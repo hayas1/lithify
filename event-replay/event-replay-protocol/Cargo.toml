@@ -7,3 +7,6 @@ edition = "2024"
 event-replay-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+event-replay-strategy = { workspace = true }
