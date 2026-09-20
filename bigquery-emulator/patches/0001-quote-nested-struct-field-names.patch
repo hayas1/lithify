@@ -1,0 +1,107 @@
+diff --git a/internal/contentdata/repository.go b/internal/contentdata/repository.go
+index 9458739..5ec2c61 100644
+--- a/internal/contentdata/repository.go
++++ b/internal/contentdata/repository.go
+@@ -167,7 +167,7 @@ func (r *Repository) encodeSchemaField(field *bigqueryv2.TableFieldSchema) strin
+ 	if field.Type == "RECORD" {
+ 		types := make([]string, 0, len(field.Fields))
+ 		for _, f := range field.Fields {
+-			types = append(types, fmt.Sprintf("%s %s", f.Name, r.encodeSchemaField(f)))
++			types = append(types, fmt.Sprintf("`%s` %s", escapeIdent(f.Name), r.encodeSchemaField(f)))
+ 		}
+ 		elem = fmt.Sprintf("STRUCT<%s>", strings.Join(types, ","))
+ 	} else {
+diff --git a/internal/contentdata/schema_field_test.go b/internal/contentdata/schema_field_test.go
+new file mode 100644
+index 0000000..a35d4db
+--- /dev/null
++++ b/internal/contentdata/schema_field_test.go
+@@ -0,0 +1,22 @@
++package contentdata
++
++import (
++	"testing"
++
++	bigqueryv2 "google.golang.org/api/bigquery/v2"
++)
++
++func TestBigQueryCompatNestedFieldNamesAreQuoted(t *testing.T) {
++	r := NewRepository()
++	field := &bigqueryv2.TableFieldSchema{
++		Name: "_kafka",
++		Type: "RECORD",
++		Fields: []*bigqueryv2.TableFieldSchema{
++			{Name: "partition", Type: "INTEGER"},
++			{Name: "offset", Type: "INTEGER"},
++		},
++	}
++	if got, want := r.encodeSchemaField(field), "STRUCT<`partition` INT64,`offset` INT64>"; got != want {
++		t.Errorf("encodeSchemaField = %q, want %q", got, want)
++	}
++}
+diff --git a/server/compat_client_test.go b/server/compat_client_test.go
+new file mode 100644
+index 0000000..2f55483
+--- /dev/null
++++ b/server/compat_client_test.go
+@@ -0,0 +1,34 @@
++package server_test
++
++import (
++	"context"
++	"testing"
++
++	"cloud.google.com/go/bigquery"
++	"github.com/goccy/bigquery-emulator/server"
++	"github.com/goccy/bigquery-emulator/types"
++	"google.golang.org/api/option"
++)
++
++func newCompatClient(t *testing.T) *bigquery.Client {
++	t.Helper()
++	ctx := context.Background()
++	bqServer, err := server.New(server.TempStorage)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := bqServer.Load(server.StructSource(types.NewProject("test", types.NewDataset("ds")))); err != nil {
++		t.Fatal(err)
++	}
++	testServer := bqServer.TestServer()
++	t.Cleanup(func() {
++		testServer.Close()
++		bqServer.Stop(ctx)
++	})
++	client, err := bigquery.NewClient(ctx, "test", option.WithEndpoint(testServer.URL), option.WithoutAuthentication())
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { client.Close() })
++	return client
++}
+diff --git a/server/nested_field_name_test.go b/server/nested_field_name_test.go
+new file mode 100644
+index 0000000..6638660
+--- /dev/null
++++ b/server/nested_field_name_test.go
+@@ -0,0 +1,20 @@
++package server_test
++
++import (
++	"context"
++	"testing"
++
++	"cloud.google.com/go/bigquery"
++)
++
++func TestBigQueryCompatCreateTableWithReservedNestedFieldName(t *testing.T) {
++	client := newCompatClient(t)
++	schema := bigquery.Schema{
++		{Name: "_kafka", Type: bigquery.RecordFieldType, Schema: bigquery.Schema{
++			{Name: "partition", Type: bigquery.IntegerFieldType},
++		}},
++	}
++	if err := client.Dataset("ds").Table("events").Create(context.Background(), &bigquery.TableMetadata{Schema: schema}); err != nil {
++		t.Fatal(err)
++	}
++}

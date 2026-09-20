@@ -1,0 +1,15 @@
+{
+  "connector.class": "io.aiven.kafka.connect.s3.AivenKafkaConnectS3SinkConnector",
+  "tasks.max": "1",
+  "topics.regex": "${env:CDC_@SOURCE@_TOPICS_REGEX}",
+  "aws.access.key.id": "${env:S3_ACCESS_KEY_ID}",
+  "aws.secret.access.key": "${env:S3_SECRET_ACCESS_KEY}",
+  "aws.s3.endpoint": "${env:S3_ENDPOINT}",
+  "aws.s3.region": "${env:S3_REGION}",
+  "aws.s3.bucket.name": "${env:S3_BUCKET}",
+  "file.name.template": "${env:S3_@SOURCE@_PREFIX}/{{topic}}/{{partition:padding=true}}-{{start_offset:padding=true}}.parquet",
+  "file.compression.type": "zstd",
+  "format.output.type": "parquet",
+  "format.output.fields": "key,value,offset,timestamp",
+  "file.max.records": "1000"
+}

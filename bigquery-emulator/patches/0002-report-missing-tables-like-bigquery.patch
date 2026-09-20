@@ -1,0 +1,60 @@
+diff --git a/server/middleware.go b/server/middleware.go
+index d951030..f408bbf 100644
+--- a/server/middleware.go
++++ b/server/middleware.go
+@@ -213,7 +213,7 @@ func withDatasetMiddleware() func(http.Handler) http.Handler {
+ 				project := projectFromContext(ctx)
+ 				dataset := project.Dataset(datasetID)
+ 				if dataset == nil {
+-					errorResponse(ctx, w, errNotFound(fmt.Sprintf("dataset %s is not found", datasetID)))
++					errorResponse(ctx, w, errNotFound(fmt.Sprintf("Not found: Dataset %s:%s", project.ID, datasetID)))
+ 					return
+ 				}
+ 				ctx = withDataset(ctx, dataset)
+@@ -259,7 +259,7 @@ func withTableMiddleware() func(http.Handler) http.Handler {
+ 				dataset := datasetFromContext(ctx)
+ 				table := dataset.Table(tableID)
+ 				if table == nil {
+-					errorResponse(ctx, w, errNotFound(fmt.Sprintf("table %s is not found", tableID)))
++					errorResponse(ctx, w, errNotFound(fmt.Sprintf("Not found: Table %s:%s.%s", projectFromContext(ctx).ID, dataset.ID, tableID)))
+ 					return
+ 				}
+ 				ctx = withTable(ctx, table)
+diff --git a/server/not_found_message_test.go b/server/not_found_message_test.go
+new file mode 100644
+index 0000000..fdf37ee
+--- /dev/null
++++ b/server/not_found_message_test.go
+@@ -0,0 +1,32 @@
++package server_test
++
++import (
++	"context"
++	"errors"
++	"testing"
++
++	"google.golang.org/api/googleapi"
++)
++
++func assertNotFoundMessage(t *testing.T, err error, want string) {
++	t.Helper()
++	var apiErr *googleapi.Error
++	if !errors.As(err, &apiErr) {
++		t.Fatalf("error = %v, want *googleapi.Error", err)
++	}
++	if apiErr.Code != 404 || apiErr.Message != want {
++		t.Errorf("error = %d %q, want 404 %q", apiErr.Code, apiErr.Message, want)
++	}
++}
++
++func TestBigQueryCompatMissingTableMessage(t *testing.T) {
++	client := newCompatClient(t)
++	_, err := client.Dataset("ds").Table("missing").Metadata(context.Background())
++	assertNotFoundMessage(t, err, "Not found: Table test:ds.missing")
++}
++
++func TestBigQueryCompatMissingDatasetMessage(t *testing.T) {
++	client := newCompatClient(t)
++	_, err := client.Dataset("missing").Metadata(context.Background())
++	assertNotFoundMessage(t, err, "Not found: Dataset test:missing")
++}

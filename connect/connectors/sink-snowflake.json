@@ -1,0 +1,16 @@
+{
+  "connector.class": "com.snowflake.kafka.connector.SnowflakeSinkConnector",
+  "tasks.max": "1",
+  "topics.regex": "${env:CDC_@SOURCE@_TOPICS_REGEX}",
+  "snowflake.url.name": "${env:SNOWFLAKE_URL}",
+  "snowflake.user.name": "${env:SNOWFLAKE_USER}",
+  "snowflake.private.key": "${env:SNOWFLAKE_PRIVATE_KEY}",
+  "snowflake.role.name": "${env:SNOWFLAKE_ROLE}",
+  "snowflake.database.name": "${env:SNOWFLAKE_DATABASE}",
+  "snowflake.schema.name": "${env:SNOWFLAKE_@SOURCE@_SCHEMA}",
+  "snowflake.ingestion.method": "SNOWPIPE_STREAMING",
+  "snowflake.enable.schematization": "false",
+  "buffer.flush.time": "10",
+  "buffer.count.records": "10000",
+  "buffer.size.bytes": "5000000"
+}

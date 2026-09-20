@@ -1,0 +1,17 @@
+{
+  "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+  "tasks.max": "1",
+  "database.hostname": "postgres",
+  "database.port": "5432",
+  "database.user": "debezium",
+  "database.password": "debezium",
+  "database.dbname": "shop",
+  "topic.prefix": "postgres",
+  "schema.include.list": "shop",
+  "plugin.name": "pgoutput",
+  "slot.name": "debezium",
+  "publication.name": "debezium",
+  "publication.autocreate.mode": "disabled",
+  "decimal.handling.mode": "string",
+  "tombstones.on.delete": "false"
+}

@@ -1,0 +1,43 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Test the connector registration script
+        run: connect/register_test.sh
+
+      - name: Test the client installer
+        run: scripts/install-clients_test.sh
+
+      - name: Validate the compose file
+        run: docker compose config --quiet
+
+      - name: Create the compose network
+        run: docker network create devcontainer-network
+
+      - name: Build the images
+        run: docker compose build
+
+      - name: Start the stack
+        run: docker compose up -d
+
+      - name: Test the change log end to end
+        run: ./e2e_test.sh
+
+      - name: Dump the logs
+        if: failure()
+        run: docker compose logs --tail 200
+
+      - name: Stop the stack
+        if: always()
+        run: docker compose down -v

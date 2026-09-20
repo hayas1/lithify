@@ -1,0 +1,18 @@
+{
+	skip_install_trust
+}
+
+(proxy-tls) {
+	tls /certs/proxy.crt /certs/proxy.key
+}
+
+bigquery.googleapis.com {
+	import proxy-tls
+	reverse_proxy bigquery-emulator:9050
+}
+
+oauth2.googleapis.com {
+	import proxy-tls
+	header Content-Type application/json
+	respond `{"access_token":"emulator","token_type":"Bearer","expires_in":3600}` 200
+}

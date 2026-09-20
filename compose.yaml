@@ -1,0 +1,329 @@
+name: event-replay
+
+x-register-connectors: &register-connectors
+  image: curlimages/curl:8.16.0
+  entrypoint: ["/register.sh"]
+  environment:
+    CONNECT_URL: http://connect:8083
+    CONNECTORS_DIR: /connectors
+  volumes:
+    - ./connect/register.sh:/register.sh:ro
+    - ./connect/connectors:/connectors:ro
+  restart: "no"
+
+x-bigquery-env: &bigquery-env
+  BIGQUERY_PROJECT: ${BIGQUERY_PROJECT}
+  BIGQUERY_MYSQL_DATASET: ${BIGQUERY_MYSQL_DATASET}
+  BIGQUERY_POSTGRES_DATASET: ${BIGQUERY_POSTGRES_DATASET}
+
+x-s3-env: &s3-env
+  S3_ENDPOINT: ${S3_ENDPOINT}
+  S3_REGION: ${S3_REGION}
+  S3_BUCKET: ${S3_BUCKET}
+  S3_MYSQL_PREFIX: ${S3_MYSQL_PREFIX}
+  S3_POSTGRES_PREFIX: ${S3_POSTGRES_PREFIX}
+  S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID}
+  S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY}
+
+# Deferred: Snowflake sink.
+# x-snowflake-env: &snowflake-env
+#   SNOWFLAKE_URL: ${SNOWFLAKE_URL}
+#   SNOWFLAKE_USER: ${SNOWFLAKE_USER}
+#   SNOWFLAKE_PRIVATE_KEY: ${SNOWFLAKE_PRIVATE_KEY}
+#   SNOWFLAKE_ROLE: ${SNOWFLAKE_ROLE}
+#   SNOWFLAKE_DATABASE: ${SNOWFLAKE_DATABASE}
+#   SNOWFLAKE_MYSQL_SCHEMA: ${SNOWFLAKE_MYSQL_SCHEMA}
+#   SNOWFLAKE_POSTGRES_SCHEMA: ${SNOWFLAKE_POSTGRES_SCHEMA}
+
+services:
+  kafka:
+    image: apache/kafka:4.3.1
+    environment:
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    ports:
+      - "9094:9094"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "/opt/kafka/bin/kafka-broker-api-versions.sh", "--bootstrap-server", "localhost:9092"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+
+  connect:
+    build: ./connect
+    environment:
+      <<: [*bigquery-env, *s3-env]
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: connect
+      CONFIG_STORAGE_TOPIC: _connect-configs
+      OFFSET_STORAGE_TOPIC: _connect-offsets
+      STATUS_STORAGE_TOPIC: _connect-status
+      OFFSET_FLUSH_INTERVAL_MS: 10000
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_CONSUMER_METADATA_MAX_AGE_MS: 10000
+      CONNECT_CONFIG_PROVIDERS: env
+      CONNECT_CONFIG_PROVIDERS_ENV_CLASS: org.apache.kafka.common.config.provider.EnvVarConfigProvider
+      CDC_MYSQL_TOPICS_REGEX: ${CDC_MYSQL_TOPICS_REGEX}
+      CDC_POSTGRES_TOPICS_REGEX: ${CDC_POSTGRES_TOPICS_REGEX}
+      TRUSTED_CA_CERT: /bigquery-proxy-certs/proxy.crt
+      GOOGLE_APPLICATION_CREDENTIALS: /secrets/gcp-credentials.json
+    ports:
+      - "8083:8083"
+    volumes:
+      - ${GCP_CREDENTIALS_FILE}:/secrets/gcp-credentials.json:ro
+      - bigquery-proxy-certs:/bigquery-proxy-certs:ro
+    networks:
+      - default
+      - bigquery-emulator
+    depends_on:
+      kafka:
+        condition: service_healthy
+      bigquery-proxy:
+        condition: service_started
+        required: false
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8083/connectors"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+
+  kafka-ui:
+    image: ghcr.io/kafbat/kafka-ui:v1.5.0
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: connect
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://connect:8083
+    ports:
+      - "8080:8080"
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  mysql:
+    image: mysql:8.4.11
+    command: ["--gtid-mode=ON", "--enforce-gtid-consistency=ON"]
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./mysql/initdb.d:/docker-entrypoint-initdb.d:ro
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  postgres:
+    image: postgres:17.11
+    command: ["postgres", "-c", "wal_level=logical"]
+    environment:
+      POSTGRES_DB: shop
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./postgres/initdb.d:/docker-entrypoint-initdb.d:ro
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "shop"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  register-sources:
+    <<: *register-connectors
+    command: ["source-mysql", "source-postgres"]
+    depends_on:
+      connect:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  bigquery-emulator:
+    build: ./bigquery-emulator
+    profiles: ["bigquery-emulator"]
+    command:
+      - --project=${BIGQUERY_PROJECT}
+      - --database=/data/bigquery.db
+    ports:
+      - "9050:9050"
+      - "9060:9060"
+    volumes:
+      - bigquery-emulator-data:/data
+    networks:
+      - default
+      - bigquery-emulator
+
+  bigquery-emulator-init:
+    image: curlimages/curl:8.16.0
+    profiles: ["bigquery-emulator"]
+    entrypoint: ["/create-datasets.sh"]
+    environment:
+      BIGQUERY_EMULATOR_URL: http://bigquery-emulator:9050
+      BIGQUERY_PROJECT: ${BIGQUERY_PROJECT}
+      BIGQUERY_DATASETS: ${BIGQUERY_MYSQL_DATASET},${BIGQUERY_POSTGRES_DATASET}
+    volumes:
+      - ./bigquery-emulator/create-datasets.sh:/create-datasets.sh:ro
+    depends_on:
+      bigquery-emulator:
+        condition: service_started
+    restart: "no"
+
+  bigquery-proxy-cert:
+    image: alpine/openssl:3.5.8
+    profiles: ["bigquery-emulator"]
+    entrypoint: ["/generate-proxy-cert.sh"]
+    volumes:
+      - ./bigquery-proxy/generate-proxy-cert.sh:/generate-proxy-cert.sh:ro
+      - bigquery-proxy-certs:/certs
+    network_mode: none
+    restart: "no"
+
+  bigquery-proxy:
+    image: caddy:2.11.4
+    profiles: ["bigquery-emulator"]
+    volumes:
+      - ./bigquery-proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - bigquery-proxy-certs:/certs:ro
+    networks:
+      bigquery-emulator:
+        aliases:
+          - bigquery.googleapis.com
+          - oauth2.googleapis.com
+    depends_on:
+      bigquery-emulator:
+        condition: service_started
+      bigquery-proxy-cert:
+        condition: service_completed_successfully
+
+  register-bigquery:
+    <<: *register-connectors
+    profiles: ["bigquery-emulator", "bigquery"]
+    command: ["sink-bigquery:mysql", "sink-bigquery:postgres"]
+    depends_on:
+      register-sources:
+        condition: service_completed_successfully
+      bigquery-emulator-init:
+        condition: service_completed_successfully
+        required: false
+
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+    profiles: ["minio"]
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  minio-init:
+    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
+    profiles: ["minio"]
+    environment:
+      <<: *s3-env
+    entrypoint: ["/create-bucket.sh"]
+    volumes:
+      - ./minio/create-bucket.sh:/create-bucket.sh:ro
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: "no"
+
+  register-s3:
+    <<: *register-connectors
+    profiles: ["minio", "s3"]
+    command: ["sink-s3:mysql", "sink-s3:postgres"]
+    depends_on:
+      register-sources:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+        required: false
+
+  duckdb:
+    build: ./duckdb
+    profiles: ["cli"]
+    command: ["/duckdb", "-init", "/cdc.sql", "/data/cdc.duckdb"]
+    environment:
+      <<: *s3-env
+    stdin_open: true
+    tty: true
+    volumes:
+      - ./duckdb/cdc.sql:/cdc.sql:ro
+      - duckdb-data:/data
+
+  # Deferred: Snowflake sink. Enable the connector plugin in connect/Dockerfile and the connect environment first.
+  # register-snowflake:
+  #   <<: *register-connectors
+  #   profiles: ["snowflake"]
+  #   command: ["sink-snowflake:mysql", "sink-snowflake:postgres"]
+  #   depends_on:
+  #     register-sources:
+  #       condition: service_completed_successfully
+
+  # Deferred: Iceberg REST catalog for the Iceberg sink. Enable the connector plugin in connect/Dockerfile first.
+  # iceberg-rest:
+  #   image: apache/iceberg-rest-fixture:latest
+  #   profiles: ["iceberg"]
+  #   environment:
+  #     AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID}
+  #     AWS_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY}
+  #     AWS_REGION: ${S3_REGION}
+  #     CATALOG_WAREHOUSE: s3://${ICEBERG_BUCKET}/
+  #     CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+  #     CATALOG_S3_ENDPOINT: ${S3_ENDPOINT}
+  #     CATALOG_S3_PATH__STYLE__ACCESS: "true"
+  #   ports:
+  #     - "8181:8181"
+  #   depends_on:
+  #     minio:
+  #       condition: service_healthy
+
+networks:
+  default:
+    name: devcontainer-network
+    external: true
+  bigquery-emulator:
+    internal: true
+
+volumes:
+  kafka-data:
+  mysql-data:
+  postgres-data:
+  bigquery-emulator-data:
+  bigquery-proxy-certs:
+  minio-data:
+  duckdb-data:
