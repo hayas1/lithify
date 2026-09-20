@@ -85,7 +85,7 @@ echo n | install_clients > /dev/null
 assert_nothing_installed "a declined client is not installed"
 
 only_missing duckdb
-duckdb_version=$(grep '^FROM duckdb/duckdb:' "${here}/../external/duckdb/Dockerfile" | cut -d: -f2)
+duckdb_version=$(grep '^FROM duckdb/duckdb:' "${here}/../compose/duckdb/Dockerfile" | cut -d: -f2)
 install_clients -y < /dev/null > /dev/null
 assert_installed "duckdb is downloaded at the version the image pins" \
     "curl .*duckdb/releases/download/v${duckdb_version}/duckdb_cli-linux-"
