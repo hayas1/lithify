@@ -2,6 +2,7 @@
 
 A local CDC playground: MySQL / PostgreSQL changes are captured by Debezium, published to Kafka, and sunk into analytical stores as a raw change log.
 It is the groundwork for an application that replays the change log to reproduce the source database in a sink.
+Everything the stack is made of lives in `external/`, so the application can grow next to it. `scripts/` stays at the root because it installs clients on the developer's machine, not in the stack.
 
 ```mermaid
 flowchart LR
@@ -32,7 +33,7 @@ flowchart LR
 | minio | `minio` | `http://minio:9000`, console `:9001` (minioadmin/minioadmin) | 9000, 9001 |
 | duckdb | `cli` | run on demand | - |
 
-Both source databases have a `shop` schema with `customers`, `orders` and `order_items` (`01-shop.sql`), and the Debezium user plus CDC settings (`02-debezium.sql`), see `mysql/initdb.d` and `postgres/initdb.d`.
+Both source databases have a `shop` schema with `customers`, `orders` and `order_items` (`01-shop.sql`), and the Debezium user plus CDC settings (`02-debezium.sql`), see `external/mysql/initdb.d` and `external/postgres/initdb.d`.
 Column types follow each engine's idiom (e.g. `customers.tags` is `JSON` in MySQL and `TEXT[]` in PostgreSQL); `updated_at` is maintained by `ON UPDATE` in MySQL and a trigger in PostgreSQL.
 
 ## Usage
@@ -41,19 +42,20 @@ Run from WSL (bind mounts are resolved against the host path).
 
 ```sh
 docker network create devcontainer-network   # once
+cd external
 docker compose up -d --build
 ./e2e_test.sh
 ```
 
-`e2e_test.sh` waits for the connectors, changes both source databases, and asserts that the change log reaches BigQuery and DuckDB. `.github/workflows/test.yml` runs it, `connect/register_test.sh` and the emulator patch's own tests on every push.
+`external/e2e_test.sh` waits for the connectors, changes both source databases, and asserts that the change log reaches BigQuery and DuckDB. `.github/workflows/test.yml` runs it, `external/connect/register_test.sh`, `scripts/install-clients_test.sh` and the emulator patch's own tests on every push.
 
-`.env` holds every default. Override any of them with shell environment variables, which take precedence over `.env`.
+`external/.env` holds every default. Override any of them with shell environment variables, which take precedence over `.env`.
 `COMPOSE_PROFILES` selects the sinks: `bigquery-emulator` or `bigquery`, and `minio` or `s3`.
-The `register-*` one-shot services register the connectors in `connect/connectors` once Kafka Connect is healthy.
-There is one sink connector per source database and sink, named `sink-<sink>-<source>`. Each is registered from the template `connect/connectors/sink-<sink>.json`: `register.sh sink-bigquery:mysql` replaces `@SOURCE@` with `MYSQL`, so it subscribes to `CDC_MYSQL_TOPICS_REGEX` and writes to `BIGQUERY_MYSQL_DATASET` (`sink-s3:mysql` writes under `S3_MYSQL_PREFIX`). The per-source namespace (`CDC_<SOURCE>_NAMESPACE`) is the default for both `BIGQUERY_<SOURCE>_DATASET` and `S3_<SOURCE>_PREFIX`.
-Run `connect/register_test.sh` to test the registration script on its own.
+The `register-*` one-shot services register the connectors in `external/connect/connectors` once Kafka Connect is healthy.
+There is one sink connector per source database and sink, named `sink-<sink>-<source>`. Each is registered from the template `external/connect/connectors/sink-<sink>.json`: `register.sh sink-bigquery:mysql` replaces `@SOURCE@` with `MYSQL`, so it subscribes to `CDC_MYSQL_TOPICS_REGEX` and writes to `BIGQUERY_MYSQL_DATASET` (`sink-s3:mysql` writes under `S3_MYSQL_PREFIX`). The per-source namespace (`CDC_<SOURCE>_NAMESPACE`) is the default for both `BIGQUERY_<SOURCE>_DATASET` and `S3_<SOURCE>_PREFIX`.
+Run `external/connect/register_test.sh` to test the registration script on its own.
 
-Make some changes and look at the result:
+Make some changes and look at the result (`docker compose` runs in `external/`):
 
 ```sh
 docker compose exec mysql mysql -uroot -proot shop -e "UPDATE customers SET name = 'Alice2' WHERE id = 1"
@@ -72,7 +74,7 @@ Sinks commit every 10 seconds, so a change shows up there with that much delay.
 
 `scripts/install-clients.sh` installs `mysql`, `psql`, `duckdb` and `bq`, skipping the ones already on PATH. Pass `-y` to install without asking, which is what an automated setup such as a devcontainer `postCreateCommand` wants. `scripts/install-clients_test.sh` tests the script.
 
-From a shell on `devcontainer-network` the services are reachable by name:
+From a shell on `devcontainer-network` the services are reachable by name (the last one runs in `external/`):
 
 ```sh
 mysql -h mysql -uroot -proot --ssl-verify-server-cert=0 shop -e "INSERT INTO customers (email, name) VALUES ('dave@example.com', 'Dave')"
@@ -105,10 +107,10 @@ Decimals are emitted as strings (`decimal.handling.mode=string`). PostgreSQL tab
 The Aiven BigQuery sink has no setting for the API endpoint, so the emulator is reached by impersonating Google's hosts on a network only Kafka Connect joins:
 
 - `bigquery-proxy` (Caddy) holds the network aliases `bigquery.googleapis.com` and `oauth2.googleapis.com` on the internal `bigquery-emulator` network. `devcontainer-network` is not affected.
-- `bigquery-proxy-cert` generates a self-signed certificate, which `connect/entrypoint.sh` adds to the JVM trust store.
-- `oauth2.googleapis.com` answers with a dummy token for the dummy credentials in `bigquery-proxy/application_default_credentials.json`.
+- `bigquery-proxy-cert` generates a self-signed certificate, which `external/connect/entrypoint.sh` adds to the JVM trust store.
+- `oauth2.googleapis.com` answers with a dummy token for the dummy credentials in `external/bigquery-proxy/application_default_credentials.json`.
 - `bigquery-emulator-init` creates the datasets, since the connector does not.
-- `bigquery-emulator` is built from the pinned upstream source with `bigquery-emulator/patches` applied, because the released emulator is not compatible enough for the connector. One patch per fix, each with its own tests, which the image build runs and counts:
+- `bigquery-emulator` is built from the pinned upstream source with `external/bigquery-emulator/patches` applied, because the released emulator is not compatible enough for the connector. One patch per fix, each with its own tests, which the image build runs and counts:
   - `0001-quote-nested-struct-field-names.patch` quotes nested STRUCT field names in the generated DDL, so a field named after a reserved word works. The connector's `kafkaDataFieldName` struct has `partition`. Upstream closed the reports (goccy/bigquery-emulator#402, #414) as fixed in v0.7.0, but v0.8.1 still reproduces them; drop this patch once upstream fixes it.
   - `0002-report-missing-tables-like-bigquery.patch` reports missing tables and datasets in BigQuery's wording (`Not found: Table <project>:<dataset>.<table>`), which the connector matches to decide that a table has to be created. Its test reuses the client helper `0001` adds, so the patches apply in order.
 
@@ -122,11 +124,11 @@ export BIGQUERY_PROJECT=<project>
 export BIGQUERY_MYSQL_DATASET=<existing dataset>
 export BIGQUERY_POSTGRES_DATASET=<existing dataset>
 export GCP_CREDENTIALS_FILE=~/.config/gcloud/application_default_credentials.json   # or a service account key
-docker compose up -d --build
+cd external && docker compose up -d --build
 ```
 
 Real S3 works the same way with the `s3` profile instead of `minio` and the `S3_*` variables.
 
 ## Deferred
 
-Iceberg (Iceberg Kafka Connect sink + REST catalog on MinIO) and Snowflake (Snowpipe Streaming) are prepared but commented out in `connect/Dockerfile` and `compose.yaml`. `connect/connectors/sink-snowflake.json` is untested.
+Iceberg (Iceberg Kafka Connect sink + REST catalog on MinIO) and Snowflake (Snowpipe Streaming) are prepared but commented out in `external/connect/Dockerfile` and `external/compose.yaml`. `external/connect/connectors/sink-snowflake.json` is untested.

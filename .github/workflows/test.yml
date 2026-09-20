@@ -10,6 +10,9 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: external
     steps:
       - uses: actions/checkout@v5
 
@@ -17,6 +20,7 @@ jobs:
         run: connect/register_test.sh
 
       - name: Test the client installer
+        working-directory: .
         run: scripts/install-clients_test.sh
 
       - name: Validate the compose file

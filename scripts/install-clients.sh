@@ -71,7 +71,7 @@ install_psql() {
 }
 
 install_duckdb() {
-    version=$(sed -n 's|^FROM duckdb/duckdb:||p' "${root}/duckdb/Dockerfile")
+    version=$(sed -n 's|^FROM duckdb/duckdb:||p' "${root}/external/duckdb/Dockerfile")
     archive=$(mktemp -d)/duckdb.zip
     curl -fsSL -o "${archive}" \
         "https://github.com/duckdb/duckdb/releases/download/v${version}/duckdb_cli-linux-$(dpkg --print-architecture).zip"
