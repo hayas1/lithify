@@ -1,0 +1,8 @@
+[package]
+name = "event-replay-dialect"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+event-replay-core = { workspace = true }
+serde_json = { workspace = true }

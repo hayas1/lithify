@@ -45,3 +45,21 @@ jobs:
       - name: Stop the stack
         if: always()
         run: docker compose down -v
+
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: event-replay
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check the formatting
+        run: cargo fmt --all --check
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
