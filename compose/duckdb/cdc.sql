@@ -11,7 +11,7 @@ CREATE OR REPLACE SECRET cdc_s3 (
     URL_STYLE 'path'
 );
 
-CREATE OR REPLACE MACRO cdc_events(prefix, topic) AS TABLE
+CREATE OR REPLACE MACRO cdc_events(log_namespace, topic) AS TABLE
     SELECT *
     FROM (
         SELECT
@@ -24,7 +24,7 @@ CREATE OR REPLACE MACRO cdc_events(prefix, topic) AS TABLE
                 "timestamp" := "timestamp"
             ) AS _kafka
         FROM read_parquet(
-            's3://' || getenv('S3_BUCKET') || '/' || prefix || '/' || topic || '/*.parquet',
+            's3://' || getenv('S3_BUCKET') || '/' || log_namespace || '/' || topic || '/*.parquet',
             filename = true
         )
     )

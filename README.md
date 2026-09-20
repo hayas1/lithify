@@ -52,7 +52,10 @@ docker compose up -d --build
 `compose/.env` holds every default. Override any of them with shell environment variables, which take precedence over `.env`.
 `COMPOSE_PROFILES` selects the sinks: `bigquery-emulator` or `bigquery`, and `minio` or `s3`.
 The `register-*` one-shot services register the connectors in `compose/connect/connectors` once Kafka Connect is healthy.
-There is one sink connector per source database and sink, named `sink-<sink>-<source>`. Each is registered from the template `compose/connect/connectors/sink-<sink>.json`: `register.sh sink-bigquery:mysql` replaces `@SOURCE@` with `MYSQL`, so it subscribes to `CDC_MYSQL_TOPICS_REGEX` and writes to `BIGQUERY_MYSQL_DATASET` (`sink-s3:mysql` writes under `S3_MYSQL_PREFIX`). The per-source namespace (`CDC_<SOURCE>_NAMESPACE`) is the default for both `BIGQUERY_<SOURCE>_DATASET` and `S3_<SOURCE>_PREFIX`.
+There is one sink connector per source database and sink, named `sink-<sink>-<source>`. Each is registered from the template `compose/connect/connectors/sink-<sink>.json`: `register.sh sink-bigquery:mysql` replaces `@SOURCE@` with `MYSQL`, so it subscribes to `CDC_MYSQL_TOPICS_REGEX` and writes to `BIGQUERY_MYSQL_DATASET` (`sink-s3:mysql` writes under `S3_MYSQL_PREFIX`).
+
+`CDC_<SOURCE>_NAMESPACE` names the source and `CDC_<SOURCE>_LOG_NAMESPACE` is where its raw change log lands, as a dataset in BigQuery and as a prefix in S3. That leaves the source namespace free for what an application derives from the log.
+Log tables keep the names the source connector and the sink give them, so `mysql_shop_cdc.mysql_shop_customers`, while derived tables read as `mysql_shop.customers_snapshot` and `mysql_shop.customers_history`.
 Run `compose/connect/register_test.sh` to test the registration script on its own.
 
 Make some changes and look at the result (`docker compose` runs in `compose/`):
@@ -62,10 +65,10 @@ docker compose exec mysql mysql -uroot -proot shop -e "UPDATE customers SET name
 
 curl -s -X POST http://localhost:9050/bigquery/v2/projects/local-project/queries \
   -H 'Content-Type: application/json' \
-  -d '{"useLegacySql": false, "query": "SELECT op, before.name, after.name, _kafka.offset FROM mysql_shop.mysql_shop_customers ORDER BY _kafka.offset"}'
+  -d '{"useLegacySql": false, "query": "SELECT op, before.name, after.name, _kafka.offset FROM mysql_shop_cdc.mysql_shop_customers ORDER BY _kafka.offset"}'
 
 docker compose run --rm duckdb
-# D SELECT op, before.name, after.name, _kafka.offset FROM cdc_events('mysql_shop', 'mysql.shop.customers');
+# D SELECT op, before.name, after.name, _kafka.offset FROM cdc_events('mysql_shop_cdc', 'mysql.shop.customers');
 ```
 
 Sinks commit every 10 seconds, so a change shows up there with that much delay.
@@ -81,10 +84,10 @@ mysql -h mysql -uroot -proot --ssl-verify-server-cert=0 shop -e "INSERT INTO cus
 PGPASSWORD=postgres psql -h postgres -U postgres shop -c "UPDATE shop.customers SET tags = '{vip,gold}' WHERE id = 1"
 
 bq --api=http://bigquery-emulator:9050 --project_id=local-project query --use_legacy_sql=false \
-  "SELECT op, after.name, _kafka.offset FROM mysql_shop.mysql_shop_customers ORDER BY _kafka.offset"
+  "SELECT op, after.name, _kafka.offset FROM mysql_shop_cdc.mysql_shop_customers ORDER BY _kafka.offset"
 
-S3_ENDPOINT=http://minio:9000 S3_REGION=us-east-1 S3_BUCKET=cdc S3_ACCESS_KEY_ID=minioadmin S3_SECRET_ACCESS_KEY=minioadmin \
-  duckdb -init duckdb/cdc.sql -c "SELECT op, after.name, _kafka.offset FROM cdc_events('mysql_shop', 'mysql.shop.customers')"
+S3_ENDPOINT=http://minio:9000 S3_REGION=us-east-1 S3_BUCKET=event-replay S3_ACCESS_KEY_ID=minioadmin S3_SECRET_ACCESS_KEY=minioadmin \
+  duckdb -init duckdb/cdc.sql -c "SELECT op, after.name, _kafka.offset FROM cdc_events('mysql_shop_cdc', 'mysql.shop.customers')"
 ```
 
 The MySQL client is MariaDB's, which does not trust the server's self-signed certificate, hence `--ssl-verify-server-cert=0`.
@@ -99,8 +102,8 @@ Decimals are emitted as strings (`decimal.handling.mode=string`). PostgreSQL tab
 
 | Sink | Table | Extra columns |
 | --- | --- | --- |
-| BigQuery | `<BIGQUERY_<SOURCE>_DATASET>.<topic with . replaced by _>` (e.g. `mysql_shop.mysql_shop_customers`), ingestion-time partitioned by day (`_PARTITIONTIME`) | `_kafka_key` (primary key struct), `_kafka` (`topic`, `partition`, `offset`, `insertTime`) |
-| S3 / DuckDB | `s3://<S3_BUCKET>/<S3_<SOURCE>_PREFIX>/<topic>/<partition>-<start offset>.parquet` (e.g. `mysql_shop/mysql.shop.customers/`) | Parquet columns `key`, `value`, `offset`, `timestamp`; `cdc_events(prefix, topic)` in DuckDB returns the BigQuery column layout, except that `_kafka.timestamp` (the Kafka record time) stands in for `_kafka.insertTime` |
+| BigQuery | `<BIGQUERY_<SOURCE>_DATASET>.<topic with . replaced by _>` (e.g. `mysql_shop_cdc.mysql_shop_customers`), ingestion-time partitioned by day (`_PARTITIONTIME`) | `_kafka_key` (primary key struct), `_kafka` (`topic`, `partition`, `offset`, `insertTime`) |
+| S3 / DuckDB | `s3://<S3_BUCKET>/<S3_<SOURCE>_PREFIX>/<topic>/<partition>-<start offset>.parquet` (e.g. `mysql_shop_cdc/mysql.shop.customers/`) | Parquet columns `key`, `value`, `offset`, `timestamp`; `cdc_events(log_namespace, topic)` in DuckDB returns the BigQuery column layout, except that `_kafka.timestamp` (the Kafka record time) stands in for `_kafka.insertTime` |
 
 ## BigQuery emulator
 

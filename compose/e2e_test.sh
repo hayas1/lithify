@@ -73,8 +73,8 @@ wait_for "connectors to run" running_connectors 6
 bigquery_project=$(connect_setting BIGQUERY_PROJECT)
 mysql_dataset=$(connect_setting BIGQUERY_MYSQL_DATASET)
 postgres_dataset=$(connect_setting BIGQUERY_POSTGRES_DATASET)
-mysql_prefix=$(connect_setting S3_MYSQL_PREFIX)
-postgres_prefix=$(connect_setting S3_POSTGRES_PREFIX)
+mysql_log_namespace=$(connect_setting S3_MYSQL_PREFIX)
+postgres_log_namespace=$(connect_setting S3_POSTGRES_PREFIX)
 
 compose exec -T -e MYSQL_PWD=root mysql mysql -uroot shop -e "UPDATE customers SET name = 'Alice2' WHERE id = 1"
 compose exec -T postgres psql -U postgres -q shop -c "DELETE FROM shop.order_items WHERE order_id = 2"
@@ -93,14 +93,14 @@ assert_equals "the PostgreSQL change log in BigQuery" "r,r,d" "$(
 )"
 
 wait_for "the MySQL change log in DuckDB" \
-    duckdb_scalar_is "SELECT string_agg(op, ',' ORDER BY _kafka.offset) FROM cdc_events('${mysql_prefix}', 'mysql.shop.customers')" "r,r,u"
+    duckdb_scalar_is "SELECT string_agg(op, ',' ORDER BY _kafka.offset) FROM cdc_events('${mysql_log_namespace}', 'mysql.shop.customers')" "r,r,u"
 wait_for "the PostgreSQL change log in DuckDB" \
-    duckdb_scalar_is "SELECT string_agg(op, ',' ORDER BY _kafka.offset) FROM cdc_events('${postgres_prefix}', 'postgres.shop.order_items')" "r,r,d"
+    duckdb_scalar_is "SELECT string_agg(op, ',' ORDER BY _kafka.offset) FROM cdc_events('${postgres_log_namespace}', 'postgres.shop.order_items')" "r,r,d"
 
 assert_equals "the Kafka coordinates of the MySQL update in BigQuery" "mysql.shop.customers:0:2" \
     "$(bigquery_scalar "SELECT CONCAT(_kafka.topic, ':', CAST(_kafka.partition AS STRING), ':', CAST(_kafka.offset AS STRING)) FROM ${mysql_dataset}.mysql_shop_customers WHERE op = 'u'")"
 
 assert_equals "the Kafka coordinates of the MySQL update in DuckDB" "mysql.shop.customers:0:2" \
-    "$(duckdb_scalar "SELECT _kafka.topic || ':' || _kafka.partition || ':' || _kafka.offset FROM cdc_events('${mysql_prefix}', 'mysql.shop.customers') WHERE op = 'u'")"
+    "$(duckdb_scalar "SELECT _kafka.topic || ':' || _kafka.partition || ':' || _kafka.offset FROM cdc_events('${mysql_log_namespace}', 'mysql.shop.customers') WHERE op = 'u'")"
 
 echo "e2e_test.sh passed"
