@@ -6,51 +6,66 @@ use crate::model::{ColumnModel, TableId, TableModel};
 use crate::position::Position;
 
 pub trait SchemaChangeListener<P> {
-    fn accept(&mut self, change: &SchemaChange<P>);
+    fn visit_statement(&mut self, change: &SchemaChange<P>) {
+        let _ = change;
+    }
+
+    fn leave_statement(&mut self, change: &SchemaChange<P>) {
+        let _ = change;
+    }
+
+    fn visit_created(&mut self, event: &TableCreated<'_>) {
+        let _ = event;
+    }
+
+    fn visit_dropped(&mut self, event: &TableDropped<'_>) {
+        let _ = event;
+    }
+
+    fn visit_column_added(&mut self, event: &ColumnAdded<'_>) {
+        let _ = event;
+    }
+
+    fn visit_column_dropped(&mut self, event: &ColumnDropped<'_>) {
+        let _ = event;
+    }
+
+    fn visit_column_retyped(&mut self, event: &ColumnRetyped<'_>) {
+        let _ = event;
+    }
+
+    fn visit_primary_key_changed(&mut self, event: &PrimaryKeyChanged<'_>) {
+        let _ = event;
+    }
 }
 
-pub struct TableCreated<'a, P> {
-    change: &'a SchemaChange<P>,
+pub struct TableCreated<'a> {
     table: &'a TableModel,
 }
 
-impl<'a, P> TableCreated<'a, P> {
-    pub fn change(&self) -> &'a SchemaChange<P> {
-        self.change
-    }
-
+impl<'a> TableCreated<'a> {
     pub fn table(&self) -> &'a TableModel {
         self.table
     }
 }
 
-pub struct TableDropped<'a, P> {
-    change: &'a SchemaChange<P>,
+pub struct TableDropped<'a> {
     table: &'a TableModel,
 }
 
-impl<'a, P> TableDropped<'a, P> {
-    pub fn change(&self) -> &'a SchemaChange<P> {
-        self.change
-    }
-
+impl<'a> TableDropped<'a> {
     pub fn table(&self) -> &'a TableModel {
         self.table
     }
 }
 
-pub struct ColumnAdded<'a, P> {
-    change: &'a SchemaChange<P>,
+pub struct ColumnAdded<'a> {
     before: &'a TableModel,
     after: &'a TableModel,
     column: &'a ColumnModel,
 }
 
-impl<'a, P> ColumnAdded<'a, P> {
-    pub fn change(&self) -> &'a SchemaChange<P> {
-        self.change
-    }
-
+impl<'a> ColumnAdded<'a> {
     pub fn before(&self) -> &'a TableModel {
         self.before
     }
@@ -64,18 +79,13 @@ impl<'a, P> ColumnAdded<'a, P> {
     }
 }
 
-pub struct ColumnDropped<'a, P> {
-    change: &'a SchemaChange<P>,
+pub struct ColumnDropped<'a> {
     before: &'a TableModel,
     after: &'a TableModel,
     column: &'a ColumnModel,
 }
 
-impl<'a, P> ColumnDropped<'a, P> {
-    pub fn change(&self) -> &'a SchemaChange<P> {
-        self.change
-    }
-
+impl<'a> ColumnDropped<'a> {
     pub fn before(&self) -> &'a TableModel {
         self.before
     }
@@ -89,19 +99,14 @@ impl<'a, P> ColumnDropped<'a, P> {
     }
 }
 
-pub struct ColumnRetyped<'a, P> {
-    change: &'a SchemaChange<P>,
+pub struct ColumnRetyped<'a> {
     before: &'a TableModel,
     after: &'a TableModel,
     previous: &'a ColumnModel,
     column: &'a ColumnModel,
 }
 
-impl<'a, P> ColumnRetyped<'a, P> {
-    pub fn change(&self) -> &'a SchemaChange<P> {
-        self.change
-    }
-
+impl<'a> ColumnRetyped<'a> {
     pub fn before(&self) -> &'a TableModel {
         self.before
     }
@@ -119,17 +124,12 @@ impl<'a, P> ColumnRetyped<'a, P> {
     }
 }
 
-pub struct PrimaryKeyChanged<'a, P> {
-    change: &'a SchemaChange<P>,
+pub struct PrimaryKeyChanged<'a> {
     before: &'a TableModel,
     after: &'a TableModel,
 }
 
-impl<'a, P> PrimaryKeyChanged<'a, P> {
-    pub fn change(&self) -> &'a SchemaChange<P> {
-        self.change
-    }
-
+impl<'a> PrimaryKeyChanged<'a> {
     pub fn before(&self) -> &'a TableModel {
         self.before
     }
@@ -139,41 +139,26 @@ impl<'a, P> PrimaryKeyChanged<'a, P> {
     }
 }
 
-pub enum TableEvent<'a, P> {
-    Created(TableCreated<'a, P>),
-    Dropped(TableDropped<'a, P>),
-    ColumnAdded(ColumnAdded<'a, P>),
-    ColumnDropped(ColumnDropped<'a, P>),
-    ColumnRetyped(ColumnRetyped<'a, P>),
-    PrimaryKeyChanged(PrimaryKeyChanged<'a, P>),
+pub enum TableEvent<'a> {
+    Created(TableCreated<'a>),
+    Dropped(TableDropped<'a>),
+    ColumnAdded(ColumnAdded<'a>),
+    ColumnDropped(ColumnDropped<'a>),
+    ColumnRetyped(ColumnRetyped<'a>),
+    PrimaryKeyChanged(PrimaryKeyChanged<'a>),
 }
 
-impl<'a, P> TableEvent<'a, P> {
-    pub fn change(&self) -> &'a SchemaChange<P> {
+impl TableEvent<'_> {
+    pub fn accept<P>(&self, listener: &mut impl SchemaChangeListener<P>) {
         match self {
-            Self::Created(event) => event.change(),
-            Self::Dropped(event) => event.change(),
-            Self::ColumnAdded(event) => event.change(),
-            Self::ColumnDropped(event) => event.change(),
-            Self::ColumnRetyped(event) => event.change(),
-            Self::PrimaryKeyChanged(event) => event.change(),
+            Self::Created(event) => listener.visit_created(event),
+            Self::Dropped(event) => listener.visit_dropped(event),
+            Self::ColumnAdded(event) => listener.visit_column_added(event),
+            Self::ColumnDropped(event) => listener.visit_column_dropped(event),
+            Self::ColumnRetyped(event) => listener.visit_column_retyped(event),
+            Self::PrimaryKeyChanged(event) => listener.visit_primary_key_changed(event),
         }
     }
-
-    pub fn table(&self) -> &'a TableId {
-        match self {
-            Self::Created(event) => event.table().id(),
-            Self::Dropped(event) => event.table().id(),
-            Self::ColumnAdded(event) => event.after().id(),
-            Self::ColumnDropped(event) => event.after().id(),
-            Self::ColumnRetyped(event) => event.after().id(),
-            Self::PrimaryKeyChanged(event) => event.after().id(),
-        }
-    }
-}
-
-pub trait TableListener<P> {
-    fn accept(&mut self, event: &TableEvent<'_, P>);
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -220,11 +205,13 @@ impl<P: Position> CatalogModel<P> {
     pub fn accept(
         &mut self,
         change: &SchemaChange<P>,
-        listener: &mut impl TableListener<P>,
+        listener: &mut impl SchemaChangeListener<P>,
     ) -> Result<(), OutOfOrder> {
         for table in change.tables() {
             self.guard_order(table.id(), change.position())?;
         }
+
+        listener.visit_statement(change);
 
         for table in change.tables() {
             match table {
@@ -233,6 +220,8 @@ impl<P: Position> CatalogModel<P> {
                 TableChange::Dropped(id) => self.forget(change, id, listener),
             }
         }
+
+        listener.leave_statement(change);
 
         Ok(())
     }
@@ -250,9 +239,9 @@ impl<P: Position> CatalogModel<P> {
         &mut self,
         change: &SchemaChange<P>,
         table: &TableModel,
-        listener: &mut impl TableListener<P>,
+        listener: &mut impl SchemaChangeListener<P>,
     ) {
-        listener.accept(&TableEvent::Created(TableCreated { change, table }));
+        TableEvent::Created(TableCreated { table }).accept(listener);
         self.remember(change, table);
     }
 
@@ -260,10 +249,10 @@ impl<P: Position> CatalogModel<P> {
         &mut self,
         change: &SchemaChange<P>,
         id: &TableId,
-        listener: &mut impl TableListener<P>,
+        listener: &mut impl SchemaChangeListener<P>,
     ) {
         if let Some(table) = self.tables.get(id) {
-            listener.accept(&TableEvent::Dropped(TableDropped { change, table }));
+            TableEvent::Dropped(TableDropped { table }).accept(listener);
         }
         self.tables.remove(id);
         self.applied_at
@@ -274,7 +263,7 @@ impl<P: Position> CatalogModel<P> {
         &mut self,
         change: &SchemaChange<P>,
         after: &TableModel,
-        listener: &mut impl TableListener<P>,
+        listener: &mut impl SchemaChangeListener<P>,
     ) {
         let Some(before) = self.tables.get(after.id()).cloned() else {
             return self.create(change, after, listener);
@@ -282,40 +271,40 @@ impl<P: Position> CatalogModel<P> {
 
         for column in before.columns() {
             match after.column(column.name()) {
-                None => listener.accept(&TableEvent::ColumnDropped(ColumnDropped {
-                    change,
+                None => TableEvent::ColumnDropped(ColumnDropped {
                     before: &before,
                     after,
                     column,
-                })),
+                })
+                .accept(listener),
                 Some(altered) if altered.type_name() != column.type_name() => {
-                    listener.accept(&TableEvent::ColumnRetyped(ColumnRetyped {
-                        change,
+                    TableEvent::ColumnRetyped(ColumnRetyped {
                         before: &before,
                         after,
                         previous: column,
                         column: altered,
-                    }))
+                    })
+                    .accept(listener)
                 }
                 Some(_) => {}
             }
         }
         for column in after.columns() {
             if before.column(column.name()).is_none() {
-                listener.accept(&TableEvent::ColumnAdded(ColumnAdded {
-                    change,
+                TableEvent::ColumnAdded(ColumnAdded {
                     before: &before,
                     after,
                     column,
-                }));
+                })
+                .accept(listener);
             }
         }
         if before.primary_key().ne(after.primary_key()) {
-            listener.accept(&TableEvent::PrimaryKeyChanged(PrimaryKeyChanged {
-                change,
+            TableEvent::PrimaryKeyChanged(PrimaryKeyChanged {
                 before: &before,
                 after,
-            }));
+            })
+            .accept(listener);
         }
 
         self.remember(change, after);
@@ -345,45 +334,71 @@ mod tests {
         entries: Vec<String>,
     }
 
-    impl SchemaChangeListener<Offset> for Journal {
-        fn accept(&mut self, change: &SchemaChange<Offset>) {
+    #[derive(Debug, Default)]
+    struct Statements {
+        entries: Vec<String>,
+    }
+
+    impl SchemaChangeListener<Offset> for Statements {
+        fn visit_statement(&mut self, change: &SchemaChange<Offset>) {
             self.entries
                 .push(format!("statement {} tables", change.tables().count()));
         }
+
+        fn leave_statement(&mut self, change: &SchemaChange<Offset>) {
+            self.entries
+                .push(format!("left statement {} tables", change.tables().count()));
+        }
+
+        fn visit_created(&mut self, event: &TableCreated<'_>) {
+            self.entries.push(format!("table {}", event.table().id()));
+        }
     }
 
-    impl TableListener<Offset> for Journal {
-        fn accept(&mut self, event: &TableEvent<'_, Offset>) {
-            let entry = match event {
-                TableEvent::Created(created) => format!("created {}", created.table().id()),
-                TableEvent::Dropped(dropped) => format!("dropped {}", dropped.table().id()),
-                TableEvent::ColumnAdded(added) => format!(
-                    "added {}.{} at {} of {}",
-                    added.after().id(),
-                    added.column().name(),
-                    added.column().position(),
-                    added.after().columns().count()
-                ),
-                TableEvent::ColumnDropped(dropped) => format!(
-                    "dropped {}.{}",
-                    dropped.before().id(),
-                    dropped.column().name()
-                ),
-                TableEvent::ColumnRetyped(retyped) => format!(
-                    "retyped {}.{} {} -> {}",
-                    retyped.after().id(),
-                    retyped.column().name(),
-                    retyped.previous().type_name(),
-                    retyped.column().type_name()
-                ),
-                TableEvent::PrimaryKeyChanged(changed) => format!(
-                    "primary key {} {:?} -> {:?}",
-                    changed.after().id(),
-                    changed.before().primary_key().collect::<Vec<_>>(),
-                    changed.after().primary_key().collect::<Vec<_>>()
-                ),
-            };
-            self.entries.push(entry);
+    impl SchemaChangeListener<Offset> for Journal {
+        fn visit_created(&mut self, event: &TableCreated<'_>) {
+            self.entries.push(format!("created {}", event.table().id()));
+        }
+
+        fn visit_dropped(&mut self, event: &TableDropped<'_>) {
+            self.entries.push(format!("dropped {}", event.table().id()));
+        }
+
+        fn visit_column_added(&mut self, event: &ColumnAdded<'_>) {
+            self.entries.push(format!(
+                "added {}.{} at {} of {}",
+                event.after().id(),
+                event.column().name(),
+                event.column().position(),
+                event.after().columns().count()
+            ));
+        }
+
+        fn visit_column_dropped(&mut self, event: &ColumnDropped<'_>) {
+            self.entries.push(format!(
+                "dropped {}.{}",
+                event.before().id(),
+                event.column().name()
+            ));
+        }
+
+        fn visit_column_retyped(&mut self, event: &ColumnRetyped<'_>) {
+            self.entries.push(format!(
+                "retyped {}.{} {} -> {}",
+                event.after().id(),
+                event.column().name(),
+                event.previous().type_name(),
+                event.column().type_name()
+            ));
+        }
+
+        fn visit_primary_key_changed(&mut self, event: &PrimaryKeyChanged<'_>) {
+            self.entries.push(format!(
+                "primary key {} {:?} -> {:?}",
+                event.after().id(),
+                event.before().primary_key().collect::<Vec<_>>(),
+                event.after().primary_key().collect::<Vec<_>>()
+            ));
         }
     }
 
@@ -548,16 +563,23 @@ mod tests {
     }
 
     #[test]
-    fn a_statement_that_changes_nothing_announces_nothing() {
+    fn a_statement_that_changes_no_table_announces_the_statement_alone() {
         let mut catalog = CatalogModel::default();
-        accept(&mut catalog, created(1));
+        let mut statements = Statements::default();
+        catalog.accept(&created(1), &mut statements).unwrap();
+        statements.entries.clear();
 
-        let entries = accept(
-            &mut catalog,
-            altered(2, vec![identifier(), name_at(2)], &["id"]),
+        catalog
+            .accept(
+                &altered(2, vec![identifier(), name_at(2)], &["id"]),
+                &mut statements,
+            )
+            .unwrap();
+
+        assert_eq!(
+            statements.entries,
+            ["statement 1 tables", "left statement 1 tables"]
         );
-
-        assert_eq!(entries, [] as [String; 0]);
     }
 
     #[test]
@@ -588,11 +610,29 @@ mod tests {
     }
 
     #[test]
-    fn a_statement_reaches_a_listener_of_whole_statements_once() {
-        let mut journal = Journal::default();
+    fn a_statement_reaches_the_listener_before_the_tables_it_changes() {
+        let mut catalog = CatalogModel::default();
+        let mut statements = Statements::default();
 
-        SchemaChangeListener::accept(&mut journal, &created(1));
+        catalog.accept(&created(1), &mut statements).unwrap();
 
-        assert_eq!(journal.entries, ["statement 1 tables"]);
+        assert_eq!(
+            statements.entries,
+            [
+                "statement 1 tables",
+                "table shop.customers",
+                "left statement 1 tables"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_statement_that_is_rejected_reaches_no_listener() {
+        let mut catalog = CatalogModel::default();
+        accept(&mut catalog, created(2));
+        let mut statements = Statements::default();
+
+        assert!(catalog.accept(&created(1), &mut statements).is_err());
+        assert!(statements.entries.is_empty());
     }
 }

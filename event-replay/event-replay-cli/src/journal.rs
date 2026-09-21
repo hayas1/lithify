@@ -1,0 +1,204 @@
+use chrono::{DateTime, Utc};
+
+use event_replay_core::event::SchemaChange;
+use event_replay_core::listener::{
+    ColumnAdded, ColumnDropped, ColumnRetyped, PrimaryKeyChanged, SchemaChangeListener,
+    TableCreated, TableDropped,
+};
+
+#[derive(Debug, Default)]
+pub struct Journal {
+    entries: Vec<String>,
+}
+
+impl Journal {
+    pub fn entries(&self) -> impl Iterator<Item = &str> {
+        self.entries.iter().map(String::as_str)
+    }
+
+    pub fn note(&mut self, note: &str) {
+        self.entries.push(note.to_owned());
+    }
+
+    fn table(&mut self, entry: String) {
+        self.entries.push(format!("  {entry}"));
+    }
+
+    fn recorded_at<P>(change: &SchemaChange<P>) -> String {
+        match DateTime::<Utc>::try_from(*change.recorded_at()) {
+            Ok(at) => at.to_rfc3339(),
+            Err(recorded_at) => recorded_at.milliseconds_since_epoch().to_string(),
+        }
+    }
+}
+
+impl<P> SchemaChangeListener<P> for Journal {
+    fn visit_statement(&mut self, change: &SchemaChange<P>) {
+        self.entries.push(format!(
+            "{} {}",
+            Self::recorded_at(change),
+            change.statement()
+        ));
+    }
+
+    fn visit_created(&mut self, event: &TableCreated<'_>) {
+        self.table(format!(
+            "created {} ({} columns, key {:?})",
+            event.table().id(),
+            event.table().columns().count(),
+            event.table().primary_key().collect::<Vec<_>>()
+        ));
+    }
+
+    fn visit_dropped(&mut self, event: &TableDropped<'_>) {
+        self.table(format!("dropped {}", event.table().id()));
+    }
+
+    fn visit_column_added(&mut self, event: &ColumnAdded<'_>) {
+        self.table(format!(
+            "added {}.{} at {}",
+            event.after().id(),
+            event.column().name(),
+            event.column().position()
+        ));
+    }
+
+    fn visit_column_dropped(&mut self, event: &ColumnDropped<'_>) {
+        self.table(format!(
+            "dropped {}.{}",
+            event.before().id(),
+            event.column().name()
+        ));
+    }
+
+    fn visit_column_retyped(&mut self, event: &ColumnRetyped<'_>) {
+        self.table(format!(
+            "retyped {}.{} {} -> {}",
+            event.after().id(),
+            event.column().name(),
+            event.previous().type_name(),
+            event.column().type_name()
+        ));
+    }
+
+    fn visit_primary_key_changed(&mut self, event: &PrimaryKeyChanged<'_>) {
+        self.table(format!(
+            "keyed {} {:?} -> {:?}",
+            event.after().id(),
+            event.before().primary_key().collect::<Vec<_>>(),
+            event.after().primary_key().collect::<Vec<_>>()
+        ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use event_replay_core::event::TableChange;
+    use event_replay_core::listener::CatalogModel;
+    use event_replay_core::model::{ColumnModel, ColumnType, TableId, TableModel};
+    use event_replay_core::position::{Position, RecordedAt};
+
+    #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+    struct Offset(u64);
+
+    impl Position for Offset {}
+
+    fn customers(columns: Vec<ColumnModel>) -> TableModel {
+        TableModel::new(
+            TableId::new("shop", "customers"),
+            columns,
+            vec!["id".to_owned()],
+        )
+    }
+
+    fn identifier() -> ColumnModel {
+        ColumnModel::new("id", "BIGINT", ColumnType::Int64, 1, false, None)
+    }
+
+    fn change(at: u64, statement: &str, tables: Vec<TableChange>) -> SchemaChange<Offset> {
+        SchemaChange::new(
+            Offset(at),
+            RecordedAt::from(1789800000000 + at as i64 * 1000),
+            statement,
+            tables,
+        )
+    }
+
+    fn journal(changes: Vec<SchemaChange<Offset>>) -> Vec<String> {
+        let mut catalog = CatalogModel::default();
+        let mut journal = Journal::default();
+
+        for change in &changes {
+            catalog.accept(change, &mut journal).unwrap();
+        }
+
+        journal.entries().map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn a_statement_is_reported_with_the_time_the_source_recorded_it() {
+        let entries = journal(vec![change(
+            1,
+            "CREATE TABLE `customers` (`id` bigint)",
+            vec![TableChange::Created(customers(vec![identifier()]))],
+        )]);
+
+        assert_eq!(
+            entries,
+            [
+                "2026-09-19T06:40:01+00:00 CREATE TABLE `customers` (`id` bigint)",
+                "  created shop.customers (1 columns, key [\"id\"])",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_statement_that_changes_a_table_is_reported_under_the_statement() {
+        let nickname = ColumnModel::new("nickname", "varchar", ColumnType::Text, 2, true, None);
+        let entries = journal(vec![
+            change(
+                1,
+                "CREATE TABLE `customers` (`id` bigint)",
+                vec![TableChange::Created(customers(vec![identifier()]))],
+            ),
+            change(
+                2,
+                "ALTER TABLE `customers` ADD COLUMN `nickname` varchar(255)",
+                vec![TableChange::Altered(customers(vec![
+                    identifier(),
+                    nickname,
+                ]))],
+            ),
+            change(
+                3,
+                "DROP TABLE `customers`",
+                vec![TableChange::Dropped(TableId::new("shop", "customers"))],
+            ),
+        ]);
+
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.starts_with("  "))
+                .collect::<Vec<_>>(),
+            [
+                "  created shop.customers (1 columns, key [\"id\"])",
+                "  added shop.customers.nickname at 2",
+                "  dropped shop.customers",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_note_is_reported_as_it_stands() {
+        let mut journal = Journal::default();
+
+        journal.note("primary lands no schema changes");
+
+        assert_eq!(
+            journal.entries().collect::<Vec<_>>(),
+            ["primary lands no schema changes"]
+        );
+    }
+}

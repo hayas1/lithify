@@ -4,18 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-duckdb = { version = "1.10505.0", optional = true }
+duckdb = { workspace = true, optional = true }
 event-replay-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
-[dev-dependencies]
-event-replay-config = { workspace = true }
-event-replay-strategy = { workspace = true }
-
 [features]
 duckdb = ["dep:duckdb"]
-
-[[example]]
-name = "read_schema_changes"
-required-features = ["duckdb"]
