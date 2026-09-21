@@ -24,40 +24,40 @@ pub trait Dialect {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DebeziumDdl<S> {
-    source: S,
+    pub source: S,
     #[serde(rename = "ts_ms")]
-    ts_ms: i64,
-    ddl: String,
+    pub ts_ms: i64,
+    pub ddl: String,
     #[serde(default)]
-    table_changes: Vec<DdlTableChange>,
+    pub table_changes: Vec<DdlTableChange>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct DdlTableChange {
-    r#type: String,
-    id: String,
-    table: Option<DdlTable>,
+pub struct DdlTableChange {
+    pub r#type: String,
+    pub id: String,
+    pub table: Option<DdlTable>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct DdlTable {
+pub struct DdlTable {
     #[serde(default)]
-    primary_key_column_names: Vec<String>,
-    columns: Vec<DdlColumn>,
+    pub primary_key_column_names: Vec<String>,
+    pub columns: Vec<DdlColumn>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct DdlColumn {
-    name: String,
-    type_name: String,
-    position: u32,
-    optional: bool,
-    default_value_expression: Option<String>,
-    length: Option<u32>,
-    scale: Option<u32>,
+pub struct DdlColumn {
+    pub name: String,
+    pub type_name: String,
+    pub position: u32,
+    pub optional: bool,
+    pub default_value_expression: Option<String>,
+    pub length: Option<u32>,
+    pub scale: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -66,6 +66,24 @@ pub struct Debezium<D> {
 }
 
 impl<D: Dialect> Debezium<D> {
+    pub fn schema_change(
+        &self,
+        statement: DebeziumDdl<D::Source>,
+    ) -> Result<SchemaChange<D::Position>, MalformedEvent> {
+        let tables = statement
+            .table_changes
+            .into_iter()
+            .map(|change| self.table_change(change))
+            .collect::<Result<_, _>>()?;
+
+        Ok(SchemaChange::new(
+            self.dialect.position(&statement.source),
+            RecordedAt::from(statement.ts_ms),
+            &statement.ddl,
+            tables,
+        ))
+    }
+
     pub fn new(dialect: D) -> Self {
         Self { dialect }
     }
@@ -119,21 +137,14 @@ impl<D: Dialect> Debezium<D>
 where
     D::Source: DeserializeOwned,
 {
-    pub fn schema_change(&self, row: Value) -> Result<SchemaChange<D::Position>, MalformedEvent> {
+    pub fn schema_change_json(
+        &self,
+        row: Value,
+    ) -> Result<SchemaChange<D::Position>, MalformedEvent> {
         let statement: DebeziumDdl<D::Source> = serde_json::from_value(row)
             .map_err(|undecodable| MalformedEvent::Undecodable(undecodable.to_string()))?;
-        let tables = statement
-            .table_changes
-            .into_iter()
-            .map(|change| self.table_change(change))
-            .collect::<Result<_, _>>()?;
 
-        Ok(SchemaChange::new(
-            self.dialect.position(&statement.source),
-            RecordedAt::from(statement.ts_ms),
-            &statement.ddl,
-            tables,
-        ))
+        self.schema_change(statement)
     }
 }
 

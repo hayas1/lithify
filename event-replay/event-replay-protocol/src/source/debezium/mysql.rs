@@ -8,9 +8,9 @@ use super::Dialect;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MySqlSource {
-    file: String,
-    pos: u64,
-    gtid: Option<String>,
+    pub file: String,
+    pub pos: u64,
+    pub gtid: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -95,11 +95,7 @@ mod tests {
     use super::super::Debezium;
     use super::*;
     use event_replay_core::event::{MalformedEvent, TableChange};
-    use event_replay_core::model::ColumnType;
-    use serde_json::Value;
-
-    use super::Dialect;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     fn source(source: Value) -> MySqlSource {
         serde_json::from_value(source).unwrap()
@@ -127,7 +123,7 @@ mod tests {
 
     #[test]
     fn a_statement_whose_source_carries_no_binlog_offset_is_rejected() {
-        let statement = Debezium::new(MySql).schema_change(json!({
+        let statement = Debezium::new(MySql).schema_change_json(json!({
             "source": {"lsn": 26738384i64},
             "ts_ms": 1789800000000i64,
             "ddl": "",
@@ -203,7 +199,7 @@ mod tests {
     #[test]
     fn a_column_of_a_schema_change_carries_its_type() {
         let change = Debezium::new(MySql)
-            .schema_change(json!({
+            .schema_change_json(json!({
                 "source": {"file": "binlog.000002", "pos": 448},
                 "ts_ms": 1789800000000i64,
                 "ddl": "",
@@ -233,7 +229,7 @@ mod tests {
     #[test]
     fn a_schema_change_is_positioned_by_its_binlog_offset() {
         let change = Debezium::new(MySql)
-            .schema_change(json!({
+            .schema_change_json(json!({
                 "source": {"file": "binlog.000002", "pos": 448},
                 "ts_ms": 1789800000000i64,
                 "ddl": "ALTER TABLE `customers` ADD COLUMN `nickname` varchar(255)",

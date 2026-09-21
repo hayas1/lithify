@@ -8,7 +8,7 @@ use super::Dialect;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PostgresSource {
-    lsn: u64,
+    pub lsn: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -81,8 +81,6 @@ mod tests {
     use super::*;
     use event_replay_core::event::MalformedEvent;
     use event_replay_core::model::ColumnType;
-
-    use super::Dialect;
     use serde_json::json;
 
     fn position(lsn: u64) -> PostgresPosition {
@@ -96,7 +94,7 @@ mod tests {
 
     #[test]
     fn a_statement_whose_source_carries_no_log_sequence_number_is_rejected() {
-        let statement = Debezium::new(Postgres).schema_change(json!({
+        let statement = Debezium::new(Postgres).schema_change_json(json!({
             "source": {"file": "binlog.000002", "pos": 448},
             "ts_ms": 1789800000000i64,
             "ddl": "",
@@ -170,7 +168,7 @@ mod tests {
     #[test]
     fn a_schema_change_is_positioned_by_its_log_sequence_number() {
         let change = Debezium::new(Postgres)
-            .schema_change(json!({
+            .schema_change_json(json!({
                 "source": {"lsn": 26738384i64, "txId": 770},
                 "ts_ms": 1789800000000i64,
                 "ddl": "",

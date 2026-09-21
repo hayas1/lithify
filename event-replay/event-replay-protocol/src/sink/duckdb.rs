@@ -1,3 +1,5 @@
+pub mod from_sql;
+
 use event_replay_core::model::ColumnType;
 use event_replay_core::sink::{TablePath, UnsupportedColumn, Warehouse};
 

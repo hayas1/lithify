@@ -239,7 +239,7 @@ impl<P: Position> CatalogModel<P> {
 
     fn guard_order(&self, table: &TableId, position: &P) -> Result<(), OutOfOrder> {
         match self.applied_at.get(table) {
-            Some(applied) if applied >= position => Err(OutOfOrder {
+            Some(applied) if applied > position => Err(OutOfOrder {
                 table: table.clone(),
             }),
             _ => Ok(()),
@@ -558,6 +558,20 @@ mod tests {
         );
 
         assert_eq!(entries, [] as [String; 0]);
+    }
+
+    #[test]
+    fn statements_of_one_position_all_apply_because_a_position_holds_several() {
+        let mut catalog = CatalogModel::default();
+        accept(&mut catalog, created(1));
+
+        let entries = accept(
+            &mut catalog,
+            change(1, vec![TableChange::Dropped(customers())]),
+        );
+
+        assert_eq!(entries, ["dropped shop.customers"]);
+        assert_eq!(catalog.table(&customers()), None);
     }
 
     #[test]
