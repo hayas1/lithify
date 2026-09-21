@@ -10,6 +10,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+event-replay-config = { workspace = true }
 event-replay-strategy = { workspace = true }
 
 [features]

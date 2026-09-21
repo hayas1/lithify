@@ -1,0 +1,245 @@
+use std::path::Path;
+
+use serde::de::DeserializeOwned;
+
+use event_replay_core::model::TableId;
+
+use crate::infra::{self, Sink, Source};
+use crate::table::{self, Table, Tables};
+use crate::unreadable::Unreadable;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Host {
+    name: String,
+    sources: Vec<Source>,
+    sinks: Vec<Sink>,
+    tables: Tables,
+}
+
+impl Host {
+    pub fn open(directory: impl AsRef<Path>) -> Result<Self, Unreadable> {
+        let directory = directory.as_ref();
+        let wiring = directory.join("infra.toml");
+        let listing = directory.join("table.toml");
+        let written: infra::Wiring = Self::read(&wiring)?;
+        let miswired = |miswiring| Unreadable::at(&wiring, miswiring);
+
+        Ok(Self {
+            name: Self::named(directory),
+            sources: written.sources().map_err(miswired)?,
+            sinks: written.sinks().map_err(miswired)?,
+            tables: Tables::try_from(Self::read::<table::Listing>(&listing)?)
+                .map_err(|mislisting| Unreadable::at(&listing, mislisting))?,
+        })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn sources(&self) -> impl Iterator<Item = &Source> {
+        self.sources.iter()
+    }
+
+    pub fn sinks(&self) -> impl Iterator<Item = &Sink> {
+        self.sinks.iter()
+    }
+
+    pub fn table(&self, id: &TableId) -> &Table {
+        self.tables.table(id)
+    }
+
+    fn named(directory: &Path) -> String {
+        directory
+            .file_name()
+            .unwrap_or(directory.as_os_str())
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn read<T: DeserializeOwned>(path: &Path) -> Result<T, Unreadable> {
+        let written =
+            std::fs::read_to_string(path).map_err(|missing| Unreadable::at(path, missing))?;
+
+        toml::from_str(&written).map_err(|malformed| Unreadable::at(path, malformed))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::Artifact;
+    use crate::infra::{Dialect, Miswiring};
+    use crate::table::Replayed;
+    use crate::unreadable::Cause;
+    use event_replay_core::sink::TablePath;
+
+    fn host(name: &str) -> Host {
+        Host::open(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../compose/event-replay")
+                .join(name),
+        )
+        .unwrap()
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let directory =
+            std::env::temp_dir().join(format!("event-replay-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+
+        directory
+    }
+
+    #[test]
+    fn a_host_is_named_after_the_directory_that_configures_it() {
+        assert_eq!(host("mysql").name(), "mysql");
+        assert_eq!(host("postgres").name(), "postgres");
+    }
+
+    #[test]
+    fn a_host_says_which_dialect_each_of_its_servers_is_captured_as() {
+        assert_eq!(
+            host("mysql").sources().next().unwrap().capture().dialect(),
+            Dialect::MySql
+        );
+        assert_eq!(
+            host("postgres")
+                .sources()
+                .next()
+                .unwrap()
+                .capture()
+                .dialect(),
+            Dialect::Postgres
+        );
+    }
+
+    #[test]
+    fn a_host_says_where_each_sink_holds_the_schema_changes_of_its_source() {
+        let host = host("mysql");
+        let source = host.sources().next().unwrap();
+
+        let tables: Vec<_> = host
+            .sinks()
+            .map(|sink| sink.schema_changes(source))
+            .collect();
+
+        assert_eq!(
+            tables,
+            [
+                Some(TablePath::new("mysql_shop_cdc", "mysql")),
+                Some(TablePath::new("mysql_shop_cdc", "mysql"))
+            ]
+        );
+    }
+
+    #[test]
+    fn a_table_the_host_does_not_configure_takes_the_defaults() {
+        let host = host("mysql");
+        let table = host.table(&TableId::new("shop", "order_items"));
+
+        assert!(table.builds(Artifact::Snapshot));
+        assert!(!table.builds(Artifact::History));
+        assert_eq!(table.replayed("sku"), Replayed::Value);
+    }
+
+    #[test]
+    fn a_table_the_host_configures_overrides_the_defaults() {
+        let host = host("mysql");
+        let table = host.table(&TableId::new("shop", "orders"));
+
+        assert!(table.builds(Artifact::Snapshot));
+        assert!(table.builds(Artifact::History));
+        assert_eq!(table.replayed("attributes"), Replayed::Null);
+        assert_eq!(table.replayed("amount"), Replayed::Value);
+    }
+
+    #[test]
+    fn a_directory_that_configures_no_host_is_reported_with_the_file_it_misses() {
+        let unreadable = Host::open("/nowhere").unwrap_err();
+
+        assert!(matches!(unreadable.cause(), Cause::Missing(_)));
+        assert_eq!(unreadable.path(), Path::new("/nowhere/infra.toml"));
+        assert!(unreadable.to_string().contains("/nowhere/infra.toml"));
+    }
+
+    #[test]
+    fn a_host_that_configures_no_table_is_reported_with_the_file_it_misses() {
+        let directory = scratch("host-without-tables");
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../compose/event-replay/mysql/infra.toml"),
+            directory.join("infra.toml"),
+        )
+        .unwrap();
+
+        let unreadable = Host::open(&directory).unwrap_err();
+
+        assert!(matches!(unreadable.cause(), Cause::Missing(_)));
+        assert_eq!(unreadable.path(), directory.join("table.toml"));
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn a_host_captured_from_no_server_is_reported_with_the_file_that_wires_it() {
+        let directory = scratch("host-without-servers");
+        std::fs::write(
+            directory.join("infra.toml"),
+            "[[sink]]\nchange_log = \"mysql_shop_cdc\"\nwarehouse.duckdb.s3.endpoint = \"http://minio:9000\"\nwarehouse.duckdb.s3.region = \"us-east-1\"\nwarehouse.duckdb.s3.bucket = \"event-replay\"\nwarehouse.duckdb.s3.format = \"parquet\"\nreplay.snapshot = \"mysql_shop\"\nreplay.history = \"mysql_shop_history\"\nreplay.shard = \"%Y%m%d\"\n",
+        )
+        .unwrap();
+        std::fs::write(directory.join("table.toml"), "").unwrap();
+
+        let unreadable = Host::open(&directory).unwrap_err();
+
+        assert!(matches!(
+            unreadable.cause(),
+            Cause::Miswiring(Miswiring::WithoutSources)
+        ));
+        assert_eq!(unreadable.path(), directory.join("infra.toml"));
+        assert_eq!(
+            unreadable.to_string(),
+            format!(
+                "{}: no server is captured",
+                directory.join("infra.toml").display()
+            )
+        );
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn a_table_listed_twice_is_reported_with_the_file_that_lists_it() {
+        let directory = scratch("host-with-a-table-twice");
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../compose/event-replay/mysql/infra.toml"),
+            directory.join("infra.toml"),
+        )
+        .unwrap();
+        std::fs::write(
+            directory.join("table.toml"),
+            "[[table]]\nschema = \"shop\"\nname = \"orders\"\n\n[[table]]\nschema = \"shop\"\nname = \"orders\"\n",
+        )
+        .unwrap();
+
+        let unreadable = Host::open(&directory).unwrap_err();
+
+        assert!(matches!(unreadable.cause(), Cause::Mislisting(_)));
+        assert_eq!(unreadable.path(), directory.join("table.toml"));
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn a_configuration_that_does_not_parse_is_reported_with_its_file() {
+        let directory = scratch("unparsable-host");
+        std::fs::write(directory.join("infra.toml"), "capture = 1").unwrap();
+
+        let unreadable = Host::open(&directory).unwrap_err();
+
+        assert!(matches!(unreadable.cause(), Cause::Malformed(_)));
+        assert_eq!(unreadable.path(), directory.join("infra.toml"));
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+}
