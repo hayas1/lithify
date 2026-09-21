@@ -8,8 +8,10 @@ usage() {
     cat <<USAGE
 Usage: install-clients.sh [-y] [-h]
 
-Installs the command line clients for the stack: mysql, psql, duckdb and bq.
-Clients that are already on PATH are left alone.
+Installs the command line clients for the stack: mysql, psql, duckdb and bq,
+and libduckdb, which the Rust workspace links against.
+Clients that are already on PATH and libraries the linker already finds are
+left alone.
 
   -y, --yes   install without asking
   -h, --help  show this message
@@ -42,19 +44,29 @@ confirmed() {
     esac
 }
 
-install_missing() {
-    command_name="$1"
-    installer="$2"
-    if command -v "${command_name}" > /dev/null; then
-        echo "${command_name}: already installed"
+install_missing_command() {
+    if command -v "$1" > /dev/null; then
+        echo "$1: already installed"
         return 0
     fi
-    if ! confirmed "${command_name}"; then
-        echo "${command_name}: skipped"
+    install_confirmed "$1" "$2"
+}
+
+install_missing_library() {
+    if ldconfig -p | grep -q "$1\.so"; then
+        echo "$1: already installed"
         return 0
     fi
-    "${installer}"
-    echo "${command_name}: installed"
+    install_confirmed "$1" "$2"
+}
+
+install_confirmed() {
+    if ! confirmed "$1"; then
+        echo "$1: skipped"
+        return 0
+    fi
+    "$2"
+    echo "$1: installed"
 }
 
 apt_install() {
@@ -70,13 +82,44 @@ install_psql() {
     apt_install postgresql-client
 }
 
+duckdb_version() {
+    sed -n 's|^FROM duckdb/duckdb:||p' "${root}/compose/duckdb/Dockerfile"
+}
+
+duckdb_release() {
+    echo "https://github.com/duckdb/duckdb/releases/download/v$(duckdb_version)/$1-linux-$(dpkg --print-architecture).zip"
+}
+
 install_duckdb() {
-    version=$(sed -n 's|^FROM duckdb/duckdb:||p' "${root}/compose/duckdb/Dockerfile")
-    archive=$(mktemp -d)/duckdb.zip
-    curl -fsSL -o "${archive}" \
-        "https://github.com/duckdb/duckdb/releases/download/v${version}/duckdb_cli-linux-$(dpkg --print-architecture).zip"
-    sudo unzip -o -q "${archive}" duckdb -d /usr/local/bin
-    sudo chmod 755 /usr/local/bin/duckdb
+    unpacked=$(mktemp -d)
+    curl -fsSL -o "${unpacked}/duckdb.zip" "$(duckdb_release duckdb_cli)"
+    unzip -o -q "${unpacked}/duckdb.zip" duckdb -d "${unpacked}"
+    sudo install -m 755 "${unpacked}/duckdb" /usr/local/bin
+}
+
+install_libduckdb() {
+    unpacked=$(mktemp -d)
+    curl -fsSL -o "${unpacked}/libduckdb.zip" "$(duckdb_release libduckdb)"
+    unzip -o -q "${unpacked}/libduckdb.zip" -d "${unpacked}"
+    sudo install -m 644 "${unpacked}/libduckdb.so" /usr/local/lib
+    sudo install -m 644 "${unpacked}/duckdb.h" "${unpacked}/duckdb.hpp" /usr/local/include
+    duckdb_pkg_config > "${unpacked}/duckdb.pc"
+    sudo install -D -m 644 "${unpacked}/duckdb.pc" /usr/local/lib/pkgconfig/duckdb.pc
+    sudo ldconfig
+}
+
+duckdb_pkg_config() {
+    cat <<PKG_CONFIG
+prefix=/usr/local
+libdir=\${prefix}/lib
+includedir=\${prefix}/include
+
+Name: duckdb
+Description: DuckDB, the library the Rust workspace links against
+Version: $(duckdb_version)
+Libs: -L\${libdir} -lduckdb
+Cflags: -I\${includedir}
+PKG_CONFIG
 }
 
 install_bq() {
@@ -87,7 +130,8 @@ install_bq() {
     apt_install google-cloud-cli
 }
 
-install_missing mysql install_mysql
-install_missing psql install_psql
-install_missing duckdb install_duckdb
-install_missing bq install_bq
+install_missing_command mysql install_mysql
+install_missing_command psql install_psql
+install_missing_command duckdb install_duckdb
+install_missing_command bq install_bq
+install_missing_library libduckdb install_libduckdb

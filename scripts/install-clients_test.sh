@@ -13,7 +13,7 @@ for utility in cat dirname dpkg grep mktemp sed; do
     }
     ln -s "${utility_path}" "${workdir}/bin/${utility}"
 done
-for installer in apt-get curl sudo unzip; do
+for installer in apt-get curl install sudo unzip; do
     cat > "${workdir}/bin/${installer}" <<STUB
 #!/bin/sh
 echo "${installer} \$*" >> "\${INSTALL_LOG}"
@@ -34,9 +34,23 @@ stub_missing() {
     done
 }
 
+stub_linked() {
+    printf '#!/bin/sh\n' > "${workdir}/bin/ldconfig"
+    for library in "$@"; do
+        echo "echo \"${library}.so (libc6) => /usr/local/lib/${library}.so\"" >> "${workdir}/bin/ldconfig"
+    done
+    chmod +x "${workdir}/bin/ldconfig"
+}
+
 only_missing() {
     stub_installed mysql psql duckdb bq
+    stub_linked libduckdb
     stub_missing "$@"
+}
+
+only_missing_library() {
+    stub_installed mysql psql duckdb bq
+    stub_linked
 }
 
 install_clients() {
@@ -89,11 +103,25 @@ duckdb_version=$(grep '^FROM duckdb/duckdb:' "${here}/../compose/duckdb/Dockerfi
 install_clients -y < /dev/null > /dev/null
 assert_installed "duckdb is downloaded at the version the image pins" \
     "curl .*duckdb/releases/download/v${duckdb_version}/duckdb_cli-linux-"
-assert_installed "duckdb is unpacked onto PATH" "sudo unzip"
+assert_installed "duckdb is unpacked onto PATH" "sudo install .*duckdb /usr/local/bin"
 
 only_missing mysql
 install_clients -y < /dev/null > /dev/null
 assert_installed "the MySQL client is installed with apt" "sudo apt-get install .*default-mysql-client"
+
+only_missing_library
+install_clients -y < /dev/null > /dev/null
+assert_installed "libduckdb is downloaded at the version the image pins" \
+    "curl .*duckdb/releases/download/v${duckdb_version}/libduckdb-linux-"
+assert_installed "libduckdb is installed where the linker looks" \
+    "sudo install .*libduckdb\.so /usr/local/lib"
+assert_installed "the duckdb headers are installed beside it" "sudo install .*/usr/local/include"
+assert_installed "cargo is told where to find it" "sudo install .*/usr/local/lib/pkgconfig/duckdb.pc"
+assert_installed "the linker is told about it" "sudo ldconfig"
+
+only_missing_library
+echo n | install_clients > /dev/null
+assert_nothing_installed "a declined library is not installed"
 
 only_missing
 
