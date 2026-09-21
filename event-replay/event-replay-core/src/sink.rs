@@ -71,6 +71,17 @@ pub trait Warehouse {
     fn read(&self, expression: &str, column_type: &ColumnType)
     -> Result<String, UnsupportedColumn>;
 
+    fn envelope(&self) -> Option<ColumnPath> {
+        None
+    }
+
+    fn within_envelope(&self, path: &ColumnPath) -> String {
+        match self.envelope() {
+            Some(envelope) => format!("{}.{}", self.path(&envelope), self.path(path)),
+            None => self.path(path),
+        }
+    }
+
     fn path(&self, path: &ColumnPath) -> String {
         path.parts()
             .map(|part| self.identifier(part))

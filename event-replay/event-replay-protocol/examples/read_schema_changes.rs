@@ -1,8 +1,13 @@
 use duckdb::Connection;
 
 use event_replay_core::listener::{CatalogModel, TableEvent, TableListener};
-use event_replay_protocol::source::debezium::{Debezium, DebeziumDdl};
-use event_replay_protocol::{MySql, MySqlPosition, MySqlSource};
+use event_replay_core::position::RecordedAt;
+use event_replay_core::sink::TablePath;
+use event_replay_core::source::{SchemaChangeStream, SchemaChanges};
+use event_replay_core::window::Window;
+use event_replay_protocol::sink::duckdb::client::DuckDbClient;
+use event_replay_protocol::source::debezium::Debezium;
+use event_replay_protocol::{MySql, MySqlPosition};
 
 #[derive(Default)]
 struct Journal;
@@ -43,25 +48,33 @@ impl TableListener<MySqlPosition> for Journal {
     }
 }
 
-const QUERY: &str = "SELECT value
-    FROM read_parquet(?)
-    WHERE len(value.tableChanges) > 0
-    ORDER BY value.source.file, value.source.pos";
-
 fn main() {
     let parquet = std::env::args().nth(1).expect("a parquet path");
     let connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(&format!(
+            "CREATE SCHEMA mysql_shop_cdc;
+             CREATE VIEW mysql_shop_cdc.mysql AS SELECT * FROM read_parquet('{parquet}')"
+        ))
+        .unwrap();
+
+    let client = DuckDbClient::new(connection);
     let log = Debezium::new(MySql);
     let mut catalog = CatalogModel::default();
     let mut journal = Journal;
 
-    let mut prepared = connection.prepare(QUERY).unwrap();
-    let mut rows = prepared.query([parquet]).unwrap();
+    let mut changes = client
+        .schema_changes(
+            &log,
+            &TablePath::new("mysql_shop_cdc", "mysql"),
+            &Window::new(RecordedAt::from(0), RecordedAt::from(4102444800000)),
+        )
+        .unwrap();
 
-    while let Some(row) = rows.next().unwrap() {
-        let statement: DebeziumDdl<MySqlSource> = row.get(0).unwrap();
-        let change = log.schema_change(statement).unwrap();
-        catalog.accept(&change, &mut journal).unwrap();
+    for change in changes.stream().unwrap() {
+        catalog
+            .accept(&change.unwrap(), &mut journal)
+            .expect("in order");
     }
 
     println!("--- catalog");

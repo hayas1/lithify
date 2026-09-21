@@ -1,12 +1,20 @@
+#[cfg(feature = "duckdb")]
+pub mod client;
+#[cfg(feature = "duckdb")]
 pub mod from_sql;
 
 use event_replay_core::model::ColumnType;
 use event_replay_core::sink::{TablePath, UnsupportedColumn, Warehouse};
+use event_replay_core::source::ColumnPath;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DuckDb;
 
 impl Warehouse for DuckDb {
+    fn envelope(&self) -> Option<ColumnPath> {
+        Some(ColumnPath::from("value"))
+    }
+
     fn identifier(&self, name: &str) -> String {
         format!("\"{name}\"")
     }

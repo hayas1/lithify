@@ -2,8 +2,9 @@ use event_replay_core::artifact::Artifact;
 use event_replay_core::model::{ColumnModel, ColumnType, TableId, TableModel};
 use event_replay_core::position::RecordedAt;
 use event_replay_core::sink::TablePath;
+use event_replay_core::window::Window;
 use event_replay_protocol::{BigQuery, Debezium, DuckDb, MySql};
-use event_replay_strategy::snapshot::{Snapshot, Window};
+use event_replay_strategy::snapshot::Snapshot;
 
 fn column(name: &str, type_name: &str, column_type: ColumnType, position: u32) -> ColumnModel {
     ColumnModel::new(name, type_name, column_type, position, false, None)

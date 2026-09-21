@@ -1,28 +1,8 @@
 use event_replay_core::artifact::{Artifact, UnbuildableArtifact};
 use event_replay_core::model::{ColumnModel, TableModel};
-use event_replay_core::position::RecordedAt;
 use event_replay_core::sink::{TablePath, Warehouse};
 use event_replay_core::source::ChangeLog;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Window {
-    from: RecordedAt,
-    to: RecordedAt,
-}
-
-impl Window {
-    pub fn new(from: RecordedAt, to: RecordedAt) -> Self {
-        Self { from, to }
-    }
-
-    pub fn from(&self) -> &RecordedAt {
-        &self.from
-    }
-
-    pub fn to(&self) -> &RecordedAt {
-        &self.to
-    }
-}
+use event_replay_core::window::Window;
 
 pub struct Snapshot<'a, L> {
     log: &'a L,
@@ -79,9 +59,9 @@ impl<'a, L: ChangeLog> Snapshot<'a, L> {
             warehouse.identifier("changes"),
             warehouse.table_ref(&self.cdc),
             warehouse.path(&self.log.recorded_at()),
-            self.window.from.milliseconds_since_epoch(),
+            self.window.from().milliseconds_since_epoch(),
             warehouse.path(&self.log.recorded_at()),
-            self.window.to.milliseconds_since_epoch(),
+            self.window.to().milliseconds_since_epoch(),
             self.key(warehouse)?,
             self.ordering(warehouse),
         ))

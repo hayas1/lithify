@@ -1,6 +1,9 @@
 use std::fmt;
 
+use crate::event::SchemaChange;
 use crate::position::Position;
+use crate::sink::TablePath;
+use crate::window::Window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnPath(Vec<String>);
@@ -37,4 +40,29 @@ pub trait ChangeLog {
     fn recorded_at(&self) -> ColumnPath;
 
     fn ordering(&self) -> Vec<ColumnPath>;
+}
+
+pub trait SchemaChangeStream<L: ChangeLog> {
+    type Error: std::error::Error;
+    type Changes<'a>: SchemaChanges<L, Error = Self::Error>
+    where
+        Self: 'a,
+        L: 'a;
+
+    fn schema_changes<'a>(
+        &'a self,
+        log: &'a L,
+        table: &TablePath,
+        window: &Window,
+    ) -> Result<Self::Changes<'a>, Self::Error>;
+}
+
+pub type Streamed<P, E> = Result<SchemaChange<P>, E>;
+
+pub trait SchemaChanges<L: ChangeLog> {
+    type Error: std::error::Error;
+
+    fn stream(
+        &mut self,
+    ) -> Result<impl Iterator<Item = Streamed<L::Position, Self::Error>>, Self::Error>;
 }
