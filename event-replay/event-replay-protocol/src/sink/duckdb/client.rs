@@ -2,10 +2,10 @@ use duckdb::types::{FromSql, Type};
 use duckdb::{Connection, Error, Statement};
 
 use event_replay_core::sink::{TablePath, Warehouse};
-use event_replay_core::source::{ChangeLog, SchemaChangeStream, SchemaChanges, Streamed};
+use event_replay_core::source::{SchemaChangeStream, SchemaChanges, Streamed};
 use event_replay_core::window::Window;
 
-use crate::sink::duckdb::DuckDb;
+use crate::sink::duckdb::DuckDbWarehouse;
 use crate::source::debezium::{Debezium, DebeziumDdl, Dialect};
 
 pub struct DuckDbClient {
@@ -15,28 +15,6 @@ pub struct DuckDbClient {
 impl DuckDbClient {
     pub fn new(connection: Connection) -> Self {
         Self { connection }
-    }
-
-    fn query(&self, log: &impl ChangeLog, table: &TablePath, window: &Window) -> String {
-        let warehouse = DuckDb;
-        let envelope = warehouse
-            .envelope()
-            .map(|envelope| warehouse.path(&envelope))
-            .unwrap_or_else(|| "*".to_owned());
-        let recorded_at = warehouse.within_envelope(&log.recorded_at());
-        let ordering = log
-            .ordering()
-            .iter()
-            .map(|path| warehouse.within_envelope(path))
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        format!(
-            "SELECT {envelope}\nFROM {}\nWHERE {recorded_at} >= {} AND {recorded_at} < {}\nORDER BY {ordering}",
-            warehouse.table_ref(table),
-            window.from().milliseconds_since_epoch(),
-            window.to().milliseconds_since_epoch(),
-        )
     }
 }
 
@@ -84,7 +62,9 @@ where
         window: &Window,
     ) -> Result<Self::Changes<'a>, Self::Error> {
         Ok(DuckDbSchemaChanges {
-            statement: self.connection.prepare(&self.query(log, table, window))?,
+            statement: self
+                .connection
+                .prepare(&DuckDbWarehouse.select_schema_changes(log, table, window))?,
             log,
         })
     }
@@ -191,22 +171,5 @@ mod tests {
         let changes = client.schema_changes(&log, &table(), &window(0, 1));
 
         assert!(changes.is_err());
-    }
-
-    #[test]
-    fn the_query_reads_the_envelope_of_each_row_in_source_order() {
-        let connection = Connection::open_in_memory().unwrap();
-        let client = DuckDbClient::new(connection);
-        let log = Debezium::new(MySql);
-
-        assert_eq!(
-            client.query(&log, &table(), &window(0, 10)),
-            concat!(
-                "SELECT \"value\"\n",
-                "FROM \"mysql_shop_cdc\".\"mysql\"\n",
-                "WHERE \"value\".\"ts_ms\" >= 0 AND \"value\".\"ts_ms\" < 10\n",
-                "ORDER BY \"value\".\"source\".\"file\", \"value\".\"source\".\"pos\"",
-            )
-        );
     }
 }

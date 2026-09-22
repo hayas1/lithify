@@ -1,4 +1,3 @@
-mod change_log;
 mod credential;
 mod journal;
 mod run;
@@ -55,6 +54,12 @@ struct Arguments {
         help = "The secret the object storage holding the change log is read with"
     )]
     secret_access_key: Secret,
+    #[arg(
+        long,
+        value_name = "NAME",
+        help = "The sink to read, out of the ones the host is sunk into"
+    )]
+    sink: Option<String>,
 }
 
 impl Arguments {
@@ -71,6 +76,7 @@ impl From<Arguments> for Run {
             arguments.directory,
             window,
             Credential::new(arguments.access_key_id, arguments.secret_access_key),
+            arguments.sink,
         )
     }
 }
@@ -84,7 +90,10 @@ fn main() -> ExitCode {
                 println!("{entry}");
             }
 
-            ExitCode::SUCCESS
+            match journal.complete() {
+                true => ExitCode::SUCCESS,
+                false => ExitCode::FAILURE,
+            }
         }
         Err(unreplayable) => {
             eprintln!("{unreplayable}");

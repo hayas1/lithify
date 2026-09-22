@@ -13,7 +13,8 @@ clap = { version = "4", features = ["derive", "env"] }
 duckdb = { workspace = true }
 event-replay-config = { workspace = true }
 event-replay-core = { workspace = true }
-event-replay-protocol = { workspace = true, features = ["duckdb"] }
+event-replay-protocol = { workspace = true, features = ["bigquery", "duckdb"] }
+google-cloud-bigquery = { workspace = true }
 
 [dev-dependencies]
 event-replay-strategy = { workspace = true }

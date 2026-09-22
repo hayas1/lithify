@@ -3,7 +3,7 @@ use event_replay_core::model::{ColumnModel, ColumnType, TableId, TableModel};
 use event_replay_core::position::RecordedAt;
 use event_replay_core::sink::TablePath;
 use event_replay_core::window::Window;
-use event_replay_protocol::{BigQuery, Debezium, DuckDb, MySql};
+use event_replay_protocol::{BigQueryWarehouse, Debezium, DuckDbWarehouse, MySql};
 use event_replay_strategy::snapshot::Snapshot;
 
 fn column(name: &str, type_name: &str, column_type: ColumnType, position: u32) -> ColumnModel {
@@ -40,9 +40,9 @@ fn main() {
         Some("bigquery") => println!(
             "{}",
             snapshot
-                .statements(&BigQuery::new("local-project"))
+                .statements(&BigQueryWarehouse::new("local-project"))
                 .unwrap()[0]
         ),
-        _ => println!("{}", snapshot.statements(&DuckDb).unwrap()[0]),
+        _ => println!("{}", snapshot.statements(&DuckDbWarehouse).unwrap()[0]),
     }
 }

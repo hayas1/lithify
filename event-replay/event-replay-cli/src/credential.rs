@@ -17,12 +17,18 @@ impl Credential {
     }
 
     pub fn secret(&self) -> &str {
-        &self.secret.0
+        self.secret.read()
     }
 }
 
 #[derive(Clone)]
 pub struct Secret(String);
+
+impl Secret {
+    pub fn read(&self) -> &str {
+        &self.0
+    }
+}
 
 impl Debug for Secret {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {

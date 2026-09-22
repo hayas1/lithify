@@ -120,7 +120,7 @@ impl FromSql for MySqlSource {
 
         Ok(Self {
             file: member(source, row, "file")?,
-            pos: member::<i64>(source, row, "pos")? as u64,
+            pos: member(source, row, "pos")?,
             gtid: member(source, row, "gtid")?,
         })
     }
@@ -131,7 +131,7 @@ impl FromSql for PostgresSource {
         let (source, row) = structure(value)?;
 
         Ok(Self {
-            lsn: member::<i64>(source, row, "lsn")? as u64,
+            lsn: member(source, row, "lsn")?,
         })
     }
 }
@@ -143,11 +143,11 @@ impl FromSql for DdlColumn {
         Ok(Self {
             name: member(column, row, "name")?,
             type_name: member(column, row, "typeName")?,
-            position: member::<i64>(column, row, "position")? as u32,
+            position: member(column, row, "position")?,
             optional: member(column, row, "optional")?,
             default_value_expression: member(column, row, "defaultValueExpression")?,
-            length: member::<Option<i64>>(column, row, "length")?.map(|length| length as u32),
-            scale: member::<Option<i64>>(column, row, "scale")?.map(|scale| scale as u32),
+            length: member(column, row, "length")?,
+            scale: member(column, row, "scale")?,
         })
     }
 }

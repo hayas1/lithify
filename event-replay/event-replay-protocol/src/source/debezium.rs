@@ -33,31 +33,38 @@ pub struct DebeziumDdl<S> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[cfg_attr(feature = "bigquery", derive(google_cloud_bigquery::query::FromSql))]
 #[serde(rename_all = "camelCase")]
 pub struct DdlTableChange {
+    #[cfg_attr(feature = "bigquery", bigquery(rename = "type"))]
     pub r#type: String,
     pub id: String,
     pub table: Option<DdlTable>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[cfg_attr(feature = "bigquery", derive(google_cloud_bigquery::query::FromSql))]
 #[serde(rename_all = "camelCase")]
 pub struct DdlTable {
     #[serde(default)]
+    #[cfg_attr(feature = "bigquery", bigquery(rename = "primaryKeyColumnNames"))]
     pub primary_key_column_names: Vec<String>,
     pub columns: Vec<DdlColumn>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[cfg_attr(feature = "bigquery", derive(google_cloud_bigquery::query::FromSql))]
 #[serde(rename_all = "camelCase")]
 pub struct DdlColumn {
     pub name: String,
+    #[cfg_attr(feature = "bigquery", bigquery(rename = "typeName"))]
     pub type_name: String,
-    pub position: u32,
+    pub position: i64,
     pub optional: bool,
+    #[cfg_attr(feature = "bigquery", bigquery(rename = "defaultValueExpression"))]
     pub default_value_expression: Option<String>,
-    pub length: Option<u32>,
-    pub scale: Option<u32>,
+    pub length: Option<i64>,
+    pub scale: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -124,9 +131,12 @@ impl<D: Dialect> Debezium<D> {
         ColumnModel::new(
             &column.name,
             &column.type_name,
-            self.dialect
-                .column_type(&column.type_name, column.length, column.scale),
-            column.position,
+            self.dialect.column_type(
+                &column.type_name,
+                column.length.map(|length| length as u32),
+                column.scale.map(|scale| scale as u32),
+            ),
+            column.position as u32,
             column.optional,
             column.default_value_expression.as_deref(),
         )

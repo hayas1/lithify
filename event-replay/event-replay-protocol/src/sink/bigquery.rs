@@ -1,12 +1,17 @@
+#[cfg(feature = "bigquery")]
+pub mod client;
+#[cfg(feature = "bigquery")]
+pub mod from_sql;
+
 use event_replay_core::model::ColumnType;
 use event_replay_core::sink::{TablePath, UnsupportedColumn, Warehouse};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BigQuery {
+pub struct BigQueryWarehouse {
     project: String,
 }
 
-impl BigQuery {
+impl BigQueryWarehouse {
     pub fn new(project: &str) -> Self {
         Self {
             project: project.to_owned(),
@@ -18,7 +23,7 @@ impl BigQuery {
     }
 }
 
-impl Warehouse for BigQuery {
+impl Warehouse for BigQueryWarehouse {
     fn identifier(&self, name: &str) -> String {
         format!("`{name}`")
     }
@@ -70,11 +75,15 @@ impl Warehouse for BigQuery {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::debezium::Debezium;
+    use crate::source::debezium::mysql::MySql;
     use event_replay_core::model::ColumnType;
+    use event_replay_core::position::RecordedAt;
     use event_replay_core::sink::{TablePath, UnsupportedColumn, Warehouse};
+    use event_replay_core::window::Window;
 
-    fn bigquery() -> BigQuery {
-        BigQuery::new("local-project")
+    fn bigquery() -> BigQueryWarehouse {
+        BigQueryWarehouse::new("local-project")
     }
 
     fn read(column_type: ColumnType) -> String {
@@ -165,6 +174,26 @@ mod tests {
         assert_eq!(
             bigquery().column_type(&unsupported).unwrap_err(),
             UnsupportedColumn::new(&unsupported)
+        );
+    }
+
+    #[test]
+    fn the_schema_changes_of_a_window_are_read_whole_in_source_order() {
+        let log = Debezium::new(MySql);
+        let window = Window::new(RecordedAt::from(0), RecordedAt::from(10));
+
+        assert_eq!(
+            BigQueryWarehouse::new("local-project").select_schema_changes(
+                &log,
+                &TablePath::new("mysql_shop_cdc", "mysql"),
+                &window
+            ),
+            concat!(
+                "SELECT *\n",
+                "FROM `local-project`.`mysql_shop_cdc`.`mysql`\n",
+                "WHERE `ts_ms` >= 0 AND `ts_ms` < 10\n",
+                "ORDER BY `source`.`file`, `source`.`pos`",
+            )
         );
     }
 }

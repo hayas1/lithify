@@ -7,16 +7,17 @@ use event_replay_core::source::ColumnPath;
 use super::Dialect;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "bigquery", derive(google_cloud_bigquery::query::FromSql))]
 pub struct MySqlSource {
     pub file: String,
-    pub pos: u64,
+    pub pos: i64,
     pub gtid: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MySqlPosition {
     file: String,
-    pos: u64,
+    pos: i64,
     transaction: Option<String>,
 }
 
@@ -25,7 +26,7 @@ impl MySqlPosition {
         &self.file
     }
 
-    pub fn pos(&self) -> u64 {
+    pub fn pos(&self) -> i64 {
         self.pos
     }
 
@@ -101,7 +102,7 @@ mod tests {
         serde_json::from_value(source).unwrap()
     }
 
-    fn position(file: &str, pos: u64) -> MySqlPosition {
+    fn position(file: &str, pos: i64) -> MySqlPosition {
         MySql.position(&source(json!({"file": file, "pos": pos})))
     }
 

@@ -39,13 +39,7 @@ impl Wiring {
     }
 
     fn distinct(sources: &[Source]) -> Result<(), Miswiring> {
-        let mut named = BTreeSet::new();
-
-        for source in sources {
-            if !named.insert(source.name()) {
-                return Err(Miswiring::SourceNamedTwice(source.name().to_owned()));
-            }
-        }
+        Self::named_once(sources.iter().map(Source::name)).map_err(Miswiring::SourceNamedTwice)?;
 
         match sources
             .windows(2)
@@ -71,14 +65,21 @@ impl Wiring {
             .map(|(at, wired)| wired.clone().sink(at, &self.default.sink))
             .collect::<Result<Vec<_>, _>>()?;
 
-        match sinks
-            .iter()
-            .enumerate()
-            .find(|(at, sink)| sinks[..*at].contains(sink))
-        {
-            Some((at, _)) => Err(Miswiring::SinkConfiguredTwice(at)),
-            None => Ok(sinks),
+        Self::named_once(sinks.iter().map(Sink::name))
+            .map_err(Miswiring::SinkNamedTwice)
+            .map(|()| sinks)
+    }
+
+    fn named_once<'a>(names: impl Iterator<Item = &'a str>) -> Result<(), String> {
+        let mut named = BTreeSet::new();
+
+        for name in names {
+            if !named.insert(name) {
+                return Err(name.to_owned());
+            }
         }
+
+        Ok(())
     }
 }
 
@@ -123,6 +124,7 @@ impl WiredSource {
 #[semigroup(with = "semigroup::op::Coalesce")]
 #[serde(deny_unknown_fields)]
 struct WiredSink {
+    name: Option<String>,
     change_log: Option<String>,
     warehouse: Option<Warehouse>,
     replay: Option<Replay>,
@@ -131,13 +133,19 @@ struct WiredSink {
 impl WiredSink {
     fn sink(self, at: usize, default: &Self) -> Result<Sink, Miswiring> {
         let wired = self.semigroup(default.clone());
+        let name = wired.name.ok_or(Miswiring::SinkWithoutName(at))?;
 
         Ok(Sink {
             change_log: wired
                 .change_log
-                .ok_or(Miswiring::SinkWithoutChangeLog(at))?,
-            warehouse: wired.warehouse.ok_or(Miswiring::SinkWithoutWarehouse(at))?,
-            replay: wired.replay.ok_or(Miswiring::SinkWithoutReplay(at))?,
+                .ok_or_else(|| Miswiring::SinkWithoutChangeLog(name.clone()))?,
+            warehouse: wired
+                .warehouse
+                .ok_or_else(|| Miswiring::SinkWithoutWarehouse(name.clone()))?,
+            replay: wired
+                .replay
+                .ok_or_else(|| Miswiring::SinkWithoutReplay(name.clone()))?,
+            name,
         })
     }
 }
@@ -151,10 +159,11 @@ pub enum Miswiring {
     SourceWithoutCapture(String),
     SourceNamedTwice(String),
     SourcesTakingOverTogether(String, String),
-    SinkWithoutChangeLog(usize),
-    SinkWithoutWarehouse(usize),
-    SinkWithoutReplay(usize),
-    SinkConfiguredTwice(usize),
+    SinkWithoutName(usize),
+    SinkWithoutChangeLog(String),
+    SinkWithoutWarehouse(String),
+    SinkWithoutReplay(String),
+    SinkNamedTwice(String),
 }
 
 impl Display for Miswiring {
@@ -173,16 +182,13 @@ impl Display for Miswiring {
             Self::SourcesTakingOverTogether(taking, over) => {
                 write!(formatter, "{taking} and {over} take over at the same time")
             }
-            Self::SinkWithoutChangeLog(at) => {
-                write!(formatter, "sink {} holds no change log", at + 1)
+            Self::SinkWithoutName(at) => write!(formatter, "sink {} is not named", at + 1),
+            Self::SinkWithoutChangeLog(name) => {
+                write!(formatter, "{name} holds no change log")
             }
-            Self::SinkWithoutWarehouse(at) => {
-                write!(formatter, "sink {} names no warehouse", at + 1)
-            }
-            Self::SinkWithoutReplay(at) => write!(formatter, "sink {} builds nothing", at + 1),
-            Self::SinkConfiguredTwice(at) => {
-                write!(formatter, "sink {} repeats another sink", at + 1)
-            }
+            Self::SinkWithoutWarehouse(name) => write!(formatter, "{name} names no warehouse"),
+            Self::SinkWithoutReplay(name) => write!(formatter, "{name} builds nothing"),
+            Self::SinkNamedTwice(name) => write!(formatter, "{name} is sunk into twice"),
         }
     }
 }
@@ -236,12 +242,17 @@ impl Source {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sink {
+    name: String,
     change_log: String,
     warehouse: Warehouse,
     replay: Replay,
 }
 
 impl Sink {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     pub fn change_log(&self) -> &str {
         &self.change_log
     }
@@ -357,6 +368,8 @@ impl Format {
 pub struct BigQuery {
     project: String,
     endpoint: Option<String>,
+    #[serde(default)]
+    credentials: Credentials,
 }
 
 impl BigQuery {
@@ -364,9 +377,23 @@ impl BigQuery {
         &self.project
     }
 
-    pub fn endpoint(&self) -> Option<&str> {
-        self.endpoint.as_deref()
+    pub fn endpoint(&self) -> &str {
+        self.endpoint.as_deref().unwrap_or(Self::GOOGLE)
     }
+
+    pub fn credentials(&self) -> Credentials {
+        self.credentials
+    }
+
+    const GOOGLE: &'static str = "https://bigquery.googleapis.com";
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Credentials {
+    #[default]
+    Adc,
+    Anonymous,
 }
 
 #[cfg(test)]
@@ -394,15 +421,18 @@ mod tests {
         dialect = "postgres"
 
         [[sink]]
+        name = "minio"
         warehouse.duckdb.s3.endpoint = "http://minio:9000"
         warehouse.duckdb.s3.region = "us-east-1"
         warehouse.duckdb.s3.bucket = "event-replay"
         warehouse.duckdb.s3.format = "parquet"
 
         [[sink]]
+        name = "warehouse"
         change_log = "mysql_shop_archive"
         warehouse.bigquery.project = "local-project"
         warehouse.bigquery.endpoint = "http://bigquery-emulator:9050"
+        warehouse.bigquery.credentials = "anonymous"
     "#;
 
     const SERVER: &str = r#"
@@ -421,6 +451,10 @@ mod tests {
         warehouse.duckdb.s3.format = "parquet"
     "#;
 
+    const NAMED: &str = r#"
+        name = "minio"
+    "#;
+
     const REPLAY: &str = r#"
         replay.snapshot = "mysql_shop"
         replay.history = "mysql_shop_history"
@@ -432,7 +466,7 @@ mod tests {
     }
 
     fn wired(server: &str, sink: &str) -> Wiring {
-        wiring(&format!("{server}\n[[sink]]\n{sink}"))
+        wiring(&format!("{server}\n[[sink]]\n{NAMED}{sink}"))
     }
 
     fn sources() -> Vec<Source> {
@@ -513,6 +547,7 @@ mod tests {
 
     #[test]
     fn a_sink_holds_the_change_log_the_host_names() {
+        assert_eq!(sinks()[0].name(), "minio");
         assert_eq!(sinks()[0].change_log(), "mysql_shop_cdc");
     }
 
@@ -585,7 +620,7 @@ mod tests {
 
         assert_eq!(
             wiring.sinks().unwrap_err(),
-            Miswiring::SinkWithoutChangeLog(0)
+            Miswiring::SinkWithoutChangeLog("minio".to_owned())
         );
     }
 
@@ -598,7 +633,7 @@ mod tests {
 
         assert_eq!(
             wiring.sinks().unwrap_err(),
-            Miswiring::SinkWithoutWarehouse(0)
+            Miswiring::SinkWithoutWarehouse("minio".to_owned())
         );
     }
 
@@ -609,18 +644,30 @@ mod tests {
             &format!("change_log = \"mysql_shop_cdc\"\n{WAREHOUSE}"),
         );
 
-        assert_eq!(wiring.sinks().unwrap_err(), Miswiring::SinkWithoutReplay(0));
+        assert_eq!(
+            wiring.sinks().unwrap_err(),
+            Miswiring::SinkWithoutReplay("minio".to_owned())
+        );
     }
 
     #[test]
-    fn a_sink_repeated_as_it_stands_is_rejected() {
-        let sink = format!("change_log = \"mysql_shop_cdc\"\n{WAREHOUSE}{REPLAY}");
+    fn a_sink_named_twice_is_rejected() {
+        let sink = format!("{NAMED}change_log = \"mysql_shop_cdc\"\n{WAREHOUSE}{REPLAY}");
         let wiring = wiring(&format!("{SERVER}\n[[sink]]\n{sink}\n[[sink]]\n{sink}"));
 
         assert_eq!(
             wiring.sinks().unwrap_err(),
-            Miswiring::SinkConfiguredTwice(1)
+            Miswiring::SinkNamedTwice("minio".to_owned())
         );
+    }
+
+    #[test]
+    fn a_sink_without_a_name_is_rejected() {
+        let wiring = wiring(&format!(
+            "{SERVER}\n[[sink]]\nchange_log = \"mysql_shop_cdc\"\n{WAREHOUSE}{REPLAY}"
+        ));
+
+        assert_eq!(wiring.sinks().unwrap_err(), Miswiring::SinkWithoutName(0));
     }
 
     #[test]
@@ -655,7 +702,17 @@ mod tests {
 
         assert!(sinks()[1].warehouse().as_duck_db().is_none());
         assert_eq!(bigquery.project(), "local-project");
-        assert_eq!(bigquery.endpoint(), Some("http://bigquery-emulator:9050"));
+        assert_eq!(bigquery.endpoint(), "http://bigquery-emulator:9050");
+        assert_eq!(bigquery.credentials(), Credentials::Anonymous);
+    }
+
+    #[test]
+    fn a_bigquery_warehouse_is_google_and_authenticated_unless_it_says_otherwise() {
+        let warehouse: Warehouse = toml::from_str("[bigquery]\nproject = \"shop\"").unwrap();
+        let bigquery = warehouse.as_big_query().unwrap();
+
+        assert_eq!(bigquery.endpoint(), "https://bigquery.googleapis.com");
+        assert_eq!(bigquery.credentials(), Credentials::Adc);
     }
 
     #[test]

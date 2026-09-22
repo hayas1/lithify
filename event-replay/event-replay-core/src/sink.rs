@@ -1,7 +1,8 @@
 use std::fmt;
 
 use crate::model::ColumnType;
-use crate::source::ColumnPath;
+use crate::source::{ChangeLog, ColumnPath};
+use crate::window::Window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnsupportedColumn {
@@ -87,5 +88,31 @@ pub trait Warehouse {
             .map(|part| self.identifier(part))
             .collect::<Vec<_>>()
             .join(".")
+    }
+
+    fn select_schema_changes(
+        &self,
+        log: &impl ChangeLog,
+        table: &TablePath,
+        window: &Window,
+    ) -> String {
+        let envelope = self
+            .envelope()
+            .map(|envelope| self.path(&envelope))
+            .unwrap_or_else(|| "*".to_owned());
+        let recorded_at = self.within_envelope(&log.recorded_at());
+        let ordering = log
+            .ordering()
+            .iter()
+            .map(|path| self.within_envelope(path))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        format!(
+            "SELECT {envelope}\nFROM {}\nWHERE {recorded_at} >= {} AND {recorded_at} < {}\nORDER BY {ordering}",
+            self.table_ref(table),
+            window.from().milliseconds_since_epoch(),
+            window.to().milliseconds_since_epoch(),
+        )
     }
 }

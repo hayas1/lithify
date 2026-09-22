@@ -7,17 +7,18 @@ use event_replay_core::source::ColumnPath;
 use super::Dialect;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "bigquery", derive(google_cloud_bigquery::query::FromSql))]
 pub struct PostgresSource {
-    pub lsn: u64,
+    pub lsn: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PostgresPosition {
-    lsn: u64,
+    lsn: i64,
 }
 
 impl PostgresPosition {
-    pub fn lsn(&self) -> u64 {
+    pub fn lsn(&self) -> i64 {
         self.lsn
     }
 }
@@ -83,7 +84,7 @@ mod tests {
     use event_replay_core::model::ColumnType;
     use serde_json::json;
 
-    fn position(lsn: u64) -> PostgresPosition {
+    fn position(lsn: i64) -> PostgresPosition {
         Postgres.position(&serde_json::from_value(json!({"lsn": lsn})).unwrap())
     }
 

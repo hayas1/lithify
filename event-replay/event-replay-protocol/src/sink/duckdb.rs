@@ -2,15 +2,17 @@
 pub mod client;
 #[cfg(feature = "duckdb")]
 pub mod from_sql;
+#[cfg(feature = "duckdb")]
+pub mod store;
 
 use event_replay_core::model::ColumnType;
 use event_replay_core::sink::{TablePath, UnsupportedColumn, Warehouse};
 use event_replay_core::source::ColumnPath;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct DuckDb;
+pub struct DuckDbWarehouse;
 
-impl Warehouse for DuckDb {
+impl Warehouse for DuckDbWarehouse {
     fn envelope(&self) -> Option<ColumnPath> {
         Some(ColumnPath::from("value"))
     }
@@ -74,30 +76,45 @@ impl Warehouse for DuckDb {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::debezium::Debezium;
+    use crate::source::debezium::mysql::MySql;
+    use event_replay_core::position::RecordedAt;
+    use event_replay_core::window::Window;
 
     fn read(column_type: ColumnType) -> String {
-        DuckDb.read("\"after\".\"amount\"", &column_type).unwrap()
+        DuckDbWarehouse
+            .read("\"after\".\"amount\"", &column_type)
+            .unwrap()
     }
 
     #[test]
     fn a_table_is_qualified_by_the_schema_it_lives_in() {
         assert_eq!(
-            DuckDb.table_ref(&TablePath::new("mysql_shop", "customers_20260920")),
+            DuckDbWarehouse.table_ref(&TablePath::new("mysql_shop", "customers_20260920")),
             "\"mysql_shop\".\"customers_20260920\""
         );
     }
 
     #[test]
     fn whole_numbers_keep_the_width_the_source_declared() {
-        assert_eq!(DuckDb.column_type(&ColumnType::Int16).unwrap(), "SMALLINT");
-        assert_eq!(DuckDb.column_type(&ColumnType::Int32).unwrap(), "INTEGER");
-        assert_eq!(DuckDb.column_type(&ColumnType::Int64).unwrap(), "BIGINT");
+        assert_eq!(
+            DuckDbWarehouse.column_type(&ColumnType::Int16).unwrap(),
+            "SMALLINT"
+        );
+        assert_eq!(
+            DuckDbWarehouse.column_type(&ColumnType::Int32).unwrap(),
+            "INTEGER"
+        );
+        assert_eq!(
+            DuckDbWarehouse.column_type(&ColumnType::Int64).unwrap(),
+            "BIGINT"
+        );
     }
 
     #[test]
     fn a_decimal_keeps_the_precision_and_scale_the_source_declared() {
         assert_eq!(
-            DuckDb
+            DuckDbWarehouse
                 .column_type(&ColumnType::Decimal {
                     precision: 12,
                     scale: 2
@@ -145,7 +162,7 @@ mod tests {
     #[test]
     fn an_array_takes_the_type_of_its_elements() {
         assert_eq!(
-            DuckDb
+            DuckDbWarehouse
                 .column_type(&ColumnType::Array(Box::new(ColumnType::Text)))
                 .unwrap(),
             "VARCHAR[]"
@@ -157,8 +174,27 @@ mod tests {
         let unsupported = ColumnType::Unsupported("tsvector".to_owned());
 
         assert_eq!(
-            DuckDb.column_type(&unsupported).unwrap_err(),
+            DuckDbWarehouse.column_type(&unsupported).unwrap_err(),
             UnsupportedColumn::new(&unsupported)
+        );
+    }
+    #[test]
+    fn the_schema_changes_of_a_window_are_read_from_the_envelope_in_source_order() {
+        let log = Debezium::new(MySql);
+        let window = Window::new(RecordedAt::from(0), RecordedAt::from(10));
+
+        assert_eq!(
+            DuckDbWarehouse.select_schema_changes(
+                &log,
+                &TablePath::new("mysql_shop_cdc", "mysql"),
+                &window
+            ),
+            concat!(
+                "SELECT \"value\"\n",
+                "FROM \"mysql_shop_cdc\".\"mysql\"\n",
+                "WHERE \"value\".\"ts_ms\" >= 0 AND \"value\".\"ts_ms\" < 10\n",
+                "ORDER BY \"value\".\"source\".\"file\", \"value\".\"source\".\"pos\"",
+            )
         );
     }
 }

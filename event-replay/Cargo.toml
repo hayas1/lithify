@@ -15,5 +15,10 @@ event-replay-config = { path = "event-replay-config" }
 event-replay-core = { path = "event-replay-core" }
 event-replay-protocol = { path = "event-replay-protocol" }
 event-replay-strategy = { path = "event-replay-strategy" }
+google-cloud-auth = "1.16"
+google-cloud-bigquery = "=0.16.1-preview"
+google-cloud-gax = "1.14"
+wkt = { package = "google-cloud-wkt", version = "1.7" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.151"
+tokio = { version = "1", features = ["rt"] }
