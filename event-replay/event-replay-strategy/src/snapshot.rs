@@ -170,6 +170,8 @@ mod tests {
     struct Engine;
 
     impl Warehouse for Engine {
+        type Config = ();
+
         fn identifier(&self, name: &str) -> String {
             format!("\"{name}\"")
         }

@@ -27,6 +27,10 @@ impl fmt::Display for ColumnPath {
     }
 }
 
+pub trait CdcFormat {
+    type Config;
+}
+
 pub trait SchemaChangeLog {
     type Position: Position;
 

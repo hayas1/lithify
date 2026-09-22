@@ -1,5 +1,6 @@
 #[cfg(feature = "duckdb")]
 pub mod client;
+pub mod config;
 #[cfg(feature = "duckdb")]
 pub mod from_sql;
 #[cfg(feature = "duckdb")]
@@ -13,6 +14,8 @@ use event_replay_core::source::ColumnPath;
 pub struct DuckDbWarehouse;
 
 impl Warehouse for DuckDbWarehouse {
+    type Config = config::Store;
+
     fn envelope(&self) -> Option<ColumnPath> {
         Some(ColumnPath::from("value"))
     }

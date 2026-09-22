@@ -1,5 +1,6 @@
 #[cfg(feature = "bigquery")]
 pub mod client;
+pub mod config;
 #[cfg(feature = "bigquery")]
 pub mod from_sql;
 
@@ -24,6 +25,8 @@ impl BigQueryWarehouse {
 }
 
 impl Warehouse for BigQueryWarehouse {
+    type Config = config::Config;
+
     fn identifier(&self, name: &str) -> String {
         format!("`{name}`")
     }
@@ -77,6 +80,7 @@ mod tests {
     use super::*;
     use crate::source::debezium::Debezium;
     use crate::source::debezium::mysql::MySql;
+
     use event_replay_core::model::ColumnType;
     use event_replay_core::position::RecordedAt;
     use event_replay_core::sink::{TablePath, UnsupportedColumn, Warehouse};

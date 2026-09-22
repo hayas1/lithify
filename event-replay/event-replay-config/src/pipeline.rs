@@ -9,19 +9,19 @@ use crate::table::{self, Table, Tables};
 use crate::unreadable::Unreadable;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Host {
+pub struct Pipeline<C, W> {
     name: String,
-    sources: Vec<Source>,
-    sinks: Vec<Sink>,
+    sources: Vec<Source<C>>,
+    sinks: Vec<Sink<W>>,
     tables: Tables,
 }
 
-impl Host {
+impl<C: Clone + DeserializeOwned, W: Clone + DeserializeOwned> Pipeline<C, W> {
     pub fn open(directory: impl AsRef<Path>) -> Result<Self, Unreadable> {
         let directory = directory.as_ref();
         let wiring = directory.join("infra.toml");
         let listing = directory.join("table.toml");
-        let written: infra::Wiring = Self::read(&wiring)?;
+        let written: infra::Wiring<C, W> = Self::read(&wiring)?;
         let miswired = |miswiring| Unreadable::at(&wiring, miswiring);
 
         Ok(Self {
@@ -37,11 +37,11 @@ impl Host {
         &self.name
     }
 
-    pub fn sources(&self) -> impl Iterator<Item = &Source> {
+    pub fn sources(&self) -> impl Iterator<Item = &Source<C>> {
         self.sources.iter()
     }
 
-    pub fn sinks(&self) -> impl Iterator<Item = &Sink> {
+    pub fn sinks(&self) -> impl Iterator<Item = &Sink<W>> {
         self.sinks.iter()
     }
 
@@ -71,13 +71,29 @@ mod tests {
 
     use super::*;
     use crate::Artifact;
-    use crate::infra::{Dialect, Miswiring};
+    use crate::infra::Miswiring;
     use crate::table::Replayed;
     use crate::unreadable::Cause;
     use event_replay_core::sink::TablePath;
+    use event_replay_protocol::sink::bigquery::config as bigquery;
+    use event_replay_protocol::sink::duckdb::config::Store;
+    use event_replay_protocol::source::debezium::config as debezium;
 
-    fn host(name: &str) -> Host {
-        Host::open(
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+    #[serde(deny_unknown_fields, rename_all = "lowercase")]
+    enum Sunk {
+        DuckDb(Store),
+        BigQuery(bigquery::Config),
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+    #[serde(deny_unknown_fields, rename_all = "lowercase")]
+    enum Capture {
+        Debezium(debezium::Config),
+    }
+
+    fn pipeline(name: &str) -> Pipeline<Capture, Sunk> {
+        Pipeline::open(
             Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../compose/event-replay")
                 .join(name),
@@ -94,34 +110,29 @@ mod tests {
     }
 
     #[test]
-    fn a_host_is_named_after_the_directory_that_configures_it() {
-        assert_eq!(host("mysql").name(), "mysql");
-        assert_eq!(host("postgres").name(), "postgres");
+    fn a_pipeline_is_named_after_the_directory_that_configures_it() {
+        assert_eq!(pipeline("mysql").name(), "mysql");
+        assert_eq!(pipeline("postgres").name(), "postgres");
     }
 
     #[test]
-    fn a_host_says_which_dialect_each_of_its_servers_is_captured_as() {
+    fn a_pipeline_says_which_dialect_each_of_its_servers_is_captured_as() {
         assert_eq!(
-            host("mysql").sources().next().unwrap().capture().dialect(),
-            Dialect::MySql
+            pipeline("mysql").sources().next().unwrap().capture(),
+            &Capture::Debezium(debezium::Config::of(debezium::Dialect::MySql))
         );
         assert_eq!(
-            host("postgres")
-                .sources()
-                .next()
-                .unwrap()
-                .capture()
-                .dialect(),
-            Dialect::Postgres
+            pipeline("postgres").sources().next().unwrap().capture(),
+            &Capture::Debezium(debezium::Config::of(debezium::Dialect::Postgres))
         );
     }
 
     #[test]
-    fn a_host_says_where_each_sink_holds_the_schema_changes_of_its_source() {
-        let host = host("mysql");
-        let source = host.sources().next().unwrap();
+    fn a_pipeline_says_where_each_sink_holds_the_schema_changes_of_its_source() {
+        let pipeline = pipeline("mysql");
+        let source = pipeline.sources().next().unwrap();
 
-        let tables: Vec<_> = host
+        let tables: Vec<_> = pipeline
             .sinks()
             .map(|sink| sink.schema_changes(source))
             .collect();
@@ -136,9 +147,9 @@ mod tests {
     }
 
     #[test]
-    fn a_table_the_host_does_not_configure_takes_the_defaults() {
-        let host = host("mysql");
-        let table = host.table(&TableId::new("shop", "order_items"));
+    fn a_table_the_pipeline_does_not_configure_takes_the_defaults() {
+        let pipeline = pipeline("mysql");
+        let table = pipeline.table(&TableId::new("shop", "order_items"));
 
         assert!(table.builds(Artifact::Snapshot));
         assert!(!table.builds(Artifact::History));
@@ -146,9 +157,9 @@ mod tests {
     }
 
     #[test]
-    fn a_table_the_host_configures_overrides_the_defaults() {
-        let host = host("mysql");
-        let table = host.table(&TableId::new("shop", "orders"));
+    fn a_table_the_pipeline_configures_overrides_the_defaults() {
+        let pipeline = pipeline("mysql");
+        let table = pipeline.table(&TableId::new("shop", "orders"));
 
         assert!(table.builds(Artifact::Snapshot));
         assert!(table.builds(Artifact::History));
@@ -157,8 +168,8 @@ mod tests {
     }
 
     #[test]
-    fn a_directory_that_configures_no_host_is_reported_with_the_file_it_misses() {
-        let unreadable = Host::open("/nowhere").unwrap_err();
+    fn a_directory_that_configures_no_pipeline_is_reported_with_the_file_it_misses() {
+        let unreadable = Pipeline::<Capture, Sunk>::open("/nowhere").unwrap_err();
 
         assert!(matches!(unreadable.cause(), Cause::Missing(_)));
         assert_eq!(unreadable.path(), Path::new("/nowhere/infra.toml"));
@@ -166,8 +177,8 @@ mod tests {
     }
 
     #[test]
-    fn a_host_that_configures_no_table_is_reported_with_the_file_it_misses() {
-        let directory = scratch("host-without-tables");
+    fn a_pipeline_that_configures_no_table_is_reported_with_the_file_it_misses() {
+        let directory = scratch("pipeline-without-tables");
         std::fs::copy(
             Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../compose/event-replay/mysql/infra.toml"),
@@ -175,7 +186,7 @@ mod tests {
         )
         .unwrap();
 
-        let unreadable = Host::open(&directory).unwrap_err();
+        let unreadable = Pipeline::<Capture, Sunk>::open(&directory).unwrap_err();
 
         assert!(matches!(unreadable.cause(), Cause::Missing(_)));
         assert_eq!(unreadable.path(), directory.join("table.toml"));
@@ -183,8 +194,8 @@ mod tests {
     }
 
     #[test]
-    fn a_host_captured_from_no_server_is_reported_with_the_file_that_wires_it() {
-        let directory = scratch("host-without-servers");
+    fn a_pipeline_captured_from_no_server_is_reported_with_the_file_that_wires_it() {
+        let directory = scratch("pipeline-without-servers");
         std::fs::write(
             directory.join("infra.toml"),
             "[[sink]]\nname = \"minio\"\nchange_log = \"mysql_shop_cdc\"\nwarehouse.duckdb.s3.endpoint = \"http://minio:9000\"\nwarehouse.duckdb.s3.region = \"us-east-1\"\nwarehouse.duckdb.s3.bucket = \"event-replay\"\nwarehouse.duckdb.s3.format = \"parquet\"\nreplay.snapshot = \"mysql_shop\"\nreplay.history = \"mysql_shop_history\"\nreplay.shard = \"%Y%m%d\"\n",
@@ -192,7 +203,7 @@ mod tests {
         .unwrap();
         std::fs::write(directory.join("table.toml"), "").unwrap();
 
-        let unreadable = Host::open(&directory).unwrap_err();
+        let unreadable = Pipeline::<Capture, Sunk>::open(&directory).unwrap_err();
 
         assert!(matches!(
             unreadable.cause(),
@@ -211,7 +222,7 @@ mod tests {
 
     #[test]
     fn a_table_listed_twice_is_reported_with_the_file_that_lists_it() {
-        let directory = scratch("host-with-a-table-twice");
+        let directory = scratch("pipeline-with-a-table-twice");
         std::fs::copy(
             Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../compose/event-replay/mysql/infra.toml"),
@@ -224,7 +235,7 @@ mod tests {
         )
         .unwrap();
 
-        let unreadable = Host::open(&directory).unwrap_err();
+        let unreadable = Pipeline::<Capture, Sunk>::open(&directory).unwrap_err();
 
         assert!(matches!(unreadable.cause(), Cause::Mislisting(_)));
         assert_eq!(unreadable.path(), directory.join("table.toml"));
@@ -233,10 +244,10 @@ mod tests {
 
     #[test]
     fn a_configuration_that_does_not_parse_is_reported_with_its_file() {
-        let directory = scratch("unparsable-host");
+        let directory = scratch("unparsable-pipeline");
         std::fs::write(directory.join("infra.toml"), "capture = 1").unwrap();
 
-        let unreadable = Host::open(&directory).unwrap_err();
+        let unreadable = Pipeline::<Capture, Sunk>::open(&directory).unwrap_err();
 
         assert!(matches!(unreadable.cause(), Cause::Malformed(_)));
         assert_eq!(unreadable.path(), directory.join("infra.toml"));

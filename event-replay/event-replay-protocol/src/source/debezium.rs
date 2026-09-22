@@ -1,3 +1,4 @@
+pub mod config;
 pub mod mysql;
 pub mod postgres;
 
@@ -8,7 +9,14 @@ use serde_json::Value;
 use event_replay_core::event::{MalformedEvent, SchemaChange, TableChange};
 use event_replay_core::model::{ColumnModel, ColumnType, TableId, TableModel};
 use event_replay_core::position::{Position, RecordedAt};
-use event_replay_core::source::{ColumnPath, RowChangeLog, SchemaChangeLog};
+use event_replay_core::source::{CdcFormat, ColumnPath, RowChangeLog, SchemaChangeLog};
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DebeziumFormat;
+
+impl CdcFormat for DebeziumFormat {
+    type Config = config::Config;
+}
 
 pub trait Dialect {
     type Source;

@@ -21,8 +21,10 @@ impl Display for Unreplayable {
             Self::Unqueryable(cause) => write!(formatter, "{cause}"),
             Self::Unanswerable(cause) => write!(formatter, "{cause}"),
             Self::OutOfOrder(cause) => write!(formatter, "{cause}"),
-            Self::UnknownSink(name) => write!(formatter, "the host is not sunk into {name}"),
-            Self::WithoutSource => write!(formatter, "the host is captured from no server"),
+            Self::UnknownSink(name) => {
+                write!(formatter, "nothing in this pipeline is sunk into {name}")
+            }
+            Self::WithoutSource => write!(formatter, "this pipeline captures no server"),
         }
     }
 }

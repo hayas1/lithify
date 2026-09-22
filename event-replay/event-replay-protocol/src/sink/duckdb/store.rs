@@ -4,30 +4,20 @@ use event_replay_core::sink::{TablePath, Warehouse};
 
 use crate::sink::duckdb::DuckDbWarehouse;
 use crate::sink::duckdb::client::DuckDbClient;
+use crate::sink::duckdb::config::{FileFormat, S3, Store};
 
 pub struct ObjectStore {
-    endpoint: String,
-    region: String,
-    bucket: String,
-    format: FileFormat,
+    store: S3,
     key_id: String,
     secret: String,
 }
 
 impl ObjectStore {
-    pub fn new(
-        endpoint: &str,
-        region: &str,
-        bucket: &str,
-        format: FileFormat,
-        key_id: &str,
-        secret: &str,
-    ) -> Self {
+    pub fn open(store: &Store, key_id: &str, secret: &str) -> Self {
+        let Store::S3(store) = store;
+
         Self {
-            endpoint: endpoint.to_owned(),
-            region: region.to_owned(),
-            bucket: bucket.to_owned(),
-            format,
+            store: store.clone(),
             key_id: key_id.to_owned(),
             secret: secret.to_owned(),
         }
@@ -49,19 +39,18 @@ impl ObjectStore {
              LOAD httpfs;\n\
              CREATE SECRET (TYPE s3, PROVIDER config, KEY_ID '{}', SECRET '{}', \
              REGION '{}', ENDPOINT '{endpoint}', USE_SSL {over_tls}, URL_STYLE 'path')",
-            self.key_id, self.secret, self.region,
+            self.key_id,
+            self.secret,
+            self.store.region(),
         )
     }
 
     fn endpoint(&self) -> (&str, bool) {
-        match self.endpoint.strip_prefix("https://") {
+        let endpoint = self.store.endpoint();
+
+        match endpoint.strip_prefix("https://") {
             Some(host) => (host, true),
-            None => (
-                self.endpoint
-                    .strip_prefix("http://")
-                    .unwrap_or(&self.endpoint),
-                false,
-            ),
+            None => (endpoint.strip_prefix("http://").unwrap_or(endpoint), false),
         }
     }
 
@@ -75,7 +64,7 @@ impl ObjectStore {
     }
 
     fn scan(&self, table: &TablePath) -> String {
-        match self.format {
+        match self.store.format() {
             FileFormat::Parquet => format!("read_parquet('{}')", self.files(table)),
         }
     }
@@ -83,24 +72,11 @@ impl ObjectStore {
     fn files(&self, table: &TablePath) -> String {
         format!(
             "s3://{}/{}/{}/*.{}",
-            self.bucket,
+            self.store.bucket(),
             table.namespace(),
             table.name(),
-            self.format.extension()
+            self.store.format().extension()
         )
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FileFormat {
-    Parquet,
-}
-
-impl FileFormat {
-    pub fn extension(&self) -> &'static str {
-        match self {
-            Self::Parquet => "parquet",
-        }
     }
 }
 
@@ -108,15 +84,20 @@ impl FileFormat {
 mod tests {
     use super::*;
 
+    fn s3(endpoint: &str) -> Store {
+        serde_json::from_value(serde_json::json!({
+            "s3": {
+                "endpoint": endpoint,
+                "region": "us-east-1",
+                "bucket": "event-replay",
+                "format": "parquet"
+            }
+        }))
+        .unwrap()
+    }
+
     fn store() -> ObjectStore {
-        ObjectStore::new(
-            "http://minio:9000",
-            "us-east-1",
-            "event-replay",
-            FileFormat::Parquet,
-            "minioadmin",
-            "minioadmin",
-        )
+        ObjectStore::open(&s3("http://minio:9000"), "minioadmin", "minioadmin")
     }
 
     fn table() -> TablePath {
@@ -150,14 +131,7 @@ mod tests {
 
     #[test]
     fn object_storage_reached_over_tls_is_read_as_such() {
-        let google = ObjectStore::new(
-            "https://storage.googleapis.com",
-            "auto",
-            "event-replay",
-            FileFormat::Parquet,
-            "key",
-            "secret",
-        );
+        let google = ObjectStore::open(&s3("https://storage.googleapis.com"), "key", "secret");
 
         assert_eq!(google.endpoint(), ("storage.googleapis.com", true));
     }

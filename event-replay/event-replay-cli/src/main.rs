@@ -1,5 +1,6 @@
 mod credential;
 mod journal;
+mod pipeline;
 mod run;
 mod unreplayable;
 
@@ -18,12 +19,12 @@ use crate::run::Run;
 #[derive(Parser)]
 #[command(
     name = "event-replay",
-    about = "Report the schema changes a window of a host's change log holds"
+    about = "Report the schema changes a window of a pipeline's change log holds"
 )]
 struct Arguments {
     #[arg(
         value_name = "DIRECTORY",
-        help = "The directory holding infra.toml and table.toml of the captured host"
+        help = "The directory holding the infra.toml and table.toml of one pipeline"
     )]
     directory: PathBuf,
     #[arg(
@@ -57,7 +58,7 @@ struct Arguments {
     #[arg(
         long,
         value_name = "NAME",
-        help = "The sink to read, out of the ones the host is sunk into"
+        help = "The sink to read, out of the ones the pipeline is sunk into"
     )]
     sink: Option<String>,
 }

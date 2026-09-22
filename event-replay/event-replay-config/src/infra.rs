@@ -10,19 +10,21 @@ use event_replay_core::sink::TablePath;
 
 use crate::Artifact;
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Wiring {
+#[serde(bound(deserialize = "C: Deserialize<'de>, W: Deserialize<'de>"))]
+#[serde(bound(serialize = "C: Serialize, W: Serialize"))]
+pub(crate) struct Wiring<C, W> {
     #[serde(default)]
-    default: Defaults,
+    default: Defaults<C, W>,
     #[serde(default, rename = "source")]
-    sources: Vec<WiredSource>,
+    sources: Vec<WiredSource<C>>,
     #[serde(default, rename = "sink")]
-    sinks: Vec<WiredSink>,
+    sinks: Vec<WiredSink<W>>,
 }
 
-impl Wiring {
-    pub(crate) fn sources(&self) -> Result<Vec<Source>, Miswiring> {
+impl<C: Clone, W: Clone> Wiring<C, W> {
+    pub(crate) fn sources(&self) -> Result<Vec<Source<C>>, Miswiring> {
         if self.sources.is_empty() {
             return Err(Miswiring::WithoutSources);
         }
@@ -38,7 +40,7 @@ impl Wiring {
         Ok(sources)
     }
 
-    fn distinct(sources: &[Source]) -> Result<(), Miswiring> {
+    fn distinct(sources: &[Source<C>]) -> Result<(), Miswiring> {
         Self::named_once(sources.iter().map(Source::name)).map_err(Miswiring::SourceNamedTwice)?;
 
         match sources
@@ -53,7 +55,7 @@ impl Wiring {
         }
     }
 
-    pub(crate) fn sinks(&self) -> Result<Vec<Sink>, Miswiring> {
+    pub(crate) fn sinks(&self) -> Result<Vec<Sink<W>>, Miswiring> {
         if self.sinks.is_empty() {
             return Err(Miswiring::WithoutSinks);
         }
@@ -83,27 +85,51 @@ impl Wiring {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Defaults {
+#[serde(bound(deserialize = "C: Deserialize<'de>, W: Deserialize<'de>"))]
+#[serde(bound(serialize = "C: Serialize, W: Serialize"))]
+struct Defaults<C, W> {
     #[serde(default)]
-    source: WiredSource,
+    source: WiredSource<C>,
     #[serde(default)]
-    sink: WiredSink,
+    sink: WiredSink<W>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize, Semigroup)]
+impl<C, W> Default for Defaults<C, W> {
+    fn default() -> Self {
+        Self {
+            source: WiredSource::default(),
+            sink: WiredSink::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Semigroup)]
 #[semigroup(with = "semigroup::op::Coalesce")]
 #[serde(deny_unknown_fields)]
-struct WiredSource {
+#[serde(bound(deserialize = "C: Deserialize<'de>"))]
+#[serde(bound(serialize = "C: Serialize"))]
+struct WiredSource<C> {
     name: Option<String>,
     since: Option<DateTime<Utc>>,
-    capture: Option<Capture>,
+    capture: Option<C>,
     schema_changes: Option<String>,
 }
 
-impl WiredSource {
-    fn source(self, default: &Self) -> Result<Source, Miswiring> {
+impl<C> Default for WiredSource<C> {
+    fn default() -> Self {
+        Self {
+            name: None,
+            since: None,
+            capture: None,
+            schema_changes: None,
+        }
+    }
+}
+
+impl<C: Clone> WiredSource<C> {
+    fn source(self, default: &Self) -> Result<Source<C>, Miswiring> {
         let wired = self.semigroup(default.clone());
         let name = wired.name.ok_or(Miswiring::SourceWithoutName)?;
 
@@ -120,18 +146,31 @@ impl WiredSource {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize, Semigroup)]
+#[derive(Debug, Clone, Deserialize, Serialize, Semigroup)]
 #[semigroup(with = "semigroup::op::Coalesce")]
 #[serde(deny_unknown_fields)]
-struct WiredSink {
+#[serde(bound(deserialize = "W: Deserialize<'de>"))]
+#[serde(bound(serialize = "W: Serialize"))]
+struct WiredSink<W> {
     name: Option<String>,
     change_log: Option<String>,
-    warehouse: Option<Warehouse>,
+    warehouse: Option<W>,
     replay: Option<Replay>,
 }
 
-impl WiredSink {
-    fn sink(self, at: usize, default: &Self) -> Result<Sink, Miswiring> {
+impl<W> Default for WiredSink<W> {
+    fn default() -> Self {
+        Self {
+            name: None,
+            change_log: None,
+            warehouse: None,
+            replay: None,
+        }
+    }
+}
+
+impl<W: Clone> WiredSink<W> {
+    fn sink(self, at: usize, default: &Self) -> Result<Sink<W>, Miswiring> {
         let wired = self.semigroup(default.clone());
         let name = wired.name.ok_or(Miswiring::SinkWithoutName(at))?;
 
@@ -193,41 +232,20 @@ impl Display for Miswiring {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "lowercase")]
-pub enum Capture {
-    Debezium { dialect: Dialect },
-}
-
-impl Capture {
-    pub fn dialect(&self) -> Dialect {
-        match self {
-            Self::Debezium { dialect } => *dialect,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Dialect {
-    MySql,
-    Postgres,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Source {
+pub struct Source<C> {
     name: String,
     since: DateTime<Utc>,
-    capture: Capture,
+    capture: C,
     schema_changes: Option<String>,
 }
 
-impl Source {
+impl<C> Source<C> {
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    pub fn capture(&self) -> &Capture {
+    pub fn capture(&self) -> &C {
         &self.capture
     }
 
@@ -241,14 +259,14 @@ impl Source {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Sink {
+pub struct Sink<W> {
     name: String,
     change_log: String,
-    warehouse: Warehouse,
+    warehouse: W,
     replay: Replay,
 }
 
-impl Sink {
+impl<W> Sink<W> {
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -257,13 +275,13 @@ impl Sink {
         &self.change_log
     }
 
-    pub fn schema_changes(&self, source: &Source) -> Option<TablePath> {
+    pub fn schema_changes<C>(&self, source: &Source<C>) -> Option<TablePath> {
         source
             .schema_changes()
             .map(|table| TablePath::new(&self.change_log, table))
     }
 
-    pub fn warehouse(&self) -> &Warehouse {
+    pub fn warehouse(&self) -> &W {
         &self.warehouse
     }
 
@@ -293,112 +311,22 @@ impl Replay {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "lowercase")]
-pub enum Warehouse {
-    DuckDb(Store),
-    BigQuery(BigQuery),
-}
-
-impl Warehouse {
-    pub fn as_duckdb(&self) -> Option<&Store> {
-        match self {
-            Self::DuckDb(duckdb) => Some(duckdb),
-            Self::BigQuery(_) => None,
-        }
-    }
-
-    pub fn as_bigquery(&self) -> Option<&BigQuery> {
-        match self {
-            Self::BigQuery(bigquery) => Some(bigquery),
-            Self::DuckDb(_) => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "lowercase")]
-pub enum Store {
-    S3(S3),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct S3 {
-    endpoint: String,
-    region: String,
-    bucket: String,
-    format: Format,
-}
-
-impl S3 {
-    pub fn endpoint(&self) -> &str {
-        &self.endpoint
-    }
-
-    pub fn region(&self) -> &str {
-        &self.region
-    }
-
-    pub fn bucket(&self) -> &str {
-        &self.bucket
-    }
-
-    pub fn format(&self) -> Format {
-        self.format
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Format {
-    Parquet,
-}
-
-impl Format {
-    pub fn extension(&self) -> &'static str {
-        match self {
-            Self::Parquet => "parquet",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct BigQuery {
-    project: String,
-    endpoint: Option<String>,
-    #[serde(default)]
-    credentials: Credentials,
-}
-
-impl BigQuery {
-    pub fn project(&self) -> &str {
-        &self.project
-    }
-
-    pub fn endpoint(&self) -> &str {
-        self.endpoint.as_deref().unwrap_or(Self::GOOGLE)
-    }
-
-    pub fn credentials(&self) -> Credentials {
-        self.credentials
-    }
-
-    const GOOGLE: &'static str = "https://bigquery.googleapis.com";
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Credentials {
-    #[default]
-    Adc,
-    Anonymous,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+    #[serde(deny_unknown_fields, rename_all = "lowercase")]
+    enum Captured {
+        Debezium { dialect: String },
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+    #[serde(deny_unknown_fields, rename_all = "lowercase")]
+    enum Sunk {
+        Files { bucket: String },
+        Warehouse { project: String },
+    }
 
     const INFRA: &str = r#"
         [default]
@@ -417,22 +345,16 @@ mod tests {
         name = "replica"
         since = "2026-09-21T00:00:00Z"
 
-        [source.capture.debezium]
-        dialect = "postgres"
+        capture.debezium.dialect = "postgres"
 
         [[sink]]
         name = "minio"
-        warehouse.duckdb.s3.endpoint = "http://minio:9000"
-        warehouse.duckdb.s3.region = "us-east-1"
-        warehouse.duckdb.s3.bucket = "event-replay"
-        warehouse.duckdb.s3.format = "parquet"
+        warehouse.files.bucket = "event-replay"
 
         [[sink]]
         name = "warehouse"
         change_log = "mysql_shop_archive"
-        warehouse.bigquery.project = "local-project"
-        warehouse.bigquery.endpoint = "http://bigquery-emulator:9050"
-        warehouse.bigquery.credentials = "anonymous"
+        warehouse.warehouse.project = "local-project"
     "#;
 
     const SERVER: &str = r#"
@@ -440,15 +362,11 @@ mod tests {
         name = "primary"
         since = "1970-01-01T00:00:00Z"
 
-        [source.capture.debezium]
-        dialect = "mysql"
+        capture.debezium.dialect = "mysql"
     "#;
 
     const WAREHOUSE: &str = r#"
-        warehouse.duckdb.s3.endpoint = "http://minio:9000"
-        warehouse.duckdb.s3.region = "us-east-1"
-        warehouse.duckdb.s3.bucket = "event-replay"
-        warehouse.duckdb.s3.format = "parquet"
+        warehouse.files.bucket = "event-replay"
     "#;
 
     const NAMED: &str = r#"
@@ -461,34 +379,44 @@ mod tests {
         replay.shard = "%Y%m%d"
     "#;
 
-    fn wiring(written: &str) -> Wiring {
+    fn wiring(written: &str) -> Wiring<Captured, Sunk> {
         toml::from_str(written).unwrap()
     }
 
-    fn wired(server: &str, sink: &str) -> Wiring {
+    fn wired(server: &str, sink: &str) -> Wiring<Captured, Sunk> {
         wiring(&format!("{server}\n[[sink]]\n{NAMED}{sink}"))
     }
 
-    fn sources() -> Vec<Source> {
+    fn sources() -> Vec<Source<Captured>> {
         wiring(INFRA).sources().unwrap()
     }
 
-    fn sinks() -> Vec<Sink> {
+    fn sinks() -> Vec<Sink<Sunk>> {
         wiring(INFRA).sinks().unwrap()
     }
 
     #[test]
     fn a_source_is_captured_as_the_dialect_it_names() {
-        assert_eq!(sources()[1].capture().dialect(), Dialect::Postgres);
+        assert_eq!(
+            sources()[1].capture(),
+            &Captured::Debezium {
+                dialect: "postgres".to_owned()
+            }
+        );
     }
 
     #[test]
     fn a_source_that_names_no_capture_is_captured_like_the_others() {
-        assert_eq!(sources()[0].capture().dialect(), Dialect::MySql);
+        assert_eq!(
+            sources()[0].capture(),
+            &Captured::Debezium {
+                dialect: "mysql".to_owned()
+            }
+        );
     }
 
     #[test]
-    fn the_servers_of_a_host_are_read_in_the_order_they_took_over() {
+    fn the_servers_of_a_pipeline_are_read_in_the_order_they_took_over() {
         let written = INFRA.replace("1970-01-01T00:00:00Z", "2030-01-01T00:00:00Z");
 
         let sources = wiring(&written).sources().unwrap();
@@ -504,7 +432,7 @@ mod tests {
     fn a_server_that_took_over_at_an_unreadable_time_is_rejected() {
         let unknown = INFRA.replace("\"2026-09-21T00:00:00Z\"", "\"yesterday afternoon\"");
 
-        assert!(toml::from_str::<Wiring>(&unknown).is_err());
+        assert!(toml::from_str::<Wiring<Captured, Sunk>>(&unknown).is_err());
     }
 
     #[test]
@@ -528,25 +456,25 @@ mod tests {
     }
 
     #[test]
-    fn a_host_captured_from_no_server_is_rejected() {
+    fn a_pipeline_that_captures_no_server_is_rejected() {
         let wiring = wiring(
-            "[[sink]]\nchange_log = \"mysql_shop_cdc\"\nwarehouse.duckdb.s3.endpoint = \"http://minio:9000\"\nwarehouse.duckdb.s3.region = \"us-east-1\"\nwarehouse.duckdb.s3.bucket = \"event-replay\"\nwarehouse.duckdb.s3.format = \"parquet\"\nreplay.snapshot = \"mysql_shop\"\nreplay.history = \"mysql_shop_history\"\nreplay.shard = \"%Y%m%d\"",
+            "[[sink]]\nname = \"minio\"\nchange_log = \"mysql_shop_cdc\"\nwarehouse.files.bucket = \"event-replay\"\nreplay.snapshot = \"mysql_shop\"\nreplay.history = \"mysql_shop_history\"\nreplay.shard = \"%Y%m%d\"",
         );
 
         assert_eq!(wiring.sources().unwrap_err(), Miswiring::WithoutSources);
     }
 
     #[test]
-    fn a_host_sunk_nowhere_is_rejected() {
+    fn a_pipeline_sunk_nowhere_is_rejected() {
         let wiring = wiring(
-            "[[source]]\nname = \"primary\"\nsince = \"1970-01-01T00:00:00Z\"\n\n[source.capture.debezium]\ndialect = \"mysql\"",
+            "[[source]]\nname = \"primary\"\nsince = \"1970-01-01T00:00:00Z\"\ncapture.debezium.dialect = \"mysql\"",
         );
 
         assert_eq!(wiring.sinks().unwrap_err(), Miswiring::WithoutSinks);
     }
 
     #[test]
-    fn a_sink_holds_the_change_log_the_host_names() {
+    fn a_sink_holds_the_change_log_the_pipeline_names() {
         assert_eq!(sinks()[0].name(), "minio");
         assert_eq!(sinks()[0].change_log(), "mysql_shop_cdc");
     }
@@ -570,7 +498,7 @@ mod tests {
     }
 
     #[test]
-    fn a_sink_builds_each_artifact_in_the_namespace_the_host_names() {
+    fn a_sink_builds_each_artifact_in_the_namespace_the_pipeline_names() {
         let replay = sinks()[1].replay().clone();
 
         assert_eq!(replay.namespace(Artifact::Snapshot), "mysql_shop");
@@ -581,7 +509,7 @@ mod tests {
     #[test]
     fn a_source_that_says_since_when_nowhere_is_rejected() {
         let wiring = wired(
-            "[[source]]\nname = \"primary\"\n\n[source.capture.debezium]\ndialect = \"mysql\"",
+            "[[source]]\nname = \"primary\"\ncapture.debezium.dialect = \"mysql\"",
             &format!("change_log = \"mysql_shop_cdc\"\n{WAREHOUSE}{REPLAY}"),
         );
 
@@ -671,61 +599,29 @@ mod tests {
     }
 
     #[test]
-    fn a_warehouse_reading_object_storage_says_where_the_change_log_is_written() {
-        let Store::S3(s3) = sinks()[0].warehouse().as_duckdb().unwrap().clone();
-
-        assert!(sinks()[0].warehouse().as_bigquery().is_none());
-        assert_eq!(s3.endpoint(), "http://minio:9000");
-        assert_eq!(s3.region(), "us-east-1");
-        assert_eq!(s3.bucket(), "event-replay");
-        assert_eq!(s3.format(), Format::Parquet);
-        assert_eq!(s3.format().extension(), "parquet");
+    fn a_sink_carries_the_warehouse_configuration_as_it_stands() {
+        assert_eq!(
+            sinks()[0].warehouse(),
+            &Sunk::Files {
+                bucket: "event-replay".to_owned()
+            }
+        );
     }
 
     #[test]
-    fn a_change_log_written_in_an_unknown_format_is_rejected() {
-        let unknown = INFRA.replace("format = \"parquet\"", "format = \"protobuf\"");
-
-        assert!(toml::from_str::<Wiring>(&unknown).is_err());
+    fn a_pipeline_sunk_into_two_warehouses_keeps_each_configuration() {
+        assert_eq!(
+            sinks()[1].warehouse(),
+            &Sunk::Warehouse {
+                project: "local-project".to_owned()
+            }
+        );
     }
 
     #[test]
-    fn a_change_log_written_into_an_unknown_store_is_rejected() {
-        let unknown = INFRA.replace("warehouse.duckdb.s3", "warehouse.duckdb.gcs");
+    fn a_sink_into_a_warehouse_the_application_does_not_know_is_rejected() {
+        let unknown = INFRA.replace("warehouse.files", "warehouse.redshift");
 
-        assert!(toml::from_str::<Wiring>(&unknown).is_err());
-    }
-
-    #[test]
-    fn a_bigquery_warehouse_says_which_project_holds_it() {
-        let bigquery = sinks()[1].warehouse().as_bigquery().unwrap().clone();
-
-        assert!(sinks()[1].warehouse().as_duckdb().is_none());
-        assert_eq!(bigquery.project(), "local-project");
-        assert_eq!(bigquery.endpoint(), "http://bigquery-emulator:9050");
-        assert_eq!(bigquery.credentials(), Credentials::Anonymous);
-    }
-
-    #[test]
-    fn a_bigquery_warehouse_is_google_and_authenticated_unless_it_says_otherwise() {
-        let warehouse: Warehouse = toml::from_str("[bigquery]\nproject = \"shop\"").unwrap();
-        let bigquery = warehouse.as_bigquery().unwrap();
-
-        assert_eq!(bigquery.endpoint(), "https://bigquery.googleapis.com");
-        assert_eq!(bigquery.credentials(), Credentials::Adc);
-    }
-
-    #[test]
-    fn a_capture_by_an_unknown_dialect_is_rejected() {
-        let unknown = INFRA.replace("dialect = \"mysql\"", "dialect = \"oracle\"");
-
-        assert!(toml::from_str::<Wiring>(&unknown).is_err());
-    }
-
-    #[test]
-    fn a_sink_into_an_unknown_warehouse_is_rejected() {
-        let unknown = INFRA.replace("warehouse.duckdb", "warehouse.redshift");
-
-        assert!(toml::from_str::<Wiring>(&unknown).is_err());
+        assert!(toml::from_str::<Wiring<Captured, Sunk>>(&unknown).is_err());
     }
 }

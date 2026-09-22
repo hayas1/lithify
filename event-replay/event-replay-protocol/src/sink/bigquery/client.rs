@@ -13,6 +13,7 @@ use event_replay_core::source::{SchemaChangeStream, SchemaChanges, Streamed};
 use event_replay_core::window::Window;
 
 use crate::sink::bigquery::BigQueryWarehouse;
+use crate::sink::bigquery::config::{Config, Credentials};
 use crate::source::debezium::{Debezium, DebeziumDdl, Dialect};
 
 pub struct BigQueryClient {
@@ -22,21 +23,21 @@ pub struct BigQueryClient {
 }
 
 impl BigQueryClient {
-    pub fn new(project: &str, endpoint: &str, anonymously: bool) -> Result<Self, Unqueryable> {
+    pub fn open(config: &Config) -> Result<Self, Unqueryable> {
         let runtime = Runtime::new().map_err(Unqueryable::Unrunnable)?;
         let builder = BigQuery::builder()
-            .with_project_id(project)
-            .with_endpoint(endpoint);
-        let builder = match anonymously {
-            true => builder.with_credentials(anonymous::Builder::new().build()),
-            false => builder,
+            .with_project_id(config.project())
+            .with_endpoint(config.endpoint());
+        let builder = match config.credentials() {
+            Credentials::Anonymous => builder.with_credentials(anonymous::Builder::new().build()),
+            Credentials::Adc => builder,
         };
         let client = runtime
             .block_on(builder.build())
             .map_err(Unqueryable::Unbuildable)?;
 
         Ok(Self {
-            warehouse: BigQueryWarehouse::new(project),
+            warehouse: BigQueryWarehouse::new(config.project()),
             client,
             runtime,
         })

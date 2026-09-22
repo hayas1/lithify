@@ -1,20 +1,20 @@
 use std::path::PathBuf;
 
-use event_replay_config::Host;
-use event_replay_config::infra::{
-    BigQuery, Credentials, Dialect, Format, S3, Sink, Source, Store, Warehouse,
-};
+use event_replay_config::Pipeline;
+use event_replay_config::infra::{Sink, Source};
 use event_replay_core::listener::CatalogModel;
 use event_replay_core::sink::TablePath;
 use event_replay_core::source::SchemaChangeStream;
 use event_replay_core::window::Window;
 use event_replay_protocol::sink::bigquery::client::BigQueryClient;
-use event_replay_protocol::sink::duckdb::store::{FileFormat, ObjectStore};
+use event_replay_protocol::sink::duckdb::store::ObjectStore;
 use event_replay_protocol::source::debezium::Debezium;
+use event_replay_protocol::source::debezium::config::Dialect;
 use event_replay_protocol::{MySql, Postgres};
 
 use crate::credential::Credential;
 use crate::journal::Journal;
+use crate::pipeline::{Capture, Warehouse};
 use crate::unreplayable::Unreplayable;
 
 pub struct Run {
@@ -40,8 +40,8 @@ impl Run {
     }
 
     pub fn report(&self) -> Result<Journal, Unreplayable> {
-        let host = Host::open(&self.directory)?;
-        let mut sources = host.sources();
+        let pipeline: Pipeline<Capture, Warehouse> = Pipeline::open(&self.directory)?;
+        let mut sources = pipeline.sources();
         let source = sources.next().ok_or(Unreplayable::WithoutSource)?;
 
         if sources.next().is_some() {
@@ -50,7 +50,7 @@ impl Run {
 
         let mut journal = Journal::default();
 
-        for sink in self.sinks(&host)? {
+        for sink in self.sinks(&pipeline)? {
             journal.sink(sink.name());
 
             if let Err(unreplayable) = self.read(sink, source, &mut journal) {
@@ -63,8 +63,8 @@ impl Run {
 
     fn read(
         &self,
-        sink: &Sink,
-        source: &Source,
+        sink: &Sink<Warehouse>,
+        source: &Source<Capture>,
         journal: &mut Journal,
     ) -> Result<(), Unreplayable> {
         let Some(table) = sink.schema_changes(source) else {
@@ -74,25 +74,36 @@ impl Run {
         };
 
         match sink.warehouse() {
-            Warehouse::DuckDb(Store::S3(store)) => {
-                self.read_duckdb(&self.store(store), &table, source, journal)
+            Warehouse::DuckDb(store) => {
+                let store =
+                    ObjectStore::open(store, self.credential.key_id(), self.credential.secret());
+
+                self.read_duckdb(&store, &table, source, journal)
             }
-            Warehouse::BigQuery(warehouse) => {
-                self.read_bigquery(&self.client(warehouse)?, &table, source, journal)
+            Warehouse::BigQuery(config) => {
+                self.read_bigquery(&BigQueryClient::open(config)?, &table, source, journal)
             }
         }
     }
 
+    // TODO: the dialect is matched inside each of the two readers below, because
+    // the conversion a client requires is settled per warehouse and dialect pair,
+    // and a method generic over the dialect would ask every caller for both
+    // warehouses' conversions. Double dispatch removes the repetition: a visitor
+    // with one method per dialect, matched where the dialects live, in
+    // event-replay-protocol.
     fn read_duckdb(
         &self,
         store: &ObjectStore,
         table: &TablePath,
-        source: &Source,
+        source: &Source<Capture>,
         journal: &mut Journal,
     ) -> Result<(), Unreplayable> {
         let client = store.client(table)?;
 
-        match source.capture().dialect() {
+        let Capture::Debezium(debezium) = source.capture();
+
+        match debezium.dialect() {
             Dialect::MySql => client.catalog(
                 &Debezium::new(MySql),
                 table,
@@ -114,10 +125,12 @@ impl Run {
         &self,
         client: &BigQueryClient,
         table: &TablePath,
-        source: &Source,
+        source: &Source<Capture>,
         journal: &mut Journal,
     ) -> Result<(), Unreplayable> {
-        match source.capture().dialect() {
+        let Capture::Debezium(debezium) = source.capture();
+
+        match debezium.dialect() {
             Dialect::MySql => client.catalog(
                 &Debezium::new(MySql),
                 table,
@@ -135,29 +148,11 @@ impl Run {
         }
     }
 
-    fn store(&self, store: &S3) -> ObjectStore {
-        ObjectStore::new(
-            store.endpoint(),
-            store.region(),
-            store.bucket(),
-            match store.format() {
-                Format::Parquet => FileFormat::Parquet,
-            },
-            self.credential.key_id(),
-            self.credential.secret(),
-        )
-    }
-
-    fn client(&self, warehouse: &BigQuery) -> Result<BigQueryClient, Unreplayable> {
-        Ok(BigQueryClient::new(
-            warehouse.project(),
-            warehouse.endpoint(),
-            warehouse.credentials() == Credentials::Anonymous,
-        )?)
-    }
-
-    fn sinks<'a>(&self, host: &'a Host) -> Result<Vec<&'a Sink>, Unreplayable> {
-        let sinks: Vec<_> = host
+    fn sinks<'a>(
+        &self,
+        pipeline: &'a Pipeline<Capture, Warehouse>,
+    ) -> Result<Vec<&'a Sink<Warehouse>>, Unreplayable> {
+        let sinks: Vec<_> = pipeline
             .sinks()
             .filter(|sink| match &self.sink {
                 Some(named) => named == sink.name(),

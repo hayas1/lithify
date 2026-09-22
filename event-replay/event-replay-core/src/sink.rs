@@ -63,6 +63,8 @@ impl fmt::Display for TablePath {
 }
 
 pub trait Warehouse {
+    type Config;
+
     fn identifier(&self, name: &str) -> String;
 
     fn table_ref(&self, table: &TablePath) -> String;
