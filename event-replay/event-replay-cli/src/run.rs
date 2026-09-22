@@ -1,12 +1,15 @@
 use std::path::PathBuf;
 
 use event_replay_config::Host;
-use event_replay_config::infra::{Credentials, Dialect, Format, Sink, Source, Store, Warehouse};
+use event_replay_config::infra::{
+    BigQuery, Credentials, Dialect, Format, S3, Sink, Source, Store, Warehouse,
+};
 use event_replay_core::listener::CatalogModel;
+use event_replay_core::sink::TablePath;
+use event_replay_core::source::SchemaChangeStream;
 use event_replay_core::window::Window;
 use event_replay_protocol::sink::bigquery::client::BigQueryClient;
 use event_replay_protocol::sink::duckdb::store::{FileFormat, ObjectStore};
-use event_replay_protocol::sink::reader::ChangeLogReader;
 use event_replay_protocol::source::debezium::Debezium;
 use event_replay_protocol::{MySql, Postgres};
 
@@ -70,46 +73,87 @@ impl Run {
             return Ok(());
         };
 
-        let reader = self.reader(sink)?;
-
-        match source.capture().dialect() {
-            Dialect::MySql => reader.read(
-                &Debezium::new(MySql),
-                &table,
-                &self.window,
-                &mut CatalogModel::default(),
-                journal,
-            ),
-            Dialect::Postgres => reader.read(
-                &Debezium::new(Postgres),
-                &table,
-                &self.window,
-                &mut CatalogModel::default(),
-                journal,
-            ),
-        }?;
-
-        Ok(())
+        match sink.warehouse() {
+            Warehouse::DuckDb(Store::S3(store)) => {
+                self.read_duckdb(&self.store(store), &table, source, journal)
+            }
+            Warehouse::BigQuery(warehouse) => {
+                self.read_bigquery(&self.client(warehouse)?, &table, source, journal)
+            }
+        }
     }
 
-    fn reader(&self, sink: &Sink) -> Result<ChangeLogReader, Unreplayable> {
-        match sink.warehouse() {
-            Warehouse::DuckDb(Store::S3(store)) => Ok(ChangeLogReader::DuckDb(ObjectStore::new(
-                store.endpoint(),
-                store.region(),
-                store.bucket(),
-                match store.format() {
-                    Format::Parquet => FileFormat::Parquet,
-                },
-                self.credential.key_id(),
-                self.credential.secret(),
-            ))),
-            Warehouse::BigQuery(warehouse) => Ok(ChangeLogReader::BigQuery(BigQueryClient::new(
-                warehouse.project(),
-                warehouse.endpoint(),
-                warehouse.credentials() == Credentials::Anonymous,
-            )?)),
+    fn read_duckdb(
+        &self,
+        store: &ObjectStore,
+        table: &TablePath,
+        source: &Source,
+        journal: &mut Journal,
+    ) -> Result<(), Unreplayable> {
+        let client = store.client(table)?;
+
+        match source.capture().dialect() {
+            Dialect::MySql => client.catalog(
+                &Debezium::new(MySql),
+                table,
+                &self.window,
+                &mut CatalogModel::default(),
+                journal,
+            ),
+            Dialect::Postgres => client.catalog(
+                &Debezium::new(Postgres),
+                table,
+                &self.window,
+                &mut CatalogModel::default(),
+                journal,
+            ),
         }
+    }
+
+    fn read_bigquery(
+        &self,
+        client: &BigQueryClient,
+        table: &TablePath,
+        source: &Source,
+        journal: &mut Journal,
+    ) -> Result<(), Unreplayable> {
+        match source.capture().dialect() {
+            Dialect::MySql => client.catalog(
+                &Debezium::new(MySql),
+                table,
+                &self.window,
+                &mut CatalogModel::default(),
+                journal,
+            ),
+            Dialect::Postgres => client.catalog(
+                &Debezium::new(Postgres),
+                table,
+                &self.window,
+                &mut CatalogModel::default(),
+                journal,
+            ),
+        }
+    }
+
+    fn store(&self, store: &S3) -> ObjectStore {
+        ObjectStore::new(
+            store.endpoint(),
+            store.region(),
+            store.bucket(),
+            match store.format() {
+                Format::Parquet => FileFormat::Parquet,
+            },
+            self.credential.key_id(),
+            self.credential.secret(),
+        )
+    }
+
+    fn client(&self, warehouse: &BigQuery) -> Result<BigQueryClient, Unreplayable> {
+        Ok(BigQueryClient::new(
+            warehouse.project(),
+            warehouse.endpoint(),
+            warehouse.credentials() == Credentials::Anonymous,
+        )?)
     }
 
     fn sinks<'a>(&self, host: &'a Host) -> Result<Vec<&'a Sink>, Unreplayable> {

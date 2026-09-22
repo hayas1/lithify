@@ -1,7 +1,7 @@
 use std::fmt;
 
 use crate::model::ColumnType;
-use crate::source::{ChangeLog, ColumnPath};
+use crate::source::{ColumnPath, SchemaChangeLog};
 use crate::window::Window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,7 +92,7 @@ pub trait Warehouse {
 
     fn select_schema_changes(
         &self,
-        log: &impl ChangeLog,
+        log: &impl SchemaChangeLog,
         table: &TablePath,
         window: &Window,
     ) -> String {

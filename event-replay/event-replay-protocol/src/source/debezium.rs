@@ -8,7 +8,7 @@ use serde_json::Value;
 use event_replay_core::event::{MalformedEvent, SchemaChange, TableChange};
 use event_replay_core::model::{ColumnModel, ColumnType, TableId, TableModel};
 use event_replay_core::position::{Position, RecordedAt};
-use event_replay_core::source::{ChangeLog, ColumnPath};
+use event_replay_core::source::{ColumnPath, RowChangeLog, SchemaChangeLog};
 
 pub trait Dialect {
     type Source;
@@ -158,8 +158,28 @@ where
     }
 }
 
-impl<D: Dialect> ChangeLog for Debezium<D> {
+impl<D: Dialect> SchemaChangeLog for Debezium<D> {
     type Position = D::Position;
+
+    fn recorded_at(&self) -> ColumnPath {
+        ColumnPath::from("ts_ms")
+    }
+
+    fn ordering(&self) -> Vec<ColumnPath> {
+        self.dialect.ordering()
+    }
+}
+
+impl<D: Dialect> RowChangeLog for Debezium<D> {
+    type Position = D::Position;
+
+    fn recorded_at(&self) -> ColumnPath {
+        ColumnPath::from("ts_ms")
+    }
+
+    fn ordering(&self) -> Vec<ColumnPath> {
+        self.dialect.ordering()
+    }
 
     fn key(&self) -> ColumnPath {
         ColumnPath::from("_kafka_key")
@@ -175,14 +195,6 @@ impl<D: Dialect> ChangeLog for Debezium<D> {
 
     fn after(&self) -> ColumnPath {
         ColumnPath::from("after")
-    }
-
-    fn recorded_at(&self) -> ColumnPath {
-        ColumnPath::from("ts_ms")
-    }
-
-    fn ordering(&self) -> Vec<ColumnPath> {
-        self.dialect.ordering()
     }
 }
 

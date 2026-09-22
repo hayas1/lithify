@@ -301,14 +301,14 @@ pub enum Warehouse {
 }
 
 impl Warehouse {
-    pub fn as_duck_db(&self) -> Option<&Store> {
+    pub fn as_duckdb(&self) -> Option<&Store> {
         match self {
             Self::DuckDb(duckdb) => Some(duckdb),
             Self::BigQuery(_) => None,
         }
     }
 
-    pub fn as_big_query(&self) -> Option<&BigQuery> {
+    pub fn as_bigquery(&self) -> Option<&BigQuery> {
         match self {
             Self::BigQuery(bigquery) => Some(bigquery),
             Self::DuckDb(_) => None,
@@ -672,9 +672,9 @@ mod tests {
 
     #[test]
     fn a_warehouse_reading_object_storage_says_where_the_change_log_is_written() {
-        let Store::S3(s3) = sinks()[0].warehouse().as_duck_db().unwrap().clone();
+        let Store::S3(s3) = sinks()[0].warehouse().as_duckdb().unwrap().clone();
 
-        assert!(sinks()[0].warehouse().as_big_query().is_none());
+        assert!(sinks()[0].warehouse().as_bigquery().is_none());
         assert_eq!(s3.endpoint(), "http://minio:9000");
         assert_eq!(s3.region(), "us-east-1");
         assert_eq!(s3.bucket(), "event-replay");
@@ -698,9 +698,9 @@ mod tests {
 
     #[test]
     fn a_bigquery_warehouse_says_which_project_holds_it() {
-        let bigquery = sinks()[1].warehouse().as_big_query().unwrap().clone();
+        let bigquery = sinks()[1].warehouse().as_bigquery().unwrap().clone();
 
-        assert!(sinks()[1].warehouse().as_duck_db().is_none());
+        assert!(sinks()[1].warehouse().as_duckdb().is_none());
         assert_eq!(bigquery.project(), "local-project");
         assert_eq!(bigquery.endpoint(), "http://bigquery-emulator:9050");
         assert_eq!(bigquery.credentials(), Credentials::Anonymous);
@@ -709,7 +709,7 @@ mod tests {
     #[test]
     fn a_bigquery_warehouse_is_google_and_authenticated_unless_it_says_otherwise() {
         let warehouse: Warehouse = toml::from_str("[bigquery]\nproject = \"shop\"").unwrap();
-        let bigquery = warehouse.as_big_query().unwrap();
+        let bigquery = warehouse.as_bigquery().unwrap();
 
         assert_eq!(bigquery.endpoint(), "https://bigquery.googleapis.com");
         assert_eq!(bigquery.credentials(), Credentials::Adc);

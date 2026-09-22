@@ -1,6 +1,7 @@
 use std::fmt;
 
 use crate::event::SchemaChange;
+use crate::listener::{CatalogModel, OutOfOrder, SchemaChangeListener};
 use crate::position::Position;
 use crate::sink::TablePath;
 use crate::window::Window;
@@ -26,8 +27,20 @@ impl fmt::Display for ColumnPath {
     }
 }
 
-pub trait ChangeLog {
+pub trait SchemaChangeLog {
     type Position: Position;
+
+    fn recorded_at(&self) -> ColumnPath;
+
+    fn ordering(&self) -> Vec<ColumnPath>;
+}
+
+pub trait RowChangeLog {
+    type Position: Position;
+
+    fn recorded_at(&self) -> ColumnPath;
+
+    fn ordering(&self) -> Vec<ColumnPath>;
 
     fn key(&self) -> ColumnPath;
 
@@ -36,13 +49,9 @@ pub trait ChangeLog {
     fn before(&self) -> ColumnPath;
 
     fn after(&self) -> ColumnPath;
-
-    fn recorded_at(&self) -> ColumnPath;
-
-    fn ordering(&self) -> Vec<ColumnPath>;
 }
 
-pub trait SchemaChangeStream<L: ChangeLog> {
+pub trait SchemaChangeStream<L: SchemaChangeLog> {
     type Error: std::error::Error;
     type Changes<'a>: SchemaChanges<L, Error = Self::Error>
     where
@@ -55,11 +64,31 @@ pub trait SchemaChangeStream<L: ChangeLog> {
         table: &TablePath,
         window: &Window,
     ) -> Result<Self::Changes<'a>, Self::Error>;
+
+    fn catalog<E>(
+        &self,
+        log: &L,
+        table: &TablePath,
+        window: &Window,
+        catalog: &mut CatalogModel<L::Position>,
+        listener: &mut impl SchemaChangeListener<L::Position>,
+    ) -> Result<(), E>
+    where
+        E: From<Self::Error> + From<OutOfOrder>,
+    {
+        let mut changes = self.schema_changes(log, table, window)?;
+
+        for change in changes.stream()? {
+            catalog.accept(&change?, listener)?;
+        }
+
+        Ok(())
+    }
 }
 
 pub type Streamed<P, E> = Result<SchemaChange<P>, E>;
 
-pub trait SchemaChanges<L: ChangeLog> {
+pub trait SchemaChanges<L: SchemaChangeLog> {
     type Error: std::error::Error;
 
     fn stream(

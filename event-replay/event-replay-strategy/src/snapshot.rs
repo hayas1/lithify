@@ -1,7 +1,7 @@
 use event_replay_core::artifact::{Artifact, UnbuildableArtifact};
 use event_replay_core::model::{ColumnModel, TableModel};
 use event_replay_core::sink::{TablePath, Warehouse};
-use event_replay_core::source::ChangeLog;
+use event_replay_core::source::RowChangeLog;
 use event_replay_core::window::Window;
 
 pub struct Snapshot<'a, L> {
@@ -12,7 +12,7 @@ pub struct Snapshot<'a, L> {
     window: Window,
 }
 
-impl<'a, L: ChangeLog> Snapshot<'a, L> {
+impl<'a, L: RowChangeLog> Snapshot<'a, L> {
     pub fn new(
         log: &'a L,
         table: TableModel,
@@ -117,7 +117,7 @@ impl<'a, L: ChangeLog> Snapshot<'a, L> {
     }
 }
 
-impl<L: ChangeLog> Artifact for Snapshot<'_, L> {
+impl<L: RowChangeLog> Artifact for Snapshot<'_, L> {
     fn statements(&self, warehouse: &impl Warehouse) -> Result<Vec<String>, UnbuildableArtifact> {
         Ok(vec![self.create_table(warehouse)?])
     }
@@ -130,7 +130,7 @@ mod tests {
     use event_replay_core::model::{ColumnModel, ColumnType, TableId, TableModel};
     use event_replay_core::position::{Position, RecordedAt};
     use event_replay_core::sink::{TablePath, UnsupportedColumn, Warehouse};
-    use event_replay_core::source::{ChangeLog, ColumnPath};
+    use event_replay_core::source::{ColumnPath, RowChangeLog};
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     struct Offset(u64);
@@ -139,8 +139,16 @@ mod tests {
 
     struct Log;
 
-    impl ChangeLog for Log {
+    impl RowChangeLog for Log {
         type Position = Offset;
+
+        fn recorded_at(&self) -> ColumnPath {
+            ColumnPath::from("ts_ms")
+        }
+
+        fn ordering(&self) -> Vec<ColumnPath> {
+            vec![ColumnPath::from("source.offset")]
+        }
 
         fn key(&self) -> ColumnPath {
             ColumnPath::from("_kafka_key")
@@ -156,14 +164,6 @@ mod tests {
 
         fn after(&self) -> ColumnPath {
             ColumnPath::from("after")
-        }
-
-        fn recorded_at(&self) -> ColumnPath {
-            ColumnPath::from("ts_ms")
-        }
-
-        fn ordering(&self) -> Vec<ColumnPath> {
-            vec![ColumnPath::from("source.offset")]
         }
     }
 
