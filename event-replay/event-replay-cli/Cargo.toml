@@ -3,6 +3,10 @@ name = "event-replay-cli"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "event_replay_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "event-replay"
 path = "src/main.rs"

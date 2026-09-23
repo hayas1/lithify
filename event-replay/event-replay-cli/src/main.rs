@@ -1,9 +1,3 @@
-mod credential;
-mod journal;
-mod pipeline;
-mod run;
-mod unreplayable;
-
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -13,8 +7,8 @@ use clap::Parser;
 use event_replay_core::position::RecordedAt;
 use event_replay_core::window::Window;
 
-use crate::credential::{Credential, Secret};
-use crate::run::Run;
+use event_replay_cli::credential::{Credential, Secret};
+use event_replay_cli::run::Run;
 
 #[derive(Parser)]
 #[command(
