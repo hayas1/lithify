@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "event-replay-cli",
+    "event-replay-e2e",
     "event-replay-config",
     "event-replay-core",
     "event-replay-protocol",

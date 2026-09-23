@@ -1,0 +1,21 @@
+[package]
+name = "event-replay-e2e"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "event-replay-e2e"
+path = "src/main.rs"
+
+[dependencies]
+chrono = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+duckdb = { workspace = true }
+event-replay-cli = { path = "../event-replay-cli" }
+event-replay-config = { workspace = true }
+event-replay-core = { workspace = true }
+event-replay-protocol = { workspace = true, features = ["bigquery", "duckdb"] }
+event-replay-strategy = { workspace = true }
+mysql = "28.0.2"
+serde = { workspace = true }
+toml = "0.9"
