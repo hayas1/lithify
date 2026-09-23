@@ -1,7 +1,12 @@
 [package]
 name = "event-replay-cli"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+description.workspace = true
+authors.workspace = true
+edition.workspace = true
+repository.workspace = true
+license-file.workspace = true
+readme.workspace = true
 
 [lib]
 name = "event_replay_cli"
@@ -13,7 +18,7 @@ path = "src/main.rs"
 
 [dependencies]
 chrono = { workspace = true }
-clap = { version = "4", features = ["derive", "env"] }
+clap = { workspace = true }
 duckdb = { workspace = true }
 event-replay-config = { workspace = true }
 event-replay-core = { workspace = true }
@@ -23,4 +28,4 @@ serde = { workspace = true }
 
 [dev-dependencies]
 event-replay-strategy = { workspace = true }
-toml = "0.9"
+toml = { workspace = true }

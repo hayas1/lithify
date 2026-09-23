@@ -1,14 +1,19 @@
 [package]
 name = "event-replay-config"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+description.workspace = true
+authors.workspace = true
+edition.workspace = true
+repository.workspace = true
+license-file.workspace = true
+readme.workspace = true
 
 [dependencies]
 chrono = { workspace = true, features = ["serde"] }
 event-replay-core = { workspace = true }
-semigroup = { version = "0.6.0", features = ["derive"] }
+semigroup = { workspace = true }
 serde = { workspace = true }
-toml = "0.9"
+toml = { workspace = true }
 
 [dev-dependencies]
 event-replay-protocol = { workspace = true }

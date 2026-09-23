@@ -1,3 +1,12 @@
+[workspace.package]
+version = "0.1.0"
+description = "Replay what a database changed into the snapshots and histories of a warehouse"
+authors = ["hayas1 <h4ystack@gmail.com>"]
+edition = "2024"
+repository = "https://github.com/hayas1/event-replay"
+license-file = "../LICENSE"
+readme = "../README.md"
+
 [workspace]
 members = [
     "event-replay-cli",
@@ -10,16 +19,22 @@ members = [
 resolver = "3"
 
 [workspace.dependencies]
+event-replay-cli = { version = "0.1.0", path = "event-replay-cli" }
+event-replay-config = { version = "0.1.0", path = "event-replay-config" }
+event-replay-core = { version = "0.1.0", path = "event-replay-core" }
+event-replay-protocol = { version = "0.1.0", path = "event-replay-protocol" }
+event-replay-strategy = { version = "0.1.0", path = "event-replay-strategy" }
+
 chrono = { version = "0.4", default-features = false, features = ["std"] }
+clap = { version = "4", features = ["derive", "env"] }
 duckdb = "1.10505.0"
-event-replay-config = { path = "event-replay-config" }
-event-replay-core = { path = "event-replay-core" }
-event-replay-protocol = { path = "event-replay-protocol" }
-event-replay-strategy = { path = "event-replay-strategy" }
 google-cloud-auth = "1.16"
 google-cloud-bigquery = "=0.16.1-preview"
 google-cloud-gax = "1.14"
-wkt = { package = "google-cloud-wkt", version = "1.7" }
+mysql = "28.0.2"
+semigroup = { version = "0.6.0", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.151"
 tokio = { version = "1", features = ["rt"] }
+toml = "0.9"
+wkt = { package = "google-cloud-wkt", version = "1.7" }

@@ -1,7 +1,12 @@
 [package]
 name = "event-replay-core"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+description.workspace = true
+authors.workspace = true
+edition.workspace = true
+repository.workspace = true
+license-file.workspace = true
+readme.workspace = true
 
 [dependencies]
 chrono = { workspace = true }
