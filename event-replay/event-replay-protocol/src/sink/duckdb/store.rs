@@ -25,10 +25,14 @@ impl ObjectStore {
 
     pub fn client(&self, table: &TablePath) -> Result<DuckDbClient, duckdb::Error> {
         let connection = Connection::open_in_memory()?;
-        connection.execute_batch(&self.secret())?;
-        connection.execute_batch(&self.view(table))?;
+        self.attach(&connection, table)?;
 
         Ok(DuckDbClient::new(connection))
+    }
+
+    pub fn attach(&self, connection: &Connection, table: &TablePath) -> Result<(), duckdb::Error> {
+        connection.execute_batch(&self.secret())?;
+        connection.execute_batch(&self.view(table))
     }
 
     fn secret(&self) -> String {
@@ -37,7 +41,7 @@ impl ObjectStore {
         format!(
             "INSTALL httpfs;\n\
              LOAD httpfs;\n\
-             CREATE SECRET (TYPE s3, PROVIDER config, KEY_ID '{}', SECRET '{}', \
+             CREATE OR REPLACE SECRET (TYPE s3, PROVIDER config, KEY_ID '{}', SECRET '{}', \
              REGION '{}', ENDPOINT '{endpoint}', USE_SSL {over_tls}, URL_STYLE 'path')",
             self.key_id,
             self.secret,
@@ -56,7 +60,7 @@ impl ObjectStore {
 
     fn view(&self, table: &TablePath) -> String {
         format!(
-            "CREATE SCHEMA IF NOT EXISTS {};\nCREATE VIEW {} AS SELECT * FROM {}",
+            "CREATE SCHEMA IF NOT EXISTS {};\nCREATE OR REPLACE VIEW {} AS SELECT * FROM {}",
             DuckDbWarehouse.identifier(table.namespace()),
             DuckDbWarehouse.table_ref(table),
             self.scan(table),
@@ -118,7 +122,7 @@ mod tests {
             store().view(&table()),
             concat!(
                 "CREATE SCHEMA IF NOT EXISTS \"mysql_shop_cdc\";\n",
-                "CREATE VIEW \"mysql_shop_cdc\".\"mysql\" AS SELECT * FROM ",
+                "CREATE OR REPLACE VIEW \"mysql_shop_cdc\".\"mysql\" AS SELECT * FROM ",
                 "read_parquet('s3://event-replay/mysql_shop_cdc/mysql/*.parquet')"
             )
         );

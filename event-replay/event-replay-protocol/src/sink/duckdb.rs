@@ -56,9 +56,7 @@ impl Warehouse for DuckDbWarehouse {
         column_type: &ColumnType,
     ) -> Result<String, UnsupportedColumn> {
         match column_type {
-            ColumnType::Date => Ok(format!(
-                "(DATE '1970-01-01' + to_days(({expression})::INTEGER))"
-            )),
+            ColumnType::Date => Ok(format!("(DATE '1970-01-01' + ({expression})::INTEGER)")),
             ColumnType::Time => Ok(format!(
                 "(TIME '00:00:00' + INTERVAL (({expression})::BIGINT) MICROSECOND)"
             )),
@@ -137,7 +135,7 @@ mod tests {
     fn a_date_is_read_from_the_days_debezium_counts_since_the_epoch() {
         assert_eq!(
             read(ColumnType::Date),
-            "(DATE '1970-01-01' + to_days((\"after\".\"amount\")::INTEGER))"
+            "(DATE '1970-01-01' + (\"after\".\"amount\")::INTEGER)"
         );
     }
 
