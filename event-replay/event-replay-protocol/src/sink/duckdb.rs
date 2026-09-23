@@ -8,17 +8,12 @@ pub mod store;
 
 use event_replay_core::model::ColumnType;
 use event_replay_core::sink::{TablePath, UnsupportedColumn, Warehouse};
-use event_replay_core::source::ColumnPath;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DuckDbWarehouse;
 
 impl Warehouse for DuckDbWarehouse {
     type Config = config::Store;
-
-    fn envelope(&self) -> Option<ColumnPath> {
-        Some(ColumnPath::from("value"))
-    }
 
     fn identifier(&self, name: &str) -> String {
         format!("\"{name}\"")
@@ -183,7 +178,7 @@ mod tests {
     }
     #[test]
     fn the_schema_changes_of_a_window_are_read_from_the_envelope_in_source_order() {
-        let log = Debezium::new(MySql);
+        let log = Debezium::under("value", MySql);
         let window = Window::new(RecordedAt::from(0), RecordedAt::from(10));
 
         assert_eq!(

@@ -75,9 +75,10 @@ pub struct DdlColumn {
     pub scale: Option<i64>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Debezium<D> {
     dialect: D,
+    envelope: Option<ColumnPath>,
 }
 
 impl<D: Dialect> Debezium<D> {
@@ -100,11 +101,36 @@ impl<D: Dialect> Debezium<D> {
     }
 
     pub fn new(dialect: D) -> Self {
-        Self { dialect }
+        Self {
+            dialect,
+            envelope: None,
+        }
+    }
+
+    pub fn under(column: &str, dialect: D) -> Self {
+        Self {
+            dialect,
+            envelope: Some(ColumnPath::from(column)),
+        }
+    }
+
+    fn path(&self, name: &str) -> ColumnPath {
+        match &self.envelope {
+            Some(envelope) => ColumnPath::from(format!("{envelope}.{name}").as_str()),
+            None => ColumnPath::from(name),
+        }
     }
 
     pub fn dialect(&self) -> &D {
         &self.dialect
+    }
+
+    fn ordered(&self) -> Vec<ColumnPath> {
+        self.dialect
+            .ordering()
+            .iter()
+            .map(|path| self.path(&path.parts().collect::<Vec<_>>().join(".")))
+            .collect()
     }
 
     fn table_change(&self, change: DdlTableChange) -> Result<TableChange, MalformedEvent> {
@@ -169,12 +195,16 @@ where
 impl<D: Dialect> SchemaChangeLog for Debezium<D> {
     type Position = D::Position;
 
+    fn envelope(&self) -> Option<ColumnPath> {
+        self.envelope.clone()
+    }
+
     fn recorded_at(&self) -> ColumnPath {
-        ColumnPath::from("ts_ms")
+        self.path("ts_ms")
     }
 
     fn ordering(&self) -> Vec<ColumnPath> {
-        self.dialect.ordering()
+        self.ordered()
     }
 }
 
@@ -182,27 +212,23 @@ impl<D: Dialect> RowChangeLog for Debezium<D> {
     type Position = D::Position;
 
     fn recorded_at(&self) -> ColumnPath {
-        ColumnPath::from("ts_ms")
+        self.path("ts_ms")
     }
 
     fn ordering(&self) -> Vec<ColumnPath> {
-        self.dialect.ordering()
-    }
-
-    fn key(&self) -> ColumnPath {
-        ColumnPath::from("_kafka_key")
+        self.ordered()
     }
 
     fn operation(&self) -> ColumnPath {
-        ColumnPath::from("op")
+        self.path("op")
     }
 
     fn before(&self) -> ColumnPath {
-        ColumnPath::from("before")
+        self.path("before")
     }
 
     fn after(&self) -> ColumnPath {
-        ColumnPath::from("after")
+        self.path("after")
     }
 }
 

@@ -4,12 +4,18 @@ use event_replay_core::sink::{TablePath, Warehouse};
 use event_replay_core::source::RowChangeLog;
 use event_replay_core::window::Window;
 
+pub enum Base {
+    Captured,
+    Shard(TablePath),
+}
+
 pub struct Snapshot<'a, L> {
     log: &'a L,
     table: TableModel,
     cdc: TablePath,
     target: TablePath,
     window: Window,
+    base: Base,
 }
 
 impl<'a, L: RowChangeLog> Snapshot<'a, L> {
@@ -19,6 +25,7 @@ impl<'a, L: RowChangeLog> Snapshot<'a, L> {
         cdc: TablePath,
         target: TablePath,
         window: Window,
+        base: Base,
     ) -> Self {
         Self {
             log,
@@ -26,17 +33,52 @@ impl<'a, L: RowChangeLog> Snapshot<'a, L> {
             cdc,
             target,
             window,
+            base,
         }
     }
 
     fn create_table(&self, warehouse: &impl Warehouse) -> Result<String, UnbuildableArtifact> {
         Ok(format!(
-            "CREATE OR REPLACE TABLE {} AS\n{}\n{}\nFROM {}\nWHERE {} <> 'd'",
+            "CREATE OR REPLACE TABLE {} AS\n{}\n{}\nUNION ALL\n{}",
             warehouse.table_ref(&self.target),
-            self.latest_of_each_key(warehouse)?,
-            self.columns(warehouse)?,
+            self.reads(warehouse)?,
+            self.kept(warehouse)?,
+            self.changed(warehouse)?,
+        ))
+    }
+
+    fn reads(&self, warehouse: &impl Warehouse) -> Result<String, UnbuildableArtifact> {
+        Ok(format!(
+            "WITH {} AS (\n{}\n),\n{} AS (\n{}\n)",
+            warehouse.identifier("base"),
+            self.base(warehouse)?,
             warehouse.identifier("changes"),
-            warehouse.path(&self.log.operation()),
+            self.changes(warehouse)?,
+        ))
+    }
+
+    fn base(&self, warehouse: &impl Warehouse) -> Result<String, UnbuildableArtifact> {
+        match &self.base {
+            Base::Shard(shard) => Ok(format!("  SELECT *\n  FROM {}", warehouse.table_ref(shard))),
+            Base::Captured => Ok(format!(
+                "  SELECT\n{}\n  FROM {}\n  WHERE {} = 'r'\n{}",
+                self.casts(warehouse, "    ")?,
+                warehouse.table_ref(&self.cdc),
+                warehouse.path(&self.log.operation()),
+                self.latest_of_each_key(warehouse)?,
+            )),
+        }
+    }
+
+    fn changes(&self, warehouse: &impl Warehouse) -> Result<String, UnbuildableArtifact> {
+        Ok(format!(
+            "  SELECT *\n  FROM {}\n  WHERE {} >= {} AND {} < {}\n{}",
+            warehouse.table_ref(&self.cdc),
+            warehouse.path(&self.log.recorded_at()),
+            self.window.from().milliseconds_since_epoch(),
+            warehouse.path(&self.log.recorded_at()),
+            self.window.to().milliseconds_since_epoch(),
+            self.latest_of_each_key(warehouse)?,
         ))
     }
 
@@ -46,42 +88,97 @@ impl<'a, L: RowChangeLog> Snapshot<'a, L> {
     ) -> Result<String, UnbuildableArtifact> {
         Ok(format!(
             concat!(
-                "WITH {} AS (\n",
-                "  SELECT *\n",
-                "  FROM {}\n",
-                "  WHERE {} >= {} AND {} < {}\n",
                 "  QUALIFY ROW_NUMBER() OVER (\n",
                 "    PARTITION BY {}\n",
                 "    ORDER BY {}\n",
-                "  ) = 1\n",
-                ")"
+                "  ) = 1"
             ),
-            warehouse.identifier("changes"),
-            warehouse.table_ref(&self.cdc),
-            warehouse.path(&self.log.recorded_at()),
-            self.window.from().milliseconds_since_epoch(),
-            warehouse.path(&self.log.recorded_at()),
-            self.window.to().milliseconds_since_epoch(),
             self.key(warehouse)?,
             self.ordering(warehouse),
         ))
     }
 
+    fn kept(&self, warehouse: &impl Warehouse) -> Result<String, UnbuildableArtifact> {
+        Ok(format!(
+            concat!(
+                "SELECT *\n",
+                "FROM {}\n",
+                "WHERE NOT EXISTS (\n",
+                "  SELECT 1\n",
+                "  FROM {}\n",
+                "{}\n",
+                ")"
+            ),
+            warehouse.identifier("base"),
+            warehouse.identifier("changes"),
+            self.changed_key(warehouse)?,
+        ))
+    }
+
+    fn changed(&self, warehouse: &impl Warehouse) -> Result<String, UnbuildableArtifact> {
+        Ok(format!(
+            "SELECT\n{}\nFROM {}\nWHERE {} <> 'd'",
+            self.casts(warehouse, "  ")?,
+            warehouse.identifier("changes"),
+            warehouse.path(&self.log.operation()),
+        ))
+    }
+
+    fn changed_key(&self, warehouse: &impl Warehouse) -> Result<String, UnbuildableArtifact> {
+        let changes = warehouse.identifier("changes");
+        let base = warehouse.identifier("base");
+        let matched: Vec<String> = self
+            .primary_key(warehouse)?
+            .iter()
+            .map(|column| {
+                format!(
+                    "{} = {base}.{column}",
+                    self.keyed(warehouse, &format!("{changes}."), column)
+                )
+            })
+            .collect();
+
+        Ok(matched
+            .iter()
+            .enumerate()
+            .map(|(at, matched)| match at {
+                0 => format!("  WHERE {matched}"),
+                _ => format!("    AND {matched}"),
+            })
+            .collect::<Vec<_>>()
+            .join("\n"))
+    }
+
     fn key(&self, warehouse: &impl Warehouse) -> Result<String, UnbuildableArtifact> {
-        let key = warehouse.path(&self.log.key());
+        Ok(self
+            .primary_key(warehouse)?
+            .iter()
+            .map(|column| self.keyed(warehouse, "", column))
+            .collect::<Vec<_>>()
+            .join(", "))
+    }
+
+    fn keyed(&self, warehouse: &impl Warehouse, within: &str, column: &str) -> String {
+        format!(
+            "COALESCE({within}{}.{column}, {within}{}.{column})",
+            warehouse.path(&self.log.after()),
+            warehouse.path(&self.log.before()),
+        )
+    }
+
+    fn primary_key(&self, warehouse: &impl Warehouse) -> Result<Vec<String>, UnbuildableArtifact> {
         let columns: Vec<String> = self
             .table
             .primary_key()
-            .map(|column| format!("{key}.{}", warehouse.identifier(column)))
+            .map(|column| warehouse.identifier(column))
             .collect();
 
-        if columns.is_empty() {
-            return Err(UnbuildableArtifact::WithoutPrimaryKey(
+        match columns.is_empty() {
+            true => Err(UnbuildableArtifact::WithoutPrimaryKey(
                 self.table.id().clone(),
-            ));
+            )),
+            false => Ok(columns),
         }
-
-        Ok(columns.join(", "))
     }
 
     fn ordering(&self, warehouse: &impl Warehouse) -> String {
@@ -93,27 +190,32 @@ impl<'a, L: RowChangeLog> Snapshot<'a, L> {
             .join(", ")
     }
 
-    fn columns(&self, warehouse: &impl Warehouse) -> Result<String, UnbuildableArtifact> {
+    fn casts(
+        &self,
+        warehouse: &impl Warehouse,
+        indent: &str,
+    ) -> Result<String, UnbuildableArtifact> {
         let after = warehouse.path(&self.log.after());
         let columns: Vec<String> = self
             .table
             .columns()
-            .map(|column| self.column(warehouse, &after, column))
+            .map(|column| self.cast(warehouse, &after, column, indent))
             .collect::<Result<_, _>>()?;
 
-        Ok(format!("SELECT\n{}", columns.join(",\n")))
+        Ok(columns.join(",\n"))
     }
 
-    fn column(
+    fn cast(
         &self,
         warehouse: &impl Warehouse,
         after: &str,
         column: &ColumnModel,
+        indent: &str,
     ) -> Result<String, UnbuildableArtifact> {
         let name = warehouse.identifier(column.name());
         let read = warehouse.read(&format!("{after}.{name}"), column.column_type())?;
 
-        Ok(format!("  {read} AS {name}"))
+        Ok(format!("{indent}{read} AS {name}"))
     }
 }
 
@@ -148,10 +250,6 @@ mod tests {
 
         fn ordering(&self) -> Vec<ColumnPath> {
             vec![ColumnPath::from("source.offset")]
-        }
-
-        fn key(&self) -> ColumnPath {
-            ColumnPath::from("_kafka_key")
         }
 
         fn operation(&self) -> ColumnPath {
@@ -226,33 +324,53 @@ mod tests {
         )
     }
 
-    fn snapshot() -> Snapshot<'static, Log> {
+    fn snapshot(base: Base) -> Snapshot<'static, Log> {
         Snapshot::new(
             &Log,
             customers(),
             TablePath::new("mysql_shop_cdc", "mysql_shop_customers"),
             TablePath::new("mysql_shop", "customers_20260920"),
             window(),
+            base,
         )
     }
 
     #[test]
-    fn a_first_snapshot_takes_the_last_change_of_each_key_in_the_window() {
-        let statements = snapshot().statements(&Engine).unwrap();
+    fn a_first_snapshot_folds_the_window_onto_what_the_capture_read() {
+        let statements = snapshot(Base::Captured).statements(&Engine).unwrap();
 
         assert_eq!(
             statements[0],
             concat!(
                 "CREATE OR REPLACE TABLE \"mysql_shop\".\"customers_20260920\" AS\n",
-                "WITH \"changes\" AS (\n",
+                "WITH \"base\" AS (\n",
+                "  SELECT\n",
+                "    CAST(\"after\".\"id\" AS BIGINT) AS \"id\",\n",
+                "    CAST(\"after\".\"name\" AS TEXT) AS \"name\"\n",
+                "  FROM \"mysql_shop_cdc\".\"mysql_shop_customers\"\n",
+                "  WHERE \"op\" = 'r'\n",
+                "  QUALIFY ROW_NUMBER() OVER (\n",
+                "    PARTITION BY COALESCE(\"after\".\"id\", \"before\".\"id\")\n",
+                "    ORDER BY \"source\".\"offset\" DESC\n",
+                "  ) = 1\n",
+                "),\n",
+                "\"changes\" AS (\n",
                 "  SELECT *\n",
                 "  FROM \"mysql_shop_cdc\".\"mysql_shop_customers\"\n",
                 "  WHERE \"ts_ms\" >= 1789800000000 AND \"ts_ms\" < 1789886400000\n",
                 "  QUALIFY ROW_NUMBER() OVER (\n",
-                "    PARTITION BY \"_kafka_key\".\"id\"\n",
+                "    PARTITION BY COALESCE(\"after\".\"id\", \"before\".\"id\")\n",
                 "    ORDER BY \"source\".\"offset\" DESC\n",
                 "  ) = 1\n",
                 ")\n",
+                "SELECT *\n",
+                "FROM \"base\"\n",
+                "WHERE NOT EXISTS (\n",
+                "  SELECT 1\n",
+                "  FROM \"changes\"\n",
+                "  WHERE COALESCE(\"changes\".\"after\".\"id\", \"changes\".\"before\".\"id\") = \"base\".\"id\"\n",
+                ")\n",
+                "UNION ALL\n",
                 "SELECT\n",
                 "  CAST(\"after\".\"id\" AS BIGINT) AS \"id\",\n",
                 "  CAST(\"after\".\"name\" AS TEXT) AS \"name\"\n",
@@ -260,6 +378,36 @@ mod tests {
                 "WHERE \"op\" <> 'd'"
             )
         );
+    }
+
+    #[test]
+    fn a_later_snapshot_folds_the_window_onto_the_snapshot_before_it() {
+        let base = Base::Shard(TablePath::new("mysql_shop", "customers_20260919"));
+
+        let statements = snapshot(base).statements(&Engine).unwrap();
+
+        assert!(statements[0].starts_with(concat!(
+            "CREATE OR REPLACE TABLE \"mysql_shop\".\"customers_20260920\" AS\n",
+            "WITH \"base\" AS (\n",
+            "  SELECT *\n",
+            "  FROM \"mysql_shop\".\"customers_20260919\"\n",
+            "),\n",
+            "\"changes\" AS (\n"
+        )));
+    }
+
+    #[test]
+    fn a_key_the_window_changed_is_taken_from_the_window_instead_of_the_base() {
+        let statements = snapshot(Base::Captured).statements(&Engine).unwrap();
+
+        assert!(statements[0].contains(concat!(
+            "WHERE NOT EXISTS (\n",
+            "  SELECT 1\n",
+            "  FROM \"changes\"\n",
+            "  WHERE COALESCE(\"changes\".\"after\".\"id\", \"changes\".\"before\".\"id\") = \"base\".\"id\"\n",
+            ")\n",
+            "UNION ALL\n"
+        )));
     }
 
     #[test]
@@ -278,11 +426,25 @@ mod tests {
             TablePath::new("mysql_shop_cdc", "mysql_shop_order_items"),
             TablePath::new("mysql_shop", "order_items_20260920"),
             window(),
+            Base::Captured,
         );
 
-        assert!(snapshot.statements(&Engine).unwrap()[0].contains(
-            "    PARTITION BY \"_kafka_key\".\"order_id\", \"_kafka_key\".\"line_no\"\n"
-        ));
+        let statement = &snapshot.statements(&Engine).unwrap()[0];
+
+        assert!(statement.contains(concat!(
+            "    PARTITION BY COALESCE(\"after\".\"order_id\", \"before\".\"order_id\"), ",
+            "COALESCE(\"after\".\"line_no\", \"before\".\"line_no\")\n"
+        )));
+        assert!(statement.contains(concat!(
+            concat!(
+                "  WHERE COALESCE(\"changes\".\"after\".\"order_id\", \"changes\".\"before\".\"order_id\")",
+                " = \"base\".\"order_id\"\n"
+            ),
+            concat!(
+                "    AND COALESCE(\"changes\".\"after\".\"line_no\", \"changes\".\"before\".\"line_no\")",
+                " = \"base\".\"line_no\"\n"
+            )
+        )));
     }
 
     #[test]
@@ -298,6 +460,7 @@ mod tests {
             TablePath::new("mysql_shop_cdc", "mysql_shop_customers"),
             TablePath::new("mysql_shop", "customers_20260920"),
             window(),
+            Base::Captured,
         );
 
         assert_eq!(
@@ -319,6 +482,7 @@ mod tests {
             TablePath::new("mysql_shop_cdc", "mysql_shop_customers"),
             TablePath::new("mysql_shop", "customers_20260920"),
             window(),
+            Base::Captured,
         );
 
         assert_eq!(

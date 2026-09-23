@@ -105,14 +105,14 @@ impl Run {
 
         match debezium.dialect() {
             Dialect::MySql => client.catalog(
-                &Debezium::new(MySql),
+                &Debezium::under("value", MySql),
                 table,
                 &self.window,
                 &mut CatalogModel::default(),
                 journal,
             ),
             Dialect::Postgres => client.catalog(
-                &Debezium::new(Postgres),
+                &Debezium::under("value", Postgres),
                 table,
                 &self.window,
                 &mut CatalogModel::default(),

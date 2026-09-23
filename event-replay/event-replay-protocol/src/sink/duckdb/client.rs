@@ -108,7 +108,7 @@ mod tests {
         let connection = Connection::open_in_memory().unwrap();
         connection.execute_batch(CHANGE_LOG).unwrap();
         let client = DuckDbClient::new(connection);
-        let log = Debezium::new(MySql);
+        let log = Debezium::under("value", MySql);
         let mut changes = client.schema_changes(&log, &table(), window).unwrap();
 
         changes
@@ -166,7 +166,7 @@ mod tests {
     fn a_table_that_does_not_hold_a_change_log_is_rejected() {
         let connection = Connection::open_in_memory().unwrap();
         let client = DuckDbClient::new(connection);
-        let log = Debezium::new(MySql);
+        let log = Debezium::under("value", MySql);
 
         let changes = client.schema_changes(&log, &table(), &window(0, 1));
 

@@ -34,6 +34,8 @@ pub trait CdcFormat {
 pub trait SchemaChangeLog {
     type Position: Position;
 
+    fn envelope(&self) -> Option<ColumnPath>;
+
     fn recorded_at(&self) -> ColumnPath;
 
     fn ordering(&self) -> Vec<ColumnPath>;
@@ -45,8 +47,6 @@ pub trait RowChangeLog {
     fn recorded_at(&self) -> ColumnPath;
 
     fn ordering(&self) -> Vec<ColumnPath>;
-
-    fn key(&self) -> ColumnPath;
 
     fn operation(&self) -> ColumnPath;
 
