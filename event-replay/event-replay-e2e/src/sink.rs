@@ -13,11 +13,12 @@ use event_replay_core::sink::{TablePath, Warehouse};
 use event_replay_core::source::{ColumnPath, RowChangeLog, SchemaChangeLog, SchemaChangeStream};
 use event_replay_core::window::Window;
 use event_replay_protocol::DuckDbWarehouse;
-use event_replay_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbLogFn};
+use event_replay_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbSchemaLogFn};
 use event_replay_protocol::sink::duckdb::store::ObjectStore;
 use event_replay_strategy::snapshot::{Base, Snapshot};
 
 use crate::row::{Cell, Row, Rows};
+use crate::row_log::{DuckDbRowCapture, RowLogFn};
 
 pub trait Sink {
     fn execute(&mut self, statement: &str) -> Result<(), Unbuildable>;
@@ -127,7 +128,7 @@ impl Sink for DuckDb {
         capture: &Capture,
         at: RecordedAt,
     ) -> Result<u64, Unbuildable> {
-        let recorded_at = capture.with_duckdb_log(ChangeTime);
+        let recorded_at = capture.with_duckdb_row_log(ChangeTime);
 
         if self.attach(changes).is_err() {
             return Ok(0);
@@ -154,7 +155,7 @@ impl Sink for DuckDb {
         table: &TableId,
         window: &Window,
     ) -> Result<TableModel, Unbuildable> {
-        let read = capture.with_duckdb_log(Catalog {
+        let read = capture.with_duckdb_schema_log(Catalog {
             store: &self.store,
             statements,
             table,
@@ -174,7 +175,7 @@ impl Sink for DuckDb {
     ) -> Result<(), Unbuildable> {
         self.attach(changes)?;
 
-        let statements = capture.with_duckdb_log(SnapshotStatements {
+        let statements = capture.with_duckdb_row_log(SnapshotStatements {
             model,
             changes,
             into,
@@ -231,15 +232,11 @@ impl From<&Value> for Cell {
 
 struct ChangeTime;
 
-impl DuckDbLogFn for ChangeTime {
+impl RowLogFn for ChangeTime {
     type Output = ColumnPath;
 
-    fn call_duckdb<L>(self, log: L) -> Self::Output
-    where
-        L: SchemaChangeLog + RowChangeLog,
-        L::Record: FromSql,
-    {
-        RowChangeLog::recorded_at(&log)
+    fn call<L: RowChangeLog>(self, log: L) -> Self::Output {
+        log.recorded_at()
     }
 }
 
@@ -250,12 +247,12 @@ struct Catalog<'a> {
     window: &'a Window,
 }
 
-impl DuckDbLogFn for Catalog<'_> {
+impl DuckDbSchemaLogFn for Catalog<'_> {
     type Output = Result<Option<TableModel>, Unbuildable>;
 
     fn call_duckdb<L>(self, log: L) -> Self::Output
     where
-        L: SchemaChangeLog + RowChangeLog,
+        L: SchemaChangeLog,
         L::Record: FromSql,
     {
         let mut catalog = CatalogModel::default();
@@ -279,14 +276,10 @@ struct SnapshotStatements<'a> {
     window: &'a Window,
 }
 
-impl DuckDbLogFn for SnapshotStatements<'_> {
+impl RowLogFn for SnapshotStatements<'_> {
     type Output = Result<Vec<String>, Unbuildable>;
 
-    fn call_duckdb<L>(self, log: L) -> Self::Output
-    where
-        L: SchemaChangeLog + RowChangeLog,
-        L::Record: FromSql,
-    {
+    fn call<L: RowChangeLog>(self, log: L) -> Self::Output {
         Ok(Snapshot::new(
             &log,
             self.model.clone(),

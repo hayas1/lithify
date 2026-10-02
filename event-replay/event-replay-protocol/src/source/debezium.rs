@@ -9,7 +9,7 @@ use serde_json::Value;
 use event_replay_core::event::{MalformedEvent, SchemaChange, TableChange};
 use event_replay_core::model::{ColumnModel, ColumnType, TableId, TableModel};
 use event_replay_core::position::{Position, RecordedAt};
-use event_replay_core::source::{CdcFormat, ColumnPath, RowChangeLog, SchemaChangeLog};
+use event_replay_core::source::{CdcFormat, ChangeLog, ColumnPath, RowChangeLog, SchemaChangeLog};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DebeziumFormat;
@@ -83,16 +83,17 @@ pub struct Debezium<D> {
 
 impl<D: Dialect> Debezium<D> {
     pub fn new(dialect: D) -> Self {
-        Self {
-            dialect,
-            envelope: None,
-        }
+        Self::within(None, dialect)
     }
 
     pub fn under(column: &str, dialect: D) -> Self {
+        Self::within(Some(column), dialect)
+    }
+
+    pub fn within(envelope: Option<&str>, dialect: D) -> Self {
         Self {
             dialect,
-            envelope: Some(ColumnPath::from(column)),
+            envelope: envelope.map(ColumnPath::from),
         }
     }
 
@@ -174,8 +175,23 @@ where
     }
 }
 
-impl<D: Dialect> SchemaChangeLog for Debezium<D> {
+impl<D: Dialect> ChangeLog for Debezium<D> {
     type Position = D::Position;
+
+    fn envelope(&self) -> Option<ColumnPath> {
+        self.envelope.clone()
+    }
+
+    fn recorded_at(&self) -> ColumnPath {
+        self.path("ts_ms")
+    }
+
+    fn ordering(&self) -> Vec<ColumnPath> {
+        self.ordered()
+    }
+}
+
+impl<D: Dialect> SchemaChangeLog for Debezium<D> {
     type Record = DebeziumDdl<D::Source>;
 
     fn schema_change(
@@ -195,31 +211,9 @@ impl<D: Dialect> SchemaChangeLog for Debezium<D> {
             tables,
         ))
     }
-
-    fn envelope(&self) -> Option<ColumnPath> {
-        self.envelope.clone()
-    }
-
-    fn recorded_at(&self) -> ColumnPath {
-        self.path("ts_ms")
-    }
-
-    fn ordering(&self) -> Vec<ColumnPath> {
-        self.ordered()
-    }
 }
 
 impl<D: Dialect> RowChangeLog for Debezium<D> {
-    type Position = D::Position;
-
-    fn recorded_at(&self) -> ColumnPath {
-        self.path("ts_ms")
-    }
-
-    fn ordering(&self) -> Vec<ColumnPath> {
-        self.ordered()
-    }
-
     fn operation(&self) -> ColumnPath {
         self.path("op")
     }

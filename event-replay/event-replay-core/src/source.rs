@@ -31,14 +31,8 @@ pub trait CdcFormat {
     type Config;
 }
 
-pub trait SchemaChangeLog {
+pub trait ChangeLog {
     type Position: Position;
-    type Record;
-
-    fn schema_change(
-        &self,
-        record: Self::Record,
-    ) -> Result<SchemaChange<Self::Position>, MalformedEvent>;
 
     fn envelope(&self) -> Option<ColumnPath>;
 
@@ -47,13 +41,16 @@ pub trait SchemaChangeLog {
     fn ordering(&self) -> Vec<ColumnPath>;
 }
 
-pub trait RowChangeLog {
-    type Position: Position;
+pub trait SchemaChangeLog: ChangeLog {
+    type Record;
 
-    fn recorded_at(&self) -> ColumnPath;
+    fn schema_change(
+        &self,
+        record: Self::Record,
+    ) -> Result<SchemaChange<Self::Position>, MalformedEvent>;
+}
 
-    fn ordering(&self) -> Vec<ColumnPath>;
-
+pub trait RowChangeLog: ChangeLog {
     fn operation(&self) -> ColumnPath;
 
     fn before(&self) -> ColumnPath;

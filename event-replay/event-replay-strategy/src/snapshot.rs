@@ -232,7 +232,7 @@ mod tests {
     use event_replay_core::model::{ColumnModel, ColumnType, TableId, TableModel};
     use event_replay_core::position::{Position, RecordedAt};
     use event_replay_core::sink::{TablePath, UnsupportedColumn, Warehouse};
-    use event_replay_core::source::{ColumnPath, RowChangeLog};
+    use event_replay_core::source::{ChangeLog, ColumnPath, RowChangeLog};
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     struct Offset(u64);
@@ -241,8 +241,12 @@ mod tests {
 
     struct Log;
 
-    impl RowChangeLog for Log {
+    impl ChangeLog for Log {
         type Position = Offset;
+
+        fn envelope(&self) -> Option<ColumnPath> {
+            None
+        }
 
         fn recorded_at(&self) -> ColumnPath {
             ColumnPath::from("ts_ms")
@@ -251,7 +255,9 @@ mod tests {
         fn ordering(&self) -> Vec<ColumnPath> {
             vec![ColumnPath::from("source.offset")]
         }
+    }
 
+    impl RowChangeLog for Log {
         fn operation(&self) -> ColumnPath {
             ColumnPath::from("op")
         }

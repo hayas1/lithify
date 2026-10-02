@@ -2,24 +2,22 @@ use duckdb::types::{FromSql, Type};
 use duckdb::{Connection, Error, Statement};
 
 use event_replay_core::sink::{TablePath, Warehouse};
-use event_replay_core::source::{
-    RowChangeLog, SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed,
-};
+use event_replay_core::source::{SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed};
 use event_replay_core::window::Window;
 
 use crate::sink::duckdb::DuckDbWarehouse;
 
-pub trait DuckDbLogFn {
+pub trait DuckDbSchemaLogFn {
     type Output;
 
     fn call_duckdb<L>(self, log: L) -> Self::Output
     where
-        L: SchemaChangeLog + RowChangeLog,
+        L: SchemaChangeLog,
         L::Record: FromSql;
 }
 
 pub trait DuckDbCapture {
-    fn with_duckdb_log<F: DuckDbLogFn>(&self, f: F) -> F::Output;
+    fn with_duckdb_schema_log<F: DuckDbSchemaLogFn>(&self, f: F) -> F::Output;
 }
 
 pub struct DuckDbClient {
@@ -93,7 +91,7 @@ mod tests {
     use event_replay_core::event::{MalformedEvent, SchemaChange, TableChange};
     use event_replay_core::position::Position;
     use event_replay_core::position::RecordedAt;
-    use event_replay_core::source::ColumnPath;
+    use event_replay_core::source::{ChangeLog, ColumnPath};
 
     const CHANGE_LOG: &str = "CREATE SCHEMA mysql_shop_cdc;
         CREATE TABLE mysql_shop_cdc.mysql AS
@@ -199,9 +197,8 @@ mod tests {
 
     struct Ledger;
 
-    impl SchemaChangeLog for Ledger {
+    impl ChangeLog for Ledger {
         type Position = Line;
-        type Record = String;
 
         fn envelope(&self) -> Option<ColumnPath> {
             None
@@ -214,6 +211,10 @@ mod tests {
         fn ordering(&self) -> Vec<ColumnPath> {
             vec![ColumnPath::from("line")]
         }
+    }
+
+    impl SchemaChangeLog for Ledger {
+        type Record = String;
 
         fn schema_change(
             &self,

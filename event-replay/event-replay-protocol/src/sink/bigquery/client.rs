@@ -9,25 +9,23 @@ use tokio::runtime::Runtime;
 
 use event_replay_core::event::MalformedEvent;
 use event_replay_core::sink::{TablePath, Warehouse};
-use event_replay_core::source::{
-    RowChangeLog, SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed,
-};
+use event_replay_core::source::{SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed};
 use event_replay_core::window::Window;
 
 use crate::sink::bigquery::BigQueryWarehouse;
 use crate::sink::bigquery::config::{Config, Credentials};
 
-pub trait BigQueryLogFn {
+pub trait BigQuerySchemaLogFn {
     type Output;
 
     fn call_bigquery<L>(self, log: L) -> Self::Output
     where
-        L: SchemaChangeLog + RowChangeLog,
+        L: SchemaChangeLog,
         L::Record: TryFrom<Row, Error = RowError>;
 }
 
 pub trait BigQueryCapture {
-    fn with_bigquery_log<F: BigQueryLogFn>(&self, f: F) -> F::Output;
+    fn with_bigquery_schema_log<F: BigQuerySchemaLogFn>(&self, f: F) -> F::Output;
 }
 
 pub struct BigQueryClient {

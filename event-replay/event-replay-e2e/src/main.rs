@@ -1,5 +1,6 @@
 mod pipeline;
 mod row;
+mod row_log;
 mod run;
 mod runnable;
 mod scenario;

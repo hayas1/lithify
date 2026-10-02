@@ -4,12 +4,12 @@ use event_replay_config::Pipeline;
 use event_replay_config::infra::{Sink, Source};
 use event_replay_core::listener::CatalogModel;
 use event_replay_core::sink::TablePath;
-use event_replay_core::source::{RowChangeLog, SchemaChangeLog, SchemaChangeStream};
+use event_replay_core::source::{SchemaChangeLog, SchemaChangeStream};
 use event_replay_core::window::Window;
 use event_replay_protocol::sink::bigquery::client::{
-    BigQueryCapture, BigQueryClient, BigQueryLogFn,
+    BigQueryCapture, BigQueryClient, BigQuerySchemaLogFn,
 };
-use event_replay_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbClient, DuckDbLogFn};
+use event_replay_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbClient, DuckDbSchemaLogFn};
 use event_replay_protocol::sink::duckdb::store::ObjectStore;
 use google_cloud_bigquery::error::RowError;
 use google_cloud_bigquery::query::Row;
@@ -99,7 +99,7 @@ impl Run {
 
         source
             .capture()
-            .with_duckdb_log(Catalog::new(&client, table, &self.window, journal))
+            .with_duckdb_schema_log(Catalog::new(&client, table, &self.window, journal))
     }
 
     fn read_bigquery(
@@ -109,9 +109,12 @@ impl Run {
         source: &Source<Capture>,
         journal: &mut Journal,
     ) -> Result<(), Unreplayable> {
-        source
-            .capture()
-            .with_bigquery_log(Catalog::new(client, table, &self.window, journal))
+        source.capture().with_bigquery_schema_log(Catalog::new(
+            client,
+            table,
+            &self.window,
+            journal,
+        ))
     }
 
     fn sinks<'a>(
@@ -156,12 +159,12 @@ impl<'a, C> Catalog<'a, C> {
     }
 }
 
-impl DuckDbLogFn for Catalog<'_, DuckDbClient> {
+impl DuckDbSchemaLogFn for Catalog<'_, DuckDbClient> {
     type Output = Result<(), Unreplayable>;
 
     fn call_duckdb<L>(self, log: L) -> Self::Output
     where
-        L: SchemaChangeLog + RowChangeLog,
+        L: SchemaChangeLog,
         L::Record: duckdb::types::FromSql,
     {
         self.client.catalog(
@@ -174,12 +177,12 @@ impl DuckDbLogFn for Catalog<'_, DuckDbClient> {
     }
 }
 
-impl BigQueryLogFn for Catalog<'_, BigQueryClient> {
+impl BigQuerySchemaLogFn for Catalog<'_, BigQueryClient> {
     type Output = Result<(), Unreplayable>;
 
     fn call_bigquery<L>(self, log: L) -> Self::Output
     where
-        L: SchemaChangeLog + RowChangeLog,
+        L: SchemaChangeLog,
         L::Record: TryFrom<Row, Error = RowError>,
     {
         self.client.catalog(
