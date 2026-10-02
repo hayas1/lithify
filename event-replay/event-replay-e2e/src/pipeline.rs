@@ -8,7 +8,6 @@ use event_replay_core::model::{TableId, TableModel};
 use event_replay_core::position::RecordedAt;
 use event_replay_core::sink::TablePath;
 use event_replay_core::window::Window;
-use event_replay_protocol::source::debezium::config::Dialect;
 
 use crate::row::Rows;
 use crate::run::Unverifiable;
@@ -159,10 +158,8 @@ impl<'a> SourceEnd<'a> {
         Ok(self.client.rows(model)?)
     }
 
-    fn dialect(&self) -> Dialect {
-        let Capture::Debezium(debezium) = self.config.capture();
-
-        debezium.dialect()
+    fn capture(&self) -> &Capture {
+        self.config.capture()
     }
 }
 
@@ -220,7 +217,7 @@ impl<'a> SinkEnd<'a> {
 
         watch.wait(changes, || {
             match self.client.model(
-                source.dialect(),
+                source.capture(),
                 &statements,
                 table,
                 &watch.schema_changes(),
@@ -244,7 +241,7 @@ impl<'a> SinkEnd<'a> {
         let mut settling = (0, Instant::now());
 
         watch.wait(changes, || {
-            let landed = self.client.landed(changes, source.dialect(), at)?;
+            let landed = self.client.landed(changes, source.capture(), at)?;
             let (previous, since) = settling;
 
             match (landed, landed == previous) {
@@ -269,7 +266,7 @@ impl<'a> SinkEnd<'a> {
         let table = model.id();
 
         Ok(self.client.snapshot(
-            source.dialect(),
+            source.capture(),
             model,
             &self.changes(source, table),
             &self.snapshot(table),

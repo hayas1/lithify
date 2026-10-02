@@ -6,11 +6,10 @@ use event_replay_core::listener::CatalogModel;
 use event_replay_core::sink::TablePath;
 use event_replay_core::source::SchemaChangeStream;
 use event_replay_core::window::Window;
-use event_replay_protocol::sink::bigquery::client::BigQueryClient;
+use event_replay_protocol::sink::bigquery::client::{BigQueryClient, BigQueryLogFn};
+use event_replay_protocol::sink::duckdb::client::{DuckDbClient, DuckDbLogFn};
 use event_replay_protocol::sink::duckdb::store::ObjectStore;
-use event_replay_protocol::source::debezium::Debezium;
-use event_replay_protocol::source::debezium::config::Dialect;
-use event_replay_protocol::{MySql, Postgres};
+use event_replay_protocol::source::debezium::{Debezium, DebeziumDdl, Dialect};
 
 use crate::credential::Credential;
 use crate::journal::Journal;
@@ -86,12 +85,6 @@ impl Run {
         }
     }
 
-    // TODO: the dialect is matched inside each of the two readers below, because
-    // the conversion a client requires is settled per warehouse and dialect pair,
-    // and a method generic over the dialect would ask every caller for both
-    // warehouses' conversions. Double dispatch removes the repetition: a visitor
-    // with one method per dialect, matched where the dialects live, in
-    // event-replay-protocol.
     fn read_duckdb(
         &self,
         store: &ObjectStore,
@@ -101,24 +94,9 @@ impl Run {
     ) -> Result<(), Unreplayable> {
         let client = store.client(table)?;
 
-        let Capture::Debezium(debezium) = source.capture();
-
-        match debezium.dialect() {
-            Dialect::MySql => client.catalog(
-                &Debezium::under("value", MySql),
-                table,
-                &self.window,
-                &mut CatalogModel::default(),
-                journal,
-            ),
-            Dialect::Postgres => client.catalog(
-                &Debezium::under("value", Postgres),
-                table,
-                &self.window,
-                &mut CatalogModel::default(),
-                journal,
-            ),
-        }
+        source
+            .capture()
+            .call_duckdb(Catalog::new(&client, table, &self.window, journal))
     }
 
     fn read_bigquery(
@@ -128,24 +106,9 @@ impl Run {
         source: &Source<Capture>,
         journal: &mut Journal,
     ) -> Result<(), Unreplayable> {
-        let Capture::Debezium(debezium) = source.capture();
-
-        match debezium.dialect() {
-            Dialect::MySql => client.catalog(
-                &Debezium::new(MySql),
-                table,
-                &self.window,
-                &mut CatalogModel::default(),
-                journal,
-            ),
-            Dialect::Postgres => client.catalog(
-                &Debezium::new(Postgres),
-                table,
-                &self.window,
-                &mut CatalogModel::default(),
-                journal,
-            ),
-        }
+        source
+            .capture()
+            .call_bigquery(Catalog::new(client, table, &self.window, journal))
     }
 
     fn sinks<'a>(
@@ -164,5 +127,64 @@ impl Run {
             (true, Some(named)) => Err(Unreplayable::UnknownSink(named.clone())),
             _ => Ok(sinks),
         }
+    }
+}
+
+struct Catalog<'a, C> {
+    client: &'a C,
+    table: &'a TablePath,
+    window: &'a Window,
+    journal: &'a mut Journal,
+}
+
+impl<'a, C> Catalog<'a, C> {
+    fn new(
+        client: &'a C,
+        table: &'a TablePath,
+        window: &'a Window,
+        journal: &'a mut Journal,
+    ) -> Self {
+        Self {
+            client,
+            table,
+            window,
+            journal,
+        }
+    }
+}
+
+impl DuckDbLogFn for Catalog<'_, DuckDbClient> {
+    type Output = Result<(), Unreplayable>;
+
+    fn call<D>(self, log: Debezium<D>) -> Self::Output
+    where
+        D: Dialect,
+        DebeziumDdl<D::Source>: duckdb::types::FromSql,
+    {
+        self.client.catalog(
+            &log,
+            self.table,
+            self.window,
+            &mut CatalogModel::default(),
+            self.journal,
+        )
+    }
+}
+
+impl BigQueryLogFn for Catalog<'_, BigQueryClient> {
+    type Output = Result<(), Unreplayable>;
+
+    fn call<D>(self, log: Debezium<D>) -> Self::Output
+    where
+        D: Dialect,
+        D::Source: google_cloud_bigquery::query::FromSql,
+    {
+        self.client.catalog(
+            &log,
+            self.table,
+            self.window,
+            &mut CatalogModel::default(),
+            self.journal,
+        )
     }
 }

@@ -16,6 +16,15 @@ use crate::sink::bigquery::BigQueryWarehouse;
 use crate::sink::bigquery::config::{Config, Credentials};
 use crate::source::debezium::{Debezium, DebeziumDdl, Dialect};
 
+pub trait BigQueryLogFn {
+    type Output;
+
+    fn call<D>(self, log: Debezium<D>) -> Self::Output
+    where
+        D: Dialect,
+        D::Source: FromSql;
+}
+
 pub struct BigQueryClient {
     warehouse: BigQueryWarehouse,
     client: BigQuery,

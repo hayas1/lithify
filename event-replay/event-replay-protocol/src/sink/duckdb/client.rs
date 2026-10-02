@@ -8,6 +8,15 @@ use event_replay_core::window::Window;
 use crate::sink::duckdb::DuckDbWarehouse;
 use crate::source::debezium::{Debezium, DebeziumDdl, Dialect};
 
+pub trait DuckDbLogFn {
+    type Output;
+
+    fn call<D>(self, log: Debezium<D>) -> Self::Output
+    where
+        D: Dialect,
+        DebeziumDdl<D::Source>: FromSql;
+}
+
 pub struct DuckDbClient {
     connection: Connection,
 }

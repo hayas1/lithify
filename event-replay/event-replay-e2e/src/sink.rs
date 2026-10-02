@@ -2,19 +2,20 @@ use std::fmt::{self, Display, Formatter};
 
 use chrono::DateTime;
 use duckdb::Connection;
-use duckdb::types::{TimeUnit, Value};
+use duckdb::types::{FromSql, TimeUnit, Value};
 
-use event_replay_cli::pipeline;
+use event_replay_cli::pipeline::{self, Capture};
 use event_replay_core::artifact::{Artifact, UnbuildableArtifact};
 use event_replay_core::listener::{CatalogModel, OutOfOrder, SchemaChangeListener};
 use event_replay_core::model::{TableId, TableModel};
 use event_replay_core::position::RecordedAt;
 use event_replay_core::sink::{TablePath, Warehouse};
-use event_replay_core::source::{SchemaChangeLog, SchemaChangeStream};
+use event_replay_core::source::{ColumnPath, RowChangeLog, SchemaChangeStream};
 use event_replay_core::window::Window;
+use event_replay_protocol::DuckDbWarehouse;
+use event_replay_protocol::sink::duckdb::client::DuckDbLogFn;
 use event_replay_protocol::sink::duckdb::store::ObjectStore;
-use event_replay_protocol::source::debezium::config::Dialect;
-use event_replay_protocol::{Debezium, DuckDbWarehouse, MySql, Postgres};
+use event_replay_protocol::source::debezium::{Debezium, DebeziumDdl, Dialect};
 use event_replay_strategy::snapshot::{Base, Snapshot};
 
 use crate::row::{Cell, Row, Rows};
@@ -25,13 +26,13 @@ pub trait Sink {
     fn landed(
         &mut self,
         changes: &TablePath,
-        dialect: Dialect,
+        capture: &Capture,
         at: RecordedAt,
     ) -> Result<u64, Unbuildable>;
 
     fn model(
         &mut self,
-        dialect: Dialect,
+        capture: &Capture,
         statements: &TablePath,
         table: &TableId,
         window: &Window,
@@ -39,7 +40,7 @@ pub trait Sink {
 
     fn snapshot(
         &mut self,
-        dialect: Dialect,
+        capture: &Capture,
         model: &TableModel,
         changes: &TablePath,
         into: &TablePath,
@@ -75,58 +76,6 @@ impl DuckDb {
             connection: Connection::open_in_memory()?,
             store,
         })
-    }
-
-    fn log<D>(dialect: D) -> Debezium<D>
-    where
-        D: event_replay_protocol::Dialect,
-    {
-        Debezium::under("value", dialect)
-    }
-
-    fn catalog<D>(
-        &self,
-        log: &Debezium<D>,
-        statements: &TablePath,
-        table: &TableId,
-        window: &Window,
-    ) -> Result<Option<TableModel>, Unbuildable>
-    where
-        D: event_replay_protocol::Dialect,
-        D::Source: duckdb::types::FromSql,
-    {
-        let mut catalog = CatalogModel::default();
-
-        self.store.client(statements)?.catalog::<Unbuildable>(
-            log,
-            statements,
-            window,
-            &mut catalog,
-            &mut Bystander,
-        )?;
-
-        Ok(catalog.table(table).cloned())
-    }
-
-    fn statements<D>(
-        log: &Debezium<D>,
-        model: &TableModel,
-        changes: &TablePath,
-        into: &TablePath,
-        window: &Window,
-    ) -> Result<Vec<String>, Unbuildable>
-    where
-        D: event_replay_protocol::Dialect,
-    {
-        Ok(Snapshot::new(
-            log,
-            model.clone(),
-            changes.clone(),
-            into.clone(),
-            window.clone(),
-            Base::Captured,
-        )
-        .statements(&DuckDbWarehouse)?)
     }
 
     fn instant(unit: TimeUnit, read: i64) -> Cell {
@@ -176,13 +125,10 @@ impl Sink for DuckDb {
     fn landed(
         &mut self,
         changes: &TablePath,
-        dialect: Dialect,
+        capture: &Capture,
         at: RecordedAt,
     ) -> Result<u64, Unbuildable> {
-        let recorded_at = match dialect {
-            Dialect::MySql => SchemaChangeLog::recorded_at(&Self::log(MySql)),
-            Dialect::Postgres => SchemaChangeLog::recorded_at(&Self::log(Postgres)),
-        };
+        let recorded_at = capture.call_duckdb(ChangeTime);
 
         if self.attach(changes).is_err() {
             return Ok(0);
@@ -204,22 +150,24 @@ impl Sink for DuckDb {
 
     fn model(
         &mut self,
-        dialect: Dialect,
+        capture: &Capture,
         statements: &TablePath,
         table: &TableId,
         window: &Window,
     ) -> Result<TableModel, Unbuildable> {
-        let read = match dialect {
-            Dialect::MySql => self.catalog(&Self::log(MySql), statements, table, window)?,
-            Dialect::Postgres => self.catalog(&Self::log(Postgres), statements, table, window)?,
-        };
+        let read = capture.call_duckdb(Catalog {
+            store: &self.store,
+            statements,
+            table,
+            window,
+        })?;
 
         read.ok_or_else(|| Unbuildable::UnknownTable(table.clone()))
     }
 
     fn snapshot(
         &mut self,
-        dialect: Dialect,
+        capture: &Capture,
         model: &TableModel,
         changes: &TablePath,
         into: &TablePath,
@@ -227,12 +175,12 @@ impl Sink for DuckDb {
     ) -> Result<(), Unbuildable> {
         self.attach(changes)?;
 
-        let statements = match dialect {
-            Dialect::MySql => Self::statements(&Self::log(MySql), model, changes, into, window)?,
-            Dialect::Postgres => {
-                Self::statements(&Self::log(Postgres), model, changes, into, window)?
-            }
-        };
+        let statements = capture.call_duckdb(SnapshotStatements {
+            model,
+            changes,
+            into,
+            window,
+        })?;
 
         self.connection.execute_batch(&format!(
             "CREATE SCHEMA IF NOT EXISTS {}",
@@ -279,6 +227,76 @@ impl From<&Value> for Cell {
             Value::Date32(days) => DuckDb::date(*days),
             read => Self::Read(format!("{read:?}")),
         }
+    }
+}
+
+struct ChangeTime;
+
+impl DuckDbLogFn for ChangeTime {
+    type Output = ColumnPath;
+
+    fn call<D>(self, log: Debezium<D>) -> Self::Output
+    where
+        D: Dialect,
+        DebeziumDdl<D::Source>: FromSql,
+    {
+        log.recorded_at()
+    }
+}
+
+struct Catalog<'a> {
+    store: &'a ObjectStore,
+    statements: &'a TablePath,
+    table: &'a TableId,
+    window: &'a Window,
+}
+
+impl DuckDbLogFn for Catalog<'_> {
+    type Output = Result<Option<TableModel>, Unbuildable>;
+
+    fn call<D>(self, log: Debezium<D>) -> Self::Output
+    where
+        D: Dialect,
+        DebeziumDdl<D::Source>: FromSql,
+    {
+        let mut catalog = CatalogModel::default();
+
+        self.store.client(self.statements)?.catalog::<Unbuildable>(
+            &log,
+            self.statements,
+            self.window,
+            &mut catalog,
+            &mut Bystander,
+        )?;
+
+        Ok(catalog.table(self.table).cloned())
+    }
+}
+
+struct SnapshotStatements<'a> {
+    model: &'a TableModel,
+    changes: &'a TablePath,
+    into: &'a TablePath,
+    window: &'a Window,
+}
+
+impl DuckDbLogFn for SnapshotStatements<'_> {
+    type Output = Result<Vec<String>, Unbuildable>;
+
+    fn call<D>(self, log: Debezium<D>) -> Self::Output
+    where
+        D: Dialect,
+        DebeziumDdl<D::Source>: FromSql,
+    {
+        Ok(Snapshot::new(
+            &log,
+            self.model.clone(),
+            self.changes.clone(),
+            self.into.clone(),
+            self.window.clone(),
+            Base::Captured,
+        )
+        .statements(&DuckDbWarehouse)?)
     }
 }
 
