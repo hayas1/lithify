@@ -2,19 +2,24 @@ use duckdb::types::{FromSql, Type};
 use duckdb::{Connection, Error, Statement};
 
 use event_replay_core::sink::{TablePath, Warehouse};
-use event_replay_core::source::{SchemaChangeStream, SchemaChanges, Streamed};
+use event_replay_core::source::{
+    RowChangeLog, SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed,
+};
 use event_replay_core::window::Window;
 
 use crate::sink::duckdb::DuckDbWarehouse;
-use crate::source::debezium::{Debezium, DebeziumDdl, Dialect};
 
 pub trait DuckDbLogFn {
     type Output;
 
-    fn call<D>(self, log: Debezium<D>) -> Self::Output
+    fn call_duckdb<L>(self, log: L) -> Self::Output
     where
-        D: Dialect,
-        DebeziumDdl<D::Source>: FromSql;
+        L: SchemaChangeLog + RowChangeLog,
+        L::Record: FromSql;
+}
+
+pub trait DuckDbCapture {
+    fn with_duckdb_log<F: DuckDbLogFn>(&self, f: F) -> F::Output;
 }
 
 pub struct DuckDbClient {
@@ -27,25 +32,26 @@ impl DuckDbClient {
     }
 }
 
-pub struct DuckDbSchemaChanges<'a, D> {
+pub struct DuckDbSchemaChanges<'a, L> {
     statement: Statement<'a>,
-    log: &'a Debezium<D>,
+    log: &'a L,
 }
 
-impl<D: Dialect> SchemaChanges<Debezium<D>> for DuckDbSchemaChanges<'_, D>
+impl<L> SchemaChanges<L> for DuckDbSchemaChanges<'_, L>
 where
-    DebeziumDdl<D::Source>: FromSql,
+    L: SchemaChangeLog,
+    L::Record: FromSql,
 {
     type Error = Error;
 
     fn stream(
         &mut self,
-    ) -> Result<impl Iterator<Item = Streamed<D::Position, Self::Error>>, Self::Error> {
+    ) -> Result<impl Iterator<Item = Streamed<L::Position, Self::Error>>, Self::Error> {
         let log = self.log;
 
         Ok(self
             .statement
-            .query_map([], |row| row.get::<_, DebeziumDdl<D::Source>>(0))?
+            .query_map([], |row| row.get::<_, L::Record>(0))?
             .map(move |statement| {
                 log.schema_change(statement?).map_err(|malformed| {
                     Error::FromSqlConversionFailure(0, Type::Any, Box::new(malformed))
@@ -54,19 +60,20 @@ where
     }
 }
 
-impl<D: Dialect> SchemaChangeStream<Debezium<D>> for DuckDbClient
+impl<L> SchemaChangeStream<L> for DuckDbClient
 where
-    DebeziumDdl<D::Source>: FromSql,
+    L: SchemaChangeLog,
+    L::Record: FromSql,
 {
     type Error = Error;
     type Changes<'a>
-        = DuckDbSchemaChanges<'a, D>
+        = DuckDbSchemaChanges<'a, L>
     where
-        D: 'a;
+        L: 'a;
 
     fn schema_changes<'a>(
         &'a self,
-        log: &'a Debezium<D>,
+        log: &'a L,
         table: &TablePath,
         window: &Window,
     ) -> Result<Self::Changes<'a>, Self::Error> {
@@ -81,9 +88,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::debezium::Debezium;
     use crate::source::debezium::mysql::MySql;
-    use event_replay_core::event::TableChange;
+    use event_replay_core::event::{MalformedEvent, SchemaChange, TableChange};
+    use event_replay_core::position::Position;
     use event_replay_core::position::RecordedAt;
+    use event_replay_core::source::ColumnPath;
 
     const CHANGE_LOG: &str = "CREATE SCHEMA mysql_shop_cdc;
         CREATE TABLE mysql_shop_cdc.mysql AS
@@ -180,5 +190,71 @@ mod tests {
         let changes = client.schema_changes(&log, &table(), &window(0, 1));
 
         assert!(changes.is_err());
+    }
+
+    #[derive(Debug, Clone, PartialEq, PartialOrd)]
+    struct Line(i64);
+
+    impl Position for Line {}
+
+    struct Ledger;
+
+    impl SchemaChangeLog for Ledger {
+        type Position = Line;
+        type Record = String;
+
+        fn envelope(&self) -> Option<ColumnPath> {
+            None
+        }
+
+        fn recorded_at(&self) -> ColumnPath {
+            ColumnPath::from("written")
+        }
+
+        fn ordering(&self) -> Vec<ColumnPath> {
+            vec![ColumnPath::from("line")]
+        }
+
+        fn schema_change(
+            &self,
+            statement: Self::Record,
+        ) -> Result<SchemaChange<Self::Position>, MalformedEvent> {
+            Ok(SchemaChange::new(
+                Line(0),
+                RecordedAt::from(0),
+                &statement,
+                Vec::new(),
+            ))
+        }
+    }
+
+    #[test]
+    fn a_change_log_of_any_format_is_streamed_by_the_record_it_reads() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE SCHEMA ledger;
+                 CREATE TABLE ledger.statements AS SELECT * FROM (VALUES
+                   ('DROP TABLE b', 2, 2),
+                   ('CREATE TABLE a (id bigint)', 1, 1)
+                 ) AS t(statement, line, written)",
+            )
+            .unwrap();
+        let client = DuckDbClient::new(connection);
+        let mut changes = client
+            .schema_changes(
+                &Ledger,
+                &TablePath::new("ledger", "statements"),
+                &window(0, 3),
+            )
+            .unwrap();
+
+        let statements: Vec<String> = changes
+            .stream()
+            .unwrap()
+            .map(|change| change.unwrap().statement().to_owned())
+            .collect();
+
+        assert_eq!(statements, ["CREATE TABLE a (id bigint)", "DROP TABLE b"]);
     }
 }

@@ -10,12 +10,11 @@ use event_replay_core::listener::{CatalogModel, OutOfOrder, SchemaChangeListener
 use event_replay_core::model::{TableId, TableModel};
 use event_replay_core::position::RecordedAt;
 use event_replay_core::sink::{TablePath, Warehouse};
-use event_replay_core::source::{ColumnPath, RowChangeLog, SchemaChangeStream};
+use event_replay_core::source::{ColumnPath, RowChangeLog, SchemaChangeLog, SchemaChangeStream};
 use event_replay_core::window::Window;
 use event_replay_protocol::DuckDbWarehouse;
-use event_replay_protocol::sink::duckdb::client::DuckDbLogFn;
+use event_replay_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbLogFn};
 use event_replay_protocol::sink::duckdb::store::ObjectStore;
-use event_replay_protocol::source::debezium::{Debezium, DebeziumDdl, Dialect};
 use event_replay_strategy::snapshot::{Base, Snapshot};
 
 use crate::row::{Cell, Row, Rows};
@@ -128,7 +127,7 @@ impl Sink for DuckDb {
         capture: &Capture,
         at: RecordedAt,
     ) -> Result<u64, Unbuildable> {
-        let recorded_at = capture.call_duckdb(ChangeTime);
+        let recorded_at = capture.with_duckdb_log(ChangeTime);
 
         if self.attach(changes).is_err() {
             return Ok(0);
@@ -155,7 +154,7 @@ impl Sink for DuckDb {
         table: &TableId,
         window: &Window,
     ) -> Result<TableModel, Unbuildable> {
-        let read = capture.call_duckdb(Catalog {
+        let read = capture.with_duckdb_log(Catalog {
             store: &self.store,
             statements,
             table,
@@ -175,7 +174,7 @@ impl Sink for DuckDb {
     ) -> Result<(), Unbuildable> {
         self.attach(changes)?;
 
-        let statements = capture.call_duckdb(SnapshotStatements {
+        let statements = capture.with_duckdb_log(SnapshotStatements {
             model,
             changes,
             into,
@@ -235,12 +234,12 @@ struct ChangeTime;
 impl DuckDbLogFn for ChangeTime {
     type Output = ColumnPath;
 
-    fn call<D>(self, log: Debezium<D>) -> Self::Output
+    fn call_duckdb<L>(self, log: L) -> Self::Output
     where
-        D: Dialect,
-        DebeziumDdl<D::Source>: FromSql,
+        L: SchemaChangeLog + RowChangeLog,
+        L::Record: FromSql,
     {
-        log.recorded_at()
+        RowChangeLog::recorded_at(&log)
     }
 }
 
@@ -254,10 +253,10 @@ struct Catalog<'a> {
 impl DuckDbLogFn for Catalog<'_> {
     type Output = Result<Option<TableModel>, Unbuildable>;
 
-    fn call<D>(self, log: Debezium<D>) -> Self::Output
+    fn call_duckdb<L>(self, log: L) -> Self::Output
     where
-        D: Dialect,
-        DebeziumDdl<D::Source>: FromSql,
+        L: SchemaChangeLog + RowChangeLog,
+        L::Record: FromSql,
     {
         let mut catalog = CatalogModel::default();
 
@@ -283,10 +282,10 @@ struct SnapshotStatements<'a> {
 impl DuckDbLogFn for SnapshotStatements<'_> {
     type Output = Result<Vec<String>, Unbuildable>;
 
-    fn call<D>(self, log: Debezium<D>) -> Self::Output
+    fn call_duckdb<L>(self, log: L) -> Self::Output
     where
-        D: Dialect,
-        DebeziumDdl<D::Source>: FromSql,
+        L: SchemaChangeLog + RowChangeLog,
+        L::Record: FromSql,
     {
         Ok(Snapshot::new(
             &log,

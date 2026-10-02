@@ -4,12 +4,15 @@ use event_replay_config::Pipeline;
 use event_replay_config::infra::{Sink, Source};
 use event_replay_core::listener::CatalogModel;
 use event_replay_core::sink::TablePath;
-use event_replay_core::source::SchemaChangeStream;
+use event_replay_core::source::{RowChangeLog, SchemaChangeLog, SchemaChangeStream};
 use event_replay_core::window::Window;
-use event_replay_protocol::sink::bigquery::client::{BigQueryClient, BigQueryLogFn};
-use event_replay_protocol::sink::duckdb::client::{DuckDbClient, DuckDbLogFn};
+use event_replay_protocol::sink::bigquery::client::{
+    BigQueryCapture, BigQueryClient, BigQueryLogFn,
+};
+use event_replay_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbClient, DuckDbLogFn};
 use event_replay_protocol::sink::duckdb::store::ObjectStore;
-use event_replay_protocol::source::debezium::{Debezium, DebeziumDdl, Dialect};
+use google_cloud_bigquery::error::RowError;
+use google_cloud_bigquery::query::Row;
 
 use crate::credential::Credential;
 use crate::journal::Journal;
@@ -96,7 +99,7 @@ impl Run {
 
         source
             .capture()
-            .call_duckdb(Catalog::new(&client, table, &self.window, journal))
+            .with_duckdb_log(Catalog::new(&client, table, &self.window, journal))
     }
 
     fn read_bigquery(
@@ -108,7 +111,7 @@ impl Run {
     ) -> Result<(), Unreplayable> {
         source
             .capture()
-            .call_bigquery(Catalog::new(client, table, &self.window, journal))
+            .with_bigquery_log(Catalog::new(client, table, &self.window, journal))
     }
 
     fn sinks<'a>(
@@ -156,10 +159,10 @@ impl<'a, C> Catalog<'a, C> {
 impl DuckDbLogFn for Catalog<'_, DuckDbClient> {
     type Output = Result<(), Unreplayable>;
 
-    fn call<D>(self, log: Debezium<D>) -> Self::Output
+    fn call_duckdb<L>(self, log: L) -> Self::Output
     where
-        D: Dialect,
-        DebeziumDdl<D::Source>: duckdb::types::FromSql,
+        L: SchemaChangeLog + RowChangeLog,
+        L::Record: duckdb::types::FromSql,
     {
         self.client.catalog(
             &log,
@@ -174,10 +177,10 @@ impl DuckDbLogFn for Catalog<'_, DuckDbClient> {
 impl BigQueryLogFn for Catalog<'_, BigQueryClient> {
     type Output = Result<(), Unreplayable>;
 
-    fn call<D>(self, log: Debezium<D>) -> Self::Output
+    fn call_bigquery<L>(self, log: L) -> Self::Output
     where
-        D: Dialect,
-        D::Source: google_cloud_bigquery::query::FromSql,
+        L: SchemaChangeLog + RowChangeLog,
+        L::Record: TryFrom<Row, Error = RowError>,
     {
         self.client.catalog(
             &log,

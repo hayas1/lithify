@@ -3,26 +3,31 @@ use std::fmt::{self, Display, Formatter};
 use google_cloud_auth::credentials::anonymous;
 use google_cloud_bigquery::client::BigQuery;
 use google_cloud_bigquery::error::{QueryError, RowError};
-use google_cloud_bigquery::query::FromSql;
+use google_cloud_bigquery::query::Row;
 use google_cloud_gax::client_builder;
 use tokio::runtime::Runtime;
 
 use event_replay_core::event::MalformedEvent;
 use event_replay_core::sink::{TablePath, Warehouse};
-use event_replay_core::source::{SchemaChangeStream, SchemaChanges, Streamed};
+use event_replay_core::source::{
+    RowChangeLog, SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed,
+};
 use event_replay_core::window::Window;
 
 use crate::sink::bigquery::BigQueryWarehouse;
 use crate::sink::bigquery::config::{Config, Credentials};
-use crate::source::debezium::{Debezium, DebeziumDdl, Dialect};
 
 pub trait BigQueryLogFn {
     type Output;
 
-    fn call<D>(self, log: Debezium<D>) -> Self::Output
+    fn call_bigquery<L>(self, log: L) -> Self::Output
     where
-        D: Dialect,
-        D::Source: FromSql;
+        L: SchemaChangeLog + RowChangeLog,
+        L::Record: TryFrom<Row, Error = RowError>;
+}
+
+pub trait BigQueryCapture {
+    fn with_bigquery_log<F: BigQueryLogFn>(&self, f: F) -> F::Output;
 }
 
 pub struct BigQueryClient {
@@ -52,58 +57,61 @@ impl BigQueryClient {
         })
     }
 
-    fn statements<S: FromSql>(&self, query: &str) -> Result<Vec<DebeziumDdl<S>>, Unqueryable> {
+    fn records<R>(&self, query: &str) -> Result<Vec<R>, Unqueryable>
+    where
+        R: TryFrom<Row, Error = RowError>,
+    {
         self.runtime.block_on(async {
             let mut read = self.client.query(query).until_done().await?.read();
-            let mut statements = Vec::new();
+            let mut records = Vec::new();
 
             while let Some(row) = read.next().await.transpose()? {
-                statements.push(DebeziumDdl::try_from(row)?);
+                records.push(R::try_from(row)?);
             }
 
-            Ok(statements)
+            Ok(records)
         })
     }
 }
 
-pub struct BigQuerySchemaChanges<'a, D: Dialect> {
-    statements: Vec<DebeziumDdl<D::Source>>,
-    log: &'a Debezium<D>,
+pub struct BigQuerySchemaChanges<'a, L: SchemaChangeLog> {
+    records: Vec<L::Record>,
+    log: &'a L,
 }
 
-impl<D: Dialect> SchemaChanges<Debezium<D>> for BigQuerySchemaChanges<'_, D> {
+impl<L: SchemaChangeLog> SchemaChanges<L> for BigQuerySchemaChanges<'_, L> {
     type Error = Unqueryable;
 
     fn stream(
         &mut self,
-    ) -> Result<impl Iterator<Item = Streamed<D::Position, Self::Error>>, Self::Error> {
+    ) -> Result<impl Iterator<Item = Streamed<L::Position, Self::Error>>, Self::Error> {
         let log = self.log;
 
-        Ok(std::mem::take(&mut self.statements)
+        Ok(std::mem::take(&mut self.records)
             .into_iter()
-            .map(move |statement| log.schema_change(statement).map_err(Unqueryable::Malformed)))
+            .map(move |record| log.schema_change(record).map_err(Unqueryable::Malformed)))
     }
 }
 
-impl<D: Dialect> SchemaChangeStream<Debezium<D>> for BigQueryClient
+impl<L> SchemaChangeStream<L> for BigQueryClient
 where
-    D::Source: FromSql,
+    L: SchemaChangeLog,
+    L::Record: TryFrom<Row, Error = RowError>,
 {
     type Error = Unqueryable;
     type Changes<'a>
-        = BigQuerySchemaChanges<'a, D>
+        = BigQuerySchemaChanges<'a, L>
     where
-        D: 'a;
+        L: 'a;
 
     fn schema_changes<'a>(
         &'a self,
-        log: &'a Debezium<D>,
+        log: &'a L,
         table: &TablePath,
         window: &Window,
     ) -> Result<Self::Changes<'a>, Self::Error> {
         Ok(BigQuerySchemaChanges {
-            statements: self
-                .statements(&self.warehouse.select_schema_changes(log, table, window))?,
+            records: self.records(&self.warehouse.select_schema_changes(log, table, window))?,
             log,
         })
     }

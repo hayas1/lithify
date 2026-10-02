@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "bigquery")]
-use crate::sink::bigquery::client::BigQueryLogFn;
+use crate::sink::bigquery::client::{BigQueryCapture, BigQueryLogFn};
 #[cfg(feature = "duckdb")]
-use crate::sink::duckdb::client::DuckDbLogFn;
+use crate::sink::duckdb::client::{DuckDbCapture, DuckDbLogFn};
 #[cfg(any(feature = "bigquery", feature = "duckdb"))]
 use crate::source::debezium::Debezium;
 #[cfg(any(feature = "bigquery", feature = "duckdb"))]
@@ -34,20 +34,34 @@ pub enum Dialect {
     Postgres,
 }
 
+#[cfg(feature = "duckdb")]
+impl DuckDbCapture for Config {
+    fn with_duckdb_log<F: DuckDbLogFn>(&self, f: F) -> F::Output {
+        self.dialect.with_duckdb_log(f)
+    }
+}
+
+#[cfg(feature = "bigquery")]
+impl BigQueryCapture for Config {
+    fn with_bigquery_log<F: BigQueryLogFn>(&self, f: F) -> F::Output {
+        self.dialect.with_bigquery_log(f)
+    }
+}
+
 impl Dialect {
     #[cfg(feature = "duckdb")]
-    pub fn call_duckdb<F: DuckDbLogFn>(self, f: F) -> F::Output {
+    fn with_duckdb_log<F: DuckDbLogFn>(self, f: F) -> F::Output {
         match self {
-            Self::MySql => f.call(Debezium::under("value", MySql)),
-            Self::Postgres => f.call(Debezium::under("value", Postgres)),
+            Self::MySql => f.call_duckdb(Debezium::under("value", MySql)),
+            Self::Postgres => f.call_duckdb(Debezium::under("value", Postgres)),
         }
     }
 
     #[cfg(feature = "bigquery")]
-    pub fn call_bigquery<F: BigQueryLogFn>(self, f: F) -> F::Output {
+    fn with_bigquery_log<F: BigQueryLogFn>(self, f: F) -> F::Output {
         match self {
-            Self::MySql => f.call(Debezium::new(MySql)),
-            Self::Postgres => f.call(Debezium::new(Postgres)),
+            Self::MySql => f.call_bigquery(Debezium::new(MySql)),
+            Self::Postgres => f.call_bigquery(Debezium::new(Postgres)),
         }
     }
 }
@@ -56,11 +70,7 @@ impl Dialect {
 mod tests {
     use super::*;
     #[cfg(any(feature = "bigquery", feature = "duckdb"))]
-    use crate::source::debezium;
-    #[cfg(feature = "duckdb")]
-    use crate::source::debezium::DebeziumDdl;
-    #[cfg(any(feature = "bigquery", feature = "duckdb"))]
-    use event_replay_core::source::{ColumnPath, SchemaChangeLog};
+    use event_replay_core::source::{ColumnPath, RowChangeLog, SchemaChangeLog};
 
     #[test]
     fn a_source_says_which_dialect_debezium_reads_it_as() {
@@ -78,26 +88,26 @@ mod tests {
         impl DuckDbLogFn for Probe {
             type Output = (&'static str, Option<ColumnPath>);
 
-            fn call<D>(self, log: Debezium<D>) -> Self::Output
+            fn call_duckdb<L>(self, log: L) -> Self::Output
             where
-                D: debezium::Dialect,
-                DebeziumDdl<D::Source>: duckdb::types::FromSql,
+                L: SchemaChangeLog + RowChangeLog,
+                L::Record: duckdb::types::FromSql,
             {
-                (std::any::type_name::<D>(), log.envelope())
+                (std::any::type_name::<L>(), log.envelope())
             }
         }
 
         assert_eq!(
-            Dialect::MySql.call_duckdb(Probe),
+            Config::of(Dialect::MySql).with_duckdb_log(Probe),
             (
-                std::any::type_name::<MySql>(),
+                std::any::type_name::<Debezium<MySql>>(),
                 Some(ColumnPath::from("value"))
             )
         );
         assert_eq!(
-            Dialect::Postgres.call_duckdb(Probe),
+            Config::of(Dialect::Postgres).with_duckdb_log(Probe),
             (
-                std::any::type_name::<Postgres>(),
+                std::any::type_name::<Debezium<Postgres>>(),
                 Some(ColumnPath::from("value"))
             )
         );
@@ -111,22 +121,25 @@ mod tests {
         impl BigQueryLogFn for Probe {
             type Output = (&'static str, Option<ColumnPath>);
 
-            fn call<D>(self, log: Debezium<D>) -> Self::Output
+            fn call_bigquery<L>(self, log: L) -> Self::Output
             where
-                D: debezium::Dialect,
-                D::Source: google_cloud_bigquery::query::FromSql,
+                L: SchemaChangeLog + RowChangeLog,
+                L::Record: TryFrom<
+                        google_cloud_bigquery::query::Row,
+                        Error = google_cloud_bigquery::error::RowError,
+                    >,
             {
-                (std::any::type_name::<D>(), log.envelope())
+                (std::any::type_name::<L>(), log.envelope())
             }
         }
 
         assert_eq!(
-            Dialect::MySql.call_bigquery(Probe),
-            (std::any::type_name::<MySql>(), None)
+            Config::of(Dialect::MySql).with_bigquery_log(Probe),
+            (std::any::type_name::<Debezium<MySql>>(), None)
         );
         assert_eq!(
-            Dialect::Postgres.call_bigquery(Probe),
-            (std::any::type_name::<Postgres>(), None)
+            Config::of(Dialect::Postgres).with_bigquery_log(Probe),
+            (std::any::type_name::<Debezium<Postgres>>(), None)
         );
     }
 

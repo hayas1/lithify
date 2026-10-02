@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::event::SchemaChange;
+use crate::event::{MalformedEvent, SchemaChange};
 use crate::listener::{CatalogModel, OutOfOrder, SchemaChangeListener};
 use crate::position::Position;
 use crate::sink::TablePath;
@@ -33,6 +33,12 @@ pub trait CdcFormat {
 
 pub trait SchemaChangeLog {
     type Position: Position;
+    type Record;
+
+    fn schema_change(
+        &self,
+        record: Self::Record,
+    ) -> Result<SchemaChange<Self::Position>, MalformedEvent>;
 
     fn envelope(&self) -> Option<ColumnPath>;
 

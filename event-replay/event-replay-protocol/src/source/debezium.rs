@@ -82,24 +82,6 @@ pub struct Debezium<D> {
 }
 
 impl<D: Dialect> Debezium<D> {
-    pub fn schema_change(
-        &self,
-        statement: DebeziumDdl<D::Source>,
-    ) -> Result<SchemaChange<D::Position>, MalformedEvent> {
-        let tables = statement
-            .table_changes
-            .into_iter()
-            .map(|change| self.table_change(change))
-            .collect::<Result<_, _>>()?;
-
-        Ok(SchemaChange::new(
-            self.dialect.position(&statement.source),
-            RecordedAt::from(statement.ts_ms),
-            &statement.ddl,
-            tables,
-        ))
-    }
-
     pub fn new(dialect: D) -> Self {
         Self {
             dialect,
@@ -194,6 +176,25 @@ where
 
 impl<D: Dialect> SchemaChangeLog for Debezium<D> {
     type Position = D::Position;
+    type Record = DebeziumDdl<D::Source>;
+
+    fn schema_change(
+        &self,
+        statement: Self::Record,
+    ) -> Result<SchemaChange<Self::Position>, MalformedEvent> {
+        let tables = statement
+            .table_changes
+            .into_iter()
+            .map(|change| self.table_change(change))
+            .collect::<Result<_, _>>()?;
+
+        Ok(SchemaChange::new(
+            self.dialect.position(&statement.source),
+            RecordedAt::from(statement.ts_ms),
+            &statement.ddl,
+            tables,
+        ))
+    }
 
     fn envelope(&self) -> Option<ColumnPath> {
         self.envelope.clone()
