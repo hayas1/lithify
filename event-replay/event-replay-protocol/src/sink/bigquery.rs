@@ -31,11 +31,18 @@ impl Warehouse for BigQueryWarehouse {
         format!("`{name}`")
     }
 
+    fn namespace_ref(&self, namespace: &str) -> String {
+        format!(
+            "{}.{}",
+            self.identifier(&self.project),
+            self.identifier(namespace)
+        )
+    }
+
     fn table_ref(&self, table: &TablePath) -> String {
         format!(
-            "{}.{}.{}",
-            self.identifier(&self.project),
-            self.identifier(table.namespace()),
+            "{}.{}",
+            self.namespace_ref(table.namespace()),
             self.identifier(table.name())
         )
     }
@@ -198,6 +205,14 @@ mod tests {
                 "WHERE `ts_ms` >= 0 AND `ts_ms` < 10\n",
                 "ORDER BY `source`.`file`, `source`.`pos`",
             )
+        );
+    }
+
+    #[test]
+    fn a_namespace_is_made_within_the_project_of_the_warehouse() {
+        assert_eq!(
+            bigquery().create_namespace("mysql_shop"),
+            "CREATE SCHEMA IF NOT EXISTS `local-project`.`mysql_shop`"
         );
     }
 }

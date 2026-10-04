@@ -60,8 +60,8 @@ impl ObjectStore {
 
     fn view(&self, table: &TablePath) -> String {
         format!(
-            "CREATE SCHEMA IF NOT EXISTS {};\nCREATE OR REPLACE VIEW {} AS SELECT * FROM {}",
-            DuckDbWarehouse.identifier(table.namespace()),
+            "{};\nCREATE OR REPLACE VIEW {} AS SELECT * FROM {}",
+            DuckDbWarehouse.create_namespace(table.namespace()),
             DuckDbWarehouse.table_ref(table),
             self.scan(table),
         )

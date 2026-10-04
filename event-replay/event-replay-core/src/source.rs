@@ -58,6 +58,16 @@ pub trait RowChangeLog: ChangeLog {
     fn after(&self) -> ColumnPath;
 }
 
+pub trait ChangeLogs {
+    type Position: Position;
+    type Schema: SchemaChangeLog<Position = Self::Position>;
+    type Row: RowChangeLog<Position = Self::Position>;
+
+    fn schema_changes(&self) -> &Self::Schema;
+
+    fn row_changes(&self) -> &Self::Row;
+}
+
 pub trait SchemaChangeStream<L: SchemaChangeLog> {
     type Error: std::error::Error;
     type Changes<'a>: SchemaChanges<L, Error = Self::Error>

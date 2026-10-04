@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "bigquery")]
-use crate::sink::bigquery::client::{BigQueryCapture, BigQuerySchemaLogFn};
+use crate::sink::bigquery::client::{BigQueryCapture, BigQueryChangeLogsFn};
 #[cfg(feature = "duckdb")]
-use crate::sink::duckdb::client::{DuckDbCapture, DuckDbSchemaLogFn};
+use crate::sink::duckdb::client::{DuckDbCapture, DuckDbChangeLogsFn};
 #[cfg(any(feature = "bigquery", feature = "duckdb"))]
 use crate::source::debezium::Debezium;
 #[cfg(any(feature = "bigquery", feature = "duckdb"))]
@@ -41,23 +41,23 @@ pub enum Dialect {
 
 #[cfg(feature = "duckdb")]
 impl DuckDbCapture for Config {
-    fn with_duckdb_schema_log<F: DuckDbSchemaLogFn>(&self, f: F) -> F::Output {
+    fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(&self, f: F) -> F::Output {
         self.dialect
-            .with_duckdb_schema_log(Self::DUCKDB_ENVELOPE, f)
+            .with_duckdb_change_logs(Self::DUCKDB_ENVELOPE, f)
     }
 }
 
 #[cfg(feature = "bigquery")]
 impl BigQueryCapture for Config {
-    fn with_bigquery_schema_log<F: BigQuerySchemaLogFn>(&self, f: F) -> F::Output {
+    fn with_bigquery_change_logs<F: BigQueryChangeLogsFn>(&self, f: F) -> F::Output {
         self.dialect
-            .with_bigquery_schema_log(Self::BIGQUERY_ENVELOPE, f)
+            .with_bigquery_change_logs(Self::BIGQUERY_ENVELOPE, f)
     }
 }
 
 impl Dialect {
     #[cfg(feature = "duckdb")]
-    fn with_duckdb_schema_log<F: DuckDbSchemaLogFn>(
+    fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(
         self,
         envelope: Option<&str>,
         f: F,
@@ -69,7 +69,7 @@ impl Dialect {
     }
 
     #[cfg(feature = "bigquery")]
-    fn with_bigquery_schema_log<F: BigQuerySchemaLogFn>(
+    fn with_bigquery_change_logs<F: BigQueryChangeLogsFn>(
         self,
         envelope: Option<&str>,
         f: F,
@@ -85,7 +85,19 @@ impl Dialect {
 mod tests {
     use super::*;
     #[cfg(any(feature = "bigquery", feature = "duckdb"))]
-    use event_replay_core::source::{ColumnPath, SchemaChangeLog};
+    use event_replay_core::source::{ChangeLog, ChangeLogs, ColumnPath, SchemaChangeLog};
+
+    #[cfg(any(feature = "bigquery", feature = "duckdb"))]
+    type Probed = (&'static str, Option<ColumnPath>, Option<ColumnPath>);
+
+    #[cfg(any(feature = "bigquery", feature = "duckdb"))]
+    fn probe<C: ChangeLogs>(logs: C) -> Probed {
+        (
+            std::any::type_name::<C>(),
+            logs.schema_changes().envelope(),
+            logs.row_changes().envelope(),
+        )
+    }
 
     #[test]
     fn a_source_says_which_dialect_debezium_reads_it_as() {
@@ -97,65 +109,68 @@ mod tests {
 
     #[cfg(feature = "duckdb")]
     #[test]
-    fn a_duckdb_schema_log_fn_is_called_with_the_log_of_the_dialect_under_the_value_of_each_record()
-    {
+    fn a_duckdb_fn_is_called_with_the_logs_of_the_dialect_under_the_value_of_each_record() {
         struct Probe;
 
-        impl DuckDbSchemaLogFn for Probe {
-            type Output = (&'static str, Option<ColumnPath>);
+        impl DuckDbChangeLogsFn for Probe {
+            type Output = Probed;
 
-            fn call_duckdb<L>(self, log: L) -> Self::Output
+            fn call_duckdb<C>(self, logs: C) -> Self::Output
             where
-                L: SchemaChangeLog,
-                L::Record: duckdb::types::FromSql,
+                C: ChangeLogs,
+                <C::Schema as SchemaChangeLog>::Record: duckdb::types::FromSql,
             {
-                (std::any::type_name::<L>(), log.envelope())
+                probe(logs)
             }
         }
 
+        let value = Some(ColumnPath::from("value"));
+
         assert_eq!(
-            Config::of(Dialect::MySql).with_duckdb_schema_log(Probe),
+            Config::of(Dialect::MySql).with_duckdb_change_logs(Probe),
             (
                 std::any::type_name::<Debezium<MySql>>(),
-                Some(ColumnPath::from("value"))
+                value.clone(),
+                value.clone()
             )
         );
         assert_eq!(
-            Config::of(Dialect::Postgres).with_duckdb_schema_log(Probe),
+            Config::of(Dialect::Postgres).with_duckdb_change_logs(Probe),
             (
                 std::any::type_name::<Debezium<Postgres>>(),
-                Some(ColumnPath::from("value"))
+                value.clone(),
+                value
             )
         );
     }
 
     #[cfg(feature = "bigquery")]
     #[test]
-    fn a_bigquery_schema_log_fn_is_called_with_the_log_of_the_dialect_at_the_top_of_each_row() {
+    fn a_bigquery_fn_is_called_with_the_logs_of_the_dialect_at_the_top_of_each_row() {
         struct Probe;
 
-        impl BigQuerySchemaLogFn for Probe {
-            type Output = (&'static str, Option<ColumnPath>);
+        impl BigQueryChangeLogsFn for Probe {
+            type Output = Probed;
 
-            fn call_bigquery<L>(self, log: L) -> Self::Output
+            fn call_bigquery<C>(self, logs: C) -> Self::Output
             where
-                L: SchemaChangeLog,
-                L::Record: TryFrom<
+                C: ChangeLogs,
+                <C::Schema as SchemaChangeLog>::Record: TryFrom<
                         google_cloud_bigquery::query::Row,
                         Error = google_cloud_bigquery::error::RowError,
                     >,
             {
-                (std::any::type_name::<L>(), log.envelope())
+                probe(logs)
             }
         }
 
         assert_eq!(
-            Config::of(Dialect::MySql).with_bigquery_schema_log(Probe),
-            (std::any::type_name::<Debezium<MySql>>(), None)
+            Config::of(Dialect::MySql).with_bigquery_change_logs(Probe),
+            (std::any::type_name::<Debezium<MySql>>(), None, None)
         );
         assert_eq!(
-            Config::of(Dialect::Postgres).with_bigquery_schema_log(Probe),
-            (std::any::type_name::<Debezium<Postgres>>(), None)
+            Config::of(Dialect::Postgres).with_bigquery_change_logs(Probe),
+            (std::any::type_name::<Debezium<Postgres>>(), None, None)
         );
     }
 

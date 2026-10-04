@@ -9,7 +9,9 @@ use serde_json::Value;
 use event_replay_core::event::{MalformedEvent, SchemaChange, TableChange};
 use event_replay_core::model::{ColumnModel, ColumnType, TableId, TableModel};
 use event_replay_core::position::{Position, RecordedAt};
-use event_replay_core::source::{CdcFormat, ChangeLog, ColumnPath, RowChangeLog, SchemaChangeLog};
+use event_replay_core::source::{
+    CdcFormat, ChangeLog, ChangeLogs, ColumnPath, RowChangeLog, SchemaChangeLog,
+};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DebeziumFormat;
@@ -188,6 +190,20 @@ impl<D: Dialect> ChangeLog for Debezium<D> {
 
     fn ordering(&self) -> Vec<ColumnPath> {
         self.ordered()
+    }
+}
+
+impl<D: Dialect> ChangeLogs for Debezium<D> {
+    type Position = D::Position;
+    type Schema = Self;
+    type Row = Self;
+
+    fn schema_changes(&self) -> &Self::Schema {
+        self
+    }
+
+    fn row_changes(&self) -> &Self::Row {
+        self
     }
 }
 

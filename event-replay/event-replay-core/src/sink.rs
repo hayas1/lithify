@@ -67,12 +67,23 @@ pub trait Warehouse {
 
     fn identifier(&self, name: &str) -> String;
 
+    fn namespace_ref(&self, namespace: &str) -> String {
+        self.identifier(namespace)
+    }
+
     fn table_ref(&self, table: &TablePath) -> String;
 
     fn column_type(&self, column_type: &ColumnType) -> Result<String, UnsupportedColumn>;
 
     fn read(&self, expression: &str, column_type: &ColumnType)
     -> Result<String, UnsupportedColumn>;
+
+    fn create_namespace(&self, namespace: &str) -> String {
+        format!(
+            "CREATE SCHEMA IF NOT EXISTS {}",
+            self.namespace_ref(namespace)
+        )
+    }
 
     fn path(&self, path: &ColumnPath) -> String {
         path.parts()

@@ -4,12 +4,12 @@ use event_replay_config::Pipeline;
 use event_replay_config::infra::{Sink, Source};
 use event_replay_core::listener::CatalogModel;
 use event_replay_core::sink::TablePath;
-use event_replay_core::source::{SchemaChangeLog, SchemaChangeStream};
+use event_replay_core::source::{ChangeLogs, SchemaChangeLog, SchemaChangeStream};
 use event_replay_core::window::Window;
 use event_replay_protocol::sink::bigquery::client::{
-    BigQueryCapture, BigQueryClient, BigQuerySchemaLogFn,
+    BigQueryCapture, BigQueryChangeLogsFn, BigQueryClient,
 };
-use event_replay_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbClient, DuckDbSchemaLogFn};
+use event_replay_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbChangeLogsFn};
 use event_replay_protocol::sink::duckdb::store::ObjectStore;
 use google_cloud_bigquery::error::RowError;
 use google_cloud_bigquery::query::Row;
@@ -17,6 +17,7 @@ use google_cloud_bigquery::query::Row;
 use crate::credential::Credential;
 use crate::journal::Journal;
 use crate::pipeline::{Capture, Warehouse};
+use crate::replay::DuckDbReplay;
 use crate::unreplayable::Unreplayable;
 
 pub struct Run {
@@ -95,11 +96,9 @@ impl Run {
         source: &Source<Capture>,
         journal: &mut Journal,
     ) -> Result<(), Unreplayable> {
-        let client = store.client(table)?;
-
         source
             .capture()
-            .with_duckdb_schema_log(Catalog::new(&client, table, &self.window, journal))
+            .with_duckdb_change_logs(Catalog::new(store, table, &self.window, journal))
     }
 
     fn read_bigquery(
@@ -109,7 +108,7 @@ impl Run {
         source: &Source<Capture>,
         journal: &mut Journal,
     ) -> Result<(), Unreplayable> {
-        source.capture().with_bigquery_schema_log(Catalog::new(
+        source.capture().with_bigquery_change_logs(Catalog::new(
             client,
             table,
             &self.window,
@@ -137,7 +136,7 @@ impl Run {
 }
 
 struct Catalog<'a, C> {
-    client: &'a C,
+    reader: &'a C,
     table: &'a TablePath,
     window: &'a Window,
     journal: &'a mut Journal,
@@ -145,13 +144,13 @@ struct Catalog<'a, C> {
 
 impl<'a, C> Catalog<'a, C> {
     fn new(
-        client: &'a C,
+        reader: &'a C,
         table: &'a TablePath,
         window: &'a Window,
         journal: &'a mut Journal,
     ) -> Self {
         Self {
-            client,
+            reader,
             table,
             window,
             journal,
@@ -159,34 +158,30 @@ impl<'a, C> Catalog<'a, C> {
     }
 }
 
-impl DuckDbSchemaLogFn for Catalog<'_, DuckDbClient> {
+impl DuckDbChangeLogsFn for Catalog<'_, ObjectStore> {
     type Output = Result<(), Unreplayable>;
 
-    fn call_duckdb<L>(self, log: L) -> Self::Output
+    fn call_duckdb<C>(self, logs: C) -> Self::Output
     where
-        L: SchemaChangeLog,
-        L::Record: duckdb::types::FromSql,
+        C: ChangeLogs,
+        <C::Schema as SchemaChangeLog>::Record: duckdb::types::FromSql,
     {
-        self.client.catalog(
-            &log,
-            self.table,
-            self.window,
-            &mut CatalogModel::default(),
-            self.journal,
-        )
+        DuckDbReplay::new(self.reader, logs).catalog(self.table, self.window, self.journal)?;
+
+        Ok(())
     }
 }
 
-impl BigQuerySchemaLogFn for Catalog<'_, BigQueryClient> {
+impl BigQueryChangeLogsFn for Catalog<'_, BigQueryClient> {
     type Output = Result<(), Unreplayable>;
 
-    fn call_bigquery<L>(self, log: L) -> Self::Output
+    fn call_bigquery<C>(self, logs: C) -> Self::Output
     where
-        L: SchemaChangeLog,
-        L::Record: TryFrom<Row, Error = RowError>,
+        C: ChangeLogs,
+        <C::Schema as SchemaChangeLog>::Record: TryFrom<Row, Error = RowError>,
     {
-        self.client.catalog(
-            &log,
+        self.reader.catalog(
+            logs.schema_changes(),
             self.table,
             self.window,
             &mut CatalogModel::default(),

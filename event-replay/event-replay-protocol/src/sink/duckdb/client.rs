@@ -2,22 +2,24 @@ use duckdb::types::{FromSql, Type};
 use duckdb::{Connection, Error, Statement};
 
 use event_replay_core::sink::{TablePath, Warehouse};
-use event_replay_core::source::{SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed};
+use event_replay_core::source::{
+    ChangeLogs, SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed,
+};
 use event_replay_core::window::Window;
 
 use crate::sink::duckdb::DuckDbWarehouse;
 
-pub trait DuckDbSchemaLogFn {
+pub trait DuckDbChangeLogsFn {
     type Output;
 
-    fn call_duckdb<L>(self, log: L) -> Self::Output
+    fn call_duckdb<C>(self, logs: C) -> Self::Output
     where
-        L: SchemaChangeLog,
-        L::Record: FromSql;
+        C: ChangeLogs,
+        <C::Schema as SchemaChangeLog>::Record: FromSql;
 }
 
 pub trait DuckDbCapture {
-    fn with_duckdb_schema_log<F: DuckDbSchemaLogFn>(&self, f: F) -> F::Output;
+    fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(&self, f: F) -> F::Output;
 }
 
 pub struct DuckDbClient {

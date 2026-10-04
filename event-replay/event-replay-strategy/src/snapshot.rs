@@ -221,7 +221,10 @@ impl<'a, L: RowChangeLog> Snapshot<'a, L> {
 
 impl<L: RowChangeLog> Artifact for Snapshot<'_, L> {
     fn statements(&self, warehouse: &impl Warehouse) -> Result<Vec<String>, UnbuildableArtifact> {
-        Ok(vec![self.create_table(warehouse)?])
+        Ok(vec![
+            warehouse.create_namespace(self.target.namespace()),
+            self.create_table(warehouse)?,
+        ])
     }
 }
 
@@ -342,11 +345,18 @@ mod tests {
     }
 
     #[test]
+    fn a_snapshot_is_built_into_a_namespace_made_for_it() {
+        let statements = snapshot(Base::Captured).statements(&Engine).unwrap();
+
+        assert_eq!(statements[0], "CREATE SCHEMA IF NOT EXISTS \"mysql_shop\"");
+    }
+
+    #[test]
     fn a_first_snapshot_folds_the_window_onto_what_the_capture_read() {
         let statements = snapshot(Base::Captured).statements(&Engine).unwrap();
 
         assert_eq!(
-            statements[0],
+            statements[1],
             concat!(
                 "CREATE OR REPLACE TABLE \"mysql_shop\".\"customers_20260920\" AS\n",
                 "WITH \"base\" AS (\n",
@@ -392,7 +402,7 @@ mod tests {
 
         let statements = snapshot(base).statements(&Engine).unwrap();
 
-        assert!(statements[0].starts_with(concat!(
+        assert!(statements[1].starts_with(concat!(
             "CREATE OR REPLACE TABLE \"mysql_shop\".\"customers_20260920\" AS\n",
             "WITH \"base\" AS (\n",
             "  SELECT *\n",
@@ -406,7 +416,7 @@ mod tests {
     fn a_key_the_window_changed_is_taken_from_the_window_instead_of_the_base() {
         let statements = snapshot(Base::Captured).statements(&Engine).unwrap();
 
-        assert!(statements[0].contains(concat!(
+        assert!(statements[1].contains(concat!(
             "WHERE NOT EXISTS (\n",
             "  SELECT 1\n",
             "  FROM \"changes\"\n",
@@ -435,7 +445,7 @@ mod tests {
             Base::Captured,
         );
 
-        let statement = &snapshot.statements(&Engine).unwrap()[0];
+        let statement = &snapshot.statements(&Engine).unwrap()[1];
 
         assert!(statement.contains(concat!(
             "    PARTITION BY COALESCE(\"after\".\"order_id\", \"before\".\"order_id\"), ",

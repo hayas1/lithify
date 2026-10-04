@@ -2,8 +2,8 @@ use serde::Deserialize;
 
 use event_replay_core::sink;
 use event_replay_core::source::CdcFormat;
-use event_replay_protocol::sink::bigquery::client::{BigQueryCapture, BigQuerySchemaLogFn};
-use event_replay_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbSchemaLogFn};
+use event_replay_protocol::sink::bigquery::client::{BigQueryCapture, BigQueryChangeLogsFn};
+use event_replay_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbChangeLogsFn};
 use event_replay_protocol::{BigQueryWarehouse, DebeziumFormat, DuckDbWarehouse};
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -13,17 +13,17 @@ pub enum Capture {
 }
 
 impl DuckDbCapture for Capture {
-    fn with_duckdb_schema_log<F: DuckDbSchemaLogFn>(&self, f: F) -> F::Output {
+    fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(&self, f: F) -> F::Output {
         match self {
-            Self::Debezium(debezium) => debezium.with_duckdb_schema_log(f),
+            Self::Debezium(debezium) => debezium.with_duckdb_change_logs(f),
         }
     }
 }
 
 impl BigQueryCapture for Capture {
-    fn with_bigquery_schema_log<F: BigQuerySchemaLogFn>(&self, f: F) -> F::Output {
+    fn with_bigquery_change_logs<F: BigQueryChangeLogsFn>(&self, f: F) -> F::Output {
         match self {
-            Self::Debezium(debezium) => debezium.with_bigquery_schema_log(f),
+            Self::Debezium(debezium) => debezium.with_bigquery_change_logs(f),
         }
     }
 }
@@ -38,7 +38,7 @@ pub enum Warehouse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use event_replay_core::source::SchemaChangeLog;
+    use event_replay_core::source::{ChangeLogs, SchemaChangeLog};
     use event_replay_protocol::Postgres;
     use event_replay_protocol::source::debezium::Debezium;
     use event_replay_protocol::source::debezium::config;
@@ -52,25 +52,25 @@ mod tests {
     }
 
     #[test]
-    fn a_capture_calls_a_log_fn_with_the_log_of_the_dialect_it_captures_in() {
+    fn a_capture_calls_a_fn_with_the_logs_of_the_dialect_it_captures_in() {
         struct Probe;
 
-        impl DuckDbSchemaLogFn for Probe {
+        impl DuckDbChangeLogsFn for Probe {
             type Output = &'static str;
 
-            fn call_duckdb<L>(self, _: L) -> Self::Output
+            fn call_duckdb<C>(self, _: C) -> Self::Output
             where
-                L: SchemaChangeLog,
-                L::Record: duckdb::types::FromSql,
+                C: ChangeLogs,
+                <C::Schema as SchemaChangeLog>::Record: duckdb::types::FromSql,
             {
-                std::any::type_name::<L>()
+                std::any::type_name::<C>()
             }
         }
 
         let capture: Capture = toml::from_str("[debezium]\ndialect = \"postgres\"").unwrap();
 
         assert_eq!(
-            capture.with_duckdb_schema_log(Probe),
+            capture.with_duckdb_change_logs(Probe),
             std::any::type_name::<Debezium<Postgres>>()
         );
     }

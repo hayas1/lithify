@@ -22,7 +22,7 @@ impl Warehouse for DuckDbWarehouse {
     fn table_ref(&self, table: &TablePath) -> String {
         format!(
             "{}.{}",
-            self.identifier(table.namespace()),
+            self.namespace_ref(table.namespace()),
             self.identifier(table.name())
         )
     }
