@@ -9,7 +9,9 @@ use event_replay_core::window::Window;
 use event_replay_protocol::sink::bigquery::client::{
     BigQueryCapture, BigQueryChangeLogsFn, BigQueryClient,
 };
-use event_replay_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbChangeLogsFn};
+use event_replay_protocol::sink::duckdb::client::{
+    DuckDbCapture, DuckDbChangeLogsFn, DuckDbClient,
+};
 use event_replay_protocol::sink::duckdb::store::ObjectStore;
 use google_cloud_bigquery::error::RowError;
 use google_cloud_bigquery::query::Row;
@@ -17,7 +19,6 @@ use google_cloud_bigquery::query::Row;
 use crate::credential::Credential;
 use crate::journal::Journal;
 use crate::pipeline::{Capture, Warehouse};
-use crate::replay::DuckDbReplay;
 use crate::unreplayable::Unreplayable;
 
 pub struct Run {
@@ -78,10 +79,11 @@ impl Run {
 
         match sink.warehouse() {
             Warehouse::DuckDb(store) => {
-                let store =
-                    ObjectStore::open(store, self.credential.key_id(), self.credential.secret());
+                let client =
+                    ObjectStore::open(store, self.credential.key_id(), self.credential.secret())
+                        .client()?;
 
-                self.read_duckdb(&store, &table, source, journal)
+                self.read_duckdb(&client, &table, source, journal)
             }
             Warehouse::BigQuery(config) => {
                 self.read_bigquery(&BigQueryClient::open(config)?, &table, source, journal)
@@ -91,14 +93,14 @@ impl Run {
 
     fn read_duckdb(
         &self,
-        store: &ObjectStore,
+        client: &DuckDbClient,
         table: &TablePath,
         source: &Source<Capture>,
         journal: &mut Journal,
     ) -> Result<(), Unreplayable> {
         source
             .capture()
-            .with_duckdb_change_logs(Catalog::new(store, table, &self.window, journal))
+            .with_duckdb_change_logs(Catalog::new(client, table, &self.window, journal))
     }
 
     fn read_bigquery(
@@ -158,7 +160,7 @@ impl<'a, C> Catalog<'a, C> {
     }
 }
 
-impl DuckDbChangeLogsFn for Catalog<'_, ObjectStore> {
+impl DuckDbChangeLogsFn for Catalog<'_, DuckDbClient> {
     type Output = Result<(), Unreplayable>;
 
     fn call_duckdb<C>(self, logs: C) -> Self::Output
@@ -166,9 +168,13 @@ impl DuckDbChangeLogsFn for Catalog<'_, ObjectStore> {
         C: ChangeLogs,
         <C::Schema as SchemaChangeLog>::Record: duckdb::types::FromSql,
     {
-        DuckDbReplay::new(self.reader, logs).catalog(self.table, self.window, self.journal)?;
-
-        Ok(())
+        self.reader.catalog(
+            logs.schema_changes(),
+            self.table,
+            self.window,
+            &mut CatalogModel::default(),
+            self.journal,
+        )
     }
 }
 

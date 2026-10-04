@@ -10,3 +10,7 @@ readme.workspace = true
 
 [dependencies]
 event-replay-core = { workspace = true }
+
+[dev-dependencies]
+duckdb = { workspace = true }
+event-replay-protocol = { workspace = true, features = ["duckdb"] }

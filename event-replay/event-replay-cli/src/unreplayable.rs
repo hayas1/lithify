@@ -1,7 +1,6 @@
 use std::fmt::{self, Display, Formatter};
 
 use event_replay_config::Unreadable;
-use event_replay_core::artifact::UnbuildableArtifact;
 use event_replay_core::listener::OutOfOrder;
 use event_replay_protocol::sink::bigquery::client::Unqueryable;
 
@@ -11,7 +10,6 @@ pub enum Unreplayable {
     Unqueryable(duckdb::Error),
     Unanswerable(Unqueryable),
     OutOfOrder(OutOfOrder),
-    Unbuildable(UnbuildableArtifact),
     UnknownSink(String),
     WithoutSource,
 }
@@ -23,7 +21,6 @@ impl Display for Unreplayable {
             Self::Unqueryable(cause) => write!(formatter, "{cause}"),
             Self::Unanswerable(cause) => write!(formatter, "{cause}"),
             Self::OutOfOrder(cause) => write!(formatter, "{cause}"),
-            Self::Unbuildable(cause) => write!(formatter, "{cause}"),
             Self::UnknownSink(name) => {
                 write!(formatter, "nothing in this pipeline is sunk into {name}")
             }
@@ -39,7 +36,6 @@ impl std::error::Error for Unreplayable {
             Self::Unqueryable(cause) => Some(cause),
             Self::Unanswerable(cause) => Some(cause),
             Self::OutOfOrder(cause) => Some(cause),
-            Self::Unbuildable(cause) => Some(cause),
             Self::UnknownSink(_) | Self::WithoutSource => None,
         }
     }
@@ -66,11 +62,5 @@ impl From<Unqueryable> for Unreplayable {
 impl From<OutOfOrder> for Unreplayable {
     fn from(cause: OutOfOrder) -> Self {
         Self::OutOfOrder(cause)
-    }
-}
-
-impl From<UnbuildableArtifact> for Unreplayable {
-    fn from(cause: UnbuildableArtifact) -> Self {
-        Self::Unbuildable(cause)
     }
 }

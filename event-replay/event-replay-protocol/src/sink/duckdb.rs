@@ -9,8 +9,18 @@ pub mod store;
 use event_replay_core::model::ColumnType;
 use event_replay_core::sink::{TablePath, UnsupportedColumn, Warehouse};
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct DuckDbWarehouse;
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DuckDbWarehouse {
+    change_logs: Option<config::Store>,
+}
+
+impl DuckDbWarehouse {
+    pub fn over(store: config::Store) -> Self {
+        Self {
+            change_logs: Some(store),
+        }
+    }
+}
 
 impl Warehouse for DuckDbWarehouse {
     type Config = config::Store;
@@ -25,6 +35,13 @@ impl Warehouse for DuckDbWarehouse {
             self.namespace_ref(table.namespace()),
             self.identifier(table.name())
         )
+    }
+
+    fn change_log_ref(&self, table: &TablePath) -> String {
+        match &self.change_logs {
+            Some(store) => store.scan(table),
+            None => self.table_ref(table),
+        }
     }
 
     fn column_type(&self, column_type: &ColumnType) -> Result<String, UnsupportedColumn> {
@@ -72,13 +89,14 @@ impl Warehouse for DuckDbWarehouse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sink::duckdb::config::tests::s3;
     use crate::source::debezium::Debezium;
     use crate::source::debezium::mysql::MySql;
     use event_replay_core::position::RecordedAt;
     use event_replay_core::window::Window;
 
     fn read(column_type: ColumnType) -> String {
-        DuckDbWarehouse
+        DuckDbWarehouse::default()
             .read("\"after\".\"amount\"", &column_type)
             .unwrap()
     }
@@ -86,7 +104,8 @@ mod tests {
     #[test]
     fn a_table_is_qualified_by_the_schema_it_lives_in() {
         assert_eq!(
-            DuckDbWarehouse.table_ref(&TablePath::new("mysql_shop", "customers_20260920")),
+            DuckDbWarehouse::default()
+                .table_ref(&TablePath::new("mysql_shop", "customers_20260920")),
             "\"mysql_shop\".\"customers_20260920\""
         );
     }
@@ -94,15 +113,21 @@ mod tests {
     #[test]
     fn whole_numbers_keep_the_width_the_source_declared() {
         assert_eq!(
-            DuckDbWarehouse.column_type(&ColumnType::Int16).unwrap(),
+            DuckDbWarehouse::default()
+                .column_type(&ColumnType::Int16)
+                .unwrap(),
             "SMALLINT"
         );
         assert_eq!(
-            DuckDbWarehouse.column_type(&ColumnType::Int32).unwrap(),
+            DuckDbWarehouse::default()
+                .column_type(&ColumnType::Int32)
+                .unwrap(),
             "INTEGER"
         );
         assert_eq!(
-            DuckDbWarehouse.column_type(&ColumnType::Int64).unwrap(),
+            DuckDbWarehouse::default()
+                .column_type(&ColumnType::Int64)
+                .unwrap(),
             "BIGINT"
         );
     }
@@ -110,7 +135,7 @@ mod tests {
     #[test]
     fn a_decimal_keeps_the_precision_and_scale_the_source_declared() {
         assert_eq!(
-            DuckDbWarehouse
+            DuckDbWarehouse::default()
                 .column_type(&ColumnType::Decimal {
                     precision: 12,
                     scale: 2
@@ -158,7 +183,7 @@ mod tests {
     #[test]
     fn an_array_takes_the_type_of_its_elements() {
         assert_eq!(
-            DuckDbWarehouse
+            DuckDbWarehouse::default()
                 .column_type(&ColumnType::Array(Box::new(ColumnType::Text)))
                 .unwrap(),
             "VARCHAR[]"
@@ -170,7 +195,9 @@ mod tests {
         let unsupported = ColumnType::Unsupported("tsvector".to_owned());
 
         assert_eq!(
-            DuckDbWarehouse.column_type(&unsupported).unwrap_err(),
+            DuckDbWarehouse::default()
+                .column_type(&unsupported)
+                .unwrap_err(),
             UnsupportedColumn::new(&unsupported)
         );
     }
@@ -180,7 +207,7 @@ mod tests {
         let window = Window::new(RecordedAt::from(0), RecordedAt::from(10));
 
         assert_eq!(
-            DuckDbWarehouse.select_schema_changes(
+            DuckDbWarehouse::default().select_schema_changes(
                 &log,
                 &TablePath::new("mysql_shop_cdc", "mysql"),
                 &window
@@ -191,6 +218,29 @@ mod tests {
                 "WHERE \"value\".\"ts_ms\" >= 0 AND \"value\".\"ts_ms\" < 10\n",
                 "ORDER BY \"value\".\"source\".\"file\", \"value\".\"source\".\"pos\"",
             )
+        );
+    }
+
+    #[test]
+    fn a_change_log_lives_in_the_database_unless_it_was_sunk_into_object_storage() {
+        let table = TablePath::new("mysql_shop_cdc", "mysql");
+
+        assert_eq!(
+            DuckDbWarehouse::default().change_log_ref(&table),
+            "\"mysql_shop_cdc\".\"mysql\""
+        );
+        assert_eq!(
+            DuckDbWarehouse::over(s3("http://minio:9000")).change_log_ref(&table),
+            "read_parquet('s3://event-replay/mysql_shop_cdc/mysql/*.parquet')"
+        );
+    }
+
+    #[test]
+    fn what_was_built_lives_in_the_database_even_when_the_change_log_does_not() {
+        assert_eq!(
+            DuckDbWarehouse::over(s3("http://minio:9000"))
+                .table_ref(&TablePath::new("mysql_shop", "customers")),
+            "\"mysql_shop\".\"customers\""
         );
     }
 }

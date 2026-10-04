@@ -63,7 +63,7 @@ impl<'a, L: RowChangeLog> Snapshot<'a, L> {
             Base::Captured => Ok(format!(
                 "  SELECT\n{}\n  FROM {}\n  WHERE {} = 'r'\n{}",
                 self.casts(warehouse, "    ")?,
-                warehouse.table_ref(&self.cdc),
+                warehouse.change_log_ref(&self.cdc),
                 warehouse.path(&self.log.operation()),
                 self.latest_of_each_key(warehouse)?,
             )),
@@ -73,7 +73,7 @@ impl<'a, L: RowChangeLog> Snapshot<'a, L> {
     fn changes(&self, warehouse: &impl Warehouse) -> Result<String, UnbuildableArtifact> {
         Ok(format!(
             "  SELECT *\n  FROM {}\n  WHERE {} >= {} AND {} < {}\n{}",
-            warehouse.table_ref(&self.cdc),
+            warehouse.change_log_ref(&self.cdc),
             warehouse.path(&self.log.recorded_at()),
             self.window.from().milliseconds_since_epoch(),
             warehouse.path(&self.log.recorded_at()),
@@ -311,6 +311,40 @@ mod tests {
         }
     }
 
+    struct Lake;
+
+    impl Warehouse for Lake {
+        type Config = ();
+
+        fn identifier(&self, name: &str) -> String {
+            Engine.identifier(name)
+        }
+
+        fn table_ref(&self, table: &TablePath) -> String {
+            Engine.table_ref(table)
+        }
+
+        fn change_log_ref(&self, table: &TablePath) -> String {
+            format!(
+                "read_parquet('{}/{}/*.parquet')",
+                table.namespace(),
+                table.name()
+            )
+        }
+
+        fn column_type(&self, column_type: &ColumnType) -> Result<String, UnsupportedColumn> {
+            Engine.column_type(column_type)
+        }
+
+        fn read(
+            &self,
+            expression: &str,
+            column_type: &ColumnType,
+        ) -> Result<String, UnsupportedColumn> {
+            Engine.read(expression, column_type)
+        }
+    }
+
     fn column(name: &str, column_type: ColumnType, position: u32) -> ColumnModel {
         ColumnModel::new(name, "", column_type, position, false, None)
     }
@@ -342,6 +376,17 @@ mod tests {
             window(),
             base,
         )
+    }
+
+    #[test]
+    fn a_snapshot_reads_the_change_log_where_the_warehouse_reads_change_logs() {
+        let statement = &snapshot(Base::Captured).statements(&Lake).unwrap()[1];
+
+        assert!(
+            statement
+                .contains("FROM read_parquet('mysql_shop_cdc/mysql_shop_customers/*.parquet')")
+        );
+        assert!(!statement.contains("\"mysql_shop_cdc\".\"mysql_shop_customers\""));
     }
 
     #[test]

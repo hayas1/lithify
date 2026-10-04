@@ -1,21 +1,17 @@
 use duckdb::Connection;
 
-use event_replay_core::sink::{TablePath, Warehouse};
-
 use crate::sink::duckdb::DuckDbWarehouse;
 use crate::sink::duckdb::client::DuckDbClient;
-use crate::sink::duckdb::config::{FileFormat, S3, Store};
+use crate::sink::duckdb::config::Store;
 
 pub struct ObjectStore {
-    store: S3,
+    store: Store,
     key_id: String,
     secret: String,
 }
 
 impl ObjectStore {
     pub fn open(store: &Store, key_id: &str, secret: &str) -> Self {
-        let Store::S3(store) = store;
-
         Self {
             store: store.clone(),
             key_id: key_id.to_owned(),
@@ -23,121 +19,48 @@ impl ObjectStore {
         }
     }
 
-    pub fn client(&self, table: &TablePath) -> Result<DuckDbClient, duckdb::Error> {
+    pub fn client(&self) -> Result<DuckDbClient, duckdb::Error> {
         let connection = Connection::open_in_memory()?;
-        self.attach(&connection, table)?;
-
-        Ok(DuckDbClient::new(connection))
-    }
-
-    pub fn attach(&self, connection: &Connection, table: &TablePath) -> Result<(), duckdb::Error> {
         connection.execute_batch(&self.secret())?;
-        connection.execute_batch(&self.view(table))
+
+        Ok(DuckDbClient::new(
+            connection,
+            DuckDbWarehouse::over(self.store.clone()),
+        ))
     }
 
     fn secret(&self) -> String {
-        let (endpoint, over_tls) = self.endpoint();
-
-        format!(
-            "INSTALL httpfs;\n\
-             LOAD httpfs;\n\
-             CREATE OR REPLACE SECRET (TYPE s3, PROVIDER config, KEY_ID '{}', SECRET '{}', \
-             REGION '{}', ENDPOINT '{endpoint}', USE_SSL {over_tls}, URL_STYLE 'path')",
-            self.key_id,
-            self.secret,
-            self.store.region(),
-        )
-    }
-
-    fn endpoint(&self) -> (&str, bool) {
-        let endpoint = self.store.endpoint();
-
-        match endpoint.strip_prefix("https://") {
-            Some(host) => (host, true),
-            None => (endpoint.strip_prefix("http://").unwrap_or(endpoint), false),
-        }
-    }
-
-    fn view(&self, table: &TablePath) -> String {
-        format!(
-            "{};\nCREATE OR REPLACE VIEW {} AS SELECT * FROM {}",
-            DuckDbWarehouse.create_namespace(table.namespace()),
-            DuckDbWarehouse.table_ref(table),
-            self.scan(table),
-        )
-    }
-
-    fn scan(&self, table: &TablePath) -> String {
-        match self.store.format() {
-            FileFormat::Parquet => format!("read_parquet('{}')", self.files(table)),
-        }
-    }
-
-    fn files(&self, table: &TablePath) -> String {
-        format!(
-            "s3://{}/{}/{}/*.{}",
-            self.store.bucket(),
-            table.namespace(),
-            table.name(),
-            self.store.format().extension()
-        )
+        self.store.secret(&self.key_id, &self.secret)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn s3(endpoint: &str) -> Store {
-        serde_json::from_value(serde_json::json!({
-            "s3": {
-                "endpoint": endpoint,
-                "region": "us-east-1",
-                "bucket": "event-replay",
-                "format": "parquet"
-            }
-        }))
-        .unwrap()
-    }
+    use crate::sink::duckdb::config::tests::s3;
 
     fn store() -> ObjectStore {
         ObjectStore::open(&s3("http://minio:9000"), "minioadmin", "minioadmin")
     }
 
-    fn table() -> TablePath {
-        TablePath::new("mysql_shop_cdc", "mysql")
-    }
-
-    #[test]
-    fn the_change_log_of_a_table_is_read_from_the_files_the_sink_wrote() {
-        assert_eq!(
-            store().files(&table()),
-            "s3://event-replay/mysql_shop_cdc/mysql/*.parquet"
-        );
-    }
-
-    #[test]
-    fn the_files_of_a_table_stand_for_it_in_the_format_they_were_written_in() {
-        assert_eq!(
-            store().view(&table()),
-            concat!(
-                "CREATE SCHEMA IF NOT EXISTS \"mysql_shop_cdc\";\n",
-                "CREATE OR REPLACE VIEW \"mysql_shop_cdc\".\"mysql\" AS SELECT * FROM ",
-                "read_parquet('s3://event-replay/mysql_shop_cdc/mysql/*.parquet')"
-            )
-        );
-    }
-
     #[test]
     fn object_storage_reached_without_tls_is_read_as_such() {
-        assert_eq!(store().endpoint(), ("minio:9000", false));
+        assert!(
+            store()
+                .secret()
+                .contains("ENDPOINT 'minio:9000', USE_SSL false")
+        );
     }
 
     #[test]
     fn object_storage_reached_over_tls_is_read_as_such() {
         let google = ObjectStore::open(&s3("https://storage.googleapis.com"), "key", "secret");
 
-        assert_eq!(google.endpoint(), ("storage.googleapis.com", true));
+        assert!(
+            google
+                .secret()
+                .contains("ENDPOINT 'storage.googleapis.com', USE_SSL true")
+        );
     }
 
     #[test]

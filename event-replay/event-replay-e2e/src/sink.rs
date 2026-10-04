@@ -1,21 +1,23 @@
 use std::fmt::{self, Display, Formatter};
 
 use chrono::DateTime;
-use duckdb::Connection;
 use duckdb::types::{FromSql, TimeUnit, Value};
 
 use event_replay_cli::pipeline::{self, Capture};
-use event_replay_cli::replay::DuckDbReplay;
-use event_replay_cli::unreplayable::Unreplayable;
+use event_replay_core::artifact::UnbuildableArtifact;
+use event_replay_core::listener::OutOfOrder;
 use event_replay_core::model::{TableId, TableModel};
 use event_replay_core::position::RecordedAt;
-use event_replay_core::sink::{TablePath, Warehouse};
-use event_replay_core::source::{ChangeLog, ChangeLogs, ColumnPath, SchemaChangeLog};
+use event_replay_core::sink::{TablePath, Warehouse, WarehouseClient};
+use event_replay_core::source::{
+    ChangeLog, ChangeLogs, ColumnPath, SchemaChangeLog, SchemaChangeStream,
+};
 use event_replay_core::window::Window;
-use event_replay_protocol::DuckDbWarehouse;
-use event_replay_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbChangeLogsFn};
+use event_replay_protocol::sink::duckdb::client::{
+    DuckDbCapture, DuckDbChangeLogsFn, DuckDbClient,
+};
 use event_replay_protocol::sink::duckdb::store::ObjectStore;
-use event_replay_strategy::snapshot::Base;
+use event_replay_strategy::snapshot::{Base, Snapshot};
 
 use crate::row::{Cell, Row, Rows};
 
@@ -57,7 +59,7 @@ impl dyn Sink {
     ) -> Result<Box<Self>, Unbuildable> {
         match warehouse {
             pipeline::Warehouse::DuckDb(store) => Ok(Box::new(DuckDb::connect(
-                ObjectStore::open(store, key_id, secret),
+                &ObjectStore::open(store, key_id, secret),
             )?)),
             pipeline::Warehouse::BigQuery(_) => Err(Unbuildable::Unverified("bigquery")),
         }
@@ -65,15 +67,13 @@ impl dyn Sink {
 }
 
 pub struct DuckDb {
-    connection: Connection,
-    store: ObjectStore,
+    client: DuckDbClient,
 }
 
 impl DuckDb {
-    pub fn connect(store: ObjectStore) -> Result<Self, Unbuildable> {
+    pub fn connect(store: &ObjectStore) -> Result<Self, Unbuildable> {
         Ok(Self {
-            connection: Connection::open_in_memory()?,
-            store,
+            client: store.client()?,
         })
     }
 
@@ -98,27 +98,30 @@ impl DuckDb {
         }
     }
 
-    fn attach(&self, changes: &TablePath) -> Result<(), Unbuildable> {
-        Ok(self.store.attach(&self.connection, changes)?)
+    fn unwritten(unread: &duckdb::Error) -> bool {
+        unread
+            .to_string()
+            .contains("No files found that match the pattern")
     }
 
-    fn select(table: &TablePath, model: &TableModel) -> String {
+    fn select(&self, table: &TablePath, model: &TableModel) -> String {
+        let warehouse = self.client.warehouse();
         let columns: Vec<String> = model
             .columns()
-            .map(|column| DuckDbWarehouse.identifier(column.name()))
+            .map(|column| warehouse.identifier(column.name()))
             .collect();
 
         format!(
             "SELECT {} FROM {}",
             columns.join(", "),
-            DuckDbWarehouse.table_ref(table)
+            warehouse.table_ref(table)
         )
     }
 }
 
 impl Sink for DuckDb {
     fn execute(&mut self, statement: &str) -> Result<(), Unbuildable> {
-        Ok(self.connection.execute_batch(statement)?)
+        Ok(self.client.execute(statement)?)
     }
 
     fn landed(
@@ -129,22 +132,23 @@ impl Sink for DuckDb {
     ) -> Result<u64, Unbuildable> {
         let recorded_at = capture.with_duckdb_change_logs(ChangeTime);
 
-        if self.attach(changes).is_err() {
-            return Ok(0);
-        }
-
-        let landed = self.connection.query_row(
+        let warehouse = self.client.warehouse();
+        let landed = self.client.connection().query_row(
             &format!(
                 "SELECT COUNT(*) FROM {} WHERE {} >= {}",
-                DuckDbWarehouse.table_ref(changes),
-                DuckDbWarehouse.path(&recorded_at),
+                warehouse.change_log_ref(changes),
+                warehouse.path(&recorded_at),
                 at.milliseconds_since_epoch()
             ),
             [],
             |row| row.get::<_, u64>(0),
         );
 
-        Ok(landed.unwrap_or_default())
+        match landed {
+            Ok(landed) => Ok(landed),
+            Err(unread) if Self::unwritten(&unread) => Ok(0),
+            Err(unread) => Err(unread.into()),
+        }
     }
 
     fn model(
@@ -155,7 +159,7 @@ impl Sink for DuckDb {
         window: &Window,
     ) -> Result<TableModel, Unbuildable> {
         let read = capture.with_duckdb_change_logs(Catalog {
-            store: &self.store,
+            client: &self.client,
             schema_changes: statements,
             table,
             window,
@@ -172,18 +176,20 @@ impl Sink for DuckDb {
         into: &TablePath,
         window: &Window,
     ) -> Result<(), Unbuildable> {
-        Ok(capture.with_duckdb_change_logs(Fold {
-            store: &self.store,
-            connection: &self.connection,
+        capture.with_duckdb_change_logs(Fold {
+            client: &self.client,
             model,
             changes,
             into,
             window,
-        })?)
+        })
     }
 
     fn rows(&mut self, table: &TablePath, model: &TableModel) -> Result<Rows, Unbuildable> {
-        let mut statement = self.connection.prepare(&Self::select(table, model))?;
+        let mut statement = self
+            .client
+            .connection()
+            .prepare(&self.select(table, model))?;
         let read = statement.query_map([], |row| {
             Ok((0..model.columns().count())
                 .map(|at| Cell::from(&row.get::<_, Value>(at).unwrap_or(Value::Null)))
@@ -233,27 +239,31 @@ impl DuckDbChangeLogsFn for ChangeTime {
 }
 
 struct Catalog<'a> {
-    store: &'a ObjectStore,
+    client: &'a DuckDbClient,
     schema_changes: &'a TablePath,
     table: &'a TableId,
     window: &'a Window,
 }
 
 impl DuckDbChangeLogsFn for Catalog<'_> {
-    type Output = Result<Option<TableModel>, Unreplayable>;
+    type Output = Result<Option<TableModel>, Unbuildable>;
 
     fn call_duckdb<C>(self, logs: C) -> Self::Output
     where
         C: ChangeLogs,
         <C::Schema as SchemaChangeLog>::Record: FromSql,
     {
-        DuckDbReplay::new(self.store, logs).table(self.schema_changes, self.table, self.window)
+        self.client.table(
+            logs.schema_changes(),
+            self.schema_changes,
+            self.table,
+            self.window,
+        )
     }
 }
 
 struct Fold<'a> {
-    store: &'a ObjectStore,
-    connection: &'a Connection,
+    client: &'a DuckDbClient,
     model: &'a TableModel,
     changes: &'a TablePath,
     into: &'a TablePath,
@@ -261,21 +271,21 @@ struct Fold<'a> {
 }
 
 impl DuckDbChangeLogsFn for Fold<'_> {
-    type Output = Result<(), Unreplayable>;
+    type Output = Result<(), Unbuildable>;
 
     fn call_duckdb<C>(self, logs: C) -> Self::Output
     where
         C: ChangeLogs,
         <C::Schema as SchemaChangeLog>::Record: FromSql,
     {
-        DuckDbReplay::new(self.store, logs).snapshot(
-            self.connection,
-            self.model,
-            self.changes,
-            self.into,
-            self.window,
+        self.client.build(&Snapshot::new(
+            logs.row_changes(),
+            self.model.clone(),
+            self.changes.clone(),
+            self.into.clone(),
+            self.window.clone(),
             Base::Captured,
-        )
+        ))
     }
 }
 
@@ -284,7 +294,8 @@ pub enum Unbuildable {
     Unqueryable(duckdb::Error),
     UnknownTable(TableId),
     Unverified(&'static str),
-    Unreplayable(Unreplayable),
+    Unwritable(UnbuildableArtifact),
+    OutOfOrder(OutOfOrder),
 }
 
 impl Display for Unbuildable {
@@ -293,7 +304,8 @@ impl Display for Unbuildable {
             Self::Unqueryable(cause) => write!(formatter, "{cause}"),
             Self::UnknownTable(table) => write!(formatter, "{table} is not in the change log"),
             Self::Unverified(kind) => write!(formatter, "{kind} sinks cannot be verified yet"),
-            Self::Unreplayable(cause) => write!(formatter, "{cause}"),
+            Self::Unwritable(cause) => write!(formatter, "{cause}"),
+            Self::OutOfOrder(cause) => write!(formatter, "{cause}"),
         }
     }
 }
@@ -306,8 +318,14 @@ impl From<duckdb::Error> for Unbuildable {
     }
 }
 
-impl From<Unreplayable> for Unbuildable {
-    fn from(cause: Unreplayable) -> Self {
-        Self::Unreplayable(cause)
+impl From<UnbuildableArtifact> for Unbuildable {
+    fn from(cause: UnbuildableArtifact) -> Self {
+        Self::Unwritable(cause)
+    }
+}
+
+impl From<OutOfOrder> for Unbuildable {
+    fn from(cause: OutOfOrder) -> Self {
+        Self::OutOfOrder(cause)
     }
 }

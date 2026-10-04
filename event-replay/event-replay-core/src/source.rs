@@ -2,6 +2,7 @@ use std::fmt;
 
 use crate::event::{MalformedEvent, SchemaChange};
 use crate::listener::{CatalogModel, OutOfOrder, SchemaChangeListener};
+use crate::model::{TableId, TableModel};
 use crate::position::Position;
 use crate::sink::TablePath;
 use crate::window::Window;
@@ -100,6 +101,23 @@ pub trait SchemaChangeStream<L: SchemaChangeLog> {
         }
 
         Ok(())
+    }
+
+    fn table<E>(
+        &self,
+        log: &L,
+        schema_changes: &TablePath,
+        table: &TableId,
+        window: &Window,
+    ) -> Result<Option<TableModel>, E>
+    where
+        E: From<Self::Error> + From<OutOfOrder>,
+    {
+        let mut catalog = CatalogModel::default();
+
+        self.catalog::<E>(log, schema_changes, window, &mut catalog, &mut ())?;
+
+        Ok(catalog.table(table).cloned())
     }
 }
 

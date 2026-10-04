@@ -1,7 +1,7 @@
 use duckdb::types::{FromSql, Type};
 use duckdb::{Connection, Error, Statement};
 
-use event_replay_core::sink::{TablePath, Warehouse};
+use event_replay_core::sink::{TablePath, Warehouse, WarehouseClient};
 use event_replay_core::source::{
     ChangeLogs, SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed,
 };
@@ -24,11 +24,32 @@ pub trait DuckDbCapture {
 
 pub struct DuckDbClient {
     connection: Connection,
+    warehouse: DuckDbWarehouse,
 }
 
 impl DuckDbClient {
-    pub fn new(connection: Connection) -> Self {
-        Self { connection }
+    pub fn new(connection: Connection, warehouse: DuckDbWarehouse) -> Self {
+        Self {
+            connection,
+            warehouse,
+        }
+    }
+
+    pub fn connection(&self) -> &Connection {
+        &self.connection
+    }
+}
+
+impl WarehouseClient for DuckDbClient {
+    type Warehouse = DuckDbWarehouse;
+    type Error = Error;
+
+    fn warehouse(&self) -> &Self::Warehouse {
+        &self.warehouse
+    }
+
+    fn execute(&self, statement: &str) -> Result<(), Self::Error> {
+        self.connection.execute_batch(statement)
     }
 }
 
@@ -80,7 +101,7 @@ where
         Ok(DuckDbSchemaChanges {
             statement: self
                 .connection
-                .prepare(&DuckDbWarehouse.select_schema_changes(log, table, window))?,
+                .prepare(&self.warehouse.select_schema_changes(log, table, window))?,
             log,
         })
     }
@@ -91,6 +112,8 @@ mod tests {
     use crate::source::debezium::Debezium;
     use crate::source::debezium::mysql::MySql;
     use event_replay_core::event::{MalformedEvent, SchemaChange, TableChange};
+    use event_replay_core::listener::OutOfOrder;
+    use event_replay_core::model::TableId;
     use event_replay_core::position::Position;
     use event_replay_core::position::RecordedAt;
     use event_replay_core::source::{ChangeLog, ColumnPath};
@@ -126,7 +149,7 @@ mod tests {
     fn read(window: &Window) -> Vec<String> {
         let connection = Connection::open_in_memory().unwrap();
         connection.execute_batch(CHANGE_LOG).unwrap();
-        let client = DuckDbClient::new(connection);
+        let client = DuckDbClient::new(connection, DuckDbWarehouse::default());
         let log = Debezium::under("value", MySql);
         let mut changes = client.schema_changes(&log, &table(), window).unwrap();
 
@@ -177,6 +200,65 @@ mod tests {
     }
 
     #[test]
+    fn a_table_is_modelled_as_the_schema_changes_of_a_window_left_it() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(CHANGE_LOG).unwrap();
+        let client = DuckDbClient::new(connection, DuckDbWarehouse::default());
+        let log = Debezium::under("value", MySql);
+
+        let customers = client
+            .table::<Unread>(
+                &log,
+                &table(),
+                &TableId::new("shop", "customers"),
+                &window(0, 1789900000001),
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            customers
+                .columns()
+                .map(|column| column.name())
+                .collect::<Vec<_>>(),
+            ["id"]
+        );
+    }
+
+    #[derive(Debug)]
+    struct Unread;
+
+    impl From<Error> for Unread {
+        fn from(_: Error) -> Self {
+            Self
+        }
+    }
+
+    impl From<OutOfOrder> for Unread {
+        fn from(_: OutOfOrder) -> Self {
+            Self
+        }
+    }
+
+    #[test]
+    fn a_client_runs_statements_on_its_connection() {
+        let client = DuckDbClient::new(
+            Connection::open_in_memory().unwrap(),
+            DuckDbWarehouse::default(),
+        );
+
+        client
+            .execute("CREATE TABLE people AS SELECT 1 AS id")
+            .unwrap();
+
+        let id: i64 = client
+            .connection()
+            .query_row("SELECT id FROM people", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(id, 1);
+    }
+
+    #[test]
     fn a_window_without_a_statement_reads_nothing() {
         assert!(read(&window(0, 1789800000000)).is_empty());
     }
@@ -184,7 +266,7 @@ mod tests {
     #[test]
     fn a_table_that_does_not_hold_a_change_log_is_rejected() {
         let connection = Connection::open_in_memory().unwrap();
-        let client = DuckDbClient::new(connection);
+        let client = DuckDbClient::new(connection, DuckDbWarehouse::default());
         let log = Debezium::under("value", MySql);
 
         let changes = client.schema_changes(&log, &table(), &window(0, 1));
@@ -243,7 +325,7 @@ mod tests {
                  ) AS t(statement, line, written)",
             )
             .unwrap();
-        let client = DuckDbClient::new(connection);
+        let client = DuckDbClient::new(connection, DuckDbWarehouse::default());
         let mut changes = client
             .schema_changes(
                 &Ledger,

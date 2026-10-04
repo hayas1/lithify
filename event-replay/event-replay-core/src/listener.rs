@@ -39,6 +39,8 @@ pub trait SchemaChangeListener<P> {
     }
 }
 
+impl<P> SchemaChangeListener<P> for () {}
+
 pub struct TableCreated<'a> {
     table: &'a TableModel,
 }

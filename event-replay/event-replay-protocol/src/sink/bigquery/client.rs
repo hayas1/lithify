@@ -8,7 +8,7 @@ use google_cloud_gax::client_builder;
 use tokio::runtime::Runtime;
 
 use event_replay_core::event::MalformedEvent;
-use event_replay_core::sink::{TablePath, Warehouse};
+use event_replay_core::sink::{TablePath, Warehouse, WarehouseClient};
 use event_replay_core::source::{
     ChangeLogs, SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed,
 };
@@ -70,6 +70,23 @@ impl BigQueryClient {
             }
 
             Ok(records)
+        })
+    }
+}
+
+impl WarehouseClient for BigQueryClient {
+    type Warehouse = BigQueryWarehouse;
+    type Error = Unqueryable;
+
+    fn warehouse(&self) -> &Self::Warehouse {
+        &self.warehouse
+    }
+
+    fn execute(&self, statement: &str) -> Result<(), Self::Error> {
+        self.runtime.block_on(async {
+            self.client.query(statement).until_done().await?;
+
+            Ok(())
         })
     }
 }

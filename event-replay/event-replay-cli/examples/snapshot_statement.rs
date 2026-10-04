@@ -45,8 +45,15 @@ fn main() {
             "{}",
             snapshot
                 .statements(&BigQueryWarehouse::new("local-project"))
-                .unwrap()[0]
+                .unwrap()
+                .join(";\n")
         ),
-        _ => println!("{}", snapshot.statements(&DuckDbWarehouse).unwrap()[0]),
+        _ => println!(
+            "{}",
+            snapshot
+                .statements(&DuckDbWarehouse::default())
+                .unwrap()
+                .join(";\n")
+        ),
     }
 }
