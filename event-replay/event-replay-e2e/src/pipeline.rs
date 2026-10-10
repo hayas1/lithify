@@ -100,10 +100,6 @@ impl Watch {
         }
     }
 
-    fn schema_changes(&self) -> Window {
-        Window::new(RecordedAt::from(0), Self::end())
-    }
-
     fn changes(&self) -> Window {
         Window::new(self.started, Self::end())
     }
@@ -216,12 +212,10 @@ impl<'a> SinkEnd<'a> {
         self.settle(source, changes, watch)?;
 
         watch.wait(changes, || {
-            match self.client.model(
-                source.capture(),
-                &statements,
-                table,
-                &watch.schema_changes(),
-            ) {
+            match self
+                .client
+                .model(source.capture(), &statements, table, Watch::end())
+            {
                 Ok(model) => Ok(Some(model)),
                 Err(Unbuildable::UnknownTable(_)) => Ok(None),
                 Err(unbuildable) => Err(unbuildable.into()),

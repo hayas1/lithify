@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use semigroup::Semigroup;
 use serde::{Deserialize, Serialize};
 
+use event_replay_core::model::TableId;
 use event_replay_core::position::RecordedAt;
 use event_replay_core::sink::TablePath;
 
@@ -155,7 +156,7 @@ struct WiredSink<W> {
     name: Option<String>,
     change_log: Option<String>,
     warehouse: Option<W>,
-    replay: Option<Replay>,
+    replay: Option<ReplayTargets>,
 }
 
 impl<W> Default for WiredSink<W> {
@@ -263,7 +264,7 @@ pub struct Sink<W> {
     name: String,
     change_log: String,
     warehouse: W,
-    replay: Replay,
+    replay: ReplayTargets,
 }
 
 impl<W> Sink<W> {
@@ -278,27 +279,36 @@ impl<W> Sink<W> {
     pub fn schema_changes<C>(&self, source: &Source<C>) -> Option<TablePath> {
         source
             .schema_changes()
-            .map(|table| TablePath::new(&self.change_log, table))
+            .map(|topic| TablePath::new(&self.change_log, topic))
+    }
+
+    pub fn row_changes<C>(&self, source: &Source<C>, table: &TableId) -> Option<TablePath> {
+        source.schema_changes().map(|topic| {
+            TablePath::new(
+                &self.change_log,
+                &format!("{topic}.{}.{}", table.schema(), table.table()),
+            )
+        })
     }
 
     pub fn warehouse(&self) -> &W {
         &self.warehouse
     }
 
-    pub fn replay(&self) -> &Replay {
+    pub fn replay(&self) -> &ReplayTargets {
         &self.replay
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct Replay {
+pub struct ReplayTargets {
     snapshot: String,
     history: String,
     shard: String,
 }
 
-impl Replay {
+impl ReplayTargets {
     pub fn namespace(&self, artifact: Artifact) -> &str {
         match artifact {
             Artifact::Snapshot => &self.snapshot,
@@ -308,6 +318,13 @@ impl Replay {
 
     pub fn shard(&self) -> &str {
         &self.shard
+    }
+
+    pub fn target(&self, artifact: Artifact, table: &TableId, at: DateTime<Utc>) -> TablePath {
+        TablePath::new(
+            self.namespace(artifact),
+            &format!("{}_{}", table.table(), at.format(&self.shard)),
+        )
     }
 }
 
@@ -493,8 +510,34 @@ mod tests {
     }
 
     #[test]
+    fn a_sink_says_where_the_row_changes_of_a_table_landed_under_the_topic_of_its_source() {
+        assert_eq!(
+            sinks()[0].row_changes(&sources()[0], &TableId::new("shop", "customers")),
+            Some(TablePath::new("mysql_shop_cdc", "mysql.shop.customers"))
+        );
+    }
+
+    #[test]
+    fn a_snapshot_is_built_into_its_namespace_under_the_shard_of_the_day_it_covers() {
+        let at = DateTime::parse_from_rfc3339("2026-09-20T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        assert_eq!(
+            sinks()[0]
+                .replay()
+                .target(Artifact::Snapshot, &TableId::new("shop", "customers"), at),
+            TablePath::new("mysql_shop", "customers_20260920")
+        );
+    }
+
+    #[test]
     fn a_source_captured_without_a_schema_change_topic_lands_no_schema_changes() {
         assert_eq!(sinks()[0].schema_changes(&sources()[1]), None);
+        assert_eq!(
+            sinks()[0].row_changes(&sources()[1], &TableId::new("shop", "customers")),
+            None
+        );
     }
 
     #[test]

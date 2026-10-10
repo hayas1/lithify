@@ -1,8 +1,39 @@
+use std::marker::PhantomData;
+
 use event_replay_core::artifact::{Artifact, UnbuildableArtifact};
+use event_replay_core::listener::{CatalogModel, SchemaChangeListener};
 use event_replay_core::model::{ColumnModel, TableModel};
+use event_replay_core::position::Position;
 use event_replay_core::sink::{TablePath, Warehouse};
 use event_replay_core::source::RowChangeLog;
 use event_replay_core::window::Window;
+
+pub struct SnapshotReplay<'a, L, E, F> {
+    snapshot: F,
+    built: PhantomData<fn() -> (&'a L, E)>,
+}
+
+impl<'a, L, E, F> SnapshotReplay<'a, L, E, F>
+where
+    L: RowChangeLog,
+    F: FnMut(&TableModel) -> Result<Snapshot<'a, L>, E>,
+{
+    pub fn new(snapshot: F) -> Self {
+        Self {
+            snapshot,
+            built: PhantomData,
+        }
+    }
+
+    pub fn snapshots<P: Position>(
+        mut self,
+        catalog: &CatalogModel<P>,
+    ) -> Result<Vec<Snapshot<'a, L>>, E> {
+        catalog.tables().map(&mut self.snapshot).collect()
+    }
+}
+
+impl<P, L, E, F> SchemaChangeListener<P> for SnapshotReplay<'_, L, E, F> {}
 
 pub enum Base {
     Captured,

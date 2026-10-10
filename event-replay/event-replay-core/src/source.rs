@@ -3,7 +3,7 @@ use std::fmt;
 use crate::event::{MalformedEvent, SchemaChange};
 use crate::listener::{CatalogModel, OutOfOrder, SchemaChangeListener};
 use crate::model::{TableId, TableModel};
-use crate::position::Position;
+use crate::position::{Position, RecordedAt};
 use crate::sink::TablePath;
 use crate::window::Window;
 
@@ -103,19 +103,56 @@ pub trait SchemaChangeStream<L: SchemaChangeLog> {
         Ok(())
     }
 
-    fn table<E>(
+    fn catalog_at<E>(
         &self,
         log: &L,
         schema_changes: &TablePath,
-        table: &TableId,
-        window: &Window,
-    ) -> Result<Option<TableModel>, E>
+        at: RecordedAt,
+    ) -> Result<CatalogModel<L::Position>, E>
     where
         E: From<Self::Error> + From<OutOfOrder>,
     {
         let mut catalog = CatalogModel::default();
 
-        self.catalog::<E>(log, schema_changes, window, &mut catalog, &mut ())?;
+        self.catalog::<E>(
+            log,
+            schema_changes,
+            &Window::until(at),
+            &mut catalog,
+            &mut (),
+        )?;
+
+        Ok(catalog)
+    }
+
+    fn replay<E>(
+        &self,
+        log: &L,
+        schema_changes: &TablePath,
+        window: &Window,
+        listener: &mut impl SchemaChangeListener<L::Position>,
+    ) -> Result<CatalogModel<L::Position>, E>
+    where
+        E: From<Self::Error> + From<OutOfOrder>,
+    {
+        let mut catalog = self.catalog_at::<E>(log, schema_changes, *window.from())?;
+
+        self.catalog::<E>(log, schema_changes, window, &mut catalog, listener)?;
+
+        Ok(catalog)
+    }
+
+    fn table<E>(
+        &self,
+        log: &L,
+        schema_changes: &TablePath,
+        table: &TableId,
+        at: RecordedAt,
+    ) -> Result<Option<TableModel>, E>
+    where
+        E: From<Self::Error> + From<OutOfOrder>,
+    {
+        let catalog = self.catalog_at::<E>(log, schema_changes, at)?;
 
         Ok(catalog.table(table).cloned())
     }

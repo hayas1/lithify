@@ -211,7 +211,7 @@ mod tests {
                 &log,
                 &table(),
                 &TableId::new("shop", "customers"),
-                &window(0, 1789900000001),
+                RecordedAt::from(1789900000001),
             )
             .unwrap()
             .unwrap();
@@ -223,6 +223,25 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["id"]
         );
+    }
+
+    #[test]
+    fn a_catalog_at_an_instant_holds_the_tables_the_schema_changes_before_it_left() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(CHANGE_LOG).unwrap();
+        let client = DuckDbClient::new(connection, DuckDbWarehouse::default());
+        let log = Debezium::under("value", MySql);
+        let tables = |at: i64| {
+            client
+                .catalog_at::<Unread>(&log, &table(), RecordedAt::from(at))
+                .unwrap()
+                .tables()
+                .map(|table| table.id().to_string())
+                .collect::<Vec<_>>()
+        };
+
+        assert!(tables(1789800000001).is_empty());
+        assert_eq!(tables(1789800000002), ["shop.customers"]);
     }
 
     #[derive(Debug)]

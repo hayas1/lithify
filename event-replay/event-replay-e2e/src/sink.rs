@@ -36,7 +36,7 @@ pub trait Sink {
         capture: &Capture,
         statements: &TablePath,
         table: &TableId,
-        window: &Window,
+        at: RecordedAt,
     ) -> Result<TableModel, Unbuildable>;
 
     fn snapshot(
@@ -156,13 +156,13 @@ impl Sink for DuckDb {
         capture: &Capture,
         statements: &TablePath,
         table: &TableId,
-        window: &Window,
+        at: RecordedAt,
     ) -> Result<TableModel, Unbuildable> {
         let read = capture.with_duckdb_change_logs(Catalog {
             client: &self.client,
             schema_changes: statements,
             table,
-            window,
+            at,
         })?;
 
         read.ok_or_else(|| Unbuildable::UnknownTable(table.clone()))
@@ -242,7 +242,7 @@ struct Catalog<'a> {
     client: &'a DuckDbClient,
     schema_changes: &'a TablePath,
     table: &'a TableId,
-    window: &'a Window,
+    at: RecordedAt,
 }
 
 impl DuckDbChangeLogsFn for Catalog<'_> {
@@ -257,7 +257,7 @@ impl DuckDbChangeLogsFn for Catalog<'_> {
             logs.schema_changes(),
             self.schema_changes,
             self.table,
-            self.window,
+            self.at,
         )
     }
 }

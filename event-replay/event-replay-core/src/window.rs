@@ -11,6 +11,10 @@ impl Window {
         Self { from, to }
     }
 
+    pub fn until(to: RecordedAt) -> Self {
+        Self::new(RecordedAt::from(0), to)
+    }
+
     pub fn from(&self) -> &RecordedAt {
         &self.from
     }

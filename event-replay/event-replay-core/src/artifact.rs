@@ -31,3 +31,15 @@ impl From<UnsupportedColumn> for UnbuildableArtifact {
 pub trait Artifact {
     fn statements(&self, warehouse: &impl Warehouse) -> Result<Vec<String>, UnbuildableArtifact>;
 }
+
+impl<A: Artifact> Artifact for Vec<A> {
+    fn statements(&self, warehouse: &impl Warehouse) -> Result<Vec<String>, UnbuildableArtifact> {
+        let mut statements = Vec::new();
+
+        for artifact in self {
+            statements.extend(artifact.statements(warehouse)?);
+        }
+
+        Ok(statements)
+    }
+}

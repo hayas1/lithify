@@ -47,6 +47,20 @@ impl Warehouse for BigQueryWarehouse {
         )
     }
 
+    fn change_log_ref(&self, table: &TablePath) -> String {
+        self.table_ref(&TablePath::new(
+            table.namespace(),
+            &table
+                .name()
+                .chars()
+                .map(|character| match character.is_ascii_alphanumeric() {
+                    true => character,
+                    false => '_',
+                })
+                .collect::<String>(),
+        ))
+    }
+
     fn column_type(&self, column_type: &ColumnType) -> Result<String, UnsupportedColumn> {
         match column_type {
             ColumnType::Bool => Ok("BOOL".to_owned()),
@@ -205,6 +219,22 @@ mod tests {
                 "WHERE `ts_ms` >= 0 AND `ts_ms` < 10\n",
                 "ORDER BY `source`.`file`, `source`.`pos`",
             )
+        );
+    }
+
+    #[test]
+    fn a_change_log_is_read_from_the_table_its_topic_was_sanitized_into() {
+        assert_eq!(
+            bigquery().change_log_ref(&TablePath::new("mysql_shop_cdc", "mysql.shop.customers")),
+            "`local-project`.`mysql_shop_cdc`.`mysql_shop_customers`"
+        );
+    }
+
+    #[test]
+    fn a_change_log_is_read_from_a_table_named_only_with_what_bigquery_allows() {
+        assert_eq!(
+            bigquery().change_log_ref(&TablePath::new("mysql_shop_cdc", "mysql.shop.order-lines")),
+            "`local-project`.`mysql_shop_cdc`.`mysql_shop_order_lines`"
         );
     }
 

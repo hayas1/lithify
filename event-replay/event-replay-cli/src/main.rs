@@ -8,12 +8,14 @@ use event_replay_core::position::RecordedAt;
 use event_replay_core::window::Window;
 
 use event_replay_cli::credential::{Credential, Secret};
+use event_replay_cli::journal::Journal;
 use event_replay_cli::run::Run;
+use event_replay_cli::unreplayable::Unreplayable;
 
 #[derive(Parser)]
 #[command(
     name = "event-replay",
-    about = "Report the schema changes a window of a pipeline's change log holds"
+    about = "Report the schema changes a window of a pipeline's change log holds, or plan the snapshots it would build"
 )]
 struct Arguments {
     #[arg(
@@ -55,11 +57,27 @@ struct Arguments {
         help = "The sink to read, out of the ones the pipeline is sunk into"
     )]
     sink: Option<String>,
+    #[arg(
+        long,
+        value_name = "DIRECTORY",
+        help = "Write the statements a snapshot of each table would run into this directory, one file per sink, instead of reporting the schema changes"
+    )]
+    dry_run: Option<PathBuf>,
 }
 
 impl Arguments {
     fn window(&self) -> Window {
         Window::new(RecordedAt::from(self.from), RecordedAt::from(self.to))
+    }
+
+    fn journal(mut self) -> Result<Journal, Unreplayable> {
+        let dry_run = self.dry_run.take();
+        let run = Run::from(self);
+
+        match dry_run {
+            Some(into) => run.plan(&into),
+            None => run.report(),
+        }
     }
 }
 
@@ -79,7 +97,7 @@ impl From<Arguments> for Run {
 fn main() -> ExitCode {
     let arguments = Arguments::parse();
 
-    match Run::from(arguments).report() {
+    match arguments.journal() {
         Ok(journal) => {
             for entry in journal.entries() {
                 println!("{entry}");
@@ -115,6 +133,30 @@ mod tests {
             "--secret-access-key",
             "minioadmin",
         ])
+    }
+
+    #[test]
+    fn a_dry_run_names_the_directory_the_plans_are_written_into() {
+        let planned = Arguments::parse_from([
+            "event-replay",
+            "mysql",
+            "--from",
+            "2026-09-20T00:00:00Z",
+            "--to",
+            "2026-09-21T00:00:00Z",
+            "--access-key-id",
+            "minioadmin",
+            "--secret-access-key",
+            "minioadmin",
+            "--dry-run",
+            "plans",
+        ]);
+
+        assert_eq!(planned.dry_run, Some(PathBuf::from("plans")));
+        assert_eq!(
+            arguments("2026-09-20T00:00:00Z", "2026-09-21T00:00:00Z").dry_run,
+            None
+        );
     }
 
     #[test]

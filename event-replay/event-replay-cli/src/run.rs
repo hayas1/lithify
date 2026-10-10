@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use event_replay_config::Pipeline;
 use event_replay_config::infra::{Sink, Source};
@@ -6,12 +6,14 @@ use event_replay_core::listener::CatalogModel;
 use event_replay_core::sink::TablePath;
 use event_replay_core::source::{ChangeLogs, SchemaChangeLog, SchemaChangeStream};
 use event_replay_core::window::Window;
+use event_replay_protocol::sink::bigquery;
 use event_replay_protocol::sink::bigquery::client::{
     BigQueryCapture, BigQueryChangeLogsFn, BigQueryClient,
 };
 use event_replay_protocol::sink::duckdb::client::{
     DuckDbCapture, DuckDbChangeLogsFn, DuckDbClient,
 };
+use event_replay_protocol::sink::duckdb::config::Store;
 use event_replay_protocol::sink::duckdb::store::ObjectStore;
 use google_cloud_bigquery::error::RowError;
 use google_cloud_bigquery::query::Row;
@@ -19,6 +21,7 @@ use google_cloud_bigquery::query::Row;
 use crate::credential::Credential;
 use crate::journal::Journal;
 use crate::pipeline::{Capture, Warehouse};
+use crate::plan::SnapshotPlan;
 use crate::unreplayable::Unreplayable;
 
 pub struct Run {
@@ -44,6 +47,28 @@ impl Run {
     }
 
     pub fn report(&self) -> Result<Journal, Unreplayable> {
+        self.each_sink(|sink, source, schema_changes, journal| {
+            self.read(sink, source, schema_changes, journal)
+        })
+    }
+
+    pub fn plan(&self, into: &Path) -> Result<Journal, Unreplayable> {
+        self.each_sink(|sink, source, schema_changes, journal| {
+            let statements = self.plan_statements(sink, source, schema_changes)?;
+
+            Self::write_plan(into, sink, &statements, journal)
+        })
+    }
+
+    fn each_sink(
+        &self,
+        mut act: impl FnMut(
+            &Sink<Warehouse>,
+            &Source<Capture>,
+            &TablePath,
+            &mut Journal,
+        ) -> Result<(), Unreplayable>,
+    ) -> Result<Journal, Unreplayable> {
         let pipeline: Pipeline<Capture, Warehouse> = Pipeline::open(&self.directory)?;
         let mut sources = pipeline.sources();
         let source = sources.next().ok_or(Unreplayable::WithoutSource)?;
@@ -57,7 +82,13 @@ impl Run {
         for sink in self.sinks(&pipeline)? {
             journal.sink(sink.name());
 
-            if let Err(unreplayable) = self.read(sink, source, &mut journal) {
+            let Some(schema_changes) = sink.schema_changes(source) else {
+                journal.note(&format!("{} lands no schema changes", source.name()));
+
+                continue;
+            };
+
+            if let Err(unreplayable) = act(sink, source, &schema_changes, &mut journal) {
                 journal.failed(sink.name(), &unreplayable);
             }
         }
@@ -65,28 +96,86 @@ impl Run {
         Ok(journal)
     }
 
+    fn plan_statements(
+        &self,
+        sink: &Sink<Warehouse>,
+        source: &Source<Capture>,
+        schema_changes: &TablePath,
+    ) -> Result<Vec<String>, Unreplayable> {
+        match sink.warehouse() {
+            Warehouse::DuckDb(store) => {
+                source.capture().with_duckdb_change_logs(SnapshotPlan::new(
+                    &self.duckdb(store)?,
+                    sink,
+                    source,
+                    schema_changes,
+                    &self.window,
+                ))
+            }
+            Warehouse::BigQuery(config) => {
+                source
+                    .capture()
+                    .with_bigquery_change_logs(SnapshotPlan::new(
+                        &self.bigquery(config)?,
+                        sink,
+                        source,
+                        schema_changes,
+                        &self.window,
+                    ))
+            }
+        }
+    }
+
+    fn write_plan(
+        into: &Path,
+        sink: &Sink<Warehouse>,
+        statements: &[String],
+        journal: &mut Journal,
+    ) -> Result<(), Unreplayable> {
+        let path = into.join(format!("{}.sql", sink.name()));
+
+        std::fs::create_dir_all(into)?;
+        std::fs::write(
+            &path,
+            statements
+                .iter()
+                .map(|statement| format!("{statement};\n"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )?;
+        journal.note(&format!(
+            "wrote {} statements to {}",
+            statements.len(),
+            path.display()
+        ));
+
+        Ok(())
+    }
+
+    fn duckdb(&self, store: &Store) -> Result<DuckDbClient, Unreplayable> {
+        Ok(
+            ObjectStore::open(store, self.credential.key_id(), self.credential.secret())
+                .client()?,
+        )
+    }
+
+    fn bigquery(&self, config: &bigquery::config::Config) -> Result<BigQueryClient, Unreplayable> {
+        Ok(BigQueryClient::open(config)?)
+    }
+
     fn read(
         &self,
         sink: &Sink<Warehouse>,
         source: &Source<Capture>,
+        schema_changes: &TablePath,
         journal: &mut Journal,
     ) -> Result<(), Unreplayable> {
-        let Some(table) = sink.schema_changes(source) else {
-            journal.note(&format!("{} lands no schema changes", source.name()));
-
-            return Ok(());
-        };
-
         match sink.warehouse() {
             Warehouse::DuckDb(store) => {
-                let client =
-                    ObjectStore::open(store, self.credential.key_id(), self.credential.secret())
-                        .client()?;
-
-                self.read_duckdb(&client, &table, source, journal)
+                self.read_duckdb(&self.duckdb(store)?, schema_changes, source, journal)
             }
             Warehouse::BigQuery(config) => {
-                self.read_bigquery(&BigQueryClient::open(config)?, &table, source, journal)
+                self.read_bigquery(&self.bigquery(config)?, schema_changes, source, journal)
             }
         }
     }
@@ -94,25 +183,28 @@ impl Run {
     fn read_duckdb(
         &self,
         client: &DuckDbClient,
-        table: &TablePath,
+        schema_changes: &TablePath,
         source: &Source<Capture>,
         journal: &mut Journal,
     ) -> Result<(), Unreplayable> {
-        source
-            .capture()
-            .with_duckdb_change_logs(Catalog::new(client, table, &self.window, journal))
+        source.capture().with_duckdb_change_logs(Catalog::new(
+            client,
+            schema_changes,
+            &self.window,
+            journal,
+        ))
     }
 
     fn read_bigquery(
         &self,
         client: &BigQueryClient,
-        table: &TablePath,
+        schema_changes: &TablePath,
         source: &Source<Capture>,
         journal: &mut Journal,
     ) -> Result<(), Unreplayable> {
         source.capture().with_bigquery_change_logs(Catalog::new(
             client,
-            table,
+            schema_changes,
             &self.window,
             journal,
         ))
@@ -139,7 +231,7 @@ impl Run {
 
 struct Catalog<'a, C> {
     reader: &'a C,
-    table: &'a TablePath,
+    schema_changes: &'a TablePath,
     window: &'a Window,
     journal: &'a mut Journal,
 }
@@ -147,13 +239,13 @@ struct Catalog<'a, C> {
 impl<'a, C> Catalog<'a, C> {
     fn new(
         reader: &'a C,
-        table: &'a TablePath,
+        schema_changes: &'a TablePath,
         window: &'a Window,
         journal: &'a mut Journal,
     ) -> Self {
         Self {
             reader,
-            table,
+            schema_changes,
             window,
             journal,
         }
@@ -170,7 +262,7 @@ impl DuckDbChangeLogsFn for Catalog<'_, DuckDbClient> {
     {
         self.reader.catalog(
             logs.schema_changes(),
-            self.table,
+            self.schema_changes,
             self.window,
             &mut CatalogModel::default(),
             self.journal,
@@ -188,7 +280,7 @@ impl BigQueryChangeLogsFn for Catalog<'_, BigQueryClient> {
     {
         self.reader.catalog(
             logs.schema_changes(),
-            self.table,
+            self.schema_changes,
             self.window,
             &mut CatalogModel::default(),
             self.journal,
