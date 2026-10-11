@@ -232,6 +232,9 @@ impl TableEvent<'_> {
 // TODO: tell a renamed column apart from one dropped and another added. A table change carries
 // no trace of a rename, so it steps through as a drop and an addition and the values the column
 // held are lost; reading the DDL of the source dialect could yield a Renamed step applied first.
+// TODO: follow a renamed table as well. An alteration of a table never seen is taken for a
+// creation, so the renamed table starts with no rows captured before the rename while the old
+// one lingers in the catalog; its tracked eras and its change log would have to move with it.
 enum Alteration<'a> {
     Dropped(&'a ColumnModel),
     Retyped {
