@@ -18,7 +18,6 @@ impl Base {
         snapshot: &Snapshot<'_, L>,
         warehouse: &impl Warehouse,
         table: &TableModel,
-        keys: &Keys,
     ) -> Result<String, UnbuildableArtifact> {
         match self {
             Self::Shard(shard) => Ok(format!(
@@ -31,7 +30,7 @@ impl Base {
                 snapshot.reads(warehouse, table, "    ")?,
                 warehouse.change_log_ref(&snapshot.cdc),
                 warehouse.path(&snapshot.log.operation()),
-                snapshot.latest(warehouse, keys),
+                snapshot.latest(warehouse, table),
             )),
         }
     }
@@ -66,10 +65,6 @@ impl Step {
             false => Err(UnbuildableArtifact::PrimaryKeyChanged(last.id().clone())),
         }
     }
-}
-
-struct Keys {
-    columns: Vec<String>,
 }
 
 pub struct Snapshot<'a, L> {
@@ -115,17 +110,20 @@ impl<'a, L: RowChangeLog> Snapshot<'a, L> {
             (Some(first), Some(last)) => (first.entering(), last.leaving()),
             _ => return Err(UnbuildableArtifact::WithoutEra(self.table.clone())),
         };
-        let keys = self.keys(warehouse, last)?;
+        if last.primary_key().next().is_none() {
+            return Err(UnbuildableArtifact::WithoutPrimaryKey(last.id().clone()));
+        }
+
         let mut relations = vec![(
             warehouse.identifier("base"),
-            self.base.select(self, warehouse, first, &keys)?,
+            self.base.select(self, warehouse, first)?,
         )];
 
         for (at, step) in self.steps.iter().enumerate() {
             step.guard_key(last)?;
 
             let previous = Self::latest_relation(&relations).to_owned();
-            relations.extend(self.relations(warehouse, at + 1, step, &previous, &keys)?);
+            relations.extend(self.relations(warehouse, at + 1, step, &previous)?);
         }
 
         Ok(self.with(warehouse, &relations))
@@ -155,7 +153,6 @@ impl<'a, L: RowChangeLog> Snapshot<'a, L> {
         at: usize,
         step: &Step,
         previous: &str,
-        keys: &Keys,
     ) -> Result<Vec<(String, String)>, UnbuildableArtifact> {
         let era = warehouse.identifier(&format!("era_{at}"));
 
@@ -164,11 +161,8 @@ impl<'a, L: RowChangeLog> Snapshot<'a, L> {
                 let changes = warehouse.identifier(&format!("changes_{at}"));
 
                 Ok(vec![
-                    (changes.clone(), self.changes(warehouse, fold, keys)),
-                    (
-                        era,
-                        self.fold(warehouse, fold.table(), previous, &changes, keys)?,
-                    ),
+                    (changes.clone(), self.changes(warehouse, fold)),
+                    (era, self.fold(warehouse, fold.table(), previous, &changes)?),
                 ])
             }
             Step::Transition { before, after } => Ok(vec![(
@@ -178,7 +172,7 @@ impl<'a, L: RowChangeLog> Snapshot<'a, L> {
         }
     }
 
-    fn changes(&self, warehouse: &impl Warehouse, era: &Era, keys: &Keys) -> String {
+    fn changes(&self, warehouse: &impl Warehouse, era: &Era) -> String {
         let recorded_at = warehouse.path(&self.log.recorded_at());
 
         format!(
@@ -186,7 +180,7 @@ impl<'a, L: RowChangeLog> Snapshot<'a, L> {
             warehouse.change_log_ref(&self.cdc),
             era.window().from().milliseconds_since_epoch(),
             era.window().to().milliseconds_since_epoch(),
-            self.latest(warehouse, keys),
+            self.latest(warehouse, era.table()),
         )
     }
 
@@ -196,7 +190,6 @@ impl<'a, L: RowChangeLog> Snapshot<'a, L> {
         table: &TableModel,
         previous: &str,
         changes: &str,
-        keys: &Keys,
     ) -> Result<String, UnbuildableArtifact> {
         Ok(format!(
             concat!(
@@ -206,7 +199,7 @@ impl<'a, L: RowChangeLog> Snapshot<'a, L> {
                 "  SELECT\n{}\n  FROM {changes}\n  WHERE {} <> 'd'"
             ),
             Self::columns(warehouse, table, "    "),
-            self.matched(warehouse, previous, changes, keys),
+            self.matched(warehouse, table, previous, changes),
             self.reads(warehouse, table, "    ")?,
             warehouse.path(&self.log.operation()),
             previous = previous,
@@ -217,17 +210,18 @@ impl<'a, L: RowChangeLog> Snapshot<'a, L> {
     fn matched(
         &self,
         warehouse: &impl Warehouse,
+        table: &TableModel,
         previous: &str,
         changes: &str,
-        keys: &Keys,
     ) -> String {
-        keys.columns
-            .iter()
+        table
+            .primary_key()
+            .map(|column| warehouse.identifier(column))
             .enumerate()
             .map(|(at, column)| {
                 let matched = format!(
                     "{} = {previous}.{column}",
-                    self.keyed(warehouse, &format!("{changes}."), column)
+                    self.keyed(warehouse, &format!("{changes}."), &column)
                 );
 
                 match at {
@@ -284,11 +278,10 @@ impl<'a, L: RowChangeLog> Snapshot<'a, L> {
         }
     }
 
-    fn latest(&self, warehouse: &impl Warehouse, keys: &Keys) -> String {
-        let partition: Vec<String> = keys
-            .columns
-            .iter()
-            .map(|column| self.keyed(warehouse, "", column))
+    fn latest(&self, warehouse: &impl Warehouse, table: &TableModel) -> String {
+        let partition: Vec<String> = table
+            .primary_key()
+            .map(|column| self.keyed(warehouse, "", &warehouse.identifier(column)))
             .collect();
         let ordering: Vec<String> = self
             .log
@@ -315,22 +308,6 @@ impl<'a, L: RowChangeLog> Snapshot<'a, L> {
             warehouse.path(&self.log.after()),
             warehouse.path(&self.log.before()),
         )
-    }
-
-    fn keys(
-        &self,
-        warehouse: &impl Warehouse,
-        table: &TableModel,
-    ) -> Result<Keys, UnbuildableArtifact> {
-        let columns: Vec<String> = table
-            .primary_key()
-            .map(|column| warehouse.identifier(column))
-            .collect();
-
-        match columns.is_empty() {
-            true => Err(UnbuildableArtifact::WithoutPrimaryKey(table.id().clone())),
-            false => Ok(Keys { columns }),
-        }
     }
 
     fn columns(warehouse: &impl Warehouse, table: &TableModel, indent: &str) -> String {
