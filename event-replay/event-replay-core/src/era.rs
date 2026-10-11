@@ -257,7 +257,7 @@ where
 mod tests {
     use super::*;
     use crate::event::{SchemaChange, TableChange};
-    use crate::listener::{ColumnAdded, OutOfOrder, TableCreated, TableDropped};
+    use crate::listener::{ColumnAdded, ColumnDropped, OutOfOrder, TableCreated, TableDropped};
     use crate::model::{ColumnModel, ColumnType, TableModel};
     use crate::position::Position;
 
@@ -316,6 +316,16 @@ mod tests {
 
         fn visit_column_added(&mut self, _: &(), event: &ColumnAdded<'_>) -> Result<(), Untold> {
             self.told.push(format!("added {}", event.column().name()));
+
+            Ok(())
+        }
+
+        fn visit_column_dropped(
+            &mut self,
+            _: &(),
+            event: &ColumnDropped<'_>,
+        ) -> Result<(), Untold> {
+            self.told.push(format!("dropped {}", event.column().name()));
 
             Ok(())
         }
@@ -448,6 +458,31 @@ mod tests {
                     "added name".to_owned(),
                     "added born".to_owned(),
                     "era [\"id\", \"name\", \"born\"] 15..20".to_owned()
+                ]
+            )]
+        );
+    }
+
+    #[test]
+    fn a_statement_that_steps_through_several_changes_ends_the_era_of_the_schema_before_it() {
+        assert_eq!(
+            stories(
+                vec![change(
+                    1,
+                    vec![TableChange::Created(table(people(), &["id", "name"]))]
+                )],
+                vec![change(
+                    15,
+                    vec![TableChange::Altered(table(people(), &["id", "born"]))]
+                )],
+            ),
+            [(
+                people(),
+                vec![
+                    "era [\"id\", \"name\"] 10..15".to_owned(),
+                    "dropped name".to_owned(),
+                    "added born".to_owned(),
+                    "era [\"id\", \"born\"] 15..20".to_owned()
                 ]
             )]
         );

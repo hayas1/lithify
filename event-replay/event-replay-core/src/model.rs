@@ -155,4 +155,100 @@ impl TableModel {
     pub fn primary_key(&self) -> impl Iterator<Item = &str> {
         self.primary_key.iter().map(String::as_str)
     }
+
+    pub fn without_column(&self, name: &str) -> Self {
+        Self {
+            id: self.id.clone(),
+            columns: self
+                .columns()
+                .filter(|held| held.name() != name)
+                .cloned()
+                .collect(),
+            primary_key: self.primary_key.clone(),
+        }
+    }
+
+    pub fn with_column(&self, column: &ColumnModel) -> Self {
+        let appended = self.column(column.name()).is_none().then_some(column);
+
+        Self {
+            id: self.id.clone(),
+            columns: self
+                .columns()
+                .map(|held| match held.name() == column.name() {
+                    true => column,
+                    false => held,
+                })
+                .chain(appended)
+                .cloned()
+                .collect(),
+            primary_key: self.primary_key.clone(),
+        }
+    }
+
+    pub fn keyed_by<'a>(&self, primary_key: impl IntoIterator<Item = &'a str>) -> Self {
+        Self {
+            id: self.id.clone(),
+            columns: self.columns.clone(),
+            primary_key: primary_key.into_iter().map(str::to_owned).collect(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn column(name: &str, type_name: &str, position: u32) -> ColumnModel {
+        ColumnModel::new(name, type_name, ColumnType::Text, position, true, None)
+    }
+
+    fn customers() -> TableModel {
+        TableModel::new(
+            TableId::new("shop", "customers"),
+            vec![
+                column("id", "BIGINT", 1),
+                column("name", "VARCHAR", 2),
+                column("email", "VARCHAR", 3),
+            ],
+            vec!["id".to_owned()],
+        )
+    }
+
+    fn names(table: &TableModel) -> Vec<&str> {
+        table.columns().map(ColumnModel::name).collect()
+    }
+
+    #[test]
+    fn a_table_without_a_column_keeps_the_rest_in_their_order() {
+        assert_eq!(names(&customers().without_column("name")), ["id", "email"]);
+    }
+
+    #[test]
+    fn a_table_without_a_column_it_never_had_stays_as_it_was() {
+        assert_eq!(customers().without_column("nickname"), customers());
+    }
+
+    #[test]
+    fn a_table_with_a_column_of_a_name_it_has_replaces_that_column_in_place() {
+        let retyped = customers().with_column(&column("name", "TEXT", 2));
+
+        assert_eq!(names(&retyped), ["id", "name", "email"]);
+        assert_eq!(retyped.column("name").unwrap().type_name(), "TEXT");
+    }
+
+    #[test]
+    fn a_table_with_a_new_column_holds_it_last_wherever_the_column_was_positioned() {
+        let added = customers().with_column(&column("nickname", "VARCHAR", 2));
+
+        assert_eq!(names(&added), ["id", "name", "email", "nickname"]);
+    }
+
+    #[test]
+    fn a_table_keyed_by_other_columns_keeps_its_columns() {
+        let rekeyed = customers().keyed_by(["id", "email"]);
+
+        assert_eq!(rekeyed.primary_key().collect::<Vec<_>>(), ["id", "email"]);
+        assert_eq!(names(&rekeyed), ["id", "name", "email"]);
+    }
 }

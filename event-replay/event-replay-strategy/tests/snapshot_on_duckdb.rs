@@ -250,6 +250,73 @@ fn a_column_added_within_the_window_is_filled_in_for_the_rows_last_changed_befor
     );
 }
 
+const RESHAPED: &str = "CREATE SCHEMA ddl;
+    CREATE TABLE ddl.shop AS SELECT * FROM (VALUES
+      ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL}, 'ts_ms': 0::BIGINT,
+        'ddl': 'CREATE TABLE people (id BIGINT, name VARCHAR(64), email VARCHAR(64))',
+        'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
+          'table': {'primaryKeyColumnNames': ['id'], 'columns': [
+            {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
+             'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL},
+            {'name': 'name', 'typeName': 'VARCHAR', 'position': 2, 'optional': false,
+             'defaultValueExpression': NULL, 'length': 64, 'scale': NULL},
+            {'name': 'email', 'typeName': 'VARCHAR', 'position': 3, 'optional': true,
+             'defaultValueExpression': NULL, 'length': 64, 'scale': NULL}]}}]}),
+      ({'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL}, 'ts_ms': 5::BIGINT,
+        'ddl': 'ALTER TABLE people DROP COLUMN email, ADD COLUMN phone VARCHAR(16) DEFAULT ''unknown'' AFTER id, ADD COLUMN nickname VARCHAR(64)',
+        'tableChanges': [{'type': 'ALTER', 'id': '\"shop\".\"people\"',
+          'table': {'primaryKeyColumnNames': ['id'], 'columns': [
+            {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
+             'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL},
+            {'name': 'phone', 'typeName': 'VARCHAR', 'position': 2, 'optional': true,
+             'defaultValueExpression': 'unknown', 'length': 16, 'scale': NULL},
+            {'name': 'name', 'typeName': 'VARCHAR', 'position': 3, 'optional': false,
+             'defaultValueExpression': NULL, 'length': 64, 'scale': NULL},
+            {'name': 'nickname', 'typeName': 'VARCHAR', 'position': 4, 'optional': true,
+             'defaultValueExpression': NULL, 'length': 64, 'scale': NULL}]}}]})
+    ) AS t(value);
+    CREATE SCHEMA cdc;
+    CREATE TABLE cdc.people AS SELECT * FROM (VALUES
+      ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 2::BIGINT},
+        'before': NULL::STRUCT(id BIGINT, name VARCHAR, email VARCHAR, phone VARCHAR, nickname VARCHAR),
+        'after': {'id': 1::BIGINT, 'name': 'Alice', 'email': 'alice@example.com', 'phone': NULL::VARCHAR, 'nickname': NULL::VARCHAR}}),
+      ({'op': 'c', 'ts_ms': 2::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 3::BIGINT},
+        'before': NULL::STRUCT(id BIGINT, name VARCHAR, email VARCHAR, phone VARCHAR, nickname VARCHAR),
+        'after': {'id': 2::BIGINT, 'name': 'Bob', 'email': 'bob@example.com', 'phone': NULL::VARCHAR, 'nickname': NULL::VARCHAR}}),
+      ({'op': 'u', 'ts_ms': 6::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 5::BIGINT},
+        'before': {'id': 1::BIGINT, 'name': 'Alice', 'email': NULL::VARCHAR, 'phone': 'unknown', 'nickname': NULL::VARCHAR},
+        'after': {'id': 1::BIGINT, 'name': 'Alicia', 'email': NULL::VARCHAR, 'phone': '0123', 'nickname': 'Ali'}})
+    ) AS t(value)";
+
+#[test]
+fn columns_one_statement_dropped_and_added_reshape_the_rows_last_changed_before_it() {
+    let client = DuckDbClient::new(
+        Connection::open_in_memory().unwrap(),
+        DuckDbWarehouse::default(),
+    );
+    client.execute(&SqlString::from(RESHAPED)).unwrap();
+
+    replay(
+        &client,
+        &Window::new(RecordedAt::from(0), RecordedAt::from(10)),
+    );
+
+    assert_eq!(
+        rows(
+            &client,
+            "SELECT column_name FROM information_schema.columns WHERE table_schema = 'shop_snapshot' AND table_name = 'people' ORDER BY ordinal_position"
+        ),
+        ["id", "phone", "name", "nickname"]
+    );
+    assert_eq!(
+        rows(
+            &client,
+            "SELECT concat_ws(' ', id, phone, name, coalesce(nickname, '-')) FROM shop_snapshot.people ORDER BY id"
+        ),
+        ["1 0123 Alicia Ali", "2 unknown Bob -"]
+    );
+}
+
 #[derive(Debug)]
 struct Unbuilt;
 
