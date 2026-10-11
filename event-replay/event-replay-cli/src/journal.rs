@@ -177,7 +177,7 @@ mod tests {
 
         for change in &changes {
             catalog
-                .accept::<OutOfOrder, _>(change, &mut journal, &())
+                .accept::<OutOfOrder, _>(&(), change, &mut journal)
                 .unwrap();
         }
 

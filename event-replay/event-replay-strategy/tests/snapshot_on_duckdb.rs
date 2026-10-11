@@ -8,7 +8,7 @@ use event_replay_core::model::{ColumnModel, ColumnType, TableId, TableModel};
 use event_replay_core::position::RecordedAt;
 use event_replay_core::sink::{TablePath, WarehouseClient};
 use event_replay_core::source::SchemaChangeStream;
-use event_replay_core::sql::Sql;
+use event_replay_core::sql::SqlString;
 use event_replay_core::window::Window;
 use event_replay_protocol::sink::duckdb::client::DuckDbClient;
 use event_replay_protocol::{Debezium, DuckDbWarehouse, MySql, MySqlPosition};
@@ -43,7 +43,7 @@ fn a_snapshot_holds_each_key_as_the_change_log_last_left_it() {
         Connection::open_in_memory().unwrap(),
         DuckDbWarehouse::default(),
     );
-    client.execute(&Sql::from(CHANGE_LOG)).unwrap();
+    client.execute(&SqlString::from(CHANGE_LOG)).unwrap();
     let log = Debezium::under("value", MySql);
     let window = Window::new(RecordedAt::from(0), RecordedAt::from(10));
     let mut snapshot = Snapshot::new(
@@ -129,14 +129,14 @@ fn replay(client: &DuckDbClient, window: &Window) {
     });
     let catalog = client
         .replay::<Unbuilt, _>(
+            client.warehouse(),
             &log,
             &TablePath::new("ddl", "shop"),
             window,
             &mut tracker,
-            client.warehouse(),
         )
         .unwrap();
-    let snapshots = tracker.finish(&catalog, client.warehouse()).unwrap();
+    let snapshots = tracker.finish(client.warehouse(), &catalog).unwrap();
 
     client.build::<Unbuilt>(&snapshots).unwrap();
 }
@@ -147,8 +147,8 @@ fn a_replay_of_the_schema_changes_builds_a_snapshot_of_every_table_left_standing
         Connection::open_in_memory().unwrap(),
         DuckDbWarehouse::default(),
     );
-    client.execute(&Sql::from(CHANGE_LOG)).unwrap();
-    client.execute(&Sql::from(SCHEMA_CHANGES)).unwrap();
+    client.execute(&SqlString::from(CHANGE_LOG)).unwrap();
+    client.execute(&SqlString::from(SCHEMA_CHANGES)).unwrap();
     let window = Window::new(RecordedAt::from(0), RecordedAt::from(10));
 
     replay(&client, &window);
@@ -179,8 +179,8 @@ fn a_table_created_before_the_window_is_snapshotted_too() {
         Connection::open_in_memory().unwrap(),
         DuckDbWarehouse::default(),
     );
-    client.execute(&Sql::from(CHANGE_LOG)).unwrap();
-    client.execute(&Sql::from(SCHEMA_CHANGES)).unwrap();
+    client.execute(&SqlString::from(CHANGE_LOG)).unwrap();
+    client.execute(&SqlString::from(SCHEMA_CHANGES)).unwrap();
     let window = Window::new(RecordedAt::from(1), RecordedAt::from(10));
 
     replay(&client, &window);
@@ -234,7 +234,7 @@ fn a_column_added_within_the_window_is_filled_in_for_the_rows_last_changed_befor
         Connection::open_in_memory().unwrap(),
         DuckDbWarehouse::default(),
     );
-    client.execute(&Sql::from(WIDENED)).unwrap();
+    client.execute(&SqlString::from(WIDENED)).unwrap();
 
     replay(
         &client,

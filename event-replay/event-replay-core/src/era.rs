@@ -103,8 +103,8 @@ impl<F, L, E> EraTracker<F, L, E> {
 
     pub fn finish<P: Position>(
         mut self,
-        catalog: &CatalogModel<P>,
         context: &L::Context,
+        catalog: &CatalogModel<P>,
     ) -> Result<Vec<L>, E>
     where
         L: SchemaChangeListener<P>,
@@ -361,7 +361,7 @@ mod tests {
         let mut catalog = CatalogModel::default();
         for change in &before {
             catalog
-                .accept::<OutOfOrder, _>(change, &mut (), &())
+                .accept::<OutOfOrder, _>(&(), change, &mut ())
                 .unwrap();
         }
         let mut tracker = EraTracker::new(
@@ -375,12 +375,12 @@ mod tests {
         );
         for change in &within {
             catalog
-                .accept::<Untold, _>(change, &mut tracker, &())
+                .accept::<Untold, _>(&(), change, &mut tracker)
                 .unwrap();
         }
 
         tracker
-            .finish(&catalog, &())
+            .finish(&(), &catalog)
             .unwrap()
             .into_iter()
             .map(|story| (story.table, story.told))
@@ -518,9 +518,9 @@ mod tests {
         let mut catalog = CatalogModel::default();
         catalog
             .accept::<OutOfOrder, _>(
+                &(),
                 &change(1, vec![TableChange::Created(table(people(), &["id"]))]),
                 &mut (),
-                &(),
             )
             .unwrap();
         let tracker = EraTracker::new(
@@ -529,7 +529,7 @@ mod tests {
         );
 
         assert_eq!(
-            tracker.finish(&catalog, &()).unwrap_err(),
+            tracker.finish(&(), &catalog).unwrap_err(),
             Untold::Unopened(people())
         );
     }

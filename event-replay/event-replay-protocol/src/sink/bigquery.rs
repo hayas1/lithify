@@ -6,7 +6,7 @@ pub mod from_sql;
 
 use event_replay_core::model::ColumnType;
 use event_replay_core::sink::{TablePath, UnsupportedColumn, Warehouse};
-use event_replay_core::sql::Sql;
+use event_replay_core::sql::SqlString;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BigQueryWarehouse {
@@ -28,34 +28,34 @@ impl BigQueryWarehouse {
 impl Warehouse for BigQueryWarehouse {
     type Config = config::Config;
 
-    fn identifier(&self, name: &str) -> Sql {
-        Sql::from(format!("`{name}`"))
+    fn identifier(&self, name: &str) -> SqlString {
+        SqlString::from(format!("`{name}`"))
     }
 
-    fn namespace_ref(&self, namespace: &str) -> Sql {
-        Sql::from(format!(
+    fn namespace_ref(&self, namespace: &str) -> SqlString {
+        SqlString::from(format!(
             "{}.{}",
             self.identifier(&self.project),
             self.identifier(namespace)
         ))
     }
 
-    fn table_ref(&self, table: &TablePath) -> Sql {
-        Sql::from(format!(
+    fn table_ref(&self, table: &TablePath) -> SqlString {
+        SqlString::from(format!(
             "{}.{}",
             self.namespace_ref(table.namespace()),
             self.identifier(table.name())
         ))
     }
 
-    fn literal(&self, text: &str) -> Sql {
-        Sql::from(format!(
+    fn literal(&self, text: &str) -> SqlString {
+        SqlString::from(format!(
             "'{}'",
             text.replace('\\', "\\\\").replace('\'', "\\'")
         ))
     }
 
-    fn change_log_ref(&self, table: &TablePath) -> Sql {
+    fn change_log_ref(&self, table: &TablePath) -> SqlString {
         self.table_ref(&TablePath::new(
             table.namespace(),
             &table
@@ -69,32 +69,39 @@ impl Warehouse for BigQueryWarehouse {
         ))
     }
 
-    fn column_type(&self, column_type: &ColumnType) -> Result<Sql, UnsupportedColumn> {
+    fn column_type(&self, column_type: &ColumnType) -> Result<SqlString, UnsupportedColumn> {
         match column_type {
-            ColumnType::Bool => Ok(Sql::from("BOOL")),
-            ColumnType::Int16 | ColumnType::Int32 | ColumnType::Int64 => Ok(Sql::from("INT64")),
-            ColumnType::Float32 | ColumnType::Float64 => Ok(Sql::from("FLOAT64")),
+            ColumnType::Bool => Ok(SqlString::from("BOOL")),
+            ColumnType::Int16 | ColumnType::Int32 | ColumnType::Int64 => {
+                Ok(SqlString::from("INT64"))
+            }
+            ColumnType::Float32 | ColumnType::Float64 => Ok(SqlString::from("FLOAT64")),
             ColumnType::Decimal { precision, scale } => {
-                Ok(Sql::from(format!("NUMERIC({precision}, {scale})")))
+                Ok(SqlString::from(format!("NUMERIC({precision}, {scale})")))
             }
-            ColumnType::Text => Ok(Sql::from("STRING")),
-            ColumnType::Bytes => Ok(Sql::from("BYTES")),
-            ColumnType::Date => Ok(Sql::from("DATE")),
-            ColumnType::Time => Ok(Sql::from("TIME")),
-            ColumnType::Timestamp => Ok(Sql::from("DATETIME")),
-            ColumnType::ZonedTimestamp => Ok(Sql::from("TIMESTAMP")),
-            ColumnType::Json => Ok(Sql::from("JSON")),
-            ColumnType::Array(element) => {
-                Ok(Sql::from(format!("ARRAY<{}>", self.column_type(element)?)))
-            }
+            ColumnType::Text => Ok(SqlString::from("STRING")),
+            ColumnType::Bytes => Ok(SqlString::from("BYTES")),
+            ColumnType::Date => Ok(SqlString::from("DATE")),
+            ColumnType::Time => Ok(SqlString::from("TIME")),
+            ColumnType::Timestamp => Ok(SqlString::from("DATETIME")),
+            ColumnType::ZonedTimestamp => Ok(SqlString::from("TIMESTAMP")),
+            ColumnType::Json => Ok(SqlString::from("JSON")),
+            ColumnType::Array(element) => Ok(SqlString::from(format!(
+                "ARRAY<{}>",
+                self.column_type(element)?
+            ))),
             unsupported @ ColumnType::Unsupported(_) => Err(UnsupportedColumn::new(unsupported)),
         }
     }
 
-    fn read(&self, expression: &Sql, column_type: &ColumnType) -> Result<Sql, UnsupportedColumn> {
+    fn read(
+        &self,
+        expression: &SqlString,
+        column_type: &ColumnType,
+    ) -> Result<SqlString, UnsupportedColumn> {
         match column_type {
-            ColumnType::Json => Ok(Sql::from(format!("PARSE_JSON({expression})"))),
-            other => Ok(Sql::from(format!(
+            ColumnType::Json => Ok(SqlString::from(format!("PARSE_JSON({expression})"))),
+            other => Ok(SqlString::from(format!(
                 "CAST({expression} AS {})",
                 self.column_type(other)?
             ))),
@@ -117,9 +124,9 @@ mod tests {
         BigQueryWarehouse::new("local-project")
     }
 
-    fn read(column_type: ColumnType) -> Sql {
+    fn read(column_type: ColumnType) -> SqlString {
         bigquery()
-            .read(&Sql::from("`after`.`amount`"), &column_type)
+            .read(&SqlString::from("`after`.`amount`"), &column_type)
             .unwrap()
     }
 

@@ -13,7 +13,7 @@ use event_replay_core::sink::{TablePath, Warehouse, WarehouseClient};
 use event_replay_core::source::{
     ChangeLog, ChangeLogs, ColumnPath, SchemaChangeLog, SchemaChangeStream,
 };
-use event_replay_core::sql::Sql;
+use event_replay_core::sql::SqlString;
 use event_replay_core::window::Window;
 use event_replay_protocol::sink::duckdb::client::{
     DuckDbCapture, DuckDbChangeLogsFn, DuckDbClient,
@@ -124,7 +124,7 @@ impl DuckDb {
 
 impl Sink for DuckDb {
     fn execute(&mut self, statement: &str) -> Result<(), Unbuildable> {
-        Ok(self.client.execute(&Sql::from(statement))?)
+        Ok(self.client.execute(&SqlString::from(statement))?)
     }
 
     fn landed(
@@ -294,14 +294,14 @@ impl DuckDbChangeLogsFn for Fold<'_> {
             ))
         });
         let catalog = self.client.replay::<Unbuildable, _>(
+            self.client.warehouse(),
             logs.schema_changes(),
             self.schema_changes,
             self.window,
             &mut tracker,
-            self.client.warehouse(),
         )?;
         let snapshot = tracker
-            .finish(&catalog, self.client.warehouse())?
+            .finish(self.client.warehouse(), &catalog)?
             .into_iter()
             .find(|snapshot| snapshot.table() == self.table)
             .ok_or_else(|| Unbuildable::UnknownTable(self.table.clone()))?;

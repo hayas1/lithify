@@ -11,7 +11,7 @@ use event_replay_core::model::TableId;
 use event_replay_core::sink::TablePath;
 use event_replay_core::sink::WarehouseClient;
 use event_replay_core::source::{ChangeLogs, SchemaChangeLog, SchemaChangeStream};
-use event_replay_core::sql::Sql;
+use event_replay_core::sql::SqlString;
 use event_replay_core::window::Window;
 use event_replay_protocol::sink::bigquery::client::{BigQueryChangeLogsFn, BigQueryClient};
 use event_replay_protocol::sink::duckdb::client::{DuckDbChangeLogsFn, DuckDbClient};
@@ -45,7 +45,7 @@ impl<'a, K> SnapshotPlan<'a, K> {
         }
     }
 
-    fn statements<C>(&self, logs: C) -> Result<Vec<Sql>, Unreplayable>
+    fn statements<C>(&self, logs: C) -> Result<Vec<SqlString>, Unreplayable>
     where
         C: ChangeLogs,
         K: SchemaChangeStream<C::Schema> + WarehouseClient,
@@ -68,20 +68,20 @@ impl<'a, K> SnapshotPlan<'a, K> {
             ))
         });
         let catalog = self.client.replay::<Unreplayable, _>(
+            self.client.warehouse(),
             logs.schema_changes(),
             self.schema_changes,
             self.window,
             &mut tracker,
-            self.client.warehouse(),
         )?;
-        let snapshots = tracker.finish(&catalog, self.client.warehouse())?;
+        let snapshots = tracker.finish(self.client.warehouse(), &catalog)?;
 
         Ok(artifact::Artifact::statements(&snapshots)?)
     }
 }
 
 impl DuckDbChangeLogsFn for SnapshotPlan<'_, DuckDbClient> {
-    type Output = Result<Vec<Sql>, Unreplayable>;
+    type Output = Result<Vec<SqlString>, Unreplayable>;
 
     fn call_duckdb<C>(self, logs: C) -> Self::Output
     where
@@ -93,7 +93,7 @@ impl DuckDbChangeLogsFn for SnapshotPlan<'_, DuckDbClient> {
 }
 
 impl BigQueryChangeLogsFn for SnapshotPlan<'_, BigQueryClient> {
-    type Output = Result<Vec<Sql>, Unreplayable>;
+    type Output = Result<Vec<SqlString>, Unreplayable>;
 
     fn call_bigquery<C>(self, logs: C) -> Self::Output
     where
@@ -148,7 +148,7 @@ mod tests {
             Connection::open_in_memory().unwrap(),
             DuckDbWarehouse::default(),
         );
-        client.execute(&Sql::from(CHANGE_LOGS)).unwrap();
+        client.execute(&SqlString::from(CHANGE_LOGS)).unwrap();
         let window = Window::new(
             RecordedAt::from(1789862400000),
             RecordedAt::from(1789948800000),

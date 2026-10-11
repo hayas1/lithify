@@ -8,7 +8,7 @@ use event_replay_core::listener::{
 use event_replay_core::model::{ColumnModel, TableId, TableModel};
 use event_replay_core::sink::{TablePath, Warehouse};
 use event_replay_core::source::RowChangeLog;
-use event_replay_core::sql::Sql;
+use event_replay_core::sql::SqlString;
 
 pub enum Base {
     Captured,
@@ -18,17 +18,17 @@ pub enum Base {
 impl Base {
     fn select<L: RowChangeLog, W: Warehouse>(
         &self,
-        snapshot: &Snapshot<'_, L, W>,
         warehouse: &W,
+        snapshot: &Snapshot<'_, L, W>,
         table: &TableModel,
-    ) -> Result<Sql, UnbuildableArtifact> {
+    ) -> Result<SqlString, UnbuildableArtifact> {
         match self {
-            Self::Shard(shard) => Ok(Sql::from(format!(
+            Self::Shard(shard) => Ok(SqlString::from(format!(
                 "  SELECT\n{}\n  FROM {}",
                 Snapshot::<L, W>::columns(warehouse, table, "    "),
                 warehouse.table_ref(shard),
             ))),
-            Self::Captured => Ok(Sql::from(format!(
+            Self::Captured => Ok(SqlString::from(format!(
                 "  SELECT\n{}\n  FROM {}\n  WHERE {} = 'r'\n{}",
                 snapshot.reads(warehouse, table, "    ")?,
                 warehouse.change_log_ref(&snapshot.cdc),
@@ -46,14 +46,14 @@ pub struct Snapshot<'a, L, W> {
     target: TablePath,
     base: Base,
     folding: Option<Folding>,
-    relations: Vec<(Sql, Sql)>,
+    relations: Vec<(SqlString, SqlString)>,
     steps: usize,
     warehouse: PhantomData<fn(&W)>,
 }
 
 struct Folding {
-    namespace: Sql,
-    target: Sql,
+    namespace: SqlString,
+    target: SqlString,
     shape: TableModel,
 }
 
@@ -84,7 +84,7 @@ impl<'a, L: RowChangeLog, W: Warehouse> Snapshot<'a, L, W> {
             return Err(UnbuildableArtifact::WithoutPrimaryKey(table.id().clone()));
         }
 
-        let base = self.base.select(self, warehouse, table)?;
+        let base = self.base.select(warehouse, self, table)?;
 
         self.relations.push((warehouse.identifier("base"), base));
         self.folding = Some(Folding {
@@ -96,7 +96,7 @@ impl<'a, L: RowChangeLog, W: Warehouse> Snapshot<'a, L, W> {
         Ok(())
     }
 
-    fn previous(&self) -> Result<Sql, UnbuildableArtifact> {
+    fn previous(&self) -> Result<SqlString, UnbuildableArtifact> {
         self.relations
             .last()
             .map(|(name, _)| name.clone())
@@ -140,7 +140,7 @@ impl<'a, L: RowChangeLog, W: Warehouse> Snapshot<'a, L, W> {
         &mut self,
         warehouse: &W,
         next: TableModel,
-        carried: impl Fn(&ColumnModel, &Sql) -> Result<Sql, UnbuildableArtifact>,
+        carried: impl Fn(&ColumnModel, &SqlString) -> Result<SqlString, UnbuildableArtifact>,
     ) -> Result<(), UnbuildableArtifact> {
         self.steps += 1;
 
@@ -156,7 +156,7 @@ impl<'a, L: RowChangeLog, W: Warehouse> Snapshot<'a, L, W> {
 
         self.relations.push((
             warehouse.identifier(&format!("era_{}", self.steps)),
-            Sql::from(format!(
+            SqlString::from(format!(
                 "  SELECT\n{}\n  FROM {previous}",
                 columns.join(",\n")
             )),
@@ -179,18 +179,18 @@ impl<'a, L: RowChangeLog, W: Warehouse> Snapshot<'a, L, W> {
         ))
     }
 
-    fn fill(warehouse: &W, column: &ColumnModel) -> Result<Sql, UnbuildableArtifact> {
-        Ok(Sql::from(format!(
+    fn fill(warehouse: &W, column: &ColumnModel) -> Result<SqlString, UnbuildableArtifact> {
+        Ok(SqlString::from(format!(
             "CAST({} AS {})",
             column
                 .default_value()
                 .map(|default| warehouse.literal(default))
-                .unwrap_or_else(|| Sql::from("NULL")),
+                .unwrap_or_else(|| SqlString::from("NULL")),
             warehouse.column_type(column.column_type())?,
         )))
     }
 
-    fn with(folding: &Folding, relations: &[(Sql, Sql)]) -> Sql {
+    fn with(folding: &Folding, relations: &[(SqlString, SqlString)]) -> SqlString {
         let ctes: Vec<String> = relations
             .iter()
             .map(|(name, select)| format!("{name} AS (\n{select}\n)"))
@@ -200,17 +200,17 @@ impl<'a, L: RowChangeLog, W: Warehouse> Snapshot<'a, L, W> {
             .map(|(name, _)| name.as_str())
             .unwrap_or_default();
 
-        Sql::from(format!(
+        SqlString::from(format!(
             "CREATE OR REPLACE TABLE {} AS\nWITH {}\nSELECT * FROM {last}",
             folding.target,
             ctes.join(",\n"),
         ))
     }
 
-    fn changes(&self, warehouse: &W, era: &Era) -> Sql {
+    fn changes(&self, warehouse: &W, era: &Era) -> SqlString {
         let recorded_at = warehouse.path(&self.log.recorded_at());
 
-        Sql::from(format!(
+        SqlString::from(format!(
             "  SELECT *\n  FROM {}\n  WHERE {recorded_at} >= {} AND {recorded_at} < {}\n{}",
             warehouse.change_log_ref(&self.cdc),
             era.window().from().milliseconds_since_epoch(),
@@ -223,10 +223,10 @@ impl<'a, L: RowChangeLog, W: Warehouse> Snapshot<'a, L, W> {
         &self,
         warehouse: &W,
         table: &TableModel,
-        previous: &Sql,
-        changes: &Sql,
-    ) -> Result<Sql, UnbuildableArtifact> {
-        Ok(Sql::from(format!(
+        previous: &SqlString,
+        changes: &SqlString,
+    ) -> Result<SqlString, UnbuildableArtifact> {
+        Ok(SqlString::from(format!(
             concat!(
                 "  SELECT\n{}\n  FROM {previous}\n",
                 "  WHERE NOT EXISTS (\n    SELECT 1\n    FROM {changes}\n{}\n  )\n",
@@ -242,7 +242,13 @@ impl<'a, L: RowChangeLog, W: Warehouse> Snapshot<'a, L, W> {
         )))
     }
 
-    fn matched(&self, warehouse: &W, table: &TableModel, previous: &Sql, changes: &Sql) -> Sql {
+    fn matched(
+        &self,
+        warehouse: &W,
+        table: &TableModel,
+        previous: &SqlString,
+        changes: &SqlString,
+    ) -> SqlString {
         let matched = table
             .primary_key()
             .map(|column| warehouse.identifier(column))
@@ -261,10 +267,10 @@ impl<'a, L: RowChangeLog, W: Warehouse> Snapshot<'a, L, W> {
             .collect::<Vec<_>>()
             .join("\n");
 
-        Sql::from(matched)
+        SqlString::from(matched)
     }
 
-    fn latest(&self, warehouse: &W, table: &TableModel) -> Sql {
+    fn latest(&self, warehouse: &W, table: &TableModel) -> SqlString {
         let partition: Vec<String> = table
             .primary_key()
             .map(|column| {
@@ -279,7 +285,7 @@ impl<'a, L: RowChangeLog, W: Warehouse> Snapshot<'a, L, W> {
             .map(|path| format!("{} DESC", warehouse.path(path)))
             .collect();
 
-        Sql::from(format!(
+        SqlString::from(format!(
             concat!(
                 "  QUALIFY ROW_NUMBER() OVER (\n",
                 "    PARTITION BY {}\n",
@@ -291,20 +297,20 @@ impl<'a, L: RowChangeLog, W: Warehouse> Snapshot<'a, L, W> {
         ))
     }
 
-    fn keyed(&self, warehouse: &W, within: Option<&Sql>, column: &Sql) -> Sql {
+    fn keyed(&self, warehouse: &W, within: Option<&SqlString>, column: &SqlString) -> SqlString {
         let within = within
             .map(|relation| format!("{relation}."))
             .unwrap_or_default();
 
-        Sql::from(format!(
+        SqlString::from(format!(
             "COALESCE({within}{}.{column}, {within}{}.{column})",
             warehouse.path(&self.log.after()),
             warehouse.path(&self.log.before()),
         ))
     }
 
-    fn columns(warehouse: &W, table: &TableModel, indent: &str) -> Sql {
-        Sql::from(
+    fn columns(warehouse: &W, table: &TableModel, indent: &str) -> SqlString {
+        SqlString::from(
             table
                 .columns()
                 .map(|column| format!("{indent}{}", warehouse.identifier(column.name())))
@@ -318,20 +324,22 @@ impl<'a, L: RowChangeLog, W: Warehouse> Snapshot<'a, L, W> {
         warehouse: &W,
         table: &TableModel,
         indent: &str,
-    ) -> Result<Sql, UnbuildableArtifact> {
+    ) -> Result<SqlString, UnbuildableArtifact> {
         let after = warehouse.path(&self.log.after());
         let columns: Vec<String> = table
             .columns()
             .map(|column| {
                 let name = warehouse.identifier(column.name());
-                let read =
-                    warehouse.read(&Sql::from(format!("{after}.{name}")), column.column_type())?;
+                let read = warehouse.read(
+                    &SqlString::from(format!("{after}.{name}")),
+                    column.column_type(),
+                )?;
 
                 Ok(format!("{indent}{read} AS {name}"))
             })
             .collect::<Result<_, UnbuildableArtifact>>()?;
 
-        Ok(Sql::from(columns.join(",\n")))
+        Ok(SqlString::from(columns.join(",\n")))
     }
 }
 
@@ -401,7 +409,7 @@ impl<P, L: RowChangeLog, W: Warehouse> SchemaChangeListener<P> for Snapshot<'_, 
 
         self.carry(warehouse, next, |column, name| {
             match column.name() == retyped.name() {
-                true => Ok(Sql::from(format!(
+                true => Ok(SqlString::from(format!(
                     "CAST({name} AS {})",
                     warehouse.column_type(column.column_type())?
                 ))),
@@ -422,7 +430,7 @@ impl<P, L: RowChangeLog, W: Warehouse> SchemaChangeListener<P> for Snapshot<'_, 
 }
 
 impl<L: RowChangeLog, W: Warehouse> Artifact for Snapshot<'_, L, W> {
-    fn statements(&self) -> Result<Vec<Sql>, UnbuildableArtifact> {
+    fn statements(&self) -> Result<Vec<SqlString>, UnbuildableArtifact> {
         match &self.folding {
             Some(folding) => Ok(vec![
                 folding.namespace.clone(),
@@ -488,32 +496,32 @@ mod tests {
     impl Warehouse for Engine {
         type Config = ();
 
-        fn identifier(&self, name: &str) -> Sql {
-            Sql::from(format!("\"{name}\""))
+        fn identifier(&self, name: &str) -> SqlString {
+            SqlString::from(format!("\"{name}\""))
         }
 
-        fn table_ref(&self, table: &TablePath) -> Sql {
-            Sql::from(format!(
+        fn table_ref(&self, table: &TablePath) -> SqlString {
+            SqlString::from(format!(
                 "{}.{}",
                 self.identifier(table.namespace()),
                 self.identifier(table.name())
             ))
         }
 
-        fn column_type(&self, column_type: &ColumnType) -> Result<Sql, UnsupportedColumn> {
+        fn column_type(&self, column_type: &ColumnType) -> Result<SqlString, UnsupportedColumn> {
             match column_type {
-                ColumnType::Int64 => Ok(Sql::from("BIGINT")),
-                ColumnType::Text => Ok(Sql::from("TEXT")),
+                ColumnType::Int64 => Ok(SqlString::from("BIGINT")),
+                ColumnType::Text => Ok(SqlString::from("TEXT")),
                 unsupported => Err(UnsupportedColumn::new(unsupported)),
             }
         }
 
         fn read(
             &self,
-            expression: &Sql,
+            expression: &SqlString,
             column_type: &ColumnType,
-        ) -> Result<Sql, UnsupportedColumn> {
-            Ok(Sql::from(format!(
+        ) -> Result<SqlString, UnsupportedColumn> {
+            Ok(SqlString::from(format!(
                 "CAST({expression} AS {})",
                 self.column_type(column_type)?
             )))
@@ -525,31 +533,31 @@ mod tests {
     impl Warehouse for Lake {
         type Config = ();
 
-        fn identifier(&self, name: &str) -> Sql {
+        fn identifier(&self, name: &str) -> SqlString {
             Engine.identifier(name)
         }
 
-        fn table_ref(&self, table: &TablePath) -> Sql {
+        fn table_ref(&self, table: &TablePath) -> SqlString {
             Engine.table_ref(table)
         }
 
-        fn change_log_ref(&self, table: &TablePath) -> Sql {
-            Sql::from(format!(
+        fn change_log_ref(&self, table: &TablePath) -> SqlString {
+            SqlString::from(format!(
                 "read_parquet('{}/{}/*.parquet')",
                 table.namespace(),
                 table.name()
             ))
         }
 
-        fn column_type(&self, column_type: &ColumnType) -> Result<Sql, UnsupportedColumn> {
+        fn column_type(&self, column_type: &ColumnType) -> Result<SqlString, UnsupportedColumn> {
             Engine.column_type(column_type)
         }
 
         fn read(
             &self,
-            expression: &Sql,
+            expression: &SqlString,
             column_type: &ColumnType,
-        ) -> Result<Sql, UnsupportedColumn> {
+        ) -> Result<SqlString, UnsupportedColumn> {
             Engine.read(expression, column_type)
         }
     }
@@ -606,7 +614,7 @@ mod tests {
         base: impl Fn() -> Base,
     ) -> Result<Vec<Snapshot<'static, Log, W>>, Untold> {
         let mut catalog = CatalogModel::default();
-        catalog.accept::<OutOfOrder, _>(&change(1, TableChange::Created(created)), &mut (), &())?;
+        catalog.accept::<OutOfOrder, _>(&(), &change(1, TableChange::Created(created)), &mut ())?;
         let mut tracker = EraTracker::new(
             Window::new(RecordedAt::from(100), RecordedAt::from(200)),
             |table: &TableId| {
@@ -620,10 +628,10 @@ mod tests {
             },
         );
         for change in &within {
-            catalog.accept::<Untold, _>(change, &mut tracker, warehouse)?;
+            catalog.accept::<Untold, _>(warehouse, change, &mut tracker)?;
         }
 
-        tracker.finish(&catalog, warehouse)
+        tracker.finish(warehouse, &catalog)
     }
 
     fn snapshots(

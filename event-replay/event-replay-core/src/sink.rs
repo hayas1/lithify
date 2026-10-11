@@ -3,7 +3,7 @@ use std::fmt;
 use crate::artifact::{Artifact, UnbuildableArtifact};
 use crate::model::ColumnType;
 use crate::source::{ColumnPath, SchemaChangeLog};
-use crate::sql::Sql;
+use crate::sql::SqlString;
 use crate::window::Window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,35 +67,39 @@ impl fmt::Display for TablePath {
 pub trait Warehouse {
     type Config;
 
-    fn identifier(&self, name: &str) -> Sql;
+    fn identifier(&self, name: &str) -> SqlString;
 
-    fn namespace_ref(&self, namespace: &str) -> Sql {
+    fn namespace_ref(&self, namespace: &str) -> SqlString {
         self.identifier(namespace)
     }
 
-    fn table_ref(&self, table: &TablePath) -> Sql;
+    fn table_ref(&self, table: &TablePath) -> SqlString;
 
-    fn change_log_ref(&self, table: &TablePath) -> Sql {
+    fn change_log_ref(&self, table: &TablePath) -> SqlString {
         self.table_ref(table)
     }
 
-    fn column_type(&self, column_type: &ColumnType) -> Result<Sql, UnsupportedColumn>;
+    fn column_type(&self, column_type: &ColumnType) -> Result<SqlString, UnsupportedColumn>;
 
-    fn read(&self, expression: &Sql, column_type: &ColumnType) -> Result<Sql, UnsupportedColumn>;
+    fn read(
+        &self,
+        expression: &SqlString,
+        column_type: &ColumnType,
+    ) -> Result<SqlString, UnsupportedColumn>;
 
-    fn literal(&self, text: &str) -> Sql {
-        Sql::from(format!("'{}'", text.replace('\'', "''")))
+    fn literal(&self, text: &str) -> SqlString {
+        SqlString::from(format!("'{}'", text.replace('\'', "''")))
     }
 
-    fn create_namespace(&self, namespace: &str) -> Sql {
-        Sql::from(format!(
+    fn create_namespace(&self, namespace: &str) -> SqlString {
+        SqlString::from(format!(
             "CREATE SCHEMA IF NOT EXISTS {}",
             self.namespace_ref(namespace)
         ))
     }
 
-    fn path(&self, path: &ColumnPath) -> Sql {
-        Sql::from(
+    fn path(&self, path: &ColumnPath) -> SqlString {
+        SqlString::from(
             path.parts()
                 .map(|part| self.identifier(part).to_string())
                 .collect::<Vec<_>>()
@@ -108,11 +112,11 @@ pub trait Warehouse {
         log: &impl SchemaChangeLog,
         table: &TablePath,
         window: &Window,
-    ) -> Sql {
+    ) -> SqlString {
         let envelope = log
             .envelope()
             .map(|envelope| self.path(&envelope))
-            .unwrap_or_else(|| Sql::from("*"));
+            .unwrap_or_else(|| SqlString::from("*"));
         let recorded_at = self.path(&log.recorded_at());
         let ordering = log
             .ordering()
@@ -121,7 +125,7 @@ pub trait Warehouse {
             .collect::<Vec<_>>()
             .join(", ");
 
-        Sql::from(format!(
+        SqlString::from(format!(
             "SELECT {envelope}\nFROM {}\nWHERE {recorded_at} >= {} AND {recorded_at} < {}\nORDER BY {ordering}",
             self.change_log_ref(table),
             window.from().milliseconds_since_epoch(),
@@ -139,7 +143,7 @@ pub trait WarehouseClient {
     // TODO: a client may come to be asked to create_table and the like rather than to
     // execute any statement, so that what a warehouse builds is named in this trait
     // instead of being spelled out as SQL by every artifact.
-    fn execute(&self, statement: &Sql) -> Result<(), Self::Error>;
+    fn execute(&self, statement: &SqlString) -> Result<(), Self::Error>;
 
     fn build<E>(&self, artifact: &impl Artifact) -> Result<(), E>
     where
@@ -164,19 +168,23 @@ mod tests {
     impl Warehouse for Engine {
         type Config = ();
 
-        fn identifier(&self, name: &str) -> Sql {
-            Sql::from(format!("\"{name}\""))
+        fn identifier(&self, name: &str) -> SqlString {
+            SqlString::from(format!("\"{name}\""))
         }
 
-        fn table_ref(&self, table: &TablePath) -> Sql {
-            Sql::from(format!("{}.{}", table.namespace(), table.name()))
+        fn table_ref(&self, table: &TablePath) -> SqlString {
+            SqlString::from(format!("{}.{}", table.namespace(), table.name()))
         }
 
-        fn column_type(&self, column_type: &ColumnType) -> Result<Sql, UnsupportedColumn> {
+        fn column_type(&self, column_type: &ColumnType) -> Result<SqlString, UnsupportedColumn> {
             Err(UnsupportedColumn::new(column_type))
         }
 
-        fn read(&self, _: &Sql, column_type: &ColumnType) -> Result<Sql, UnsupportedColumn> {
+        fn read(
+            &self,
+            _: &SqlString,
+            column_type: &ColumnType,
+        ) -> Result<SqlString, UnsupportedColumn> {
             Err(UnsupportedColumn::new(column_type))
         }
     }
@@ -194,7 +202,7 @@ mod tests {
             &Engine
         }
 
-        fn execute(&self, statement: &Sql) -> Result<(), Self::Error> {
+        fn execute(&self, statement: &SqlString) -> Result<(), Self::Error> {
             self.executed.borrow_mut().push(statement.to_string());
 
             Ok(())
@@ -204,10 +212,10 @@ mod tests {
     struct Namespaced;
 
     impl Artifact for Namespaced {
-        fn statements(&self) -> Result<Vec<Sql>, UnbuildableArtifact> {
+        fn statements(&self) -> Result<Vec<SqlString>, UnbuildableArtifact> {
             Ok(vec![
                 Engine.create_namespace("replay"),
-                Sql::from("CREATE TABLE replay.people (id BIGINT)"),
+                SqlString::from("CREATE TABLE replay.people (id BIGINT)"),
             ])
         }
     }

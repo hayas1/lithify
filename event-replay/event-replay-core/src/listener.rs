@@ -215,8 +215,8 @@ pub enum TableEvent<'a> {
 impl TableEvent<'_> {
     pub fn accept<P, L: SchemaChangeListener<P>>(
         &self,
-        listener: &mut L,
         context: &L::Context,
+        listener: &mut L,
     ) -> Result<(), L::Error> {
         match self {
             Self::Created(event) => listener.visit_created(context, event),
@@ -278,9 +278,9 @@ impl<P: Position> CatalogModel<P> {
 
     pub fn accept<E, L>(
         &mut self,
+        context: &L::Context,
         change: &SchemaChange<P>,
         listener: &mut L,
-        context: &L::Context,
     ) -> Result<(), E>
     where
         L: SchemaChangeListener<P>,
@@ -294,9 +294,9 @@ impl<P: Position> CatalogModel<P> {
 
         for table in change.tables() {
             match table {
-                TableChange::Created(table) => self.create(change, table, listener, context)?,
-                TableChange::Altered(table) => self.alter(change, table, listener, context)?,
-                TableChange::Dropped(id) => self.forget(change, id, listener, context)?,
+                TableChange::Created(table) => self.create(context, change, table, listener)?,
+                TableChange::Altered(table) => self.alter(context, change, table, listener)?,
+                TableChange::Dropped(id) => self.forget(context, change, id, listener)?,
             }
         }
 
@@ -316,12 +316,12 @@ impl<P: Position> CatalogModel<P> {
 
     fn create<L: SchemaChangeListener<P>>(
         &mut self,
+        context: &L::Context,
         change: &SchemaChange<P>,
         table: &TableModel,
         listener: &mut L,
-        context: &L::Context,
     ) -> Result<(), L::Error> {
-        TableEvent::Created(TableCreated { table }).accept(listener, context)?;
+        TableEvent::Created(TableCreated { table }).accept(context, listener)?;
         self.remember(change, table);
 
         Ok(())
@@ -329,13 +329,13 @@ impl<P: Position> CatalogModel<P> {
 
     fn forget<L: SchemaChangeListener<P>>(
         &mut self,
+        context: &L::Context,
         change: &SchemaChange<P>,
         id: &TableId,
         listener: &mut L,
-        context: &L::Context,
     ) -> Result<(), L::Error> {
         if let Some(table) = self.tables.get(id) {
-            TableEvent::Dropped(TableDropped { table }).accept(listener, context)?;
+            TableEvent::Dropped(TableDropped { table }).accept(context, listener)?;
         }
         self.tables.remove(id);
         self.applied_at
@@ -346,13 +346,13 @@ impl<P: Position> CatalogModel<P> {
 
     fn alter<L: SchemaChangeListener<P>>(
         &mut self,
+        context: &L::Context,
         change: &SchemaChange<P>,
         after: &TableModel,
         listener: &mut L,
-        context: &L::Context,
     ) -> Result<(), L::Error> {
         let Some(before) = self.tables.get(after.id()).cloned() else {
-            return self.create(change, after, listener, context);
+            return self.create(context, change, after, listener);
         };
 
         for column in before.columns() {
@@ -362,7 +362,7 @@ impl<P: Position> CatalogModel<P> {
                     after,
                     column,
                 })
-                .accept(listener, context)?,
+                .accept(context, listener)?,
                 Some(altered) if altered.type_name() != column.type_name() => {
                     TableEvent::ColumnRetyped(ColumnRetyped {
                         before: &before,
@@ -370,7 +370,7 @@ impl<P: Position> CatalogModel<P> {
                         previous: column,
                         column: altered,
                     })
-                    .accept(listener, context)?
+                    .accept(context, listener)?
                 }
                 Some(_) => {}
             }
@@ -382,7 +382,7 @@ impl<P: Position> CatalogModel<P> {
                     after,
                     column,
                 })
-                .accept(listener, context)?;
+                .accept(context, listener)?;
             }
         }
         if before.primary_key().ne(after.primary_key()) {
@@ -390,7 +390,7 @@ impl<P: Position> CatalogModel<P> {
                 before: &before,
                 after,
             })
-            .accept(listener, context)?;
+            .accept(context, listener)?;
         }
 
         self.remember(change, after);
@@ -592,7 +592,7 @@ mod tests {
     fn accept(catalog: &mut CatalogModel<Offset>, change: SchemaChange<Offset>) -> Vec<String> {
         let mut journal = Journal::default();
         catalog
-            .accept::<OutOfOrder, _>(&change, &mut journal, &())
+            .accept::<OutOfOrder, _>(&(), &change, &mut journal)
             .unwrap();
         journal.entries
     }
@@ -707,15 +707,15 @@ mod tests {
         let mut catalog = CatalogModel::default();
         let mut statements = Statements::default();
         catalog
-            .accept::<OutOfOrder, _>(&created(1), &mut statements, &())
+            .accept::<OutOfOrder, _>(&(), &created(1), &mut statements)
             .unwrap();
         statements.entries.clear();
 
         catalog
             .accept::<OutOfOrder, _>(
+                &(),
                 &altered(2, vec![identifier(), name_at(2)], &["id"]),
                 &mut statements,
-                &(),
             )
             .unwrap();
 
@@ -746,7 +746,7 @@ mod tests {
 
         assert_eq!(
             catalog
-                .accept::<OutOfOrder, _>(&created(1), &mut Journal::default(), &())
+                .accept::<OutOfOrder, _>(&(), &created(1), &mut Journal::default())
                 .unwrap_err(),
             OutOfOrder { table: customers() }
         );
@@ -758,7 +758,7 @@ mod tests {
         let mut statements = Statements::default();
 
         catalog
-            .accept::<OutOfOrder, _>(&created(1), &mut statements, &())
+            .accept::<OutOfOrder, _>(&(), &created(1), &mut statements)
             .unwrap();
 
         assert_eq!(
@@ -779,7 +779,7 @@ mod tests {
 
         assert!(
             catalog
-                .accept::<OutOfOrder, _>(&created(1), &mut statements, &())
+                .accept::<OutOfOrder, _>(&(), &created(1), &mut statements)
                 .is_err()
         );
         assert!(statements.entries.is_empty());

@@ -1,6 +1,6 @@
 use duckdb::Connection;
 
-use event_replay_core::sql::Sql;
+use event_replay_core::sql::SqlString;
 
 use crate::sink::duckdb::DuckDbWarehouse;
 use crate::sink::duckdb::client::DuckDbClient;
@@ -31,7 +31,7 @@ impl ObjectStore {
         ))
     }
 
-    fn secret(&self) -> Sql {
+    fn secret(&self) -> SqlString {
         self.store.secret(&self.key_id, &self.secret)
     }
 }

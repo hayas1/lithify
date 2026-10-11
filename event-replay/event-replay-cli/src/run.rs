@@ -5,7 +5,7 @@ use event_replay_config::infra::{Sink, Source};
 use event_replay_core::listener::CatalogModel;
 use event_replay_core::sink::TablePath;
 use event_replay_core::source::{ChangeLogs, SchemaChangeLog, SchemaChangeStream};
-use event_replay_core::sql::Sql;
+use event_replay_core::sql::SqlString;
 use event_replay_core::window::Window;
 use event_replay_protocol::sink::bigquery;
 use event_replay_protocol::sink::bigquery::client::{
@@ -102,7 +102,7 @@ impl Run {
         sink: &Sink<Warehouse>,
         source: &Source<Capture>,
         schema_changes: &TablePath,
-    ) -> Result<Vec<Sql>, Unreplayable> {
+    ) -> Result<Vec<SqlString>, Unreplayable> {
         match sink.warehouse() {
             Warehouse::DuckDb(store) => {
                 source.capture().with_duckdb_change_logs(SnapshotPlan::new(
@@ -130,7 +130,7 @@ impl Run {
     fn write_plan(
         into: &Path,
         sink: &Sink<Warehouse>,
-        statements: &[Sql],
+        statements: &[SqlString],
         journal: &mut Journal,
     ) -> Result<(), Unreplayable> {
         let path = into.join(format!("{}.sql", sink.name()));
@@ -262,12 +262,12 @@ impl DuckDbChangeLogsFn for Catalog<'_, DuckDbClient> {
         <C::Schema as SchemaChangeLog>::Record: duckdb::types::FromSql,
     {
         self.reader.catalog::<Unreplayable, Journal>(
+            &(),
             logs.schema_changes(),
             self.schema_changes,
             self.window,
             &mut CatalogModel::default(),
             self.journal,
-            &(),
         )
     }
 }
@@ -281,12 +281,12 @@ impl BigQueryChangeLogsFn for Catalog<'_, BigQueryClient> {
         <C::Schema as SchemaChangeLog>::Record: TryFrom<Row, Error = RowError>,
     {
         self.reader.catalog::<Unreplayable, Journal>(
+            &(),
             logs.schema_changes(),
             self.schema_changes,
             self.window,
             &mut CatalogModel::default(),
             self.journal,
-            &(),
         )
     }
 }

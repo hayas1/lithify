@@ -106,12 +106,12 @@ pub trait SchemaChangeStream<L: SchemaChangeLog> {
 
     fn catalog<E, V>(
         &self,
+        context: &V::Context,
         log: &L,
         table: &TablePath,
         window: &Window,
         catalog: &mut CatalogModel<L::Position>,
         listener: &mut V,
-        context: &V::Context,
     ) -> Result<(), E>
     where
         V: SchemaChangeListener<L::Position>,
@@ -119,7 +119,7 @@ pub trait SchemaChangeStream<L: SchemaChangeLog> {
         E: From<OutOfOrder> + From<V::Error>,
     {
         self.each_schema_change(log, table, window, |change| {
-            catalog.accept::<E, V>(&change, listener, context)
+            catalog.accept::<E, V>(context, &change, listener)
         })
     }
 
@@ -136,7 +136,7 @@ pub trait SchemaChangeStream<L: SchemaChangeLog> {
         let mut catalog = CatalogModel::default();
 
         self.each_schema_change::<E>(log, schema_changes, &Window::until(at), |change| {
-            Ok(catalog.accept::<OutOfOrder, ()>(&change, &mut (), &())?)
+            Ok(catalog.accept::<OutOfOrder, ()>(&(), &change, &mut ())?)
         })?;
 
         Ok(catalog)
@@ -144,11 +144,11 @@ pub trait SchemaChangeStream<L: SchemaChangeLog> {
 
     fn replay<E, V>(
         &self,
+        context: &V::Context,
         log: &L,
         schema_changes: &TablePath,
         window: &Window,
         listener: &mut V,
-        context: &V::Context,
     ) -> Result<CatalogModel<L::Position>, E>
     where
         V: SchemaChangeListener<L::Position>,
@@ -157,7 +157,7 @@ pub trait SchemaChangeStream<L: SchemaChangeLog> {
     {
         let mut catalog = self.catalog_at::<E>(log, schema_changes, *window.from())?;
 
-        self.catalog::<E, V>(log, schema_changes, window, &mut catalog, listener, context)?;
+        self.catalog::<E, V>(context, log, schema_changes, window, &mut catalog, listener)?;
 
         Ok(catalog)
     }

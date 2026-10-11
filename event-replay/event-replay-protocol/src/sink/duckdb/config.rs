@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use event_replay_core::sink::TablePath;
-use event_replay_core::sql::Sql;
+use event_replay_core::sql::SqlString;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "lowercase")]
@@ -19,13 +19,13 @@ pub struct S3 {
 }
 
 impl Store {
-    pub fn scan(&self, table: &TablePath) -> Sql {
+    pub fn scan(&self, table: &TablePath) -> SqlString {
         match self {
             Self::S3(s3) => s3.scan(table),
         }
     }
 
-    pub fn secret(&self, key_id: &str, secret: &str) -> Sql {
+    pub fn secret(&self, key_id: &str, secret: &str) -> SqlString {
         match self {
             Self::S3(s3) => s3.secret(key_id, secret),
         }
@@ -33,10 +33,10 @@ impl Store {
 }
 
 impl S3 {
-    fn secret(&self, key_id: &str, secret: &str) -> Sql {
+    fn secret(&self, key_id: &str, secret: &str) -> SqlString {
         let (endpoint, over_tls) = self.host();
 
-        Sql::from(format!(
+        SqlString::from(format!(
             "INSTALL httpfs;\n\
              LOAD httpfs;\n\
              CREATE OR REPLACE SECRET (TYPE s3, PROVIDER config, KEY_ID '{key_id}', SECRET '{secret}', \
@@ -57,7 +57,7 @@ impl S3 {
         }
     }
 
-    fn scan(&self, table: &TablePath) -> Sql {
+    fn scan(&self, table: &TablePath) -> SqlString {
         self.format.scan(&format!(
             "s3://{}/{}/{}/*.{}",
             self.bucket,
@@ -81,9 +81,11 @@ impl FileFormat {
         }
     }
 
-    fn scan(&self, files: &str) -> Sql {
+    fn scan(&self, files: &str) -> SqlString {
         match self {
-            Self::Parquet => Sql::from(format!("read_parquet('{files}', union_by_name = true)")),
+            Self::Parquet => {
+                SqlString::from(format!("read_parquet('{files}', union_by_name = true)"))
+            }
         }
     }
 }

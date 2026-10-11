@@ -2,7 +2,7 @@ use std::fmt;
 
 use crate::model::TableId;
 use crate::sink::UnsupportedColumn;
-use crate::sql::Sql;
+use crate::sql::SqlString;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnbuildableArtifact {
@@ -45,11 +45,11 @@ impl From<UnsupportedColumn> for UnbuildableArtifact {
 }
 
 pub trait Artifact {
-    fn statements(&self) -> Result<Vec<Sql>, UnbuildableArtifact>;
+    fn statements(&self) -> Result<Vec<SqlString>, UnbuildableArtifact>;
 }
 
 impl<A: Artifact> Artifact for Vec<A> {
-    fn statements(&self) -> Result<Vec<Sql>, UnbuildableArtifact> {
+    fn statements(&self) -> Result<Vec<SqlString>, UnbuildableArtifact> {
         let mut statements = Vec::new();
 
         for artifact in self {

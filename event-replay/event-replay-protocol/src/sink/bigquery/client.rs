@@ -12,7 +12,7 @@ use event_replay_core::sink::{TablePath, Warehouse, WarehouseClient};
 use event_replay_core::source::{
     ChangeLogs, SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed,
 };
-use event_replay_core::sql::Sql;
+use event_replay_core::sql::SqlString;
 use event_replay_core::window::Window;
 
 use crate::sink::bigquery::BigQueryWarehouse;
@@ -58,7 +58,7 @@ impl BigQueryClient {
         })
     }
 
-    fn records<R>(&self, query: &Sql) -> Result<Vec<R>, Unqueryable>
+    fn records<R>(&self, query: &SqlString) -> Result<Vec<R>, Unqueryable>
     where
         R: TryFrom<Row, Error = RowError>,
     {
@@ -83,7 +83,7 @@ impl WarehouseClient for BigQueryClient {
         &self.warehouse
     }
 
-    fn execute(&self, statement: &Sql) -> Result<(), Self::Error> {
+    fn execute(&self, statement: &SqlString) -> Result<(), Self::Error> {
         self.runtime.block_on(async {
             self.client.query(statement.as_str()).until_done().await?;
 
