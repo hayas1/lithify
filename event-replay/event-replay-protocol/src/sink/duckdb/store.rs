@@ -1,5 +1,7 @@
 use duckdb::Connection;
 
+use event_replay_core::sql::Sql;
+
 use crate::sink::duckdb::DuckDbWarehouse;
 use crate::sink::duckdb::client::DuckDbClient;
 use crate::sink::duckdb::config::Store;
@@ -21,7 +23,7 @@ impl ObjectStore {
 
     pub fn client(&self) -> Result<DuckDbClient, duckdb::Error> {
         let connection = Connection::open_in_memory()?;
-        connection.execute_batch(&self.secret())?;
+        connection.execute_batch(self.secret().as_str())?;
 
         Ok(DuckDbClient::new(
             connection,
@@ -29,7 +31,7 @@ impl ObjectStore {
         ))
     }
 
-    fn secret(&self) -> String {
+    fn secret(&self) -> Sql {
         self.store.secret(&self.key_id, &self.secret)
     }
 }
@@ -48,6 +50,7 @@ mod tests {
         assert!(
             store()
                 .secret()
+                .as_str()
                 .contains("ENDPOINT 'minio:9000', USE_SSL false")
         );
     }
@@ -59,13 +62,14 @@ mod tests {
         assert!(
             google
                 .secret()
+                .as_str()
                 .contains("ENDPOINT 'storage.googleapis.com', USE_SSL true")
         );
     }
 
     #[test]
     fn object_storage_is_reached_with_the_credential_it_was_given() {
-        let secret = store().secret();
+        let secret = store().secret().to_string();
 
         assert!(secret.contains("KEY_ID 'minioadmin', SECRET 'minioadmin'"));
         assert!(secret.contains("REGION 'us-east-1', ENDPOINT 'minio:9000', USE_SSL false"));

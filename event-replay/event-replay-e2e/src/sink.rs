@@ -13,6 +13,7 @@ use event_replay_core::sink::{TablePath, Warehouse, WarehouseClient};
 use event_replay_core::source::{
     ChangeLog, ChangeLogs, ColumnPath, SchemaChangeLog, SchemaChangeStream,
 };
+use event_replay_core::sql::Sql;
 use event_replay_core::window::Window;
 use event_replay_protocol::sink::duckdb::client::{
     DuckDbCapture, DuckDbChangeLogsFn, DuckDbClient,
@@ -110,7 +111,7 @@ impl DuckDb {
         let warehouse = self.client.warehouse();
         let columns: Vec<String> = model
             .columns()
-            .map(|column| warehouse.identifier(column.name()))
+            .map(|column| warehouse.identifier(column.name()).to_string())
             .collect();
 
         format!(
@@ -123,7 +124,7 @@ impl DuckDb {
 
 impl Sink for DuckDb {
     fn execute(&mut self, statement: &str) -> Result<(), Unbuildable> {
-        Ok(self.client.execute(statement)?)
+        Ok(self.client.execute(&Sql::from(statement))?)
     }
 
     fn landed(

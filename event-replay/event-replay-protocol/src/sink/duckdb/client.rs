@@ -5,6 +5,7 @@ use event_replay_core::sink::{TablePath, Warehouse, WarehouseClient};
 use event_replay_core::source::{
     ChangeLogs, SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed,
 };
+use event_replay_core::sql::Sql;
 use event_replay_core::window::Window;
 
 use crate::sink::duckdb::DuckDbWarehouse;
@@ -48,8 +49,8 @@ impl WarehouseClient for DuckDbClient {
         &self.warehouse
     }
 
-    fn execute(&self, statement: &str) -> Result<(), Self::Error> {
-        self.connection.execute_batch(statement)
+    fn execute(&self, statement: &Sql) -> Result<(), Self::Error> {
+        self.connection.execute_batch(statement.as_str())
     }
 }
 
@@ -99,9 +100,11 @@ where
         window: &Window,
     ) -> Result<Self::Changes<'a>, Self::Error> {
         Ok(DuckDbSchemaChanges {
-            statement: self
-                .connection
-                .prepare(&self.warehouse.select_schema_changes(log, table, window))?,
+            statement: self.connection.prepare(
+                self.warehouse
+                    .select_schema_changes(log, table, window)
+                    .as_str(),
+            )?,
             log,
         })
     }
@@ -267,7 +270,7 @@ mod tests {
         );
 
         client
-            .execute("CREATE TABLE people AS SELECT 1 AS id")
+            .execute(&Sql::from("CREATE TABLE people AS SELECT 1 AS id"))
             .unwrap();
 
         let id: i64 = client

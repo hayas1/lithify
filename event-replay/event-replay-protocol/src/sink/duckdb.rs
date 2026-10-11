@@ -8,6 +8,7 @@ pub mod store;
 
 use event_replay_core::model::ColumnType;
 use event_replay_core::sink::{TablePath, UnsupportedColumn, Warehouse};
+use event_replay_core::sql::Sql;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DuckDbWarehouse {
@@ -25,63 +26,65 @@ impl DuckDbWarehouse {
 impl Warehouse for DuckDbWarehouse {
     type Config = config::Store;
 
-    fn identifier(&self, name: &str) -> String {
-        format!("\"{name}\"")
+    fn identifier(&self, name: &str) -> Sql {
+        Sql::from(format!("\"{name}\""))
     }
 
-    fn table_ref(&self, table: &TablePath) -> String {
-        format!(
+    fn table_ref(&self, table: &TablePath) -> Sql {
+        Sql::from(format!(
             "{}.{}",
             self.namespace_ref(table.namespace()),
             self.identifier(table.name())
-        )
+        ))
     }
 
-    fn change_log_ref(&self, table: &TablePath) -> String {
+    fn change_log_ref(&self, table: &TablePath) -> Sql {
         match &self.change_logs {
             Some(store) => store.scan(table),
             None => self.table_ref(table),
         }
     }
 
-    fn column_type(&self, column_type: &ColumnType) -> Result<String, UnsupportedColumn> {
+    fn column_type(&self, column_type: &ColumnType) -> Result<Sql, UnsupportedColumn> {
         match column_type {
-            ColumnType::Bool => Ok("BOOLEAN".to_owned()),
-            ColumnType::Int16 => Ok("SMALLINT".to_owned()),
-            ColumnType::Int32 => Ok("INTEGER".to_owned()),
-            ColumnType::Int64 => Ok("BIGINT".to_owned()),
-            ColumnType::Float32 => Ok("REAL".to_owned()),
-            ColumnType::Float64 => Ok("DOUBLE".to_owned()),
+            ColumnType::Bool => Ok(Sql::from("BOOLEAN")),
+            ColumnType::Int16 => Ok(Sql::from("SMALLINT")),
+            ColumnType::Int32 => Ok(Sql::from("INTEGER")),
+            ColumnType::Int64 => Ok(Sql::from("BIGINT")),
+            ColumnType::Float32 => Ok(Sql::from("REAL")),
+            ColumnType::Float64 => Ok(Sql::from("DOUBLE")),
             ColumnType::Decimal { precision, scale } => {
-                Ok(format!("DECIMAL({precision}, {scale})"))
+                Ok(Sql::from(format!("DECIMAL({precision}, {scale})")))
             }
-            ColumnType::Text => Ok("VARCHAR".to_owned()),
-            ColumnType::Bytes => Ok("BLOB".to_owned()),
-            ColumnType::Date => Ok("DATE".to_owned()),
-            ColumnType::Time => Ok("TIME".to_owned()),
-            ColumnType::Timestamp => Ok("TIMESTAMP".to_owned()),
-            ColumnType::ZonedTimestamp => Ok("TIMESTAMPTZ".to_owned()),
-            ColumnType::Json => Ok("JSON".to_owned()),
-            ColumnType::Array(element) => Ok(format!("{}[]", self.column_type(element)?)),
+            ColumnType::Text => Ok(Sql::from("VARCHAR")),
+            ColumnType::Bytes => Ok(Sql::from("BLOB")),
+            ColumnType::Date => Ok(Sql::from("DATE")),
+            ColumnType::Time => Ok(Sql::from("TIME")),
+            ColumnType::Timestamp => Ok(Sql::from("TIMESTAMP")),
+            ColumnType::ZonedTimestamp => Ok(Sql::from("TIMESTAMPTZ")),
+            ColumnType::Json => Ok(Sql::from("JSON")),
+            ColumnType::Array(element) => {
+                Ok(Sql::from(format!("{}[]", self.column_type(element)?)))
+            }
             unsupported @ ColumnType::Unsupported(_) => Err(UnsupportedColumn::new(unsupported)),
         }
     }
 
-    fn read(
-        &self,
-        expression: &str,
-        column_type: &ColumnType,
-    ) -> Result<String, UnsupportedColumn> {
+    fn read(&self, expression: &Sql, column_type: &ColumnType) -> Result<Sql, UnsupportedColumn> {
         match column_type {
-            ColumnType::Date => Ok(format!("(DATE '1970-01-01' + ({expression})::INTEGER)")),
-            ColumnType::Time => Ok(format!(
+            ColumnType::Date => Ok(Sql::from(format!(
+                "(DATE '1970-01-01' + ({expression})::INTEGER)"
+            ))),
+            ColumnType::Time => Ok(Sql::from(format!(
                 "(TIME '00:00:00' + INTERVAL (({expression})::BIGINT) MICROSECOND)"
-            )),
-            ColumnType::Timestamp => Ok(format!("make_timestamp(({expression})::BIGINT)")),
-            other => Ok(format!(
+            ))),
+            ColumnType::Timestamp => {
+                Ok(Sql::from(format!("make_timestamp(({expression})::BIGINT)")))
+            }
+            other => Ok(Sql::from(format!(
                 "CAST({expression} AS {})",
                 self.column_type(other)?
-            )),
+            ))),
         }
     }
 }
@@ -95,9 +98,9 @@ mod tests {
     use event_replay_core::position::RecordedAt;
     use event_replay_core::window::Window;
 
-    fn read(column_type: ColumnType) -> String {
+    fn read(column_type: ColumnType) -> Sql {
         DuckDbWarehouse::default()
-            .read("\"after\".\"amount\"", &column_type)
+            .read(&Sql::from("\"after\".\"amount\""), &column_type)
             .unwrap()
     }
 

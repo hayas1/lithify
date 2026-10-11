@@ -11,6 +11,7 @@ use event_replay_core::model::TableId;
 use event_replay_core::sink::TablePath;
 use event_replay_core::sink::WarehouseClient;
 use event_replay_core::source::{ChangeLogs, SchemaChangeLog, SchemaChangeStream};
+use event_replay_core::sql::Sql;
 use event_replay_core::window::Window;
 use event_replay_protocol::sink::bigquery::client::{BigQueryChangeLogsFn, BigQueryClient};
 use event_replay_protocol::sink::duckdb::client::{DuckDbChangeLogsFn, DuckDbClient};
@@ -44,7 +45,7 @@ impl<'a, K> SnapshotPlan<'a, K> {
         }
     }
 
-    fn statements<C>(&self, logs: C) -> Result<Vec<String>, Unreplayable>
+    fn statements<C>(&self, logs: C) -> Result<Vec<Sql>, Unreplayable>
     where
         C: ChangeLogs,
         K: SchemaChangeStream<C::Schema> + WarehouseClient,
@@ -82,7 +83,7 @@ impl<'a, K> SnapshotPlan<'a, K> {
 }
 
 impl DuckDbChangeLogsFn for SnapshotPlan<'_, DuckDbClient> {
-    type Output = Result<Vec<String>, Unreplayable>;
+    type Output = Result<Vec<Sql>, Unreplayable>;
 
     fn call_duckdb<C>(self, logs: C) -> Self::Output
     where
@@ -94,7 +95,7 @@ impl DuckDbChangeLogsFn for SnapshotPlan<'_, DuckDbClient> {
 }
 
 impl BigQueryChangeLogsFn for SnapshotPlan<'_, BigQueryClient> {
-    type Output = Result<Vec<String>, Unreplayable>;
+    type Output = Result<Vec<Sql>, Unreplayable>;
 
     fn call_bigquery<C>(self, logs: C) -> Self::Output
     where
@@ -149,7 +150,7 @@ mod tests {
             Connection::open_in_memory().unwrap(),
             DuckDbWarehouse::default(),
         );
-        client.execute(CHANGE_LOGS).unwrap();
+        client.execute(&Sql::from(CHANGE_LOGS)).unwrap();
         let window = Window::new(
             RecordedAt::from(1789862400000),
             RecordedAt::from(1789948800000),
@@ -169,9 +170,14 @@ mod tests {
         assert_eq!(statements[0], "CREATE SCHEMA IF NOT EXISTS \"mysql_shop\"");
         assert!(
             statements[1]
+                .as_str()
                 .starts_with("CREATE OR REPLACE TABLE \"mysql_shop\".\"people_20260920\" AS")
         );
-        assert!(statements[1].contains("FROM \"mysql_shop_cdc\".\"mysql.shop.people\""));
+        assert!(
+            statements[1]
+                .as_str()
+                .contains("FROM \"mysql_shop_cdc\".\"mysql.shop.people\"")
+        );
         assert_eq!(statements.len(), 2);
     }
 }

@@ -12,6 +12,7 @@ use event_replay_core::sink::{TablePath, Warehouse, WarehouseClient};
 use event_replay_core::source::{
     ChangeLogs, SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed,
 };
+use event_replay_core::sql::Sql;
 use event_replay_core::window::Window;
 
 use crate::sink::bigquery::BigQueryWarehouse;
@@ -57,12 +58,12 @@ impl BigQueryClient {
         })
     }
 
-    fn records<R>(&self, query: &str) -> Result<Vec<R>, Unqueryable>
+    fn records<R>(&self, query: &Sql) -> Result<Vec<R>, Unqueryable>
     where
         R: TryFrom<Row, Error = RowError>,
     {
         self.runtime.block_on(async {
-            let mut read = self.client.query(query).until_done().await?.read();
+            let mut read = self.client.query(query.as_str()).until_done().await?.read();
             let mut records = Vec::new();
 
             while let Some(row) = read.next().await.transpose()? {
@@ -82,9 +83,9 @@ impl WarehouseClient for BigQueryClient {
         &self.warehouse
     }
 
-    fn execute(&self, statement: &str) -> Result<(), Self::Error> {
+    fn execute(&self, statement: &Sql) -> Result<(), Self::Error> {
         self.runtime.block_on(async {
-            self.client.query(statement).until_done().await?;
+            self.client.query(statement.as_str()).until_done().await?;
 
             Ok(())
         })

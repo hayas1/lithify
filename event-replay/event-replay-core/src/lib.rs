@@ -6,4 +6,5 @@ pub mod model;
 pub mod position;
 pub mod sink;
 pub mod source;
+pub mod sql;
 pub mod window;
