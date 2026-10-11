@@ -47,6 +47,10 @@ impl Warehouse for BigQueryWarehouse {
         )
     }
 
+    fn literal(&self, text: &str) -> String {
+        format!("'{}'", text.replace('\\', "\\\\").replace('\'', "\\'"))
+    }
+
     fn change_log_ref(&self, table: &TablePath) -> String {
         self.table_ref(&TablePath::new(
             table.namespace(),
@@ -236,6 +240,11 @@ mod tests {
             bigquery().change_log_ref(&TablePath::new("mysql_shop_cdc", "mysql.shop.order-lines")),
             "`local-project`.`mysql_shop_cdc`.`mysql_shop_order_lines`"
         );
+    }
+
+    #[test]
+    fn a_literal_escapes_its_quotes_the_way_bigquery_reads_them() {
+        assert_eq!(bigquery().literal("it's"), "'it\\'s'");
     }
 
     #[test]

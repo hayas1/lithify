@@ -5,6 +5,7 @@ use duckdb::types::{FromSql, TimeUnit, Value};
 
 use event_replay_cli::pipeline::{self, Capture};
 use event_replay_core::artifact::UnbuildableArtifact;
+use event_replay_core::era::EraTracker;
 use event_replay_core::listener::OutOfOrder;
 use event_replay_core::model::{TableId, TableModel};
 use event_replay_core::position::RecordedAt;
@@ -42,7 +43,8 @@ pub trait Sink {
     fn snapshot(
         &mut self,
         capture: &Capture,
-        model: &TableModel,
+        schema_changes: &TablePath,
+        table: &TableId,
         changes: &TablePath,
         into: &TablePath,
         window: &Window,
@@ -171,14 +173,16 @@ impl Sink for DuckDb {
     fn snapshot(
         &mut self,
         capture: &Capture,
-        model: &TableModel,
+        schema_changes: &TablePath,
+        table: &TableId,
         changes: &TablePath,
         into: &TablePath,
         window: &Window,
     ) -> Result<(), Unbuildable> {
         capture.with_duckdb_change_logs(Fold {
             client: &self.client,
-            model,
+            schema_changes,
+            table,
             changes,
             into,
             window,
@@ -264,7 +268,8 @@ impl DuckDbChangeLogsFn for Catalog<'_> {
 
 struct Fold<'a> {
     client: &'a DuckDbClient,
-    model: &'a TableModel,
+    schema_changes: &'a TablePath,
+    table: &'a TableId,
     changes: &'a TablePath,
     into: &'a TablePath,
     window: &'a Window,
@@ -278,12 +283,24 @@ impl DuckDbChangeLogsFn for Fold<'_> {
         C: ChangeLogs,
         <C::Schema as SchemaChangeLog>::Record: FromSql,
     {
+        let mut tracker = EraTracker::new(self.window.clone());
+        let catalog = self.client.replay::<Unbuildable>(
+            logs.schema_changes(),
+            self.schema_changes,
+            self.window,
+            &mut tracker,
+        )?;
+        let lineage = tracker
+            .lineages(&catalog)
+            .into_iter()
+            .find(|lineage| lineage.table().id() == self.table)
+            .ok_or_else(|| Unbuildable::UnknownTable(self.table.clone()))?;
+
         self.client.build(&Snapshot::new(
             logs.row_changes(),
-            self.model.clone(),
+            lineage,
             self.changes.clone(),
             self.into.clone(),
-            self.window.clone(),
             Base::Captured,
         ))
     }

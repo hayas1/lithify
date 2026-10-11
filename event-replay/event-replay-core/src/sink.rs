@@ -83,6 +83,10 @@ pub trait Warehouse {
     fn read(&self, expression: &str, column_type: &ColumnType)
     -> Result<String, UnsupportedColumn>;
 
+    fn literal(&self, text: &str) -> String {
+        format!("'{}'", text.replace('\'', "''"))
+    }
+
     fn create_namespace(&self, namespace: &str) -> String {
         format!(
             "CREATE SCHEMA IF NOT EXISTS {}",

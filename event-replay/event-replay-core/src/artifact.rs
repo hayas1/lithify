@@ -6,6 +6,8 @@ use crate::sink::{UnsupportedColumn, Warehouse};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnbuildableArtifact {
     WithoutPrimaryKey(TableId),
+    PrimaryKeyChanged(TableId),
+    WithoutEra(TableId),
     UnsupportedColumn(UnsupportedColumn),
 }
 
@@ -14,6 +16,15 @@ impl fmt::Display for UnbuildableArtifact {
         match self {
             Self::WithoutPrimaryKey(table) => {
                 write!(formatter, "{table} has no primary key to replay by")
+            }
+            Self::PrimaryKeyChanged(table) => {
+                write!(
+                    formatter,
+                    "{table} changed its primary key within the window"
+                )
+            }
+            Self::WithoutEra(table) => {
+                write!(formatter, "{table} lived through no era of the window")
             }
             Self::UnsupportedColumn(unsupported) => unsupported.fmt(formatter),
         }

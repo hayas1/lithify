@@ -1,4 +1,5 @@
 pub mod artifact;
+pub mod era;
 pub mod event;
 pub mod listener;
 pub mod model;

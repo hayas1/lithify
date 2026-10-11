@@ -6,14 +6,14 @@ use google_cloud_bigquery::query::Row;
 use event_replay_config::Artifact;
 use event_replay_config::infra::{Sink, Source};
 use event_replay_core::artifact;
-use event_replay_core::model::TableModel;
+use event_replay_core::era::EraTracker;
 use event_replay_core::sink::TablePath;
 use event_replay_core::sink::WarehouseClient;
 use event_replay_core::source::{ChangeLogs, SchemaChangeLog, SchemaChangeStream};
 use event_replay_core::window::Window;
 use event_replay_protocol::sink::bigquery::client::{BigQueryChangeLogsFn, BigQueryClient};
 use event_replay_protocol::sink::duckdb::client::{DuckDbChangeLogsFn, DuckDbClient};
-use event_replay_strategy::snapshot::{Base, Snapshot, SnapshotReplay};
+use event_replay_strategy::snapshot::{Base, Snapshot};
 
 use crate::pipeline::{Capture, Warehouse};
 use crate::unreplayable::Unreplayable;
@@ -51,30 +51,32 @@ impl<'a, K> SnapshotPlan<'a, K> {
     {
         let shard =
             DateTime::<Utc>::try_from(*self.window.from()).map_err(Unreplayable::Unshardable)?;
-        let mut replay = SnapshotReplay::new(|table: &TableModel| {
-            let changes = self
-                .sink
-                .row_changes(self.source, table.id())
-                .ok_or_else(|| Unreplayable::WithoutTopic(self.source.name().to_owned()))?;
-
-            Ok::<_, Unreplayable>(Snapshot::new(
-                logs.row_changes(),
-                table.clone(),
-                changes,
-                self.sink
-                    .replay()
-                    .target(Artifact::Snapshot, table.id(), shard),
-                self.window.clone(),
-                Base::Captured,
-            ))
-        });
+        let mut tracker = EraTracker::new(self.window.clone());
         let catalog = self.client.replay::<Unreplayable>(
             logs.schema_changes(),
             self.schema_changes,
             self.window,
-            &mut replay,
+            &mut tracker,
         )?;
-        let snapshots = replay.snapshots(&catalog)?;
+        let snapshots = tracker
+            .lineages(&catalog)
+            .into_iter()
+            .map(|lineage| {
+                let table = lineage.table().id().clone();
+                let changes = self
+                    .sink
+                    .row_changes(self.source, &table)
+                    .ok_or_else(|| Unreplayable::WithoutTopic(self.source.name().to_owned()))?;
+
+                Ok(Snapshot::new(
+                    logs.row_changes(),
+                    lineage,
+                    changes,
+                    self.sink.replay().target(Artifact::Snapshot, &table, shard),
+                    Base::Captured,
+                ))
+            })
+            .collect::<Result<Vec<_>, Unreplayable>>()?;
 
         Ok(artifact::Artifact::statements(
             &snapshots,

@@ -231,7 +231,7 @@ mod tests {
         );
         assert_eq!(
             DuckDbWarehouse::over(s3("http://minio:9000")).change_log_ref(&table),
-            "read_parquet('s3://event-replay/mysql_shop_cdc/mysql/*.parquet')"
+            "read_parquet('s3://event-replay/mysql_shop_cdc/mysql/*.parquet', union_by_name = true)"
         );
     }
 

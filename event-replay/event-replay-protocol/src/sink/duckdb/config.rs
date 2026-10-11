@@ -82,7 +82,7 @@ impl FileFormat {
 
     fn scan(&self, files: &str) -> String {
         match self {
-            Self::Parquet => format!("read_parquet('{files}')"),
+            Self::Parquet => format!("read_parquet('{files}', union_by_name = true)"),
         }
     }
 }
@@ -107,7 +107,7 @@ pub(crate) mod tests {
     fn a_table_is_scanned_from_the_files_the_sink_wrote_in_the_format_they_were_written_in() {
         assert_eq!(
             s3("http://minio:9000").scan(&TablePath::new("mysql_shop_cdc", "mysql")),
-            "read_parquet('s3://event-replay/mysql_shop_cdc/mysql/*.parquet')"
+            "read_parquet('s3://event-replay/mysql_shop_cdc/mysql/*.parquet', union_by_name = true)"
         );
     }
 }

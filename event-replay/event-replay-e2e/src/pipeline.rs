@@ -204,10 +204,7 @@ impl<'a> SinkEnd<'a> {
         watch: &Watch,
     ) -> Result<TableModel, Unverifiable> {
         let changes = &self.changes(source, table);
-        let statements = self
-            .config
-            .schema_changes(source.config)
-            .ok_or(Unverifiable::WithoutSchemaChanges)?;
+        let statements = self.schema_changes(source)?;
 
         self.settle(source, changes, watch)?;
 
@@ -261,11 +258,18 @@ impl<'a> SinkEnd<'a> {
 
         Ok(self.client.snapshot(
             source.capture(),
-            model,
+            &self.schema_changes(source)?,
+            table,
             &self.changes(source, table),
             &self.snapshot(table),
             &watch.changes(),
         )?)
+    }
+
+    fn schema_changes(&self, source: &SourceEnd) -> Result<TablePath, Unverifiable> {
+        self.config
+            .schema_changes(source.config)
+            .ok_or(Unverifiable::WithoutSchemaChanges)
     }
 
     pub fn snapshot_rows(&mut self, model: &TableModel) -> Result<Rows, Unverifiable> {

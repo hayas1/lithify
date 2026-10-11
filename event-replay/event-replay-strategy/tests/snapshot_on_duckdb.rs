@@ -1,6 +1,7 @@
 use duckdb::Connection;
 
 use event_replay_core::artifact::UnbuildableArtifact;
+use event_replay_core::era::{Era, EraTracker, Lineage};
 use event_replay_core::listener::OutOfOrder;
 use event_replay_core::model::{ColumnModel, ColumnType, TableId, TableModel};
 use event_replay_core::position::RecordedAt;
@@ -9,7 +10,7 @@ use event_replay_core::source::SchemaChangeStream;
 use event_replay_core::window::Window;
 use event_replay_protocol::sink::duckdb::client::DuckDbClient;
 use event_replay_protocol::{Debezium, DuckDbWarehouse, MySql};
-use event_replay_strategy::snapshot::{Base, Snapshot, SnapshotReplay};
+use event_replay_strategy::snapshot::{Base, Snapshot};
 
 const CHANGE_LOG: &str = "CREATE SCHEMA cdc;
     CREATE TABLE cdc.people AS SELECT * FROM (VALUES
@@ -42,12 +43,12 @@ fn a_snapshot_holds_each_key_as_the_change_log_last_left_it() {
     );
     client.execute(CHANGE_LOG).unwrap();
     let log = Debezium::under("value", MySql);
+    let window = Window::new(RecordedAt::from(0), RecordedAt::from(10));
     let snapshot = Snapshot::new(
         &log,
-        people(),
+        Lineage::new(people(), vec![Era::new(people(), window)]),
         TablePath::new("cdc", "people"),
         TablePath::new("shop_snapshot", "people"),
-        Window::new(RecordedAt::from(0), RecordedAt::from(10)),
         Base::Captured,
     );
 
@@ -109,20 +110,25 @@ fn rows(client: &DuckDbClient, query: &str) -> Vec<String> {
 
 fn replay(client: &DuckDbClient, window: &Window) {
     let log = Debezium::under("value", MySql);
-    let mut replay = SnapshotReplay::new(|table: &TableModel| {
-        Ok::<_, Unbuilt>(Snapshot::new(
-            &log,
-            table.clone(),
-            TablePath::new("cdc", table.id().table()),
-            TablePath::new("shop_snapshot", table.id().table()),
-            window.clone(),
-            Base::Captured,
-        ))
-    });
+    let mut tracker = EraTracker::new(window.clone());
     let catalog = client
-        .replay::<Unbuilt>(&log, &TablePath::new("ddl", "shop"), window, &mut replay)
+        .replay::<Unbuilt>(&log, &TablePath::new("ddl", "shop"), window, &mut tracker)
         .unwrap();
-    let snapshots = replay.snapshots(&catalog).unwrap();
+    let snapshots: Vec<_> = tracker
+        .lineages(&catalog)
+        .into_iter()
+        .map(|lineage| {
+            let table = lineage.table().id().table().to_owned();
+
+            Snapshot::new(
+                &log,
+                lineage,
+                TablePath::new("cdc", &table),
+                TablePath::new("shop_snapshot", &table),
+                Base::Captured,
+            )
+        })
+        .collect();
 
     client.build::<Unbuilt>(&snapshots).unwrap();
 }
@@ -177,6 +183,62 @@ fn a_table_created_before_the_window_is_snapshotted_too() {
             "SELECT table_name FROM information_schema.tables WHERE table_schema = 'shop_snapshot' ORDER BY table_name"
         ),
         ["people", "pets"]
+    );
+}
+
+const WIDENED: &str = "CREATE SCHEMA ddl;
+    CREATE TABLE ddl.shop AS SELECT * FROM (VALUES
+      ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL}, 'ts_ms': 0::BIGINT,
+        'ddl': 'CREATE TABLE people (id BIGINT, name VARCHAR(64))',
+        'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
+          'table': {'primaryKeyColumnNames': ['id'], 'columns': [
+            {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
+             'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL},
+            {'name': 'name', 'typeName': 'VARCHAR', 'position': 2, 'optional': false,
+             'defaultValueExpression': NULL, 'length': 64, 'scale': NULL}]}}]}),
+      ({'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL}, 'ts_ms': 5::BIGINT,
+        'ddl': 'ALTER TABLE people ADD COLUMN email VARCHAR(64)',
+        'tableChanges': [{'type': 'ALTER', 'id': '\"shop\".\"people\"',
+          'table': {'primaryKeyColumnNames': ['id'], 'columns': [
+            {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
+             'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL},
+            {'name': 'name', 'typeName': 'VARCHAR', 'position': 2, 'optional': false,
+             'defaultValueExpression': NULL, 'length': 64, 'scale': NULL},
+            {'name': 'email', 'typeName': 'VARCHAR', 'position': 3, 'optional': true,
+             'defaultValueExpression': 'none', 'length': 64, 'scale': NULL}]}}]})
+    ) AS t(value);
+    CREATE SCHEMA cdc;
+    CREATE TABLE cdc.people AS SELECT * FROM (VALUES
+      ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 2::BIGINT},
+        'before': NULL::STRUCT(id BIGINT, name VARCHAR, email VARCHAR),
+        'after': {'id': 1::BIGINT, 'name': 'Alice', 'email': NULL::VARCHAR}}),
+      ({'op': 'c', 'ts_ms': 2::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 3::BIGINT},
+        'before': NULL::STRUCT(id BIGINT, name VARCHAR, email VARCHAR),
+        'after': {'id': 2::BIGINT, 'name': 'Bob', 'email': NULL::VARCHAR}}),
+      ({'op': 'u', 'ts_ms': 6::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 5::BIGINT},
+        'before': {'id': 1::BIGINT, 'name': 'Alice', 'email': 'none'},
+        'after': {'id': 1::BIGINT, 'name': 'Alicia', 'email': 'alicia@example.com'}})
+    ) AS t(value)";
+
+#[test]
+fn a_column_added_within_the_window_is_filled_in_for_the_rows_last_changed_before_it() {
+    let client = DuckDbClient::new(
+        Connection::open_in_memory().unwrap(),
+        DuckDbWarehouse::default(),
+    );
+    client.execute(WIDENED).unwrap();
+
+    replay(
+        &client,
+        &Window::new(RecordedAt::from(0), RecordedAt::from(10)),
+    );
+
+    assert_eq!(
+        rows(
+            &client,
+            "SELECT id::VARCHAR || ' ' || name || ' ' || email FROM shop_snapshot.people ORDER BY id"
+        ),
+        ["1 Alicia alicia@example.com", "2 Bob none"]
     );
 }
 

@@ -1,4 +1,5 @@
 use event_replay_core::artifact::Artifact;
+use event_replay_core::era::{Era, Lineage};
 use event_replay_core::model::{ColumnModel, ColumnType, TableId, TableModel};
 use event_replay_core::position::RecordedAt;
 use event_replay_core::sink::TablePath;
@@ -28,12 +29,12 @@ fn customers() -> TableModel {
 
 fn main() {
     let log = Debezium::new(MySql);
+    let window = Window::new(RecordedAt::from(0), RecordedAt::from(4102444800000));
     let snapshot = Snapshot::new(
         &log,
-        customers(),
+        Lineage::new(customers(), vec![Era::new(customers(), window)]),
         TablePath::new("mysql_shop_cdc", "mysql_shop_customers"),
         TablePath::new("mysql_shop", "customers_20260920"),
-        Window::new(RecordedAt::from(0), RecordedAt::from(4102444800000)),
         match std::env::args().nth(2).as_deref() {
             Some(shard) => Base::Shard(TablePath::new("mysql_shop", shard)),
             None => Base::Captured,
