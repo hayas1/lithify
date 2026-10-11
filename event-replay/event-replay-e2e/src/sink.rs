@@ -283,26 +283,28 @@ impl DuckDbChangeLogsFn for Fold<'_> {
         C: ChangeLogs,
         <C::Schema as SchemaChangeLog>::Record: FromSql,
     {
-        let mut tracker = EraTracker::new(self.window.clone());
+        let mut tracker = EraTracker::new(self.window.clone(), |table: &TableId| {
+            Ok::<_, Unbuildable>(Snapshot::new(
+                logs.row_changes(),
+                table.clone(),
+                self.changes.clone(),
+                self.into.clone(),
+                Base::Captured,
+            ))
+        });
         let catalog = self.client.replay::<Unbuildable>(
             logs.schema_changes(),
             self.schema_changes,
             self.window,
             &mut tracker,
         )?;
-        let lineage = tracker
-            .lineages(&catalog)
+        let snapshot = tracker
+            .finish(&catalog)?
             .into_iter()
-            .find(|lineage| lineage.table().id() == self.table)
+            .find(|snapshot| snapshot.table() == self.table)
             .ok_or_else(|| Unbuildable::UnknownTable(self.table.clone()))?;
 
-        self.client.build(&Snapshot::new(
-            logs.row_changes(),
-            lineage,
-            self.changes.clone(),
-            self.into.clone(),
-            Base::Captured,
-        ))
+        self.client.build(&snapshot)
     }
 }
 

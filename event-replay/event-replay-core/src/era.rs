@@ -29,131 +29,156 @@ impl Era {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Lineage {
-    table: TableModel,
-    eras: Vec<Era>,
-}
-
-impl Lineage {
-    pub fn new(table: TableModel, eras: Vec<Era>) -> Self {
-        Self { table, eras }
-    }
-
-    pub fn table(&self) -> &TableModel {
-        &self.table
-    }
-
-    pub fn eras(&self) -> impl Iterator<Item = &Era> {
-        self.eras.iter()
-    }
-
-    pub fn first(&self) -> Option<&Era> {
-        self.eras.first()
-    }
-}
-
-pub struct EraTracker {
+pub struct EraTracker<F, L, E> {
     window: Window,
     at: RecordedAt,
-    tables: BTreeMap<TableId, Track>,
+    open: F,
+    tables: BTreeMap<TableId, Track<L, E>>,
 }
 
-struct Track {
-    closed: Vec<Era>,
-    table: TableModel,
+struct Track<L, E> {
+    listener: Result<L, E>,
     since: RecordedAt,
 }
 
-impl Track {
-    fn new(table: TableModel, since: RecordedAt) -> Self {
+impl<L, E> Track<L, E> {
+    fn open(
+        open: &mut impl FnMut(&TableId) -> Result<L, E>,
+        table: &TableId,
+        since: RecordedAt,
+    ) -> Self {
         Self {
-            closed: Vec::new(),
-            table,
+            listener: open(table),
             since,
         }
     }
 
-    fn advance(&mut self, at: RecordedAt, table: &TableModel) {
-        if self.since != at {
-            self.closed
-                .push(Era::new(self.table.clone(), Window::new(self.since, at)));
-            self.since = at;
+    fn tell(&mut self, visit: impl FnOnce(&mut L)) {
+        if let Ok(listener) = &mut self.listener {
+            visit(listener);
         }
-        self.table = table.clone();
     }
 
-    fn close(self, to: RecordedAt) -> Vec<Era> {
-        let mut eras = self.closed;
-        eras.push(Era::new(self.table, Window::new(self.since, to)));
+    fn advance<P>(&mut self, at: RecordedAt, before: &TableModel)
+    where
+        L: SchemaChangeListener<P>,
+    {
+        if self.since < at {
+            let era = Era::new(before.clone(), Window::new(self.since, at));
 
-        eras
+            self.tell(|listener| listener.visit_era(&era));
+            self.since = at;
+        }
+    }
+
+    fn finish<P>(mut self, table: &TableModel, to: RecordedAt) -> Result<L, E>
+    where
+        L: SchemaChangeListener<P>,
+    {
+        self.advance(to, table);
+
+        self.listener
     }
 }
 
-impl EraTracker {
-    pub fn new(window: Window) -> Self {
+impl<F, L, E> EraTracker<F, L, E>
+where
+    F: FnMut(&TableId) -> Result<L, E>,
+{
+    pub fn new(window: Window, open: F) -> Self {
         Self {
             at: *window.from(),
             window,
+            open,
             tables: BTreeMap::new(),
         }
     }
 
-    pub fn lineages<P: Position>(mut self, catalog: &CatalogModel<P>) -> Vec<Lineage> {
+    pub fn finish<P: Position>(mut self, catalog: &CatalogModel<P>) -> Result<Vec<L>, E>
+    where
+        L: SchemaChangeListener<P>,
+    {
         catalog
             .tables()
             .map(|table| {
-                let eras = match self.tables.remove(table.id()) {
-                    Some(track) => track.close(*self.window.to()),
-                    None => vec![Era::new(table.clone(), self.window.clone())],
-                };
+                let track = self.tables.remove(table.id()).unwrap_or_else(|| {
+                    Track::open(&mut self.open, table.id(), *self.window.from())
+                });
 
-                Lineage::new(table.clone(), eras)
+                track.finish(table, *self.window.to())
             })
             .collect()
     }
 
-    fn alter(&mut self, before: &TableModel, after: &TableModel) {
-        let from = *self.window.from();
+    fn track(&mut self, table: &TableId) -> &mut Track<L, E> {
+        let Self {
+            window,
+            open,
+            tables,
+            ..
+        } = self;
 
-        self.tables
-            .entry(after.id().clone())
-            .or_insert_with(|| Track::new(before.clone(), from))
-            .advance(self.at, after);
+        tables
+            .entry(table.clone())
+            .or_insert_with(|| Track::open(open, table, *window.from()))
+    }
+
+    fn alter<P>(&mut self, before: &TableModel, after: &TableModel, visit: impl FnOnce(&mut L))
+    where
+        L: SchemaChangeListener<P>,
+    {
+        let at = self.at;
+        let track = self.track(after.id());
+
+        track.advance(at, before);
+        track.tell(visit);
     }
 }
 
-impl<P> SchemaChangeListener<P> for EraTracker {
+impl<P, F, L, E> SchemaChangeListener<P> for EraTracker<F, L, E>
+where
+    F: FnMut(&TableId) -> Result<L, E>,
+    L: SchemaChangeListener<P>,
+{
     fn visit_statement(&mut self, change: &SchemaChange<P>) {
         self.at = *change.recorded_at();
     }
 
     fn visit_created(&mut self, event: &TableCreated<'_>) {
-        self.tables.insert(
-            event.table().id().clone(),
-            Track::new(event.table().clone(), self.at),
-        );
+        let mut track = Track::open(&mut self.open, event.table().id(), self.at);
+
+        track.tell(|listener| listener.visit_created(event));
+        self.tables.insert(event.table().id().clone(), track);
     }
 
     fn visit_dropped(&mut self, event: &TableDropped<'_>) {
-        self.tables.remove(event.table().id());
+        if let Some(mut track) = self.tables.remove(event.table().id()) {
+            track.tell(|listener| listener.visit_dropped(event));
+        }
     }
 
     fn visit_column_added(&mut self, event: &ColumnAdded<'_>) {
-        self.alter(event.before(), event.after());
+        self.alter(event.before(), event.after(), |listener| {
+            listener.visit_column_added(event)
+        });
     }
 
     fn visit_column_dropped(&mut self, event: &ColumnDropped<'_>) {
-        self.alter(event.before(), event.after());
+        self.alter(event.before(), event.after(), |listener| {
+            listener.visit_column_dropped(event)
+        });
     }
 
     fn visit_column_retyped(&mut self, event: &ColumnRetyped<'_>) {
-        self.alter(event.before(), event.after());
+        self.alter(event.before(), event.after(), |listener| {
+            listener.visit_column_retyped(event)
+        });
     }
 
     fn visit_primary_key_changed(&mut self, event: &PrimaryKeyChanged<'_>) {
-        self.alter(event.before(), event.after());
+        self.alter(event.before(), event.after(), |listener| {
+            listener.visit_primary_key_changed(event)
+        });
     }
 }
 
@@ -161,15 +186,46 @@ impl<P> SchemaChangeListener<P> for EraTracker {
 mod tests {
     use super::*;
     use crate::event::{SchemaChange, TableChange};
-    use crate::listener::CatalogModel;
-    use crate::model::{ColumnModel, ColumnType, TableId, TableModel};
-    use crate::position::{Position, RecordedAt};
-    use crate::window::Window;
+    use crate::listener::{ColumnAdded, TableCreated, TableDropped};
+    use crate::model::{ColumnModel, ColumnType, TableModel};
+    use crate::position::Position;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     struct Offset(u64);
 
     impl Position for Offset {}
+
+    #[derive(Debug)]
+    struct Story {
+        table: TableId,
+        told: Vec<String>,
+    }
+
+    impl SchemaChangeListener<Offset> for Story {
+        fn visit_era(&mut self, era: &Era) {
+            self.told.push(format!(
+                "era {:?} {}..{}",
+                era.table()
+                    .columns()
+                    .map(|column| column.name())
+                    .collect::<Vec<_>>(),
+                era.window().from().milliseconds_since_epoch(),
+                era.window().to().milliseconds_since_epoch()
+            ));
+        }
+
+        fn visit_created(&mut self, event: &TableCreated<'_>) {
+            self.told.push(format!("created {}", event.table().id()));
+        }
+
+        fn visit_dropped(&mut self, event: &TableDropped<'_>) {
+            self.told.push(format!("dropped {}", event.table().id()));
+        }
+
+        fn visit_column_added(&mut self, event: &ColumnAdded<'_>) {
+            self.told.push(format!("added {}", event.column().name()));
+        }
+    }
 
     fn people() -> TableId {
         TableId::new("shop", "people")
@@ -179,17 +235,22 @@ mod tests {
         TableId::new("shop", "pets")
     }
 
-    fn column(name: &str, position: u32) -> ColumnModel {
-        ColumnModel::new(name, "BIGINT", ColumnType::Int64, position, false, None)
-    }
-
     fn table(id: TableId, columns: &[&str]) -> TableModel {
         TableModel::new(
             id,
             columns
                 .iter()
                 .enumerate()
-                .map(|(at, name)| column(name, at as u32 + 1))
+                .map(|(at, name)| {
+                    ColumnModel::new(
+                        name,
+                        "BIGINT",
+                        ColumnType::Int64,
+                        at as u32 + 1,
+                        false,
+                        None,
+                    )
+                })
                 .collect(),
             vec!["id".to_owned()],
         )
@@ -199,154 +260,175 @@ mod tests {
         SchemaChange::new(Offset(at as u64), RecordedAt::from(at), "", tables)
     }
 
-    fn window(from: i64, to: i64) -> Window {
-        Window::new(RecordedAt::from(from), RecordedAt::from(to))
-    }
-
-    fn lineages(
+    fn stories(
         before: Vec<SchemaChange<Offset>>,
         within: Vec<SchemaChange<Offset>>,
-    ) -> Vec<Lineage> {
+    ) -> Vec<(TableId, Vec<String>)> {
         let mut catalog = CatalogModel::default();
         for change in &before {
             catalog.accept(change, &mut ()).unwrap();
         }
-        let mut tracker = EraTracker::new(window(10, 20));
+        let mut tracker = EraTracker::new(
+            Window::new(RecordedAt::from(10), RecordedAt::from(20)),
+            |table: &TableId| {
+                Ok::<_, ()>(Story {
+                    table: table.clone(),
+                    told: Vec::new(),
+                })
+            },
+        );
         for change in &within {
             catalog.accept(change, &mut tracker).unwrap();
         }
 
-        tracker.lineages(&catalog)
-    }
-
-    fn spans(lineage: &Lineage) -> Vec<(Vec<String>, i64, i64)> {
-        lineage
-            .eras()
-            .map(|era| {
-                (
-                    era.table()
-                        .columns()
-                        .map(|column| column.name().to_owned())
-                        .collect(),
-                    era.window().from().milliseconds_since_epoch(),
-                    era.window().to().milliseconds_since_epoch(),
-                )
-            })
+        tracker
+            .finish(&catalog)
+            .unwrap()
+            .into_iter()
+            .map(|story| (story.table, story.told))
             .collect()
     }
 
     #[test]
     fn a_table_no_schema_change_touches_lives_one_era_across_the_window() {
-        let lineages = lineages(
-            vec![change(
-                1,
-                vec![TableChange::Created(table(people(), &["id"]))],
-            )],
-            vec![],
+        assert_eq!(
+            stories(
+                vec![change(
+                    1,
+                    vec![TableChange::Created(table(people(), &["id"]))]
+                )],
+                vec![]
+            ),
+            [(people(), vec!["era [\"id\"] 10..20".to_owned()])]
         );
-
-        assert_eq!(lineages.len(), 1);
-        assert_eq!(lineages[0].table().id(), &people());
-        assert_eq!(spans(&lineages[0]), [(vec!["id".to_owned()], 10, 20)]);
     }
 
     #[test]
-    fn a_schema_change_within_the_window_closes_one_era_and_opens_the_next() {
-        let lineages = lineages(
-            vec![change(
-                1,
-                vec![TableChange::Created(table(people(), &["id"]))],
-            )],
-            vec![change(
-                15,
-                vec![TableChange::Altered(table(people(), &["id", "name"]))],
-            )],
-        );
-
+    fn a_schema_change_tells_the_era_before_it_then_itself_then_the_era_after_it() {
         assert_eq!(
-            spans(&lineages[0]),
-            [
-                (vec!["id".to_owned()], 10, 15),
-                (vec!["id".to_owned(), "name".to_owned()], 15, 20)
-            ]
-        );
-        assert_eq!(lineages[0].table().columns().count(), 2);
-    }
-
-    #[test]
-    fn a_statement_that_changes_a_table_twice_opens_one_era() {
-        let lineages = lineages(
-            vec![change(
-                1,
-                vec![TableChange::Created(table(people(), &["id"]))],
-            )],
-            vec![change(
-                15,
-                vec![TableChange::Altered(table(
-                    people(),
-                    &["id", "name", "born"],
-                ))],
-            )],
-        );
-
-        assert_eq!(
-            spans(&lineages[0]),
-            [
-                (vec!["id".to_owned()], 10, 15),
-                (
-                    vec!["id".to_owned(), "name".to_owned(), "born".to_owned()],
+            stories(
+                vec![change(
+                    1,
+                    vec![TableChange::Created(table(people(), &["id"]))]
+                )],
+                vec![change(
                     15,
-                    20
-                )
-            ]
+                    vec![TableChange::Altered(table(people(), &["id", "name"]))]
+                )],
+            ),
+            [(
+                people(),
+                vec![
+                    "era [\"id\"] 10..15".to_owned(),
+                    "added name".to_owned(),
+                    "era [\"id\", \"name\"] 15..20".to_owned()
+                ]
+            )]
+        );
+    }
+
+    #[test]
+    fn a_statement_that_changes_a_table_twice_ends_one_era() {
+        assert_eq!(
+            stories(
+                vec![change(
+                    1,
+                    vec![TableChange::Created(table(people(), &["id"]))]
+                )],
+                vec![change(
+                    15,
+                    vec![TableChange::Altered(table(
+                        people(),
+                        &["id", "name", "born"]
+                    ))]
+                )],
+            ),
+            [(
+                people(),
+                vec![
+                    "era [\"id\"] 10..15".to_owned(),
+                    "added name".to_owned(),
+                    "added born".to_owned(),
+                    "era [\"id\", \"name\", \"born\"] 15..20".to_owned()
+                ]
+            )]
         );
     }
 
     #[test]
     fn a_table_created_within_the_window_lives_from_its_creation() {
-        let lineages = lineages(
-            vec![],
-            vec![change(
-                12,
-                vec![TableChange::Created(table(pets(), &["id"]))],
-            )],
+        assert_eq!(
+            stories(
+                vec![],
+                vec![change(
+                    12,
+                    vec![TableChange::Created(table(pets(), &["id"]))]
+                )],
+            ),
+            [(
+                pets(),
+                vec![
+                    "created shop.pets".to_owned(),
+                    "era [\"id\"] 12..20".to_owned()
+                ]
+            )]
         );
-
-        assert_eq!(spans(&lineages[0]), [(vec!["id".to_owned()], 12, 20)]);
     }
 
     #[test]
-    fn a_table_dropped_within_the_window_has_no_lineage() {
-        let lineages = lineages(
-            vec![change(
-                1,
-                vec![TableChange::Created(table(people(), &["id"]))],
-            )],
-            vec![change(15, vec![TableChange::Dropped(people())])],
+    fn a_table_dropped_within_the_window_is_told_nothing_more() {
+        assert!(
+            stories(
+                vec![change(
+                    1,
+                    vec![TableChange::Created(table(people(), &["id"]))]
+                )],
+                vec![change(15, vec![TableChange::Dropped(people())])],
+            )
+            .is_empty()
         );
-
-        assert!(lineages.is_empty());
     }
 
     #[test]
     fn a_table_dropped_and_created_again_lives_only_from_its_new_creation() {
-        let lineages = lineages(
-            vec![change(
-                1,
-                vec![TableChange::Created(table(people(), &["id"]))],
-            )],
-            vec![
-                change(13, vec![TableChange::Dropped(people())]),
-                change(
-                    16,
-                    vec![TableChange::Created(table(people(), &["id", "name"]))],
-                ),
-            ],
+        assert_eq!(
+            stories(
+                vec![change(
+                    1,
+                    vec![TableChange::Created(table(people(), &["id"]))]
+                )],
+                vec![
+                    change(13, vec![TableChange::Dropped(people())]),
+                    change(
+                        16,
+                        vec![TableChange::Created(table(people(), &["id", "name"]))]
+                    ),
+                ],
+            ),
+            [(
+                people(),
+                vec![
+                    "created shop.people".to_owned(),
+                    "era [\"id\", \"name\"] 16..20".to_owned()
+                ]
+            )]
+        );
+    }
+
+    #[test]
+    fn a_table_whose_listener_cannot_be_opened_fails_the_tracking() {
+        let mut catalog = CatalogModel::default();
+        catalog
+            .accept(
+                &change(1, vec![TableChange::Created(table(people(), &["id"]))]),
+                &mut (),
+            )
+            .unwrap();
+        let tracker = EraTracker::new(
+            Window::new(RecordedAt::from(10), RecordedAt::from(20)),
+            |table: &TableId| Err::<Story, _>(table.clone()),
         );
 
-        assert_eq!(
-            spans(&lineages[0]),
-            [(vec!["id".to_owned(), "name".to_owned()], 16, 20)]
-        );
+        assert_eq!(tracker.finish(&catalog).unwrap_err(), people());
     }
 }

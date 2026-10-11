@@ -7,6 +7,7 @@ use event_replay_config::Artifact;
 use event_replay_config::infra::{Sink, Source};
 use event_replay_core::artifact;
 use event_replay_core::era::EraTracker;
+use event_replay_core::model::TableId;
 use event_replay_core::sink::TablePath;
 use event_replay_core::sink::WarehouseClient;
 use event_replay_core::source::{ChangeLogs, SchemaChangeLog, SchemaChangeStream};
@@ -51,32 +52,27 @@ impl<'a, K> SnapshotPlan<'a, K> {
     {
         let shard =
             DateTime::<Utc>::try_from(*self.window.from()).map_err(Unreplayable::Unshardable)?;
-        let mut tracker = EraTracker::new(self.window.clone());
+        let mut tracker = EraTracker::new(self.window.clone(), |table: &TableId| {
+            let changes = self
+                .sink
+                .row_changes(self.source, table)
+                .ok_or_else(|| Unreplayable::WithoutTopic(self.source.name().to_owned()))?;
+
+            Ok::<_, Unreplayable>(Snapshot::new(
+                logs.row_changes(),
+                table.clone(),
+                changes,
+                self.sink.replay().target(Artifact::Snapshot, table, shard),
+                Base::Captured,
+            ))
+        });
         let catalog = self.client.replay::<Unreplayable>(
             logs.schema_changes(),
             self.schema_changes,
             self.window,
             &mut tracker,
         )?;
-        let snapshots = tracker
-            .lineages(&catalog)
-            .into_iter()
-            .map(|lineage| {
-                let table = lineage.table().id().clone();
-                let changes = self
-                    .sink
-                    .row_changes(self.source, &table)
-                    .ok_or_else(|| Unreplayable::WithoutTopic(self.source.name().to_owned()))?;
-
-                Ok(Snapshot::new(
-                    logs.row_changes(),
-                    lineage,
-                    changes,
-                    self.sink.replay().target(Artifact::Snapshot, &table, shard),
-                    Base::Captured,
-                ))
-            })
-            .collect::<Result<Vec<_>, Unreplayable>>()?;
+        let snapshots = tracker.finish(&catalog)?;
 
         Ok(artifact::Artifact::statements(
             &snapshots,

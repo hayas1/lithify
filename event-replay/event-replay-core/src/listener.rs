@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use crate::era::Era;
 use crate::event::{SchemaChange, TableChange};
 use crate::model::{ColumnModel, TableId, TableModel};
 use crate::position::Position;
@@ -12,6 +13,10 @@ pub trait SchemaChangeListener<P> {
 
     fn leave_statement(&mut self, change: &SchemaChange<P>) {
         let _ = change;
+    }
+
+    fn visit_era(&mut self, era: &Era) {
+        let _ = era;
     }
 
     fn visit_created(&mut self, event: &TableCreated<'_>) {

@@ -1,10 +1,11 @@
 use event_replay_core::artifact::Artifact;
-use event_replay_core::era::{Era, Lineage};
+use event_replay_core::era::Era;
+use event_replay_core::listener::SchemaChangeListener;
 use event_replay_core::model::{ColumnModel, ColumnType, TableId, TableModel};
 use event_replay_core::position::RecordedAt;
 use event_replay_core::sink::TablePath;
 use event_replay_core::window::Window;
-use event_replay_protocol::{BigQueryWarehouse, Debezium, DuckDbWarehouse, MySql};
+use event_replay_protocol::{BigQueryWarehouse, Debezium, DuckDbWarehouse, MySql, MySqlPosition};
 use event_replay_strategy::snapshot::{Base, Snapshot};
 
 fn column(name: &str, type_name: &str, column_type: ColumnType, position: u32) -> ColumnModel {
@@ -30,9 +31,9 @@ fn customers() -> TableModel {
 fn main() {
     let log = Debezium::new(MySql);
     let window = Window::new(RecordedAt::from(0), RecordedAt::from(4102444800000));
-    let snapshot = Snapshot::new(
+    let mut snapshot = Snapshot::new(
         &log,
-        Lineage::new(customers(), vec![Era::new(customers(), window)]),
+        customers().id().clone(),
         TablePath::new("mysql_shop_cdc", "mysql_shop_customers"),
         TablePath::new("mysql_shop", "customers_20260920"),
         match std::env::args().nth(2).as_deref() {
@@ -40,6 +41,7 @@ fn main() {
             None => Base::Captured,
         },
     );
+    SchemaChangeListener::<MySqlPosition>::visit_era(&mut snapshot, &Era::new(customers(), window));
 
     match std::env::args().nth(1).as_deref() {
         Some("bigquery") => println!(

@@ -1,15 +1,16 @@
 use duckdb::Connection;
 
 use event_replay_core::artifact::UnbuildableArtifact;
-use event_replay_core::era::{Era, EraTracker, Lineage};
+use event_replay_core::era::{Era, EraTracker};
 use event_replay_core::listener::OutOfOrder;
+use event_replay_core::listener::SchemaChangeListener;
 use event_replay_core::model::{ColumnModel, ColumnType, TableId, TableModel};
 use event_replay_core::position::RecordedAt;
 use event_replay_core::sink::{TablePath, WarehouseClient};
 use event_replay_core::source::SchemaChangeStream;
 use event_replay_core::window::Window;
 use event_replay_protocol::sink::duckdb::client::DuckDbClient;
-use event_replay_protocol::{Debezium, DuckDbWarehouse, MySql};
+use event_replay_protocol::{Debezium, DuckDbWarehouse, MySql, MySqlPosition};
 use event_replay_strategy::snapshot::{Base, Snapshot};
 
 const CHANGE_LOG: &str = "CREATE SCHEMA cdc;
@@ -44,13 +45,14 @@ fn a_snapshot_holds_each_key_as_the_change_log_last_left_it() {
     client.execute(CHANGE_LOG).unwrap();
     let log = Debezium::under("value", MySql);
     let window = Window::new(RecordedAt::from(0), RecordedAt::from(10));
-    let snapshot = Snapshot::new(
+    let mut snapshot = Snapshot::new(
         &log,
-        Lineage::new(people(), vec![Era::new(people(), window)]),
+        people().id().clone(),
         TablePath::new("cdc", "people"),
         TablePath::new("shop_snapshot", "people"),
         Base::Captured,
     );
+    SchemaChangeListener::<MySqlPosition>::visit_era(&mut snapshot, &Era::new(people(), window));
 
     client.build::<Unbuilt>(&snapshot).unwrap();
 
@@ -110,25 +112,19 @@ fn rows(client: &DuckDbClient, query: &str) -> Vec<String> {
 
 fn replay(client: &DuckDbClient, window: &Window) {
     let log = Debezium::under("value", MySql);
-    let mut tracker = EraTracker::new(window.clone());
+    let mut tracker = EraTracker::new(window.clone(), |table: &TableId| {
+        Ok::<_, Unbuilt>(Snapshot::new(
+            &log,
+            table.clone(),
+            TablePath::new("cdc", table.table()),
+            TablePath::new("shop_snapshot", table.table()),
+            Base::Captured,
+        ))
+    });
     let catalog = client
         .replay::<Unbuilt>(&log, &TablePath::new("ddl", "shop"), window, &mut tracker)
         .unwrap();
-    let snapshots: Vec<_> = tracker
-        .lineages(&catalog)
-        .into_iter()
-        .map(|lineage| {
-            let table = lineage.table().id().table().to_owned();
-
-            Snapshot::new(
-                &log,
-                lineage,
-                TablePath::new("cdc", &table),
-                TablePath::new("shop_snapshot", &table),
-                Base::Captured,
-            )
-        })
-        .collect();
+    let snapshots = tracker.finish(&catalog).unwrap();
 
     client.build::<Unbuilt>(&snapshots).unwrap();
 }
