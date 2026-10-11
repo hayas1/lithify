@@ -8,21 +8,21 @@ use event_replay_core::window::Window;
 use event_replay_protocol::{BigQueryWarehouse, Debezium, DuckDbWarehouse, MySql, MySqlPosition};
 use event_replay_strategy::snapshot::{Base, Snapshot};
 
-fn column(name: &str, type_name: &str, column_type: ColumnType, position: u32) -> ColumnModel {
-    ColumnModel::new(name, type_name, column_type, position, false, None)
+fn column(name: &str, type_name: &str, column_type: ColumnType) -> ColumnModel {
+    ColumnModel::new(name, type_name, column_type, false, None)
 }
 
 fn customers() -> TableModel {
     TableModel::new(
         TableId::new("shop", "customers"),
         vec![
-            column("id", "BIGINT", ColumnType::Int64, 1),
-            column("email", "VARCHAR", ColumnType::Text, 2),
-            column("name", "VARCHAR", ColumnType::Text, 3),
-            column("is_active", "TINYINT", ColumnType::Int16, 4),
-            column("tags", "JSON", ColumnType::Json, 5),
-            column("created_at", "DATETIME", ColumnType::Timestamp, 6),
-            column("updated_at", "DATETIME", ColumnType::Timestamp, 7),
+            column("id", "BIGINT", ColumnType::Int64),
+            column("email", "VARCHAR", ColumnType::Text),
+            column("name", "VARCHAR", ColumnType::Text),
+            column("is_active", "TINYINT", ColumnType::Int16),
+            column("tags", "JSON", ColumnType::Json),
+            column("created_at", "DATETIME", ColumnType::Timestamp),
+            column("updated_at", "DATETIME", ColumnType::Timestamp),
         ],
         vec!["id".to_owned()],
     )

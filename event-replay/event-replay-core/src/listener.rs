@@ -532,11 +532,9 @@ mod tests {
             event: &ColumnAdded<'_>,
         ) -> Result<(), Infallible> {
             self.entries.push(format!(
-                "added {}.{} at {} of {}",
+                "added {}.{}",
                 event.after().id(),
-                event.column().name(),
-                event.column().position(),
-                event.after().columns().count()
+                event.column().name()
             ));
 
             Ok(())
@@ -592,16 +590,16 @@ mod tests {
         TableId::new("shop", "customers")
     }
 
-    fn column(name: &str, type_name: &str, column_type: ColumnType, position: u32) -> ColumnModel {
-        ColumnModel::new(name, type_name, column_type, position, false, None)
+    fn column(name: &str, type_name: &str, column_type: ColumnType) -> ColumnModel {
+        ColumnModel::new(name, type_name, column_type, false, None)
     }
 
     fn identifier() -> ColumnModel {
-        column("id", "BIGINT", ColumnType::Int64, 1)
+        column("id", "BIGINT", ColumnType::Int64)
     }
 
-    fn name_at(position: u32) -> ColumnModel {
-        column("name", "VARCHAR", ColumnType::Text, position)
+    fn name() -> ColumnModel {
+        column("name", "VARCHAR", ColumnType::Text)
     }
 
     fn table(columns: Vec<ColumnModel>, primary_key: &[&str]) -> TableModel {
@@ -620,7 +618,7 @@ mod tests {
         change(
             offset,
             vec![TableChange::Created(table(
-                vec![identifier(), name_at(2)],
+                vec![identifier(), name()],
                 &["id"],
             ))],
         )
@@ -664,7 +662,7 @@ mod tests {
     }
 
     #[test]
-    fn an_added_column_is_announced_with_where_it_landed() {
+    fn an_added_column_is_announced_against_the_table_that_gained_it() {
         let mut catalog = CatalogModel::default();
         accept(&mut catalog, created(1));
 
@@ -674,14 +672,14 @@ mod tests {
                 2,
                 vec![
                     identifier(),
-                    column("nickname", "VARCHAR", ColumnType::Text, 2),
-                    name_at(3),
+                    column("nickname", "VARCHAR", ColumnType::Text),
+                    name(),
                 ],
                 &["id"],
             ),
         );
 
-        assert_eq!(entries, ["added shop.customers.nickname at 2 of 3"]);
+        assert_eq!(entries, ["added shop.customers.nickname"]);
     }
 
     #[test]
@@ -703,7 +701,7 @@ mod tests {
             &mut catalog,
             altered(
                 2,
-                vec![identifier(), column("name", "TEXT", ColumnType::Text, 2)],
+                vec![identifier(), column("name", "TEXT", ColumnType::Text)],
                 &["id"],
             ),
         );
@@ -718,7 +716,7 @@ mod tests {
 
         let entries = accept(
             &mut catalog,
-            altered(2, vec![identifier(), name_at(2)], &["id", "name"]),
+            altered(2, vec![identifier(), name()], &["id", "name"]),
         );
 
         assert_eq!(
@@ -762,7 +760,7 @@ mod tests {
         catalog
             .accept::<OutOfOrder, _>(
                 &(),
-                &altered(2, vec![identifier(), name_at(2)], &["id"]),
+                &altered(2, vec![identifier(), name()], &["id"]),
                 &mut statements,
             )
             .unwrap();
@@ -934,16 +932,16 @@ mod tests {
         }
     }
 
-    fn email_at(position: u32) -> ColumnModel {
-        column("email", "VARCHAR", ColumnType::Text, position)
+    fn email() -> ColumnModel {
+        column("email", "VARCHAR", ColumnType::Text)
     }
 
-    fn nickname_at(position: u32) -> ColumnModel {
-        column("nickname", "VARCHAR", ColumnType::Text, position)
+    fn nickname() -> ColumnModel {
+        column("nickname", "VARCHAR", ColumnType::Text)
     }
 
-    fn phone_at(position: u32) -> ColumnModel {
-        column("phone", "VARCHAR", ColumnType::Text, position)
+    fn phone() -> ColumnModel {
+        column("phone", "VARCHAR", ColumnType::Text)
     }
 
     fn steps(before: TableModel, after: TableModel) -> Steps {
@@ -968,13 +966,13 @@ mod tests {
 
     fn reshaped() -> (TableModel, TableModel) {
         (
-            table(vec![identifier(), name_at(2), email_at(3)], &["id"]),
+            table(vec![identifier(), name(), email()], &["id"]),
             table(
                 vec![
                     identifier(),
-                    nickname_at(2),
-                    column("name", "TEXT", ColumnType::Text, 3),
-                    phone_at(4),
+                    nickname(),
+                    column("name", "TEXT", ColumnType::Text),
+                    phone(),
                 ],
                 &["id", "nickname"],
             ),
@@ -983,8 +981,8 @@ mod tests {
 
     #[test]
     fn an_alteration_of_one_change_steps_from_the_table_before_it_to_the_table_after_it() {
-        let before = table(vec![identifier(), name_at(2)], &["id"]);
-        let after = table(vec![identifier(), name_at(2), email_at(3)], &["id"]);
+        let before = table(vec![identifier(), name()], &["id"]);
+        let after = table(vec![identifier(), name(), email()], &["id"]);
 
         let steps = steps(before.clone(), after.clone());
 
@@ -1092,11 +1090,8 @@ mod tests {
 
     #[test]
     fn columns_added_together_are_added_one_step_at_a_time() {
-        let before = table(vec![identifier(), name_at(2)], &["id"]);
-        let after = table(
-            vec![identifier(), name_at(2), nickname_at(3), phone_at(4)],
-            &["id"],
-        );
+        let before = table(vec![identifier(), name()], &["id"]);
+        let after = table(vec![identifier(), name(), nickname(), phone()], &["id"]);
 
         assert_eq!(
             steps(before, after).outlines(),
@@ -1131,7 +1126,7 @@ mod tests {
 
     #[test]
     fn columns_dropped_together_are_dropped_one_step_at_a_time() {
-        let before = table(vec![identifier(), name_at(2), email_at(3)], &["id"]);
+        let before = table(vec![identifier(), name(), email()], &["id"]);
         let after = table(vec![identifier()], &["id"]);
 
         assert_eq!(
@@ -1151,9 +1146,9 @@ mod tests {
 
     #[test]
     fn a_column_replaced_by_one_of_its_name_is_retyped_in_one_step() {
-        let before = table(vec![identifier(), name_at(2)], &["id"]);
+        let before = table(vec![identifier(), name()], &["id"]);
         let after = table(
-            vec![identifier(), column("name", "TEXT", ColumnType::Text, 2)],
+            vec![identifier(), column("name", "TEXT", ColumnType::Text)],
             &["id"],
         );
 
@@ -1162,19 +1157,12 @@ mod tests {
 
     #[test]
     fn what_no_step_announces_changes_in_the_last_step() {
-        let before = table(vec![identifier(), name_at(2)], &["id"]);
+        let before = table(vec![identifier(), name()], &["id"]);
         let after = table(
             vec![
                 identifier(),
-                ColumnModel::new(
-                    "name",
-                    "VARCHAR",
-                    ColumnType::Text,
-                    2,
-                    true,
-                    Some("anonymous"),
-                ),
-                email_at(3),
+                ColumnModel::new("name", "VARCHAR", ColumnType::Text, true, Some("anonymous")),
+                email(),
             ],
             &["id"],
         );
@@ -1187,18 +1175,11 @@ mod tests {
 
     #[test]
     fn an_alteration_announcing_nothing_takes_no_step() {
-        let before = table(vec![identifier(), name_at(2)], &["id"]);
+        let before = table(vec![identifier(), name()], &["id"]);
         let after = table(
             vec![
                 identifier(),
-                ColumnModel::new(
-                    "name",
-                    "VARCHAR",
-                    ColumnType::Text,
-                    2,
-                    true,
-                    Some("anonymous"),
-                ),
+                ColumnModel::new("name", "VARCHAR", ColumnType::Text, true, Some("anonymous")),
             ],
             &["id"],
         );
@@ -1208,31 +1189,22 @@ mod tests {
 
     #[test]
     fn what_no_step_announces_waits_for_the_last_of_several_steps() {
-        let before = table(vec![identifier(), name_at(2)], &["id"]);
-        let anonymous = ColumnModel::new(
-            "name",
-            "VARCHAR",
-            ColumnType::Text,
-            2,
-            true,
-            Some("anonymous"),
-        );
-        let after = table(
-            vec![identifier(), anonymous, email_at(3), phone_at(4)],
-            &["id"],
-        );
+        let before = table(vec![identifier(), name()], &["id"]);
+        let anonymous =
+            ColumnModel::new("name", "VARCHAR", ColumnType::Text, true, Some("anonymous"));
+        let after = table(vec![identifier(), anonymous, email(), phone()], &["id"]);
 
         let steps = steps(before, after.clone());
 
         assert_eq!(steps.announcements(), ["added email", "added phone"]);
-        assert_eq!(steps.taken[0].after.column("name"), Some(&name_at(2)));
+        assert_eq!(steps.taken[0].after.column("name"), Some(&name()));
         assert_eq!(steps.taken[1].after, after);
     }
 
     #[test]
     fn a_key_changed_alone_steps_from_the_table_before_it_to_the_table_after_it() {
-        let before = table(vec![identifier(), name_at(2)], &["id"]);
-        let after = table(vec![identifier(), name_at(2)], &["id", "name"]);
+        let before = table(vec![identifier(), name()], &["id"]);
+        let after = table(vec![identifier(), name()], &["id", "name"]);
 
         assert_eq!(
             steps(before.clone(), after.clone()).taken,
@@ -1294,13 +1266,13 @@ mod tests {
 
     #[test]
     fn an_alteration_halts_at_the_step_its_listener_refuses_and_is_not_remembered() {
-        let before = table(vec![identifier(), name_at(2), email_at(3)], &["id"]);
+        let before = table(vec![identifier(), name(), email()], &["id"]);
         let after = table(
             vec![
                 identifier(),
-                column("name", "TEXT", ColumnType::Text, 2),
-                phone_at(3),
-                nickname_at(4),
+                column("name", "TEXT", ColumnType::Text),
+                phone(),
+                nickname(),
             ],
             &["id"],
         );

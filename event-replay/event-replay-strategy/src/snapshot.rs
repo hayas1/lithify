@@ -511,10 +511,10 @@ mod tests {
             Engine.read(expression, column_type)
         }
     }
-    fn column(name: &str, column_type: ColumnType, position: u32) -> ColumnModel {
+    fn column(name: &str, column_type: ColumnType) -> ColumnModel {
         let type_name = format!("{column_type:?}");
 
-        ColumnModel::new(name, &type_name, column_type, position, false, None)
+        ColumnModel::new(name, &type_name, column_type, false, None)
     }
 
     fn customers_with(columns: Vec<ColumnModel>, key: &[&str]) -> TableModel {
@@ -528,8 +528,8 @@ mod tests {
     fn customers() -> TableModel {
         customers_with(
             vec![
-                column("id", ColumnType::Int64, 1),
-                column("name", ColumnType::Text, 2),
+                column("id", ColumnType::Int64),
+                column("name", ColumnType::Text),
             ],
             &["id"],
         )
@@ -605,9 +605,9 @@ mod tests {
     fn widened() -> TableModel {
         customers_with(
             vec![
-                column("id", ColumnType::Int64, 1),
-                column("name", ColumnType::Text, 2),
-                ColumnModel::new("email", "", ColumnType::Text, 3, true, Some("none")),
+                column("id", ColumnType::Int64),
+                column("name", ColumnType::Text),
+                ColumnModel::new("email", "", ColumnType::Text, true, Some("none")),
             ],
             &["id"],
         )
@@ -724,10 +724,10 @@ mod tests {
     fn each_column_a_statement_adds_is_carried_in_a_relation_of_its_own() {
         let twice = customers_with(
             vec![
-                column("id", ColumnType::Int64, 1),
-                column("name", ColumnType::Text, 2),
-                column("email", ColumnType::Text, 3),
-                column("phone", ColumnType::Text, 4),
+                column("id", ColumnType::Int64),
+                column("name", ColumnType::Text),
+                column("email", ColumnType::Text),
+                column("phone", ColumnType::Text),
             ],
             &["id"],
         );
@@ -747,8 +747,8 @@ mod tests {
     fn a_column_dropped_and_one_added_by_one_statement_are_carried_one_after_the_other() {
         let replaced = customers_with(
             vec![
-                column("id", ColumnType::Int64, 1),
-                column("email", ColumnType::Text, 2),
+                column("id", ColumnType::Int64),
+                column("email", ColumnType::Text),
             ],
             &["id"],
         );
@@ -779,9 +779,9 @@ mod tests {
     fn a_column_retyped_and_one_added_by_one_statement_are_carried_one_after_the_other() {
         let reshaped = customers_with(
             vec![
-                column("id", ColumnType::Int64, 1),
-                column("name", ColumnType::Int64, 2),
-                column("email", ColumnType::Text, 3),
+                column("id", ColumnType::Int64),
+                column("name", ColumnType::Int64),
+                column("email", ColumnType::Text),
             ],
             &["id"],
         );
@@ -813,9 +813,9 @@ mod tests {
     fn a_column_added_between_others_lands_where_the_statement_placed_it() {
         let inserted = customers_with(
             vec![
-                column("id", ColumnType::Int64, 1),
-                column("email", ColumnType::Text, 2),
-                column("name", ColumnType::Text, 3),
+                column("id", ColumnType::Int64),
+                column("email", ColumnType::Text),
+                column("name", ColumnType::Text),
             ],
             &["id"],
         );
@@ -840,16 +840,16 @@ mod tests {
     fn statements_at_different_times_fold_the_era_between_them_in_the_schema_it_had() {
         let widened = customers_with(
             vec![
-                column("id", ColumnType::Int64, 1),
-                column("name", ColumnType::Text, 2),
-                column("email", ColumnType::Text, 3),
+                column("id", ColumnType::Int64),
+                column("name", ColumnType::Text),
+                column("email", ColumnType::Text),
             ],
             &["id"],
         );
         let narrowed = customers_with(
             vec![
-                column("id", ColumnType::Int64, 1),
-                column("email", ColumnType::Text, 3),
+                column("id", ColumnType::Int64),
+                column("email", ColumnType::Text),
             ],
             &["id"],
         );
@@ -892,8 +892,8 @@ mod tests {
     fn a_column_retyped_within_the_window_casts_the_rows_folded_before_it() {
         let retyped = customers_with(
             vec![
-                column("id", ColumnType::Int64, 1),
-                column("name", ColumnType::Int64, 2),
+                column("id", ColumnType::Int64),
+                column("name", ColumnType::Int64),
             ],
             &["id"],
         );
@@ -909,7 +909,7 @@ mod tests {
 
     #[test]
     fn a_column_dropped_within_the_window_leaves_the_rows_folded_before_it() {
-        let narrowed = customers_with(vec![column("id", ColumnType::Int64, 1)], &["id"]);
+        let narrowed = customers_with(vec![column("id", ColumnType::Int64)], &["id"]);
 
         let statement = statement(snapshots(
             customers(),
@@ -929,8 +929,8 @@ mod tests {
     fn a_table_whose_primary_key_changed_within_the_window_cannot_be_replayed() {
         let rekeyed = customers_with(
             vec![
-                column("id", ColumnType::Int64, 1),
-                column("name", ColumnType::Text, 2),
+                column("id", ColumnType::Int64),
+                column("name", ColumnType::Text),
             ],
             &["name"],
         );
@@ -954,17 +954,17 @@ mod tests {
     fn a_column_retyped_and_moved_by_one_statement_lands_where_the_statement_placed_it() {
         let customers = customers_with(
             vec![
-                column("id", ColumnType::Int64, 1),
-                column("name", ColumnType::Text, 2),
-                column("email", ColumnType::Text, 3),
+                column("id", ColumnType::Int64),
+                column("name", ColumnType::Text),
+                column("email", ColumnType::Text),
             ],
             &["id"],
         );
         let moved = customers_with(
             vec![
-                column("id", ColumnType::Int64, 1),
-                column("email", ColumnType::Text, 2),
-                column("name", ColumnType::Int64, 3),
+                column("id", ColumnType::Int64),
+                column("email", ColumnType::Text),
+                column("name", ColumnType::Int64),
             ],
             &["id"],
         );
@@ -989,9 +989,9 @@ mod tests {
     fn a_key_changed_after_columns_by_one_statement_still_cannot_be_replayed() {
         let rekeyed = customers_with(
             vec![
-                column("id", ColumnType::Int64, 1),
-                column("name", ColumnType::Text, 2),
-                column("email", ColumnType::Text, 3),
+                column("id", ColumnType::Int64),
+                column("name", ColumnType::Text),
+                column("email", ColumnType::Text),
             ],
             &["id", "email"],
         );
@@ -1016,8 +1016,8 @@ mod tests {
         let items = TableModel::new(
             TableId::new("shop", "order_items"),
             vec![
-                column("order_id", ColumnType::Int64, 1),
-                column("line_no", ColumnType::Int64, 2),
+                column("order_id", ColumnType::Int64),
+                column("line_no", ColumnType::Int64),
             ],
             vec!["order_id".to_owned(), "line_no".to_owned()],
         );
@@ -1038,7 +1038,7 @@ mod tests {
 
     #[test]
     fn a_column_the_warehouse_cannot_hold_is_reported() {
-        let tagged = customers_with(vec![column("tags", ColumnType::Json, 1)], &["tags"]);
+        let tagged = customers_with(vec![column("tags", ColumnType::Json)], &["tags"]);
 
         assert_eq!(
             snapshots(tagged, vec![], || Base::Captured)
@@ -1052,7 +1052,7 @@ mod tests {
 
     #[test]
     fn a_table_without_a_primary_key_cannot_be_replayed() {
-        let keyless = customers_with(vec![column("id", ColumnType::Int64, 1)], &[]);
+        let keyless = customers_with(vec![column("id", ColumnType::Int64)], &[]);
 
         assert_eq!(
             snapshots(keyless, vec![], || Base::Captured)

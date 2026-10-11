@@ -137,8 +137,10 @@ impl<D: Dialect> Debezium<D> {
     }
 
     fn table(&self, id: TableId, table: DdlTable) -> TableModel {
-        let columns = table
-            .columns
+        let mut columns = table.columns;
+        columns.sort_by_key(|column| column.position);
+
+        let columns = columns
             .into_iter()
             .map(|column| self.column(column))
             .collect();
@@ -155,7 +157,6 @@ impl<D: Dialect> Debezium<D> {
                 column.length.map(|length| length as u32),
                 column.scale.map(|scale| scale as u32),
             ),
-            column.position as u32,
             column.optional,
             column.default_value_expression.as_deref(),
         )
@@ -272,5 +273,49 @@ mod tests {
             serde_json::from_value(row.clone()).unwrap();
 
         assert_eq!(serde_json::to_value(statement).unwrap(), row);
+    }
+
+    #[test]
+    fn a_table_holds_its_columns_in_the_order_the_source_positioned_them() {
+        let statement = Debezium::new(MySql)
+            .schema_change_json(json!({
+                "source": {"file": "binlog.000002", "pos": 448, "gtid": null},
+                "ts_ms": 1789800000000i64,
+                "ddl": "ALTER TABLE `customers` ADD COLUMN `nickname` varchar(255) AFTER `id`",
+                "tableChanges": [{
+                    "type": "ALTER",
+                    "id": "\"shop\".\"customers\"",
+                    "table": {
+                        "primaryKeyColumnNames": ["id"],
+                        "columns": [
+                            {
+                                "name": "name", "typeName": "VARCHAR", "position": 3,
+                                "optional": true, "defaultValueExpression": null,
+                                "length": 255, "scale": null
+                            },
+                            {
+                                "name": "id", "typeName": "BIGINT", "position": 1,
+                                "optional": false, "defaultValueExpression": null,
+                                "length": null, "scale": null
+                            },
+                            {
+                                "name": "nickname", "typeName": "VARCHAR", "position": 2,
+                                "optional": true, "defaultValueExpression": null,
+                                "length": 255, "scale": null
+                            }
+                        ]
+                    }
+                }]
+            }))
+            .unwrap();
+
+        let Some(TableChange::Altered(table)) = statement.tables().next() else {
+            panic!("an alteration of one table");
+        };
+
+        assert_eq!(
+            table.columns().map(ColumnModel::name).collect::<Vec<_>>(),
+            ["id", "nickname", "name"]
+        );
     }
 }

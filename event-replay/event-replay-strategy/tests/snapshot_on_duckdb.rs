@@ -30,8 +30,8 @@ fn people() -> TableModel {
     TableModel::new(
         TableId::new("shop", "people"),
         vec![
-            ColumnModel::new("id", "BIGINT", ColumnType::Int64, 1, false, None),
-            ColumnModel::new("name", "VARCHAR", ColumnType::Text, 2, false, None),
+            ColumnModel::new("id", "BIGINT", ColumnType::Int64, false, None),
+            ColumnModel::new("name", "VARCHAR", ColumnType::Text, false, None),
         ],
         vec!["id".to_owned()],
     )

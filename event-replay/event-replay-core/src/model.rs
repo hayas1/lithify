@@ -72,7 +72,6 @@ pub struct ColumnModel {
     name: String,
     type_name: String,
     column_type: ColumnType,
-    position: u32,
     optional: bool,
     default_value: Option<String>,
 }
@@ -82,7 +81,6 @@ impl ColumnModel {
         name: &str,
         type_name: &str,
         column_type: ColumnType,
-        position: u32,
         optional: bool,
         default_value: Option<&str>,
     ) -> Self {
@@ -90,7 +88,6 @@ impl ColumnModel {
             name: name.to_owned(),
             type_name: type_name.to_owned(),
             column_type,
-            position,
             optional,
             default_value: default_value.map(str::to_owned),
         }
@@ -106,10 +103,6 @@ impl ColumnModel {
 
     pub fn column_type(&self) -> &ColumnType {
         &self.column_type
-    }
-
-    pub fn position(&self) -> u32 {
-        self.position
     }
 
     pub fn is_optional(&self) -> bool {
@@ -130,9 +123,6 @@ pub struct TableModel {
 
 impl TableModel {
     pub fn new(id: TableId, columns: Vec<ColumnModel>, primary_key: Vec<String>) -> Self {
-        let mut columns = columns;
-        columns.sort_by_key(ColumnModel::position);
-
         Self {
             id,
             columns,
@@ -199,17 +189,17 @@ impl TableModel {
 mod tests {
     use super::*;
 
-    fn column(name: &str, type_name: &str, position: u32) -> ColumnModel {
-        ColumnModel::new(name, type_name, ColumnType::Text, position, true, None)
+    fn column(name: &str, type_name: &str) -> ColumnModel {
+        ColumnModel::new(name, type_name, ColumnType::Text, true, None)
     }
 
     fn customers() -> TableModel {
         TableModel::new(
             TableId::new("shop", "customers"),
             vec![
-                column("id", "BIGINT", 1),
-                column("name", "VARCHAR", 2),
-                column("email", "VARCHAR", 3),
+                column("id", "BIGINT"),
+                column("name", "VARCHAR"),
+                column("email", "VARCHAR"),
             ],
             vec!["id".to_owned()],
         )
@@ -217,6 +207,17 @@ mod tests {
 
     fn names(table: &TableModel) -> Vec<&str> {
         table.columns().map(ColumnModel::name).collect()
+    }
+
+    #[test]
+    fn a_table_holds_its_columns_in_the_order_they_were_given() {
+        let table = TableModel::new(
+            TableId::new("shop", "customers"),
+            vec![column("name", "VARCHAR"), column("id", "BIGINT")],
+            vec!["id".to_owned()],
+        );
+
+        assert_eq!(names(&table), ["name", "id"]);
     }
 
     #[test]
@@ -231,15 +232,15 @@ mod tests {
 
     #[test]
     fn a_table_with_a_column_of_a_name_it_has_replaces_that_column_in_place() {
-        let retyped = customers().with_column(&column("name", "TEXT", 2));
+        let retyped = customers().with_column(&column("name", "TEXT"));
 
         assert_eq!(names(&retyped), ["id", "name", "email"]);
         assert_eq!(retyped.column("name").unwrap().type_name(), "TEXT");
     }
 
     #[test]
-    fn a_table_with_a_new_column_holds_it_last_wherever_the_column_was_positioned() {
-        let added = customers().with_column(&column("nickname", "VARCHAR", 2));
+    fn a_table_with_a_new_column_holds_it_last() {
+        let added = customers().with_column(&column("nickname", "VARCHAR"));
 
         assert_eq!(names(&added), ["id", "name", "email", "nickname"]);
     }

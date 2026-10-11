@@ -82,10 +82,9 @@ impl<P> SchemaChangeListener<P> for Journal {
 
     fn visit_column_added(&mut self, _: &(), event: &ColumnAdded<'_>) -> Result<(), Infallible> {
         self.table(format!(
-            "added {}.{} at {}",
+            "added {}.{}",
             event.after().id(),
-            event.column().name(),
-            event.column().position()
+            event.column().name()
         ));
 
         Ok(())
@@ -159,7 +158,7 @@ mod tests {
     }
 
     fn identifier() -> ColumnModel {
-        ColumnModel::new("id", "BIGINT", ColumnType::Int64, 1, false, None)
+        ColumnModel::new("id", "BIGINT", ColumnType::Int64, false, None)
     }
 
     fn change(at: u64, statement: &str, tables: Vec<TableChange>) -> SchemaChange<Offset> {
@@ -203,7 +202,7 @@ mod tests {
 
     #[test]
     fn a_statement_that_changes_a_table_is_reported_under_the_statement() {
-        let nickname = ColumnModel::new("nickname", "varchar", ColumnType::Text, 2, true, None);
+        let nickname = ColumnModel::new("nickname", "varchar", ColumnType::Text, true, None);
         let entries = journal(vec![
             change(
                 1,
@@ -232,7 +231,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 "  created shop.customers (1 columns, key [\"id\"])",
-                "  added shop.customers.nickname at 2",
+                "  added shop.customers.nickname",
                 "  dropped shop.customers",
             ]
         );

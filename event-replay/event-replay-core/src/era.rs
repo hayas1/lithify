@@ -344,17 +344,7 @@ mod tests {
             id,
             columns
                 .iter()
-                .enumerate()
-                .map(|(at, name)| {
-                    ColumnModel::new(
-                        name,
-                        "BIGINT",
-                        ColumnType::Int64,
-                        at as u32 + 1,
-                        false,
-                        None,
-                    )
-                })
+                .map(|name| ColumnModel::new(name, "BIGINT", ColumnType::Int64, false, None))
                 .collect(),
             vec!["id".to_owned()],
         )
