@@ -293,14 +293,15 @@ impl DuckDbChangeLogsFn for Fold<'_> {
                 Base::Captured,
             ))
         });
-        let catalog = self.client.replay::<Unbuildable>(
+        let catalog = self.client.replay::<Unbuildable, _>(
             logs.schema_changes(),
             self.schema_changes,
             self.window,
             &mut tracker,
+            self.client.warehouse(),
         )?;
         let snapshot = tracker
-            .finish(&catalog)?
+            .finish(&catalog, self.client.warehouse())?
             .into_iter()
             .find(|snapshot| snapshot.table() == self.table)
             .ok_or_else(|| Unbuildable::UnknownTable(self.table.clone()))?;

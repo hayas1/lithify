@@ -53,7 +53,12 @@ fn a_snapshot_holds_each_key_as_the_change_log_last_left_it() {
         TablePath::new("shop_snapshot", "people"),
         Base::Captured,
     );
-    SchemaChangeListener::<MySqlPosition>::visit_era(&mut snapshot, &Era::new(people(), window));
+    SchemaChangeListener::<MySqlPosition>::visit_era(
+        &mut snapshot,
+        client.warehouse(),
+        &Era::new(people(), window),
+    )
+    .unwrap();
 
     client.build::<Unbuilt>(&snapshot).unwrap();
 
@@ -123,9 +128,15 @@ fn replay(client: &DuckDbClient, window: &Window) {
         ))
     });
     let catalog = client
-        .replay::<Unbuilt>(&log, &TablePath::new("ddl", "shop"), window, &mut tracker)
+        .replay::<Unbuilt, _>(
+            &log,
+            &TablePath::new("ddl", "shop"),
+            window,
+            &mut tracker,
+            client.warehouse(),
+        )
         .unwrap();
-    let snapshots = tracker.finish(&catalog).unwrap();
+    let snapshots = tracker.finish(&catalog, client.warehouse()).unwrap();
 
     client.build::<Unbuilt>(&snapshots).unwrap();
 }

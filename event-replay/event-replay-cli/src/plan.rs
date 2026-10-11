@@ -5,7 +5,7 @@ use google_cloud_bigquery::query::Row;
 
 use event_replay_config::Artifact;
 use event_replay_config::infra::{Sink, Source};
-use event_replay_core::artifact;
+use event_replay_core::artifact::{self, UnbuildableArtifact};
 use event_replay_core::era::EraTracker;
 use event_replay_core::model::TableId;
 use event_replay_core::sink::TablePath;
@@ -49,7 +49,7 @@ impl<'a, K> SnapshotPlan<'a, K> {
     where
         C: ChangeLogs,
         K: SchemaChangeStream<C::Schema> + WarehouseClient,
-        Unreplayable: From<<K as SchemaChangeStream<C::Schema>>::Error>,
+        <K as SchemaChangeStream<C::Schema>>::Error: Into<Unreplayable>,
     {
         let shard =
             DateTime::<Utc>::try_from(*self.window.from()).map_err(Unreplayable::Unshardable)?;
@@ -57,9 +57,9 @@ impl<'a, K> SnapshotPlan<'a, K> {
             let changes = self
                 .sink
                 .row_changes(self.source, table)
-                .ok_or_else(|| Unreplayable::WithoutTopic(self.source.name().to_owned()))?;
+                .ok_or_else(|| UnbuildableArtifact::WithoutChangeLog(table.clone()))?;
 
-            Ok::<_, Unreplayable>(Snapshot::new(
+            Ok::<_, UnbuildableArtifact>(Snapshot::new(
                 logs.row_changes(),
                 table.clone(),
                 changes,
@@ -67,18 +67,16 @@ impl<'a, K> SnapshotPlan<'a, K> {
                 Base::Captured,
             ))
         });
-        let catalog = self.client.replay::<Unreplayable>(
+        let catalog = self.client.replay::<Unreplayable, _>(
             logs.schema_changes(),
             self.schema_changes,
             self.window,
             &mut tracker,
-        )?;
-        let snapshots = tracker.finish(&catalog)?;
-
-        Ok(artifact::Artifact::statements(
-            &snapshots,
             self.client.warehouse(),
-        )?)
+        )?;
+        let snapshots = tracker.finish(&catalog, self.client.warehouse())?;
+
+        Ok(artifact::Artifact::statements(&snapshots)?)
     }
 }
 

@@ -83,24 +83,44 @@ pub trait SchemaChangeStream<L: SchemaChangeLog> {
         window: &Window,
     ) -> Result<Self::Changes<'a>, Self::Error>;
 
-    fn catalog<E>(
+    fn each_schema_change<E>(
+        &self,
+        log: &L,
+        table: &TablePath,
+        window: &Window,
+        mut visit: impl FnMut(SchemaChange<L::Position>) -> Result<(), E>,
+    ) -> Result<(), E>
+    where
+        Self::Error: Into<E>,
+    {
+        let mut changes = self
+            .schema_changes(log, table, window)
+            .map_err(Into::into)?;
+
+        for change in changes.stream().map_err(Into::into)? {
+            visit(change.map_err(Into::into)?)?;
+        }
+
+        Ok(())
+    }
+
+    fn catalog<E, V>(
         &self,
         log: &L,
         table: &TablePath,
         window: &Window,
         catalog: &mut CatalogModel<L::Position>,
-        listener: &mut impl SchemaChangeListener<L::Position>,
+        listener: &mut V,
+        context: &V::Context,
     ) -> Result<(), E>
     where
-        E: From<Self::Error> + From<OutOfOrder>,
+        V: SchemaChangeListener<L::Position>,
+        Self::Error: Into<E>,
+        E: From<OutOfOrder> + From<V::Error>,
     {
-        let mut changes = self.schema_changes(log, table, window)?;
-
-        for change in changes.stream()? {
-            catalog.accept(&change?, listener)?;
-        }
-
-        Ok(())
+        self.each_schema_change(log, table, window, |change| {
+            catalog.accept::<E, V>(&change, listener, context)
+        })
     }
 
     fn catalog_at<E>(
@@ -110,34 +130,34 @@ pub trait SchemaChangeStream<L: SchemaChangeLog> {
         at: RecordedAt,
     ) -> Result<CatalogModel<L::Position>, E>
     where
-        E: From<Self::Error> + From<OutOfOrder>,
+        Self::Error: Into<E>,
+        E: From<OutOfOrder>,
     {
         let mut catalog = CatalogModel::default();
 
-        self.catalog::<E>(
-            log,
-            schema_changes,
-            &Window::until(at),
-            &mut catalog,
-            &mut (),
-        )?;
+        self.each_schema_change::<E>(log, schema_changes, &Window::until(at), |change| {
+            Ok(catalog.accept::<OutOfOrder, ()>(&change, &mut (), &())?)
+        })?;
 
         Ok(catalog)
     }
 
-    fn replay<E>(
+    fn replay<E, V>(
         &self,
         log: &L,
         schema_changes: &TablePath,
         window: &Window,
-        listener: &mut impl SchemaChangeListener<L::Position>,
+        listener: &mut V,
+        context: &V::Context,
     ) -> Result<CatalogModel<L::Position>, E>
     where
-        E: From<Self::Error> + From<OutOfOrder>,
+        V: SchemaChangeListener<L::Position>,
+        Self::Error: Into<E>,
+        E: From<OutOfOrder> + From<V::Error>,
     {
         let mut catalog = self.catalog_at::<E>(log, schema_changes, *window.from())?;
 
-        self.catalog::<E>(log, schema_changes, window, &mut catalog, listener)?;
+        self.catalog::<E, V>(log, schema_changes, window, &mut catalog, listener, context)?;
 
         Ok(catalog)
     }
@@ -150,7 +170,8 @@ pub trait SchemaChangeStream<L: SchemaChangeLog> {
         at: RecordedAt,
     ) -> Result<Option<TableModel>, E>
     where
-        E: From<Self::Error> + From<OutOfOrder>,
+        Self::Error: Into<E>,
+        E: From<OutOfOrder>,
     {
         let catalog = self.catalog_at::<E>(log, schema_changes, at)?;
 

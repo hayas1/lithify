@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::convert::Infallible;
 use std::fmt;
 
 use crate::era::Era;
@@ -7,44 +8,100 @@ use crate::model::{ColumnModel, TableId, TableModel};
 use crate::position::Position;
 
 pub trait SchemaChangeListener<P> {
-    fn visit_statement(&mut self, change: &SchemaChange<P>) {
-        let _ = change;
+    type Context;
+    type Error;
+
+    fn visit_statement(
+        &mut self,
+        context: &Self::Context,
+        change: &SchemaChange<P>,
+    ) -> Result<(), Self::Error> {
+        let _ = (context, change);
+
+        Ok(())
     }
 
-    fn leave_statement(&mut self, change: &SchemaChange<P>) {
-        let _ = change;
+    fn leave_statement(
+        &mut self,
+        context: &Self::Context,
+        change: &SchemaChange<P>,
+    ) -> Result<(), Self::Error> {
+        let _ = (context, change);
+
+        Ok(())
     }
 
-    fn visit_era(&mut self, era: &Era) {
-        let _ = era;
+    fn visit_era(&mut self, context: &Self::Context, era: &Era) -> Result<(), Self::Error> {
+        let _ = (context, era);
+
+        Ok(())
     }
 
-    fn visit_created(&mut self, event: &TableCreated<'_>) {
-        let _ = event;
+    fn visit_created(
+        &mut self,
+        context: &Self::Context,
+        event: &TableCreated<'_>,
+    ) -> Result<(), Self::Error> {
+        let _ = (context, event);
+
+        Ok(())
     }
 
-    fn visit_dropped(&mut self, event: &TableDropped<'_>) {
-        let _ = event;
+    fn visit_dropped(
+        &mut self,
+        context: &Self::Context,
+        event: &TableDropped<'_>,
+    ) -> Result<(), Self::Error> {
+        let _ = (context, event);
+
+        Ok(())
     }
 
-    fn visit_column_added(&mut self, event: &ColumnAdded<'_>) {
-        let _ = event;
+    fn visit_column_added(
+        &mut self,
+        context: &Self::Context,
+        event: &ColumnAdded<'_>,
+    ) -> Result<(), Self::Error> {
+        let _ = (context, event);
+
+        Ok(())
     }
 
-    fn visit_column_dropped(&mut self, event: &ColumnDropped<'_>) {
-        let _ = event;
+    fn visit_column_dropped(
+        &mut self,
+        context: &Self::Context,
+        event: &ColumnDropped<'_>,
+    ) -> Result<(), Self::Error> {
+        let _ = (context, event);
+
+        Ok(())
     }
 
-    fn visit_column_retyped(&mut self, event: &ColumnRetyped<'_>) {
-        let _ = event;
+    fn visit_column_retyped(
+        &mut self,
+        context: &Self::Context,
+        event: &ColumnRetyped<'_>,
+    ) -> Result<(), Self::Error> {
+        let _ = (context, event);
+
+        Ok(())
     }
 
-    fn visit_primary_key_changed(&mut self, event: &PrimaryKeyChanged<'_>) {
-        let _ = event;
+    fn visit_primary_key_changed(
+        &mut self,
+        context: &Self::Context,
+        event: &PrimaryKeyChanged<'_>,
+    ) -> Result<(), Self::Error> {
+        let _ = (context, event);
+
+        Ok(())
     }
 }
 
-impl<P> SchemaChangeListener<P> for () {}
+impl<P> SchemaChangeListener<P> for () {
+    type Context = ();
+    type Error = Infallible;
+}
 
 pub struct TableCreated<'a> {
     table: &'a TableModel,
@@ -156,14 +213,18 @@ pub enum TableEvent<'a> {
 }
 
 impl TableEvent<'_> {
-    pub fn accept<P>(&self, listener: &mut impl SchemaChangeListener<P>) {
+    pub fn accept<P, L: SchemaChangeListener<P>>(
+        &self,
+        listener: &mut L,
+        context: &L::Context,
+    ) -> Result<(), L::Error> {
         match self {
-            Self::Created(event) => listener.visit_created(event),
-            Self::Dropped(event) => listener.visit_dropped(event),
-            Self::ColumnAdded(event) => listener.visit_column_added(event),
-            Self::ColumnDropped(event) => listener.visit_column_dropped(event),
-            Self::ColumnRetyped(event) => listener.visit_column_retyped(event),
-            Self::PrimaryKeyChanged(event) => listener.visit_primary_key_changed(event),
+            Self::Created(event) => listener.visit_created(context, event),
+            Self::Dropped(event) => listener.visit_dropped(context, event),
+            Self::ColumnAdded(event) => listener.visit_column_added(context, event),
+            Self::ColumnDropped(event) => listener.visit_column_dropped(context, event),
+            Self::ColumnRetyped(event) => listener.visit_column_retyped(context, event),
+            Self::PrimaryKeyChanged(event) => listener.visit_primary_key_changed(context, event),
         }
     }
 }
@@ -184,6 +245,12 @@ impl fmt::Display for OutOfOrder {
 }
 
 impl std::error::Error for OutOfOrder {}
+
+impl From<Infallible> for OutOfOrder {
+    fn from(never: Infallible) -> Self {
+        match never {}
+    }
+}
 
 #[derive(Debug)]
 pub struct CatalogModel<P> {
@@ -209,26 +276,31 @@ impl<P: Position> CatalogModel<P> {
         self.tables.values()
     }
 
-    pub fn accept(
+    pub fn accept<E, L>(
         &mut self,
         change: &SchemaChange<P>,
-        listener: &mut impl SchemaChangeListener<P>,
-    ) -> Result<(), OutOfOrder> {
+        listener: &mut L,
+        context: &L::Context,
+    ) -> Result<(), E>
+    where
+        L: SchemaChangeListener<P>,
+        E: From<OutOfOrder> + From<L::Error>,
+    {
         for table in change.tables() {
             self.guard_order(table.id(), change.position())?;
         }
 
-        listener.visit_statement(change);
+        listener.visit_statement(context, change)?;
 
         for table in change.tables() {
             match table {
-                TableChange::Created(table) => self.create(change, table, listener),
-                TableChange::Altered(table) => self.alter(change, table, listener),
-                TableChange::Dropped(id) => self.forget(change, id, listener),
+                TableChange::Created(table) => self.create(change, table, listener, context)?,
+                TableChange::Altered(table) => self.alter(change, table, listener, context)?,
+                TableChange::Dropped(id) => self.forget(change, id, listener, context)?,
             }
         }
 
-        listener.leave_statement(change);
+        listener.leave_statement(context, change)?;
 
         Ok(())
     }
@@ -242,38 +314,45 @@ impl<P: Position> CatalogModel<P> {
         }
     }
 
-    fn create(
+    fn create<L: SchemaChangeListener<P>>(
         &mut self,
         change: &SchemaChange<P>,
         table: &TableModel,
-        listener: &mut impl SchemaChangeListener<P>,
-    ) {
-        TableEvent::Created(TableCreated { table }).accept(listener);
+        listener: &mut L,
+        context: &L::Context,
+    ) -> Result<(), L::Error> {
+        TableEvent::Created(TableCreated { table }).accept(listener, context)?;
         self.remember(change, table);
+
+        Ok(())
     }
 
-    fn forget(
+    fn forget<L: SchemaChangeListener<P>>(
         &mut self,
         change: &SchemaChange<P>,
         id: &TableId,
-        listener: &mut impl SchemaChangeListener<P>,
-    ) {
+        listener: &mut L,
+        context: &L::Context,
+    ) -> Result<(), L::Error> {
         if let Some(table) = self.tables.get(id) {
-            TableEvent::Dropped(TableDropped { table }).accept(listener);
+            TableEvent::Dropped(TableDropped { table }).accept(listener, context)?;
         }
         self.tables.remove(id);
         self.applied_at
             .insert(id.clone(), change.position().clone());
+
+        Ok(())
     }
 
-    fn alter(
+    fn alter<L: SchemaChangeListener<P>>(
         &mut self,
         change: &SchemaChange<P>,
         after: &TableModel,
-        listener: &mut impl SchemaChangeListener<P>,
-    ) {
+        listener: &mut L,
+        context: &L::Context,
+    ) -> Result<(), L::Error> {
         let Some(before) = self.tables.get(after.id()).cloned() else {
-            return self.create(change, after, listener);
+            return self.create(change, after, listener, context);
         };
 
         for column in before.columns() {
@@ -283,7 +362,7 @@ impl<P: Position> CatalogModel<P> {
                     after,
                     column,
                 })
-                .accept(listener),
+                .accept(listener, context)?,
                 Some(altered) if altered.type_name() != column.type_name() => {
                     TableEvent::ColumnRetyped(ColumnRetyped {
                         before: &before,
@@ -291,7 +370,7 @@ impl<P: Position> CatalogModel<P> {
                         previous: column,
                         column: altered,
                     })
-                    .accept(listener)
+                    .accept(listener, context)?
                 }
                 Some(_) => {}
             }
@@ -303,7 +382,7 @@ impl<P: Position> CatalogModel<P> {
                     after,
                     column,
                 })
-                .accept(listener);
+                .accept(listener, context)?;
             }
         }
         if before.primary_key().ne(after.primary_key()) {
@@ -311,10 +390,12 @@ impl<P: Position> CatalogModel<P> {
                 before: &before,
                 after,
             })
-            .accept(listener);
+            .accept(listener, context)?;
         }
 
         self.remember(change, after);
+
+        Ok(())
     }
 
     fn remember(&mut self, change: &SchemaChange<P>, table: &TableModel) {
@@ -326,6 +407,8 @@ impl<P: Position> CatalogModel<P> {
 
 #[cfg(test)]
 mod tests {
+    use std::convert::Infallible;
+
     use super::*;
     use crate::event::TableChange;
     use crate::model::{ColumnType, TableId};
@@ -347,31 +430,59 @@ mod tests {
     }
 
     impl SchemaChangeListener<Offset> for Statements {
-        fn visit_statement(&mut self, change: &SchemaChange<Offset>) {
+        type Context = ();
+        type Error = Infallible;
+
+        fn visit_statement(
+            &mut self,
+            _: &(),
+            change: &SchemaChange<Offset>,
+        ) -> Result<(), Infallible> {
             self.entries
                 .push(format!("statement {} tables", change.tables().count()));
+
+            Ok(())
         }
 
-        fn leave_statement(&mut self, change: &SchemaChange<Offset>) {
+        fn leave_statement(
+            &mut self,
+            _: &(),
+            change: &SchemaChange<Offset>,
+        ) -> Result<(), Infallible> {
             self.entries
                 .push(format!("left statement {} tables", change.tables().count()));
+
+            Ok(())
         }
 
-        fn visit_created(&mut self, event: &TableCreated<'_>) {
+        fn visit_created(&mut self, _: &(), event: &TableCreated<'_>) -> Result<(), Infallible> {
             self.entries.push(format!("table {}", event.table().id()));
+
+            Ok(())
         }
     }
 
     impl SchemaChangeListener<Offset> for Journal {
-        fn visit_created(&mut self, event: &TableCreated<'_>) {
+        type Context = ();
+        type Error = Infallible;
+
+        fn visit_created(&mut self, _: &(), event: &TableCreated<'_>) -> Result<(), Infallible> {
             self.entries.push(format!("created {}", event.table().id()));
+
+            Ok(())
         }
 
-        fn visit_dropped(&mut self, event: &TableDropped<'_>) {
+        fn visit_dropped(&mut self, _: &(), event: &TableDropped<'_>) -> Result<(), Infallible> {
             self.entries.push(format!("dropped {}", event.table().id()));
+
+            Ok(())
         }
 
-        fn visit_column_added(&mut self, event: &ColumnAdded<'_>) {
+        fn visit_column_added(
+            &mut self,
+            _: &(),
+            event: &ColumnAdded<'_>,
+        ) -> Result<(), Infallible> {
             self.entries.push(format!(
                 "added {}.{} at {} of {}",
                 event.after().id(),
@@ -379,17 +490,29 @@ mod tests {
                 event.column().position(),
                 event.after().columns().count()
             ));
+
+            Ok(())
         }
 
-        fn visit_column_dropped(&mut self, event: &ColumnDropped<'_>) {
+        fn visit_column_dropped(
+            &mut self,
+            _: &(),
+            event: &ColumnDropped<'_>,
+        ) -> Result<(), Infallible> {
             self.entries.push(format!(
                 "dropped {}.{}",
                 event.before().id(),
                 event.column().name()
             ));
+
+            Ok(())
         }
 
-        fn visit_column_retyped(&mut self, event: &ColumnRetyped<'_>) {
+        fn visit_column_retyped(
+            &mut self,
+            _: &(),
+            event: &ColumnRetyped<'_>,
+        ) -> Result<(), Infallible> {
             self.entries.push(format!(
                 "retyped {}.{} {} -> {}",
                 event.after().id(),
@@ -397,15 +520,23 @@ mod tests {
                 event.previous().type_name(),
                 event.column().type_name()
             ));
+
+            Ok(())
         }
 
-        fn visit_primary_key_changed(&mut self, event: &PrimaryKeyChanged<'_>) {
+        fn visit_primary_key_changed(
+            &mut self,
+            _: &(),
+            event: &PrimaryKeyChanged<'_>,
+        ) -> Result<(), Infallible> {
             self.entries.push(format!(
                 "primary key {} {:?} -> {:?}",
                 event.after().id(),
                 event.before().primary_key().collect::<Vec<_>>(),
                 event.after().primary_key().collect::<Vec<_>>()
             ));
+
+            Ok(())
         }
     }
 
@@ -460,7 +591,9 @@ mod tests {
 
     fn accept(catalog: &mut CatalogModel<Offset>, change: SchemaChange<Offset>) -> Vec<String> {
         let mut journal = Journal::default();
-        catalog.accept(&change, &mut journal).unwrap();
+        catalog
+            .accept::<OutOfOrder, _>(&change, &mut journal, &())
+            .unwrap();
         journal.entries
     }
 
@@ -573,13 +706,16 @@ mod tests {
     fn a_statement_that_changes_no_table_announces_the_statement_alone() {
         let mut catalog = CatalogModel::default();
         let mut statements = Statements::default();
-        catalog.accept(&created(1), &mut statements).unwrap();
+        catalog
+            .accept::<OutOfOrder, _>(&created(1), &mut statements, &())
+            .unwrap();
         statements.entries.clear();
 
         catalog
-            .accept(
+            .accept::<OutOfOrder, _>(
                 &altered(2, vec![identifier(), name_at(2)], &["id"]),
                 &mut statements,
+                &(),
             )
             .unwrap();
 
@@ -610,7 +746,7 @@ mod tests {
 
         assert_eq!(
             catalog
-                .accept(&created(1), &mut Journal::default())
+                .accept::<OutOfOrder, _>(&created(1), &mut Journal::default(), &())
                 .unwrap_err(),
             OutOfOrder { table: customers() }
         );
@@ -621,7 +757,9 @@ mod tests {
         let mut catalog = CatalogModel::default();
         let mut statements = Statements::default();
 
-        catalog.accept(&created(1), &mut statements).unwrap();
+        catalog
+            .accept::<OutOfOrder, _>(&created(1), &mut statements, &())
+            .unwrap();
 
         assert_eq!(
             statements.entries,
@@ -639,7 +777,11 @@ mod tests {
         accept(&mut catalog, created(2));
         let mut statements = Statements::default();
 
-        assert!(catalog.accept(&created(1), &mut statements).is_err());
+        assert!(
+            catalog
+                .accept::<OutOfOrder, _>(&created(1), &mut statements, &())
+                .is_err()
+        );
         assert!(statements.entries.is_empty());
     }
 }

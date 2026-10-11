@@ -1,7 +1,7 @@
 use std::fmt;
 
 use crate::model::TableId;
-use crate::sink::{UnsupportedColumn, Warehouse};
+use crate::sink::UnsupportedColumn;
 use crate::sql::Sql;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -9,6 +9,7 @@ pub enum UnbuildableArtifact {
     WithoutPrimaryKey(TableId),
     PrimaryKeyChanged(TableId),
     WithoutEra(TableId),
+    WithoutChangeLog(TableId),
     UnsupportedColumn(UnsupportedColumn),
 }
 
@@ -23,6 +24,9 @@ impl fmt::Display for UnbuildableArtifact {
                     formatter,
                     "{table} changed its primary key within the window"
                 )
+            }
+            Self::WithoutChangeLog(table) => {
+                write!(formatter, "{table} has no change log to replay")
             }
             Self::WithoutEra(table) => {
                 write!(formatter, "{table} lived through no era of the window")
@@ -41,15 +45,15 @@ impl From<UnsupportedColumn> for UnbuildableArtifact {
 }
 
 pub trait Artifact {
-    fn statements(&self, warehouse: &impl Warehouse) -> Result<Vec<Sql>, UnbuildableArtifact>;
+    fn statements(&self) -> Result<Vec<Sql>, UnbuildableArtifact>;
 }
 
 impl<A: Artifact> Artifact for Vec<A> {
-    fn statements(&self, warehouse: &impl Warehouse) -> Result<Vec<Sql>, UnbuildableArtifact> {
+    fn statements(&self) -> Result<Vec<Sql>, UnbuildableArtifact> {
         let mut statements = Vec::new();
 
         for artifact in self {
-            statements.extend(artifact.statements(warehouse)?);
+            statements.extend(artifact.statements()?);
         }
 
         Ok(statements)

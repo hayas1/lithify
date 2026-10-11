@@ -261,12 +261,13 @@ impl DuckDbChangeLogsFn for Catalog<'_, DuckDbClient> {
         C: ChangeLogs,
         <C::Schema as SchemaChangeLog>::Record: duckdb::types::FromSql,
     {
-        self.reader.catalog(
+        self.reader.catalog::<Unreplayable, Journal>(
             logs.schema_changes(),
             self.schema_changes,
             self.window,
             &mut CatalogModel::default(),
             self.journal,
+            &(),
         )
     }
 }
@@ -279,12 +280,13 @@ impl BigQueryChangeLogsFn for Catalog<'_, BigQueryClient> {
         C: ChangeLogs,
         <C::Schema as SchemaChangeLog>::Record: TryFrom<Row, Error = RowError>,
     {
-        self.reader.catalog(
+        self.reader.catalog::<Unreplayable, Journal>(
             logs.schema_changes(),
             self.schema_changes,
             self.window,
             &mut CatalogModel::default(),
             self.journal,
+            &(),
         )
     }
 }

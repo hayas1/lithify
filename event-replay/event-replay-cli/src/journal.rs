@@ -1,3 +1,4 @@
+use std::convert::Infallible;
 use std::fmt::Display;
 
 use chrono::{DateTime, Utc};
@@ -49,45 +50,66 @@ impl Journal {
 }
 
 impl<P> SchemaChangeListener<P> for Journal {
-    fn visit_statement(&mut self, change: &SchemaChange<P>) {
+    type Context = ();
+    type Error = Infallible;
+
+    fn visit_statement(&mut self, _: &(), change: &SchemaChange<P>) -> Result<(), Infallible> {
         self.entries.push(format!(
             "{} {}",
             Self::recorded_at(change),
             change.statement()
         ));
+
+        Ok(())
     }
 
-    fn visit_created(&mut self, event: &TableCreated<'_>) {
+    fn visit_created(&mut self, _: &(), event: &TableCreated<'_>) -> Result<(), Infallible> {
         self.table(format!(
             "created {} ({} columns, key {:?})",
             event.table().id(),
             event.table().columns().count(),
             event.table().primary_key().collect::<Vec<_>>()
         ));
+
+        Ok(())
     }
 
-    fn visit_dropped(&mut self, event: &TableDropped<'_>) {
+    fn visit_dropped(&mut self, _: &(), event: &TableDropped<'_>) -> Result<(), Infallible> {
         self.table(format!("dropped {}", event.table().id()));
+
+        Ok(())
     }
 
-    fn visit_column_added(&mut self, event: &ColumnAdded<'_>) {
+    fn visit_column_added(&mut self, _: &(), event: &ColumnAdded<'_>) -> Result<(), Infallible> {
         self.table(format!(
             "added {}.{} at {}",
             event.after().id(),
             event.column().name(),
             event.column().position()
         ));
+
+        Ok(())
     }
 
-    fn visit_column_dropped(&mut self, event: &ColumnDropped<'_>) {
+    fn visit_column_dropped(
+        &mut self,
+        _: &(),
+        event: &ColumnDropped<'_>,
+    ) -> Result<(), Infallible> {
         self.table(format!(
             "dropped {}.{}",
             event.before().id(),
             event.column().name()
         ));
+
+        Ok(())
     }
 
-    fn visit_column_retyped(&mut self, event: &ColumnRetyped<'_>) {
+    fn visit_column_retyped(
+        &mut self,
+        _: &(),
+        event: &ColumnRetyped<'_>,
+    ) -> Result<(), Infallible> {
         self.table(format!(
             "retyped {}.{} {} -> {}",
             event.after().id(),
@@ -95,15 +117,23 @@ impl<P> SchemaChangeListener<P> for Journal {
             event.previous().type_name(),
             event.column().type_name()
         ));
+
+        Ok(())
     }
 
-    fn visit_primary_key_changed(&mut self, event: &PrimaryKeyChanged<'_>) {
+    fn visit_primary_key_changed(
+        &mut self,
+        _: &(),
+        event: &PrimaryKeyChanged<'_>,
+    ) -> Result<(), Infallible> {
         self.table(format!(
             "keyed {} {:?} -> {:?}",
             event.after().id(),
             event.before().primary_key().collect::<Vec<_>>(),
             event.after().primary_key().collect::<Vec<_>>()
         ));
+
+        Ok(())
     }
 }
 
@@ -111,7 +141,7 @@ impl<P> SchemaChangeListener<P> for Journal {
 mod tests {
     use super::*;
     use event_replay_core::event::TableChange;
-    use event_replay_core::listener::CatalogModel;
+    use event_replay_core::listener::{CatalogModel, OutOfOrder};
     use event_replay_core::model::{ColumnModel, ColumnType, TableId, TableModel};
     use event_replay_core::position::{Position, RecordedAt};
 
@@ -146,7 +176,9 @@ mod tests {
         let mut journal = Journal::default();
 
         for change in &changes {
-            catalog.accept(change, &mut journal).unwrap();
+            catalog
+                .accept::<OutOfOrder, _>(change, &mut journal, &())
+                .unwrap();
         }
 
         journal.entries().map(str::to_owned).collect()

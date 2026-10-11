@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
+use std::marker::PhantomData;
 
 use crate::event::SchemaChange;
 use crate::listener::{
@@ -33,105 +35,137 @@ pub struct EraTracker<F, L, E> {
     window: Window,
     at: RecordedAt,
     open: F,
-    tables: BTreeMap<TableId, Track<L, E>>,
+    tables: BTreeMap<TableId, Track<L>>,
+    error: PhantomData<fn() -> E>,
 }
 
-struct Track<L, E> {
-    listener: Result<L, E>,
+struct Track<L> {
+    listener: L,
     since: RecordedAt,
 }
 
-impl<L, E> Track<L, E> {
-    fn open(
+impl<L> Track<L> {
+    fn open<E>(
         open: &mut impl FnMut(&TableId) -> Result<L, E>,
         table: &TableId,
         since: RecordedAt,
-    ) -> Self {
-        Self {
-            listener: open(table),
+    ) -> Result<Self, E> {
+        Ok(Self {
+            listener: open(table)?,
             since,
-        }
+        })
     }
 
-    fn tell(&mut self, visit: impl FnOnce(&mut L)) {
-        if let Ok(listener) = &mut self.listener {
-            visit(listener);
-        }
-    }
-
-    fn advance<P>(&mut self, at: RecordedAt, before: &TableModel)
+    fn advance<P>(
+        &mut self,
+        context: &L::Context,
+        at: RecordedAt,
+        before: &TableModel,
+    ) -> Result<(), L::Error>
     where
         L: SchemaChangeListener<P>,
     {
         if self.since < at {
             let era = Era::new(before.clone(), Window::new(self.since, at));
 
-            self.tell(|listener| listener.visit_era(&era));
+            self.listener.visit_era(context, &era)?;
             self.since = at;
         }
+
+        Ok(())
     }
 
-    fn finish<P>(mut self, table: &TableModel, to: RecordedAt) -> Result<L, E>
+    fn finish<P>(
+        mut self,
+        context: &L::Context,
+        table: &TableModel,
+        to: RecordedAt,
+    ) -> Result<L, L::Error>
     where
         L: SchemaChangeListener<P>,
     {
-        self.advance(to, table);
+        self.advance(context, to, table)?;
 
-        self.listener
+        Ok(self.listener)
     }
 }
 
-impl<F, L, E> EraTracker<F, L, E>
-where
-    F: FnMut(&TableId) -> Result<L, E>,
-{
+impl<F, L, E> EraTracker<F, L, E> {
     pub fn new(window: Window, open: F) -> Self {
         Self {
             at: *window.from(),
             window,
             open,
             tables: BTreeMap::new(),
+            error: PhantomData,
         }
     }
 
-    pub fn finish<P: Position>(mut self, catalog: &CatalogModel<P>) -> Result<Vec<L>, E>
+    pub fn finish<P: Position>(
+        mut self,
+        catalog: &CatalogModel<P>,
+        context: &L::Context,
+    ) -> Result<Vec<L>, E>
     where
         L: SchemaChangeListener<P>,
+        F: FnMut(&TableId) -> Result<L, E>,
+        E: From<L::Error>,
     {
         catalog
             .tables()
             .map(|table| {
-                let track = self.tables.remove(table.id()).unwrap_or_else(|| {
-                    Track::open(&mut self.open, table.id(), *self.window.from())
-                });
+                let track = match self.tables.remove(table.id()) {
+                    Some(track) => track,
+                    None => self.open(table.id(), *self.window.from())?,
+                };
 
-                track.finish(table, *self.window.to())
+                Ok(track.finish(context, table, *self.window.to())?)
             })
             .collect()
     }
 
-    fn track(&mut self, table: &TableId) -> &mut Track<L, E> {
-        let Self {
-            window,
-            open,
-            tables,
-            ..
-        } = self;
-
-        tables
-            .entry(table.clone())
-            .or_insert_with(|| Track::open(open, table, *window.from()))
-    }
-
-    fn alter<P>(&mut self, before: &TableModel, after: &TableModel, visit: impl FnOnce(&mut L))
+    fn open<P>(&mut self, table: &TableId, since: RecordedAt) -> Result<Track<L>, E>
     where
         L: SchemaChangeListener<P>,
+        F: FnMut(&TableId) -> Result<L, E>,
+        E: From<L::Error>,
+    {
+        Track::open(&mut self.open, table, since)
+    }
+
+    fn track<P>(&mut self, table: &TableId) -> Result<&mut Track<L>, E>
+    where
+        L: SchemaChangeListener<P>,
+        F: FnMut(&TableId) -> Result<L, E>,
+        E: From<L::Error>,
+    {
+        let from = *self.window.from();
+        let Self { open, tables, .. } = self;
+
+        match tables.entry(table.clone()) {
+            Entry::Occupied(track) => Ok(track.into_mut()),
+            Entry::Vacant(vacant) => Ok(vacant.insert(Track::open(open, table, from)?)),
+        }
+    }
+
+    fn alter<P>(
+        &mut self,
+        context: &L::Context,
+        before: &TableModel,
+        after: &TableModel,
+        visit: impl FnOnce(&mut L) -> Result<(), L::Error>,
+    ) -> Result<(), E>
+    where
+        L: SchemaChangeListener<P>,
+        F: FnMut(&TableId) -> Result<L, E>,
+        E: From<L::Error>,
     {
         let at = self.at;
-        let track = self.track(after.id());
+        let track = self.track(after.id())?;
 
-        track.advance(at, before);
-        track.tell(visit);
+        track.advance(context, at, before)?;
+
+        Ok(visit(&mut track.listener)?)
     }
 }
 
@@ -139,46 +173,83 @@ impl<P, F, L, E> SchemaChangeListener<P> for EraTracker<F, L, E>
 where
     F: FnMut(&TableId) -> Result<L, E>,
     L: SchemaChangeListener<P>,
+    E: From<L::Error>,
 {
-    fn visit_statement(&mut self, change: &SchemaChange<P>) {
+    type Context = L::Context;
+    type Error = E;
+
+    fn visit_statement(
+        &mut self,
+        _: &Self::Context,
+        change: &SchemaChange<P>,
+    ) -> Result<(), Self::Error> {
         self.at = *change.recorded_at();
+
+        Ok(())
     }
 
-    fn visit_created(&mut self, event: &TableCreated<'_>) {
-        let mut track = Track::open(&mut self.open, event.table().id(), self.at);
+    fn visit_created(
+        &mut self,
+        context: &Self::Context,
+        event: &TableCreated<'_>,
+    ) -> Result<(), Self::Error> {
+        let mut track = self.open(event.table().id(), self.at)?;
 
-        track.tell(|listener| listener.visit_created(event));
+        track.listener.visit_created(context, event)?;
         self.tables.insert(event.table().id().clone(), track);
+
+        Ok(())
     }
 
-    fn visit_dropped(&mut self, event: &TableDropped<'_>) {
-        if let Some(mut track) = self.tables.remove(event.table().id()) {
-            track.tell(|listener| listener.visit_dropped(event));
+    fn visit_dropped(
+        &mut self,
+        context: &Self::Context,
+        event: &TableDropped<'_>,
+    ) -> Result<(), Self::Error> {
+        match self.tables.remove(event.table().id()) {
+            Some(mut track) => Ok(track.listener.visit_dropped(context, event)?),
+            None => Ok(()),
         }
     }
 
-    fn visit_column_added(&mut self, event: &ColumnAdded<'_>) {
-        self.alter(event.before(), event.after(), |listener| {
-            listener.visit_column_added(event)
-        });
+    fn visit_column_added(
+        &mut self,
+        context: &Self::Context,
+        event: &ColumnAdded<'_>,
+    ) -> Result<(), Self::Error> {
+        self.alter(context, event.before(), event.after(), |listener| {
+            listener.visit_column_added(context, event)
+        })
     }
 
-    fn visit_column_dropped(&mut self, event: &ColumnDropped<'_>) {
-        self.alter(event.before(), event.after(), |listener| {
-            listener.visit_column_dropped(event)
-        });
+    fn visit_column_dropped(
+        &mut self,
+        context: &Self::Context,
+        event: &ColumnDropped<'_>,
+    ) -> Result<(), Self::Error> {
+        self.alter(context, event.before(), event.after(), |listener| {
+            listener.visit_column_dropped(context, event)
+        })
     }
 
-    fn visit_column_retyped(&mut self, event: &ColumnRetyped<'_>) {
-        self.alter(event.before(), event.after(), |listener| {
-            listener.visit_column_retyped(event)
-        });
+    fn visit_column_retyped(
+        &mut self,
+        context: &Self::Context,
+        event: &ColumnRetyped<'_>,
+    ) -> Result<(), Self::Error> {
+        self.alter(context, event.before(), event.after(), |listener| {
+            listener.visit_column_retyped(context, event)
+        })
     }
 
-    fn visit_primary_key_changed(&mut self, event: &PrimaryKeyChanged<'_>) {
-        self.alter(event.before(), event.after(), |listener| {
-            listener.visit_primary_key_changed(event)
-        });
+    fn visit_primary_key_changed(
+        &mut self,
+        context: &Self::Context,
+        event: &PrimaryKeyChanged<'_>,
+    ) -> Result<(), Self::Error> {
+        self.alter(context, event.before(), event.after(), |listener| {
+            listener.visit_primary_key_changed(context, event)
+        })
     }
 }
 
@@ -186,7 +257,7 @@ where
 mod tests {
     use super::*;
     use crate::event::{SchemaChange, TableChange};
-    use crate::listener::{ColumnAdded, TableCreated, TableDropped};
+    use crate::listener::{ColumnAdded, OutOfOrder, TableCreated, TableDropped};
     use crate::model::{ColumnModel, ColumnType, TableModel};
     use crate::position::Position;
 
@@ -195,6 +266,18 @@ mod tests {
 
     impl Position for Offset {}
 
+    #[derive(Debug, PartialEq, Eq)]
+    enum Untold {
+        OutOfOrder,
+        Unopened(TableId),
+    }
+
+    impl From<OutOfOrder> for Untold {
+        fn from(_: OutOfOrder) -> Self {
+            Self::OutOfOrder
+        }
+    }
+
     #[derive(Debug)]
     struct Story {
         table: TableId,
@@ -202,7 +285,10 @@ mod tests {
     }
 
     impl SchemaChangeListener<Offset> for Story {
-        fn visit_era(&mut self, era: &Era) {
+        type Context = ();
+        type Error = Untold;
+
+        fn visit_era(&mut self, _: &(), era: &Era) -> Result<(), Untold> {
             self.told.push(format!(
                 "era {:?} {}..{}",
                 era.table()
@@ -212,18 +298,26 @@ mod tests {
                 era.window().from().milliseconds_since_epoch(),
                 era.window().to().milliseconds_since_epoch()
             ));
+
+            Ok(())
         }
 
-        fn visit_created(&mut self, event: &TableCreated<'_>) {
+        fn visit_created(&mut self, _: &(), event: &TableCreated<'_>) -> Result<(), Untold> {
             self.told.push(format!("created {}", event.table().id()));
+
+            Ok(())
         }
 
-        fn visit_dropped(&mut self, event: &TableDropped<'_>) {
+        fn visit_dropped(&mut self, _: &(), event: &TableDropped<'_>) -> Result<(), Untold> {
             self.told.push(format!("dropped {}", event.table().id()));
+
+            Ok(())
         }
 
-        fn visit_column_added(&mut self, event: &ColumnAdded<'_>) {
+        fn visit_column_added(&mut self, _: &(), event: &ColumnAdded<'_>) -> Result<(), Untold> {
             self.told.push(format!("added {}", event.column().name()));
+
+            Ok(())
         }
     }
 
@@ -266,23 +360,27 @@ mod tests {
     ) -> Vec<(TableId, Vec<String>)> {
         let mut catalog = CatalogModel::default();
         for change in &before {
-            catalog.accept(change, &mut ()).unwrap();
+            catalog
+                .accept::<OutOfOrder, _>(change, &mut (), &())
+                .unwrap();
         }
         let mut tracker = EraTracker::new(
             Window::new(RecordedAt::from(10), RecordedAt::from(20)),
             |table: &TableId| {
-                Ok::<_, ()>(Story {
+                Ok::<_, Untold>(Story {
                     table: table.clone(),
                     told: Vec::new(),
                 })
             },
         );
         for change in &within {
-            catalog.accept(change, &mut tracker).unwrap();
+            catalog
+                .accept::<Untold, _>(change, &mut tracker, &())
+                .unwrap();
         }
 
         tracker
-            .finish(&catalog)
+            .finish(&catalog, &())
             .unwrap()
             .into_iter()
             .map(|story| (story.table, story.told))
@@ -419,16 +517,20 @@ mod tests {
     fn a_table_whose_listener_cannot_be_opened_fails_the_tracking() {
         let mut catalog = CatalogModel::default();
         catalog
-            .accept(
+            .accept::<OutOfOrder, _>(
                 &change(1, vec![TableChange::Created(table(people(), &["id"]))]),
                 &mut (),
+                &(),
             )
             .unwrap();
         let tracker = EraTracker::new(
             Window::new(RecordedAt::from(10), RecordedAt::from(20)),
-            |table: &TableId| Err::<Story, _>(table.clone()),
+            |table: &TableId| Err::<Story, _>(Untold::Unopened(table.clone())),
         );
 
-        assert_eq!(tracker.finish(&catalog).unwrap_err(), people());
+        assert_eq!(
+            tracker.finish(&catalog, &()).unwrap_err(),
+            Untold::Unopened(people())
+        );
     }
 }

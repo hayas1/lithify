@@ -145,7 +145,7 @@ pub trait WarehouseClient {
     where
         E: From<Self::Error> + From<UnbuildableArtifact>,
     {
-        for statement in artifact.statements(self.warehouse())? {
+        for statement in artifact.statements()? {
             self.execute(&statement)?;
         }
 
@@ -204,9 +204,9 @@ mod tests {
     struct Namespaced;
 
     impl Artifact for Namespaced {
-        fn statements(&self, warehouse: &impl Warehouse) -> Result<Vec<Sql>, UnbuildableArtifact> {
+        fn statements(&self) -> Result<Vec<Sql>, UnbuildableArtifact> {
             Ok(vec![
-                warehouse.create_namespace("replay"),
+                Engine.create_namespace("replay"),
                 Sql::from("CREATE TABLE replay.people (id BIGINT)"),
             ])
         }

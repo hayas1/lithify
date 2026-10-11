@@ -1,3 +1,4 @@
+use std::convert::Infallible;
 use std::fmt::{self, Display, Formatter};
 
 use event_replay_config::Unreadable;
@@ -17,7 +18,6 @@ pub enum Unreplayable {
     Unwritable(std::io::Error),
     UnknownSink(String),
     WithoutSource,
-    WithoutTopic(String),
 }
 
 impl Display for Unreplayable {
@@ -38,12 +38,6 @@ impl Display for Unreplayable {
                 write!(formatter, "nothing in this pipeline is sunk into {name}")
             }
             Self::WithoutSource => write!(formatter, "this pipeline captures no server"),
-            Self::WithoutTopic(source) => {
-                write!(
-                    formatter,
-                    "{source} names no topic its changes landed under"
-                )
-            }
         }
     }
 }
@@ -57,10 +51,7 @@ impl std::error::Error for Unreplayable {
             Self::OutOfOrder(cause) => Some(cause),
             Self::Unbuildable(cause) => Some(cause),
             Self::Unwritable(cause) => Some(cause),
-            Self::Unshardable(_)
-            | Self::UnknownSink(_)
-            | Self::WithoutSource
-            | Self::WithoutTopic(_) => None,
+            Self::Unshardable(_) | Self::UnknownSink(_) | Self::WithoutSource => None,
         }
     }
 }
@@ -98,5 +89,11 @@ impl From<UnbuildableArtifact> for Unreplayable {
 impl From<std::io::Error> for Unreplayable {
     fn from(cause: std::io::Error) -> Self {
         Self::Unwritable(cause)
+    }
+}
+
+impl From<Infallible> for Unreplayable {
+    fn from(never: Infallible) -> Self {
+        match never {}
     }
 }

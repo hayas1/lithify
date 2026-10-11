@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 use event_replay_core::artifact::{Artifact, UnbuildableArtifact};
 use event_replay_core::era::Era;
 use event_replay_core::listener::{
@@ -14,16 +16,16 @@ pub enum Base {
 }
 
 impl Base {
-    fn select<L: RowChangeLog>(
+    fn select<L: RowChangeLog, W: Warehouse>(
         &self,
-        snapshot: &Snapshot<'_, L>,
-        warehouse: &impl Warehouse,
+        snapshot: &Snapshot<'_, L, W>,
+        warehouse: &W,
         table: &TableModel,
     ) -> Result<Sql, UnbuildableArtifact> {
         match self {
             Self::Shard(shard) => Ok(Sql::from(format!(
                 "  SELECT\n{}\n  FROM {}",
-                Snapshot::<L>::columns(warehouse, table, "    "),
+                Snapshot::<L, W>::columns(warehouse, table, "    "),
                 warehouse.table_ref(shard),
             ))),
             Self::Captured => Ok(Sql::from(format!(
@@ -37,47 +39,25 @@ impl Base {
     }
 }
 
-enum Step {
-    Fold(Era),
-    Transition {
-        before: TableModel,
-        after: TableModel,
-    },
-}
-
-impl Step {
-    fn entering(&self) -> &TableModel {
-        match self {
-            Self::Fold(era) => era.table(),
-            Self::Transition { before, .. } => before,
-        }
-    }
-
-    fn leaving(&self) -> &TableModel {
-        match self {
-            Self::Fold(era) => era.table(),
-            Self::Transition { after, .. } => after,
-        }
-    }
-
-    fn guard_key(&self, last: &TableModel) -> Result<(), UnbuildableArtifact> {
-        match self.entering().primary_key().eq(last.primary_key()) {
-            true => Ok(()),
-            false => Err(UnbuildableArtifact::PrimaryKeyChanged(last.id().clone())),
-        }
-    }
-}
-
-pub struct Snapshot<'a, L> {
+pub struct Snapshot<'a, L, W> {
     log: &'a L,
     table: TableId,
     cdc: TablePath,
     target: TablePath,
     base: Base,
-    steps: Vec<Step>,
+    folding: Option<Folding>,
+    relations: Vec<(Sql, Sql)>,
+    steps: usize,
+    warehouse: PhantomData<fn(&W)>,
 }
 
-impl<'a, L: RowChangeLog> Snapshot<'a, L> {
+struct Folding {
+    namespace: Sql,
+    target: Sql,
+    shape: TableModel,
+}
+
+impl<'a, L: RowChangeLog, W: Warehouse> Snapshot<'a, L, W> {
     pub fn new(log: &'a L, table: TableId, cdc: TablePath, target: TablePath, base: Base) -> Self {
         Self {
             log,
@@ -85,7 +65,10 @@ impl<'a, L: RowChangeLog> Snapshot<'a, L> {
             cdc,
             target,
             base,
-            steps: Vec::new(),
+            folding: None,
+            relations: Vec::new(),
+            steps: 0,
+            warehouse: PhantomData,
         }
     }
 
@@ -93,44 +76,121 @@ impl<'a, L: RowChangeLog> Snapshot<'a, L> {
         &self.table
     }
 
-    fn transit(&mut self, before: &TableModel, after: &TableModel) {
-        if let Some(Step::Transition { after: last, .. }) = self.steps.last()
-            && last == after
-        {
-            return;
+    fn begin(&mut self, warehouse: &W, table: &TableModel) -> Result<(), UnbuildableArtifact> {
+        if self.folding.is_some() {
+            return Ok(());
+        }
+        if table.primary_key().next().is_none() {
+            return Err(UnbuildableArtifact::WithoutPrimaryKey(table.id().clone()));
         }
 
-        self.steps.push(Step::Transition {
-            before: before.clone(),
-            after: after.clone(),
+        let base = self.base.select(self, warehouse, table)?;
+
+        self.relations.push((warehouse.identifier("base"), base));
+        self.folding = Some(Folding {
+            namespace: warehouse.create_namespace(self.target.namespace()),
+            target: warehouse.table_ref(&self.target),
+            shape: table.clone(),
         });
+
+        Ok(())
     }
 
-    fn create_table(&self, warehouse: &impl Warehouse) -> Result<Sql, UnbuildableArtifact> {
-        let (first, last) = match (self.steps.first(), self.steps.last()) {
-            (Some(first), Some(last)) => (first.entering(), last.leaving()),
-            _ => return Err(UnbuildableArtifact::WithoutEra(self.table.clone())),
-        };
-        if last.primary_key().next().is_none() {
-            return Err(UnbuildableArtifact::WithoutPrimaryKey(last.id().clone()));
-        }
-
-        let mut relations = vec![(
-            warehouse.identifier("base"),
-            self.base.select(self, warehouse, first)?,
-        )];
-
-        for (at, step) in self.steps.iter().enumerate() {
-            step.guard_key(last)?;
-
-            let previous = relations[relations.len() - 1].0.clone();
-            relations.extend(self.relations(warehouse, at + 1, step, &previous)?);
-        }
-
-        Ok(self.with(warehouse, &relations))
+    fn previous(&self) -> Result<Sql, UnbuildableArtifact> {
+        self.relations
+            .last()
+            .map(|(name, _)| name.clone())
+            .ok_or_else(|| self.without_era())
     }
 
-    fn with(&self, warehouse: &impl Warehouse, relations: &[(Sql, Sql)]) -> Sql {
+    fn shape(&self) -> Result<&TableModel, UnbuildableArtifact> {
+        self.folding
+            .as_ref()
+            .map(|folding| &folding.shape)
+            .ok_or_else(|| self.without_era())
+    }
+
+    fn reshape(&mut self, shape: TableModel) {
+        if let Some(folding) = &mut self.folding {
+            folding.shape = shape;
+        }
+    }
+
+    fn without_era(&self) -> UnbuildableArtifact {
+        UnbuildableArtifact::WithoutEra(self.table.clone())
+    }
+
+    fn fold_era(&mut self, warehouse: &W, era: &Era) -> Result<(), UnbuildableArtifact> {
+        self.begin(warehouse, era.table())?;
+        self.steps += 1;
+
+        let previous = self.previous()?;
+        let changes = warehouse.identifier(&format!("changes_{}", self.steps));
+        let folded = warehouse.identifier(&format!("era_{}", self.steps));
+        let fold = self.fold(warehouse, era.table(), &previous, &changes)?;
+
+        self.relations.push((changes, self.changes(warehouse, era)));
+        self.relations.push((folded, fold));
+        self.reshape(era.table().clone());
+
+        Ok(())
+    }
+
+    fn carry(
+        &mut self,
+        warehouse: &W,
+        next: TableModel,
+        carried: impl Fn(&ColumnModel, &Sql) -> Result<Sql, UnbuildableArtifact>,
+    ) -> Result<(), UnbuildableArtifact> {
+        self.steps += 1;
+
+        let previous = self.previous()?;
+        let columns: Vec<String> = next
+            .columns()
+            .map(|column| {
+                let name = warehouse.identifier(column.name());
+
+                Ok(format!("    {} AS {name}", carried(column, &name)?))
+            })
+            .collect::<Result<_, UnbuildableArtifact>>()?;
+
+        self.relations.push((
+            warehouse.identifier(&format!("era_{}", self.steps)),
+            Sql::from(format!(
+                "  SELECT\n{}\n  FROM {previous}",
+                columns.join(",\n")
+            )),
+        ));
+        self.reshape(next);
+
+        Ok(())
+    }
+
+    fn reshaped(
+        &self,
+        reshape: impl FnOnce(&TableModel) -> Vec<ColumnModel>,
+    ) -> Result<TableModel, UnbuildableArtifact> {
+        let shape = self.shape()?;
+
+        Ok(TableModel::new(
+            shape.id().clone(),
+            reshape(shape),
+            shape.primary_key().map(str::to_owned).collect(),
+        ))
+    }
+
+    fn fill(warehouse: &W, column: &ColumnModel) -> Result<Sql, UnbuildableArtifact> {
+        Ok(Sql::from(format!(
+            "CAST({} AS {})",
+            column
+                .default_value()
+                .map(|default| warehouse.literal(default))
+                .unwrap_or_else(|| Sql::from("NULL")),
+            warehouse.column_type(column.column_type())?,
+        )))
+    }
+
+    fn with(folding: &Folding, relations: &[(Sql, Sql)]) -> Sql {
         let ctes: Vec<String> = relations
             .iter()
             .map(|(name, select)| format!("{name} AS (\n{select}\n)"))
@@ -142,37 +202,12 @@ impl<'a, L: RowChangeLog> Snapshot<'a, L> {
 
         Sql::from(format!(
             "CREATE OR REPLACE TABLE {} AS\nWITH {}\nSELECT * FROM {last}",
-            warehouse.table_ref(&self.target),
+            folding.target,
             ctes.join(",\n"),
         ))
     }
 
-    fn relations(
-        &self,
-        warehouse: &impl Warehouse,
-        at: usize,
-        step: &Step,
-        previous: &Sql,
-    ) -> Result<Vec<(Sql, Sql)>, UnbuildableArtifact> {
-        let era = warehouse.identifier(&format!("era_{at}"));
-
-        match step {
-            Step::Fold(fold) => {
-                let changes = warehouse.identifier(&format!("changes_{at}"));
-
-                Ok(vec![
-                    (changes.clone(), self.changes(warehouse, fold)),
-                    (era, self.fold(warehouse, fold.table(), previous, &changes)?),
-                ])
-            }
-            Step::Transition { before, after } => Ok(vec![(
-                era,
-                Self::transition(warehouse, before, after, previous)?,
-            )]),
-        }
-    }
-
-    fn changes(&self, warehouse: &impl Warehouse, era: &Era) -> Sql {
+    fn changes(&self, warehouse: &W, era: &Era) -> Sql {
         let recorded_at = warehouse.path(&self.log.recorded_at());
 
         Sql::from(format!(
@@ -186,7 +221,7 @@ impl<'a, L: RowChangeLog> Snapshot<'a, L> {
 
     fn fold(
         &self,
-        warehouse: &impl Warehouse,
+        warehouse: &W,
         table: &TableModel,
         previous: &Sql,
         changes: &Sql,
@@ -207,13 +242,7 @@ impl<'a, L: RowChangeLog> Snapshot<'a, L> {
         )))
     }
 
-    fn matched(
-        &self,
-        warehouse: &impl Warehouse,
-        table: &TableModel,
-        previous: &Sql,
-        changes: &Sql,
-    ) -> Sql {
+    fn matched(&self, warehouse: &W, table: &TableModel, previous: &Sql, changes: &Sql) -> Sql {
         let matched = table
             .primary_key()
             .map(|column| warehouse.identifier(column))
@@ -235,52 +264,7 @@ impl<'a, L: RowChangeLog> Snapshot<'a, L> {
         Sql::from(matched)
     }
 
-    fn transition(
-        warehouse: &impl Warehouse,
-        before: &TableModel,
-        after: &TableModel,
-        previous: &Sql,
-    ) -> Result<Sql, UnbuildableArtifact> {
-        let columns: Vec<String> = after
-            .columns()
-            .map(|column| {
-                let name = warehouse.identifier(column.name());
-                let value = Self::carried(warehouse, column, before, &name)?;
-
-                Ok(format!("    {value} AS {name}"))
-            })
-            .collect::<Result<_, UnbuildableArtifact>>()?;
-
-        Ok(Sql::from(format!(
-            "  SELECT\n{}\n  FROM {previous}",
-            columns.join(",\n")
-        )))
-    }
-
-    fn carried(
-        warehouse: &impl Warehouse,
-        column: &ColumnModel,
-        before: &TableModel,
-        name: &Sql,
-    ) -> Result<Sql, UnbuildableArtifact> {
-        match before.column(column.name()) {
-            Some(was) if was.column_type() == column.column_type() => Ok(name.clone()),
-            Some(_) => Ok(Sql::from(format!(
-                "CAST({name} AS {})",
-                warehouse.column_type(column.column_type())?
-            ))),
-            None => Ok(Sql::from(format!(
-                "CAST({} AS {})",
-                column
-                    .default_value()
-                    .map(|default| warehouse.literal(default))
-                    .unwrap_or_else(|| Sql::from("NULL")),
-                warehouse.column_type(column.column_type())?,
-            ))),
-        }
-    }
-
-    fn latest(&self, warehouse: &impl Warehouse, table: &TableModel) -> Sql {
+    fn latest(&self, warehouse: &W, table: &TableModel) -> Sql {
         let partition: Vec<String> = table
             .primary_key()
             .map(|column| {
@@ -307,7 +291,7 @@ impl<'a, L: RowChangeLog> Snapshot<'a, L> {
         ))
     }
 
-    fn keyed(&self, warehouse: &impl Warehouse, within: Option<&Sql>, column: &Sql) -> Sql {
+    fn keyed(&self, warehouse: &W, within: Option<&Sql>, column: &Sql) -> Sql {
         let within = within
             .map(|relation| format!("{relation}."))
             .unwrap_or_default();
@@ -319,7 +303,7 @@ impl<'a, L: RowChangeLog> Snapshot<'a, L> {
         ))
     }
 
-    fn columns(warehouse: &impl Warehouse, table: &TableModel, indent: &str) -> Sql {
+    fn columns(warehouse: &W, table: &TableModel, indent: &str) -> Sql {
         Sql::from(
             table
                 .columns()
@@ -331,7 +315,7 @@ impl<'a, L: RowChangeLog> Snapshot<'a, L> {
 
     fn reads(
         &self,
-        warehouse: &impl Warehouse,
+        warehouse: &W,
         table: &TableModel,
         indent: &str,
     ) -> Result<Sql, UnbuildableArtifact> {
@@ -351,34 +335,101 @@ impl<'a, L: RowChangeLog> Snapshot<'a, L> {
     }
 }
 
-impl<P, L: RowChangeLog> SchemaChangeListener<P> for Snapshot<'_, L> {
-    fn visit_era(&mut self, era: &Era) {
-        self.steps.push(Step::Fold(era.clone()));
+impl<P, L: RowChangeLog, W: Warehouse> SchemaChangeListener<P> for Snapshot<'_, L, W> {
+    type Context = W;
+    type Error = UnbuildableArtifact;
+
+    fn visit_era(&mut self, warehouse: &W, era: &Era) -> Result<(), UnbuildableArtifact> {
+        self.fold_era(warehouse, era)
     }
 
-    fn visit_column_added(&mut self, event: &ColumnAdded<'_>) {
-        self.transit(event.before(), event.after());
+    fn visit_column_added(
+        &mut self,
+        warehouse: &W,
+        event: &ColumnAdded<'_>,
+    ) -> Result<(), UnbuildableArtifact> {
+        self.begin(warehouse, event.before())?;
+
+        let added = event.column();
+        let next =
+            self.reshaped(|shape| shape.columns().cloned().chain([added.clone()]).collect())?;
+
+        self.carry(warehouse, next, |column, name| {
+            match column.name() == added.name() {
+                true => Self::fill(warehouse, column),
+                false => Ok(name.clone()),
+            }
+        })
     }
 
-    fn visit_column_dropped(&mut self, event: &ColumnDropped<'_>) {
-        self.transit(event.before(), event.after());
+    fn visit_column_dropped(
+        &mut self,
+        warehouse: &W,
+        event: &ColumnDropped<'_>,
+    ) -> Result<(), UnbuildableArtifact> {
+        self.begin(warehouse, event.before())?;
+
+        let dropped = event.column().name();
+        let next = self.reshaped(|shape| {
+            shape
+                .columns()
+                .filter(|column| column.name() != dropped)
+                .cloned()
+                .collect()
+        })?;
+
+        self.carry(warehouse, next, |_, name| Ok(name.clone()))
     }
 
-    fn visit_column_retyped(&mut self, event: &ColumnRetyped<'_>) {
-        self.transit(event.before(), event.after());
+    fn visit_column_retyped(
+        &mut self,
+        warehouse: &W,
+        event: &ColumnRetyped<'_>,
+    ) -> Result<(), UnbuildableArtifact> {
+        self.begin(warehouse, event.before())?;
+
+        let retyped = event.column();
+        let next = self.reshaped(|shape| {
+            shape
+                .columns()
+                .map(|column| match column.name() == retyped.name() {
+                    true => retyped.clone(),
+                    false => column.clone(),
+                })
+                .collect()
+        })?;
+
+        self.carry(warehouse, next, |column, name| {
+            match column.name() == retyped.name() {
+                true => Ok(Sql::from(format!(
+                    "CAST({name} AS {})",
+                    warehouse.column_type(column.column_type())?
+                ))),
+                false => Ok(name.clone()),
+            }
+        })
     }
 
-    fn visit_primary_key_changed(&mut self, event: &PrimaryKeyChanged<'_>) {
-        self.transit(event.before(), event.after());
+    fn visit_primary_key_changed(
+        &mut self,
+        _: &W,
+        event: &PrimaryKeyChanged<'_>,
+    ) -> Result<(), UnbuildableArtifact> {
+        Err(UnbuildableArtifact::PrimaryKeyChanged(
+            event.after().id().clone(),
+        ))
     }
 }
 
-impl<L: RowChangeLog> Artifact for Snapshot<'_, L> {
-    fn statements(&self, warehouse: &impl Warehouse) -> Result<Vec<Sql>, UnbuildableArtifact> {
-        Ok(vec![
-            warehouse.create_namespace(self.target.namespace()),
-            self.create_table(warehouse)?,
-        ])
+impl<L: RowChangeLog, W: Warehouse> Artifact for Snapshot<'_, L, W> {
+    fn statements(&self) -> Result<Vec<Sql>, UnbuildableArtifact> {
+        match &self.folding {
+            Some(folding) => Ok(vec![
+                folding.namespace.clone(),
+                Self::with(folding, &self.relations),
+            ]),
+            None => Err(self.without_era()),
+        }
     }
 }
 
@@ -388,7 +439,7 @@ mod tests {
     use event_replay_core::artifact::{Artifact, UnbuildableArtifact};
     use event_replay_core::era::EraTracker;
     use event_replay_core::event::{SchemaChange, TableChange};
-    use event_replay_core::listener::CatalogModel;
+    use event_replay_core::listener::{CatalogModel, OutOfOrder};
     use event_replay_core::model::{ColumnModel, ColumnType, TableId, TableModel};
     use event_replay_core::position::{Position, RecordedAt};
     use event_replay_core::sink::{TablePath, UnsupportedColumn, Warehouse};
@@ -530,19 +581,36 @@ mod tests {
         SchemaChange::new(Offset(at as u64), RecordedAt::from(at), "", vec![table])
     }
 
-    fn snapshots(
+    #[derive(Debug, PartialEq, Eq)]
+    enum Untold {
+        OutOfOrder,
+        Unbuildable(UnbuildableArtifact),
+    }
+
+    impl From<OutOfOrder> for Untold {
+        fn from(_: OutOfOrder) -> Self {
+            Self::OutOfOrder
+        }
+    }
+
+    impl From<UnbuildableArtifact> for Untold {
+        fn from(unbuildable: UnbuildableArtifact) -> Self {
+            Self::Unbuildable(unbuildable)
+        }
+    }
+
+    fn snapshots_in<W: Warehouse>(
+        warehouse: &W,
         created: TableModel,
         within: Vec<SchemaChange<Offset>>,
         base: impl Fn() -> Base,
-    ) -> Vec<Snapshot<'static, Log>> {
+    ) -> Result<Vec<Snapshot<'static, Log, W>>, Untold> {
         let mut catalog = CatalogModel::default();
-        catalog
-            .accept(&change(1, TableChange::Created(created)), &mut ())
-            .unwrap();
+        catalog.accept::<OutOfOrder, _>(&change(1, TableChange::Created(created)), &mut (), &())?;
         let mut tracker = EraTracker::new(
             Window::new(RecordedAt::from(100), RecordedAt::from(200)),
             |table: &TableId| {
-                Ok::<_, ()>(Snapshot::new(
+                Ok::<_, Untold>(Snapshot::new(
                     &Log,
                     table.clone(),
                     TablePath::new("mysql_shop_cdc", "mysql_shop_customers"),
@@ -552,15 +620,25 @@ mod tests {
             },
         );
         for change in &within {
-            catalog.accept(change, &mut tracker).unwrap();
+            catalog.accept::<Untold, _>(change, &mut tracker, warehouse)?;
         }
 
-        tracker.finish(&catalog).unwrap()
+        tracker.finish(&catalog, warehouse)
     }
 
-    fn statement(snapshots: Vec<Snapshot<'static, Log>>) -> String {
-        snapshots[0]
-            .statements(&Engine)
+    fn snapshots(
+        created: TableModel,
+        within: Vec<SchemaChange<Offset>>,
+        base: impl Fn() -> Base,
+    ) -> Result<Vec<Snapshot<'static, Log, Engine>>, Untold> {
+        snapshots_in(&Engine, created, within, base)
+    }
+
+    fn statement<W: Warehouse>(
+        snapshots: Result<Vec<Snapshot<'static, Log, W>>, Untold>,
+    ) -> String {
+        snapshots.unwrap()[0]
+            .statements()
             .unwrap()
             .remove(1)
             .to_string()
@@ -579,8 +657,8 @@ mod tests {
 
     #[test]
     fn a_snapshot_is_built_into_a_namespace_made_for_it() {
-        let statements = snapshots(customers(), vec![], || Base::Captured)[0]
-            .statements(&Engine)
+        let statements = snapshots(customers(), vec![], || Base::Captured).unwrap()[0]
+            .statements()
             .unwrap();
 
         assert_eq!(statements[0], "CREATE SCHEMA IF NOT EXISTS \"mysql_shop\"");
@@ -588,11 +666,7 @@ mod tests {
 
     #[test]
     fn a_snapshot_reads_the_change_log_where_the_warehouse_reads_change_logs() {
-        let statement = snapshots(customers(), vec![], || Base::Captured)[0]
-            .statements(&Lake)
-            .unwrap()
-            .remove(1)
-            .to_string();
+        let statement = statement(snapshots_in(&Lake, customers(), vec![], || Base::Captured));
 
         assert!(
             statement
@@ -689,7 +763,7 @@ mod tests {
     }
 
     #[test]
-    fn a_statement_that_adds_two_columns_transits_once() {
+    fn each_column_a_statement_adds_is_carried_in_a_relation_of_its_own() {
         let twice = customers_with(
             vec![
                 column("id", ColumnType::Int64, 1),
@@ -706,7 +780,9 @@ mod tests {
             || Base::Captured,
         ));
 
-        assert!(statement.ends_with("SELECT * FROM \"era_3\""));
+        assert!(statement.contains("    CAST(NULL AS TEXT) AS \"email\"\n  FROM \"era_1\"\n"));
+        assert!(statement.contains("    CAST(NULL AS TEXT) AS \"phone\"\n  FROM \"era_2\"\n"));
+        assert!(statement.ends_with("SELECT * FROM \"era_4\""));
     }
 
     #[test]
@@ -761,10 +837,13 @@ mod tests {
                 customers(),
                 vec![change(150, TableChange::Altered(rekeyed))],
                 || Base::Captured
-            )[0]
-            .statements(&Engine)
+            )
+            .map(drop)
             .unwrap_err(),
-            UnbuildableArtifact::PrimaryKeyChanged(TableId::new("shop", "customers"))
+            Untold::Unbuildable(UnbuildableArtifact::PrimaryKeyChanged(TableId::new(
+                "shop",
+                "customers"
+            )))
         );
     }
 
@@ -798,10 +877,12 @@ mod tests {
         let tagged = customers_with(vec![column("tags", ColumnType::Json, 1)], &["tags"]);
 
         assert_eq!(
-            snapshots(tagged, vec![], || Base::Captured)[0]
-                .statements(&Engine)
+            snapshots(tagged, vec![], || Base::Captured)
+                .map(drop)
                 .unwrap_err(),
-            UnbuildableArtifact::from(UnsupportedColumn::new(&ColumnType::Json))
+            Untold::Unbuildable(UnbuildableArtifact::from(UnsupportedColumn::new(
+                &ColumnType::Json
+            )))
         );
     }
 
@@ -810,16 +891,19 @@ mod tests {
         let keyless = customers_with(vec![column("id", ColumnType::Int64, 1)], &[]);
 
         assert_eq!(
-            snapshots(keyless, vec![], || Base::Captured)[0]
-                .statements(&Engine)
+            snapshots(keyless, vec![], || Base::Captured)
+                .map(drop)
                 .unwrap_err(),
-            UnbuildableArtifact::WithoutPrimaryKey(TableId::new("shop", "customers"))
+            Untold::Unbuildable(UnbuildableArtifact::WithoutPrimaryKey(TableId::new(
+                "shop",
+                "customers"
+            )))
         );
     }
 
     #[test]
     fn a_snapshot_told_of_no_era_cannot_be_built() {
-        let snapshot: Snapshot<'_, Log> = Snapshot::new(
+        let snapshot: Snapshot<'_, Log, Engine> = Snapshot::new(
             &Log,
             TableId::new("shop", "customers"),
             TablePath::new("mysql_shop_cdc", "mysql_shop_customers"),
@@ -828,7 +912,7 @@ mod tests {
         );
 
         assert_eq!(
-            snapshot.statements(&Engine).unwrap_err(),
+            snapshot.statements().unwrap_err(),
             UnbuildableArtifact::WithoutEra(TableId::new("shop", "customers"))
         );
     }
