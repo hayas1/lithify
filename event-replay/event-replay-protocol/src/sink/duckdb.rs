@@ -110,6 +110,7 @@ mod tests {
     use crate::sink::duckdb::config::tests::s3;
     use crate::source::debezium::Debezium;
     use crate::source::debezium::mysql::MySql;
+    use event_replay_core::model::ColumnModel;
     use event_replay_core::position::RecordedAt;
     use event_replay_core::window::Window;
 
@@ -117,6 +118,20 @@ mod tests {
         DuckDbWarehouse::default()
             .read(&SqlString::from("\"after\".\"amount\""), &column_type)
             .unwrap()
+    }
+
+    #[test]
+    fn a_column_is_filled_with_its_default_or_else_with_null() {
+        let warehouse = DuckDbWarehouse::default();
+        let with_default =
+            ColumnModel::new("note", "VARCHAR", ColumnType::Text, true, Some("none"));
+        let without = ColumnModel::new("note", "VARCHAR", ColumnType::Text, true, None);
+
+        assert_eq!(
+            warehouse.fill(&with_default).unwrap(),
+            "TRY_CAST('none' AS VARCHAR)"
+        );
+        assert_eq!(warehouse.fill(&without).unwrap(), "CAST(NULL AS VARCHAR)");
     }
 
     #[test]

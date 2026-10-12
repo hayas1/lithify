@@ -50,8 +50,16 @@ impl<'a, K> SnapshotPlan<'a, K> {
 
     fn base(&self, table: &TableId) -> Base {
         match self.onto {
-            Some(at) => Base::Shard(self.sink.replay().target(Artifact::Snapshot, table, at)),
+            Some(shard) => Base::Shard(self.placement(shard).snapshot(table)),
             None => Base::Captured,
+        }
+    }
+
+    fn placement(&self, shard: DateTime<Utc>) -> SinkPlacement<'a> {
+        SinkPlacement {
+            sink: self.sink,
+            source: self.source,
+            shard,
         }
     }
 
@@ -61,12 +69,9 @@ impl<'a, K> SnapshotPlan<'a, K> {
         K: SchemaChangeStream<C::Schema> + WarehouseClient,
         <K as SchemaChangeStream<C::Schema>>::Error: Into<Unreplayable>,
     {
-        let placement = SinkPlacement {
-            sink: self.sink,
-            source: self.source,
-            shard: DateTime::<Utc>::try_from(*self.window.from())
-                .map_err(Unreplayable::Unshardable)?,
-        };
+        let placement = self.placement(
+            DateTime::<Utc>::try_from(*self.window.from()).map_err(Unreplayable::Unshardable)?,
+        );
         let mut tracker = EraTracker::new(self.window.clone(), |table: &TableId| {
             Ok::<_, UnbuildableArtifact>(Snapshot::new(
                 logs.row_changes(),

@@ -29,13 +29,14 @@ impl<'a, L: RowChangeLog> ChangeLogQuery<'a, L> {
     }
 
     pub(super) fn shard<W: Warehouse>(
+        &self,
         warehouse: &W,
         shard: &TablePath,
         table: &TableModel,
     ) -> SqlString {
         SqlString::from(format!(
             "  SELECT\n{}\n  FROM {}",
-            Self::columns(warehouse, table, "    "),
+            self.columns(warehouse, table, "    "),
             warehouse.table_ref(shard),
         ))
     }
@@ -70,7 +71,7 @@ impl<'a, L: RowChangeLog> ChangeLogQuery<'a, L> {
                 "  UNION ALL\n",
                 "  SELECT\n{}\n  FROM {changes}\n  WHERE {} <> 'd'"
             ),
-            Self::columns(warehouse, table, "    "),
+            self.columns(warehouse, table, "    "),
             self.matched(warehouse, table, previous, changes),
             self.reads(warehouse, table, "    ")?,
             warehouse.path(&self.log.operation()),
@@ -80,6 +81,7 @@ impl<'a, L: RowChangeLog> ChangeLogQuery<'a, L> {
     }
 
     pub(super) fn carry<W: Warehouse>(
+        &self,
         warehouse: &W,
         next: &TableModel,
         previous: &SqlString,
@@ -98,21 +100,6 @@ impl<'a, L: RowChangeLog> ChangeLogQuery<'a, L> {
             "  SELECT\n{}\n  FROM {previous}",
             columns.join(",\n")
         )))
-    }
-
-    pub(super) fn fill<W: Warehouse>(
-        warehouse: &W,
-        column: &ColumnModel,
-    ) -> Result<SqlString, UnbuildableArtifact> {
-        match column.default_value() {
-            Some(default) => {
-                Ok(warehouse.cast_or_null(&warehouse.literal(default), column.column_type())?)
-            }
-            None => Ok(SqlString::from(format!(
-                "CAST(NULL AS {})",
-                warehouse.column_type(column.column_type())?
-            ))),
-        }
     }
 
     fn matched<W: Warehouse>(
@@ -187,7 +174,7 @@ impl<'a, L: RowChangeLog> ChangeLogQuery<'a, L> {
         ))
     }
 
-    fn columns<W: Warehouse>(warehouse: &W, table: &TableModel, indent: &str) -> SqlString {
+    fn columns<W: Warehouse>(&self, warehouse: &W, table: &TableModel, indent: &str) -> SqlString {
         SqlString::from(
             table
                 .columns()

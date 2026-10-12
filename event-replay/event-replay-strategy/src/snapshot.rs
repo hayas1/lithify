@@ -36,7 +36,7 @@ impl Base {
         table: &TableModel,
     ) -> Result<SqlString, UnbuildableArtifact> {
         match self {
-            Self::Shard(shard) => Ok(ChangeLogQuery::<L>::shard(warehouse, shard, table)),
+            Self::Shard(shard) => Ok(snapshot.query.shard(warehouse, shard, table)),
             Self::Captured => snapshot.query.captured(
                 warehouse,
                 &snapshot.change_log(warehouse, table.id())?,
@@ -150,7 +150,9 @@ impl<'a, L: RowChangeLog, W: Warehouse> Snapshot<'a, L, W> {
         carried: impl Fn(&ColumnModel, &SqlString) -> Result<SqlString, UnbuildableArtifact>,
     ) -> Result<(), UnbuildableArtifact> {
         let step = self.relations.step();
-        let carry = ChangeLogQuery::<L>::carry(warehouse, next, &self.previous()?, carried)?;
+        let carry = self
+            .query
+            .carry(warehouse, next, &self.previous()?, carried)?;
 
         self.relations
             .push(warehouse.identifier(&format!("era_{step}")), carry);
@@ -220,7 +222,7 @@ impl<P, L: RowChangeLog, W: Warehouse> SchemaChangeListener<P> for Snapshot<'_, 
 
         self.carry(warehouse, event.after(), |column, name| {
             match column.name() == added.name() {
-                true => ChangeLogQuery::<L>::fill(warehouse, column),
+                true => Ok(warehouse.fill(column)?),
                 false => Ok(name.clone()),
             }
         })

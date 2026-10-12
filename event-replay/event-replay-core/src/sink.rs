@@ -1,7 +1,7 @@
 use std::fmt;
 
 use crate::artifact::{Artifact, UnbuildableArtifact};
-use crate::model::ColumnType;
+use crate::model::{ColumnModel, ColumnType};
 use crate::source::{ColumnPath, SchemaChangeLog};
 use crate::sql::SqlString;
 use crate::window::Window;
@@ -92,6 +92,16 @@ pub trait Warehouse {
         expression: &SqlString,
         column_type: &ColumnType,
     ) -> Result<SqlString, UnsupportedColumn>;
+
+    fn fill(&self, column: &ColumnModel) -> Result<SqlString, UnsupportedColumn> {
+        match column.default_value() {
+            Some(default) => self.cast_or_null(&self.literal(default), column.column_type()),
+            None => Ok(SqlString::from(format!(
+                "CAST(NULL AS {})",
+                self.column_type(column.column_type())?
+            ))),
+        }
+    }
 
     fn literal(&self, text: &str) -> SqlString {
         SqlString::from(format!("'{}'", text.replace('\'', "''")))
