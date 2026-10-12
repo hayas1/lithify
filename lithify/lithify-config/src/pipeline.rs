@@ -72,7 +72,7 @@ mod tests {
     use super::*;
     use crate::ArtifactKind;
     use crate::infra::Miswiring;
-    use crate::table::Replayed;
+    use crate::table::Mask;
     use crate::unreadable::Cause;
     use lithify_protocol::sink::bigquery::config as bigquery;
     use lithify_protocol::sink::duckdb::config::Store;
@@ -141,7 +141,7 @@ mod tests {
 
         assert!(table.builds(ArtifactKind::Snapshot));
         assert!(!table.builds(ArtifactKind::History));
-        assert_eq!(table.replayed("sku"), Replayed::Value);
+        assert_eq!(table.mask("sku"), Mask::Identity);
     }
 
     #[test]
@@ -151,8 +151,8 @@ mod tests {
 
         assert!(table.builds(ArtifactKind::Snapshot));
         assert!(table.builds(ArtifactKind::History));
-        assert_eq!(table.replayed("attributes"), Replayed::Null);
-        assert_eq!(table.replayed("amount"), Replayed::Value);
+        assert_eq!(table.mask("attributes"), Mask::Null);
+        assert_eq!(table.mask("amount"), Mask::Identity);
     }
 
     #[test]

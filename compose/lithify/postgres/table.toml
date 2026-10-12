@@ -10,4 +10,4 @@ artifacts = ["snapshot", "history"]
 schema = "shop"
 name = "orders"
 artifacts = ["snapshot", "history"]
-column.attributes.replay = "null"
+column.attributes.mask = "null"

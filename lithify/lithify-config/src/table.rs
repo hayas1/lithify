@@ -58,10 +58,10 @@ impl ListedTable {
                 .artifacts
                 .clone()
                 .unwrap_or_else(|| default.artifacts.clone()),
-            columns: self
+            masks: self
                 .columns
                 .iter()
-                .map(|(name, column)| (name.clone(), column.replay))
+                .map(|(name, column)| (name.clone(), column.mask))
                 .collect(),
         }
     }
@@ -85,7 +85,7 @@ impl TryFrom<Listing> for Tables {
     fn try_from(listing: Listing) -> Result<Self, Self::Error> {
         let default = Table {
             artifacts: listing.default.artifacts,
-            columns: BTreeMap::new(),
+            masks: BTreeMap::new(),
         };
         let mut tables = BTreeMap::new();
 
@@ -115,7 +115,7 @@ impl Display for Mislisting {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Table {
     artifacts: BTreeSet<ArtifactKind>,
-    columns: BTreeMap<String, Replayed>,
+    masks: BTreeMap<String, Mask>,
 }
 
 impl Table {
@@ -123,8 +123,8 @@ impl Table {
         self.artifacts.contains(&kind)
     }
 
-    pub fn replayed(&self, column: &str) -> Replayed {
-        self.columns.get(column).copied().unwrap_or_default()
+    pub fn mask(&self, column: &str) -> Mask {
+        self.masks.get(column).copied().unwrap_or_default()
     }
 }
 
@@ -132,15 +132,26 @@ impl Table {
 #[serde(deny_unknown_fields)]
 struct ListedColumn {
     #[serde(default)]
-    replay: Replayed,
+    mask: Mask,
 }
 
+// A mask that takes arguments, as a hash will, is listed as a table,
+// `mask.hash = { algorithm = "sha256" }`, and before an artifact applies it, it has to settle what a
+// null mask gets away with:
+// - each warehouse spells it in SQL of its own, and one that cannot is refused like a column type it
+//   has no column for;
+// - it may change the type of the column in the artifact, as a hash turns any column into text;
+// - it cannot apply to a primary key unless it is deterministic, since rows are folded by their keys;
+// - a secret it needs, such as a salt, is read from the environment rather than written here.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Replayed {
+pub enum Mask {
     #[default]
-    Value,
+    Identity,
     Null,
+    // TODO: take the algorithm and where the salt is read from as arguments, and decide the type
+    // the hashed column takes in the artifact, before any artifact applies it.
+    Hash,
 }
 
 #[cfg(test)]
@@ -155,7 +166,7 @@ mod tests {
         schema = "shop"
         name = "orders"
         artifacts = ["snapshot", "history"]
-        column.attributes.replay = "null"
+        column.attributes.mask = "null"
 
         [[table]]
         schema = "shop"
@@ -196,11 +207,29 @@ mod tests {
     }
 
     #[test]
-    fn a_column_the_replay_does_not_carry_is_filled_with_null() {
+    fn a_column_masked_with_null_is_filled_with_null() {
         let table = table("shop", "orders");
 
-        assert_eq!(table.replayed("attributes"), Replayed::Null);
-        assert_eq!(table.replayed("amount"), Replayed::Value);
+        assert_eq!(table.mask("attributes"), Mask::Null);
+    }
+
+    #[test]
+    fn a_column_without_a_mask_is_carried_as_it_is() {
+        let table = table("shop", "orders");
+
+        assert_eq!(table.mask("amount"), Mask::Identity);
+    }
+
+    #[test]
+    fn a_column_can_be_masked_with_a_hash() {
+        let hashed = TABLES.replace("mask = \"null\"", "mask = \"hash\"");
+
+        assert_eq!(
+            tables(&hashed)
+                .table(&TableId::new("shop", "orders"))
+                .mask("attributes"),
+            Mask::Hash
+        );
     }
 
     #[test]
@@ -222,8 +251,8 @@ mod tests {
     }
 
     #[test]
-    fn a_column_replayed_in_an_unknown_way_is_rejected() {
-        let unknown = TABLES.replace("replay = \"null\"", "replay = \"hashed\"");
+    fn a_column_masked_in_an_unknown_way_is_rejected() {
+        let unknown = TABLES.replace("mask = \"null\"", "mask = \"hashed\"");
 
         assert!(toml::from_str::<Listing>(&unknown).is_err());
     }
@@ -243,8 +272,8 @@ mod tests {
     #[test]
     fn a_column_listed_twice_is_rejected() {
         let twice = TABLES.replace(
-            "column.attributes.replay = \"null\"",
-            "column.attributes.replay = \"null\"\n        column.attributes.replay = \"value\"",
+            "column.attributes.mask = \"null\"",
+            "column.attributes.mask = \"null\"\n        column.attributes.mask = \"null\"",
         );
 
         assert!(toml::from_str::<Listing>(&twice).is_err());

@@ -43,6 +43,7 @@ Status is one of:
 | History across schema changes | Versions recorded in different eras share one table, as columns are added, dropped or retyped along the way | Not started | |
 | History appended per window | A window appends its versions and closes the ones the window before it left open, rather than rebuilding every version | Not started | |
 | Deletes in history | A deleted row closes its last version instead of disappearing | Not started | |
+| Mask columns | `mask` keeps the values of a column out of the artifacts, such as a large document or a personal detail; further masks such as a hash come with the questions written on `Mask` | Partial: `mask` is read from `table.toml` but no artifact applies it | |
 
 ### Capture
 
