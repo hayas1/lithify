@@ -11,12 +11,14 @@ use event_replay_core::sql::SqlString;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BigQueryWarehouse {
     project: String,
+    change_log: String,
 }
 
 impl BigQueryWarehouse {
-    pub fn new(project: &str) -> Self {
+    pub fn new(project: &str, change_log: &str) -> Self {
         Self {
             project: project.to_owned(),
+            change_log: change_log.to_owned(),
         }
     }
 
@@ -55,18 +57,21 @@ impl Warehouse for BigQueryWarehouse {
         ))
     }
 
-    fn change_log_ref(&self, table: &TablePath) -> SqlString {
-        self.table_ref(&TablePath::new(
-            table.namespace(),
-            &table
-                .name()
+    fn change_log_namespace(&self) -> &str {
+        &self.change_log
+    }
+
+    fn change_log(&self, topic: &str) -> TablePath {
+        TablePath::new(
+            self.change_log_namespace(),
+            &topic
                 .chars()
                 .map(|character| match character.is_ascii_alphanumeric() {
                     true => character,
                     false => '_',
                 })
                 .collect::<String>(),
-        ))
+        )
     }
 
     fn column_type(&self, column_type: &ColumnType) -> Result<SqlString, UnsupportedColumn> {
@@ -132,7 +137,7 @@ mod tests {
     use event_replay_core::window::Window;
 
     fn bigquery() -> BigQueryWarehouse {
-        BigQueryWarehouse::new("local-project")
+        BigQueryWarehouse::new("local-project", "mysql_shop_cdc")
     }
 
     fn read(column_type: ColumnType) -> SqlString {
@@ -243,15 +248,12 @@ mod tests {
 
     #[test]
     fn the_schema_changes_of_a_window_are_read_whole_in_the_order_they_were_recorded_then_logged() {
-        let log = Debezium::new(MySql);
+        let log = Debezium::new("mysql", MySql);
         let window = Window::new(RecordedAt::from(0), RecordedAt::from(10));
 
         assert_eq!(
-            BigQueryWarehouse::new("local-project").select_schema_changes(
-                &log,
-                &TablePath::new("mysql_shop_cdc", "mysql"),
-                &window
-            ),
+            BigQueryWarehouse::new("local-project", "mysql_shop_cdc")
+                .select_schema_changes(&log, &window),
             concat!(
                 "SELECT *\n",
                 "FROM `local-project`.`mysql_shop_cdc`.`mysql`\n",
@@ -264,7 +266,7 @@ mod tests {
     #[test]
     fn a_change_log_is_read_from_the_table_its_topic_was_sanitized_into() {
         assert_eq!(
-            bigquery().change_log_ref(&TablePath::new("mysql_shop_cdc", "mysql.shop.customers")),
+            bigquery().change_log_ref("mysql.shop.customers"),
             "`local-project`.`mysql_shop_cdc`.`mysql_shop_customers`"
         );
     }
@@ -272,7 +274,7 @@ mod tests {
     #[test]
     fn a_change_log_is_read_from_a_table_named_only_with_what_bigquery_allows() {
         assert_eq!(
-            bigquery().change_log_ref(&TablePath::new("mysql_shop_cdc", "mysql.shop.order-lines")),
+            bigquery().change_log_ref("mysql.shop.order-lines"),
             "`local-project`.`mysql_shop_cdc`.`mysql_shop_order_lines`"
         );
     }

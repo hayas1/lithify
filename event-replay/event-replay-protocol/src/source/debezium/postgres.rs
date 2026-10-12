@@ -111,7 +111,7 @@ mod tests {
 
     #[test]
     fn a_statement_whose_source_carries_no_log_sequence_number_is_rejected() {
-        let statement = Debezium::new(Postgres).schema_change_json(json!({
+        let statement = Debezium::new("postgres", Postgres).schema_change_json(json!({
             "source": {"file": "binlog.000002", "pos": 448},
             "ts_ms": 1789800000000i64,
             "ddl": "",
@@ -184,7 +184,7 @@ mod tests {
 
     #[test]
     fn a_schema_change_is_positioned_by_its_log_sequence_number() {
-        let change = Debezium::new(Postgres)
+        let change = Debezium::new("postgres", Postgres)
             .schema_change_json(json!({
                 "source": {"lsn": 26738384i64, "txId": 770},
                 "ts_ms": 1789800000000i64,
@@ -198,7 +198,7 @@ mod tests {
 
     #[test]
     fn a_rename_is_read_from_the_ddl_in_the_syntax_of_postgres() {
-        let change = Debezium::new(Postgres)
+        let change = Debezium::new("postgres", Postgres)
             .schema_change_json(json!({
                 "source": {"lsn": 26738384i64},
                 "ts_ms": 1789800000000i64,
@@ -225,7 +225,7 @@ mod tests {
     }
 
     fn captured(source: Value) -> bool {
-        Debezium::new(Postgres)
+        Debezium::new("postgres", Postgres)
             .schema_change_json(json!({
                 "source": source,
                 "ts_ms": 1789800000000i64,

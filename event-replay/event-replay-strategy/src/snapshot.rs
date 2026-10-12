@@ -1,6 +1,8 @@
 use std::marker::PhantomData;
 
-use event_replay_core::artifact::{Artifact, UnbuildableArtifact};
+use chrono::{DateTime, Utc};
+
+use event_replay_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
 use event_replay_core::era::Era;
 use event_replay_core::listener::{
     ColumnAdded, ColumnDropped, ColumnRenamed, ColumnRetyped, PrimaryKeyChanged,
@@ -10,108 +12,127 @@ use event_replay_core::model::{ColumnModel, TableId, TableModel};
 use event_replay_core::sink::{TablePath, Warehouse};
 use event_replay_core::source::RowChangeLog;
 use event_replay_core::sql::SqlString;
+use event_replay_core::window::Window;
 
+use fold::Fold;
 use query::ChangeLogQuery;
-use relations::Relations;
 
+mod fold;
 mod query;
-mod relations;
 
-pub trait Placement {
-    fn change_log(&self, table: &TableId) -> Option<TablePath>;
-
-    fn snapshot(&self, table: &TableId) -> TablePath;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Snapshot {
+    namespace: String,
+    shard: String,
 }
 
-pub enum Base {
-    Captured,
-    Shard(TablePath),
-}
-
-impl Base {
-    fn select<L: RowChangeLog, W: Warehouse>(
-        &self,
-        warehouse: &W,
-        snapshot: &Snapshot<'_, L, W>,
-        table: &TableModel,
-    ) -> Result<SqlString, UnbuildableArtifact> {
-        match self {
-            Self::Shard(shard) => Ok(snapshot.query.shard(warehouse, shard, table)),
-            Self::Captured => snapshot.query.captured(
-                warehouse,
-                &snapshot.change_log(warehouse, table.id())?,
-                table,
-            ),
+impl Snapshot {
+    pub fn new(namespace: &str, shard: &str) -> Self {
+        Self {
+            namespace: namespace.to_owned(),
+            shard: shard.to_owned(),
         }
     }
 }
 
-pub struct Snapshot<'a, L, W> {
+impl Artifact for Snapshot {
+    type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = SnapshotBuilder<'a, L, W>;
+
+    fn target(&self, table: &TableId, window: &Window) -> Result<TablePath, UnbuildableArtifact> {
+        let at =
+            DateTime::<Utc>::try_from(*window.from()).map_err(UnbuildableArtifact::Unshardable)?;
+
+        Ok(TablePath::new(
+            &self.namespace,
+            &format!("{}_{}", table.table(), at.format(&self.shard)),
+        ))
+    }
+
+    fn builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>(
+        &'a self,
+        log: &'a L,
+        table: TableId,
+        window: &'a Window,
+        base: Option<TablePath>,
+    ) -> Self::Builder<'a, L, W> {
+        SnapshotBuilder::new(self, log, table, window.clone(), base)
+    }
+}
+
+pub struct SnapshotBuilder<'a, L, W> {
+    snapshot: &'a Snapshot,
     query: ChangeLogQuery<'a, L>,
-    placement: &'a dyn Placement,
     table: TableId,
-    base: Base,
-    folding: Option<Folding>,
-    relations: Relations,
+    window: Window,
+    base: Option<TablePath>,
+    target: Option<Target>,
+    fold: Fold,
     warehouse: PhantomData<fn(&W)>,
 }
 
-struct Folding {
+struct Target {
     namespace: SqlString,
-    target: SqlString,
+    table: SqlString,
 }
 
-impl<'a, L: RowChangeLog, W: Warehouse> Snapshot<'a, L, W> {
-    pub fn new(log: &'a L, placement: &'a dyn Placement, table: TableId, base: Base) -> Self {
+impl<'a, L: RowChangeLog, W: Warehouse> SnapshotBuilder<'a, L, W> {
+    fn new(
+        snapshot: &'a Snapshot,
+        log: &'a L,
+        table: TableId,
+        window: Window,
+        base: Option<TablePath>,
+    ) -> Self {
         Self {
+            snapshot,
             query: ChangeLogQuery::new(log),
-            placement,
             table,
+            window,
             base,
-            folding: None,
-            relations: Relations::default(),
+            target: None,
+            fold: Fold::default(),
             warehouse: PhantomData,
         }
     }
 
-    pub fn table(&self) -> &TableId {
-        &self.table
-    }
-
     fn begin(&mut self, warehouse: &W, table: &TableModel) -> Result<(), UnbuildableArtifact> {
-        if self.folding.is_some() {
+        if self.target.is_some() {
             return Ok(());
         }
         if table.primary_key().next().is_none() {
             return Err(UnbuildableArtifact::WithoutPrimaryKey(table.id().clone()));
         }
 
-        let base = self.base.select(warehouse, self, table)?;
+        let base = self.base(warehouse, table)?;
 
-        self.relations.push(warehouse.identifier("base"), base);
-        self.folding = Some(self.folding(warehouse));
+        self.fold.push(warehouse.identifier("base"), base);
+        self.target = Some(self.resolve_target(warehouse)?);
 
         Ok(())
     }
 
-    fn folding(&self, warehouse: &W) -> Folding {
-        let target = self.placement.snapshot(&self.table);
-
-        Folding {
-            namespace: warehouse.create_namespace(target.namespace()),
-            target: warehouse.table_ref(&target),
+    fn base(&self, warehouse: &W, table: &TableModel) -> Result<SqlString, UnbuildableArtifact> {
+        match &self.base {
+            Some(base) => Ok(self.query.shard(warehouse, base, table)),
+            None => self.query.captured(
+                warehouse,
+                &self.query.change_log(warehouse, table.id()),
+                table,
+            ),
         }
     }
 
-    fn change_log(&self, warehouse: &W, table: &TableId) -> Result<SqlString, UnbuildableArtifact> {
-        self.placement
-            .change_log(table)
-            .map(|path| warehouse.change_log_ref(&path))
-            .ok_or_else(|| UnbuildableArtifact::WithoutChangeLog(table.clone()))
+    fn resolve_target(&self, warehouse: &W) -> Result<Target, UnbuildableArtifact> {
+        let target = self.snapshot.target(&self.table, &self.window)?;
+
+        Ok(Target {
+            namespace: warehouse.create_namespace(target.namespace()),
+            table: warehouse.table_ref(&target),
+        })
     }
 
     fn previous(&self) -> Result<SqlString, UnbuildableArtifact> {
-        self.relations
+        self.fold
             .previous()
             .cloned()
             .ok_or_else(|| self.without_era())
@@ -128,20 +149,20 @@ impl<'a, L: RowChangeLog, W: Warehouse> Snapshot<'a, L, W> {
     ) -> Result<(), UnbuildableArtifact> {
         self.begin(warehouse, era.table())?;
 
-        let step = self.relations.step();
+        let step = self.fold.step();
         let previous = self.previous()?;
         let changes = warehouse.identifier(&format!("changes_{step}"));
         let fold = self
             .query
-            .fold(warehouse, era.table(), &previous, &changes)?;
+            .fold_changes(warehouse, era.table(), &previous, &changes)?;
         let read = self.query.changes(
             warehouse,
-            &self.change_log(warehouse, era.table().id())?,
+            &self.query.change_log(warehouse, era.table().id()),
             era,
         );
 
-        self.relations.push(changes, read);
-        self.relations
+        self.fold.push(changes, read);
+        self.fold
             .push(warehouse.identifier(&format!("era_{step}")), fold);
 
         Ok(())
@@ -153,19 +174,21 @@ impl<'a, L: RowChangeLog, W: Warehouse> Snapshot<'a, L, W> {
         next: &TableModel,
         carried: impl Fn(&ColumnModel, &SqlString) -> Result<SqlString, UnbuildableArtifact>,
     ) -> Result<(), UnbuildableArtifact> {
-        let step = self.relations.step();
+        let step = self.fold.step();
         let carry = self
             .query
             .carry(warehouse, next, &self.previous()?, carried)?;
 
-        self.relations
+        self.fold
             .push(warehouse.identifier(&format!("era_{step}")), carry);
 
         Ok(())
     }
 }
 
-impl<L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Position> for Snapshot<'_, L, W> {
+impl<L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Position>
+    for SnapshotBuilder<'_, L, W>
+{
     type Context = W;
     type Error = UnbuildableArtifact;
 
@@ -175,7 +198,7 @@ impl<L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Position> for Snapsh
         event: &TableCreated<'_>,
     ) -> Result<(), UnbuildableArtifact> {
         if event.appearance().is_logged_from_start() {
-            self.base = Base::Captured;
+            self.base = None;
         }
 
         Ok(())
@@ -196,7 +219,7 @@ impl<L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Position> for Snapsh
     ) -> Result<(), UnbuildableArtifact> {
         self.begin(warehouse, event.before())?;
         self.table = event.after().id().clone();
-        self.folding = Some(self.folding(warehouse));
+        self.target = Some(self.resolve_target(warehouse)?);
 
         Ok(())
     }
@@ -277,12 +300,23 @@ impl<L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Position> for Snapsh
     }
 }
 
-impl<L: RowChangeLog, W: Warehouse> Artifact for Snapshot<'_, L, W> {
-    fn statements(&self) -> Result<Vec<SqlString>, UnbuildableArtifact> {
-        match &self.folding {
-            Some(folding) => Ok(vec![
-                folding.namespace.clone(),
-                self.relations.statement(&folding.target),
+impl<L: RowChangeLog, W: Warehouse> ArtifactBuilder for SnapshotBuilder<'_, L, W> {
+    fn table(&self) -> &TableId {
+        &self.table
+    }
+
+    fn select(&self) -> Result<SqlString, UnbuildableArtifact> {
+        match &self.target {
+            Some(_) => Ok(self.fold.select()),
+            None => Err(self.without_era()),
+        }
+    }
+
+    fn create(&self) -> Result<Vec<SqlString>, UnbuildableArtifact> {
+        match &self.target {
+            Some(target) => Ok(vec![
+                target.namespace.clone(),
+                self.fold.create(&target.table),
             ]),
             None => Err(self.without_era()),
         }
@@ -292,7 +326,7 @@ impl<L: RowChangeLog, W: Warehouse> Artifact for Snapshot<'_, L, W> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use event_replay_core::artifact::{Artifact, UnbuildableArtifact};
+    use event_replay_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
     use event_replay_core::era::{Bound, EraTracker};
     use event_replay_core::event::{SchemaChange, TableChange};
     use event_replay_core::listener::{CatalogModel, OutOfOrder};
@@ -330,6 +364,10 @@ mod tests {
     }
 
     impl RowChangeLog for Log {
+        fn topic(&self, table: &TableId) -> String {
+            format!("mysql_{}_{}", table.schema(), table.table())
+        }
+
         fn operation(&self) -> ColumnPath {
             ColumnPath::from("op")
         }
@@ -347,6 +385,10 @@ mod tests {
 
     impl Warehouse for Engine {
         type Config = ();
+
+        fn change_log_namespace(&self) -> &str {
+            "mysql_shop_cdc"
+        }
 
         fn identifier(&self, name: &str) -> SqlString {
             SqlString::from(format!("\"{name}\""))
@@ -404,11 +446,14 @@ mod tests {
             Engine.table_ref(table)
         }
 
-        fn change_log_ref(&self, table: &TablePath) -> SqlString {
+        fn change_log_namespace(&self) -> &str {
+            Engine.change_log_namespace()
+        }
+
+        fn change_log_ref(&self, topic: &str) -> SqlString {
             SqlString::from(format!(
-                "read_parquet('{}/{}/*.parquet')",
-                table.namespace(),
-                table.name()
+                "read_parquet('{}/{topic}/*.parquet')",
+                self.change_log_namespace()
             ))
         }
 
@@ -490,32 +535,33 @@ mod tests {
         }
     }
 
-    struct Shop;
+    fn shop() -> &'static Snapshot {
+        Box::leak(Box::new(Snapshot::new("mysql_shop", "20260920")))
+    }
 
-    impl Placement for Shop {
-        fn change_log(&self, table: &TableId) -> Option<TablePath> {
-            Some(TablePath::new(
-                "mysql_shop_cdc",
-                &format!("mysql_{}_{}", table.schema(), table.table()),
-            ))
-        }
-
-        fn snapshot(&self, table: &TableId) -> TablePath {
-            TablePath::new("mysql_shop", &format!("{}_20260920", table.table()))
-        }
+    fn window() -> Window {
+        Window::new(RecordedAt::from(100), RecordedAt::from(200))
     }
 
     fn snapshots_in<W: Warehouse>(
         warehouse: &W,
         created: TableModel,
         within: Vec<SchemaChange<Offset>>,
-        base: impl Fn() -> Base,
-    ) -> Result<Vec<Snapshot<'static, Log, W>>, Untold> {
+        base: impl Fn() -> Option<TablePath>,
+    ) -> Result<Vec<SnapshotBuilder<'static, Log, W>>, Untold> {
         let mut catalog = CatalogModel::default();
         catalog.accept::<OutOfOrder, _>(&(), &change(1, TableChange::Created(created)), &mut ())?;
         let mut tracker = EraTracker::new(
             Window::new(RecordedAt::from(100), RecordedAt::from(200)),
-            |table: &TableId| Ok::<_, Untold>(Snapshot::new(&Log, &Shop, table.clone(), base())),
+            |table: &TableId| {
+                Ok::<_, Untold>(SnapshotBuilder::new(
+                    shop(),
+                    &Log,
+                    table.clone(),
+                    window(),
+                    base(),
+                ))
+            },
         );
         for change in &within {
             catalog.accept::<Untold, _>(warehouse, change, &mut tracker)?;
@@ -527,16 +573,16 @@ mod tests {
     fn snapshots(
         created: TableModel,
         within: Vec<SchemaChange<Offset>>,
-        base: impl Fn() -> Base,
-    ) -> Result<Vec<Snapshot<'static, Log, Engine>>, Untold> {
+        base: impl Fn() -> Option<TablePath>,
+    ) -> Result<Vec<SnapshotBuilder<'static, Log, Engine>>, Untold> {
         snapshots_in(&Engine, created, within, base)
     }
 
     fn statement<W: Warehouse>(
-        snapshots: Result<Vec<Snapshot<'static, Log, W>>, Untold>,
+        snapshots: Result<Vec<SnapshotBuilder<'static, Log, W>>, Untold>,
     ) -> String {
         snapshots.unwrap()[0]
-            .statements()
+            .create()
             .unwrap()
             .remove(1)
             .to_string()
@@ -555,8 +601,8 @@ mod tests {
 
     #[test]
     fn a_snapshot_is_built_into_a_namespace_made_for_it() {
-        let statements = snapshots(customers(), vec![], || Base::Captured).unwrap()[0]
-            .statements()
+        let statements = snapshots(customers(), vec![], || None).unwrap()[0]
+            .create()
             .unwrap();
 
         assert_eq!(statements[0], "CREATE SCHEMA IF NOT EXISTS \"mysql_shop\"");
@@ -564,7 +610,7 @@ mod tests {
 
     #[test]
     fn a_snapshot_reads_the_change_log_where_the_warehouse_reads_change_logs() {
-        let statement = statement(snapshots_in(&Lake, customers(), vec![], || Base::Captured));
+        let statement = statement(snapshots_in(&Lake, customers(), vec![], || None));
 
         assert!(
             statement
@@ -576,7 +622,7 @@ mod tests {
     #[test]
     fn a_first_snapshot_folds_the_window_onto_what_the_capture_read() {
         assert_eq!(
-            statement(snapshots(customers(), vec![], || Base::Captured)),
+            statement(snapshots(customers(), vec![], || None)),
             concat!(
                 "CREATE OR REPLACE TABLE \"mysql_shop\".\"customers_20260920\" AS\n",
                 "WITH \"base\" AS (\n",
@@ -624,7 +670,7 @@ mod tests {
     #[test]
     fn a_later_snapshot_folds_the_window_onto_the_snapshot_before_it() {
         let statement = statement(snapshots(customers(), vec![], || {
-            Base::Shard(TablePath::new("mysql_shop", "customers_20260919"))
+            Some(TablePath::new("mysql_shop", "customers_20260919"))
         }));
 
         assert!(statement.contains(concat!(
@@ -648,14 +694,14 @@ mod tests {
         let snapshots = snapshots(
             customers(),
             vec![change(150, TableChange::Altered(orders))],
-            || Base::Shard(TablePath::new("mysql_shop", "orders_20260919")),
+            || Some(TablePath::new("mysql_shop", "orders_20260919")),
         )
         .unwrap();
         let orders = snapshots
             .iter()
             .find(|snapshot| snapshot.table() == &TableId::new("shop", "orders"))
             .unwrap()
-            .statements()
+            .create()
             .unwrap()
             .remove(1)
             .to_string();
@@ -666,7 +712,7 @@ mod tests {
     #[test]
     fn a_table_renamed_within_the_window_folds_onto_the_shard_of_its_first_name() {
         let statement = statement(Ok(renamed_to_clients(|| {
-            Base::Shard(TablePath::new("mysql_shop", "customers_20260919"))
+            Some(TablePath::new("mysql_shop", "customers_20260919"))
         })));
 
         assert!(statement.contains("  FROM \"mysql_shop\".\"customers_20260919\"\n"));
@@ -684,7 +730,7 @@ mod tests {
         let snapshots = snapshots(
             customers(),
             vec![change(150, TableChange::Created(orders))],
-            || Base::Shard(TablePath::new("mysql_shop", "customers_20260919")),
+            || Some(TablePath::new("mysql_shop", "customers_20260919")),
         )
         .unwrap();
         let statement = |table: &str| {
@@ -692,7 +738,7 @@ mod tests {
                 .iter()
                 .find(|snapshot| snapshot.table() == &TableId::new("shop", table))
                 .unwrap()
-                .statements()
+                .create()
                 .unwrap()
                 .remove(1)
                 .to_string()
@@ -735,7 +781,7 @@ mod tests {
                 "",
                 vec![TableChange::Altered(widened())],
             )],
-            || Base::Captured,
+            || None,
         ));
 
         assert!(statement.contains(concat!(
@@ -750,7 +796,7 @@ mod tests {
 
     #[test]
     fn the_latest_change_of_a_key_is_the_one_recorded_last_then_logged_last() {
-        let statement = statement(snapshots(customers(), vec![], || Base::Captured));
+        let statement = statement(snapshots(customers(), vec![], || None));
 
         assert!(statement.contains("    ORDER BY \"ts_ms\" DESC, \"source\".\"offset\" DESC\n"));
     }
@@ -760,7 +806,7 @@ mod tests {
         let statement = statement(snapshots(
             customers(),
             vec![change(150, TableChange::Altered(widened()))],
-            || Base::Captured,
+            || None,
         ));
 
         assert!(statement.contains("  WHERE \"ts_ms\" >= 100 AND (\"ts_ms\" < 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" < 150))\n"));
@@ -793,7 +839,7 @@ mod tests {
         let statement = statement(snapshots(
             customers(),
             vec![change(150, TableChange::Altered(twice))],
-            || Base::Captured,
+            || None,
         ));
 
         assert!(statement.contains("    CAST(NULL AS TEXT) AS \"email\"\n  FROM \"era_1\"\n"));
@@ -814,7 +860,7 @@ mod tests {
         let statement = statement(snapshots(
             customers(),
             vec![change(150, TableChange::Altered(replaced))],
-            || Base::Captured,
+            || None,
         ));
 
         assert!(statement.contains(concat!(
@@ -847,7 +893,7 @@ mod tests {
         let statement = statement(snapshots(
             customers(),
             vec![change(150, TableChange::Altered(reshaped))],
-            || Base::Captured,
+            || None,
         ));
 
         assert!(statement.contains(concat!(
@@ -881,7 +927,7 @@ mod tests {
         let statement = statement(snapshots(
             customers(),
             vec![change(150, TableChange::Altered(inserted))],
-            || Base::Captured,
+            || None,
         ));
 
         assert!(statement.contains(concat!(
@@ -918,7 +964,7 @@ mod tests {
                 change(130, TableChange::Altered(widened)),
                 change(160, TableChange::Altered(narrowed)),
             ],
-            || Base::Captured,
+            || None,
         ));
 
         assert!(statement.contains(concat!(
@@ -959,7 +1005,7 @@ mod tests {
         let statement = statement(snapshots(
             customers(),
             vec![change(150, TableChange::Altered(retyped))],
-            || Base::Captured,
+            || None,
         ));
 
         assert!(statement.contains("    CAST(\"name\" AS BIGINT) AS \"name\"\n  FROM \"era_1\"\n"));
@@ -972,7 +1018,7 @@ mod tests {
         let statement = statement(snapshots(
             customers(),
             vec![change(150, TableChange::Altered(narrowed))],
-            || Base::Captured,
+            || None,
         ));
 
         assert!(statement.contains(concat!(
@@ -997,7 +1043,7 @@ mod tests {
             snapshots(
                 customers(),
                 vec![change(150, TableChange::Altered(rekeyed))],
-                || Base::Captured
+                || None
             )
             .map(drop)
             .unwrap_err(),
@@ -1030,7 +1076,7 @@ mod tests {
         let statement = statement(snapshots(
             customers,
             vec![change(150, TableChange::Altered(moved))],
-            || Base::Captured,
+            || None,
         ));
 
         assert!(statement.contains(concat!(
@@ -1058,7 +1104,7 @@ mod tests {
             snapshots(
                 customers(),
                 vec![change(150, TableChange::Altered(rekeyed))],
-                || Base::Captured
+                || None
             )
             .map(drop)
             .unwrap_err(),
@@ -1088,7 +1134,7 @@ mod tests {
                     TableChange::Altered(renamed_to),
                 ],
             )],
-            || Base::Captured,
+            || None,
         ));
 
         assert!(statement.contains(concat!(
@@ -1120,7 +1166,7 @@ mod tests {
                 150,
                 vec![renamed("name", "full_name"), TableChange::Altered(reshaped)],
             )],
-            || Base::Captured,
+            || None,
         ));
 
         assert!(statement.contains(concat!(
@@ -1152,7 +1198,7 @@ mod tests {
                 150,
                 vec![renamed("id", "customer_id"), TableChange::Altered(rekeyed)],
             )],
-            || Base::Captured,
+            || None,
         ));
 
         assert!(statement.contains(concat!(
@@ -1172,7 +1218,9 @@ mod tests {
         )));
     }
 
-    fn renamed_to_clients(base: impl Fn() -> Base) -> Vec<Snapshot<'static, Log, Engine>> {
+    fn renamed_to_clients(
+        base: impl Fn() -> Option<TablePath>,
+    ) -> Vec<SnapshotBuilder<'static, Log, Engine>> {
         let clients = TableId::new("shop", "clients");
 
         snapshots(
@@ -1194,7 +1242,7 @@ mod tests {
 
     #[test]
     fn a_table_renamed_within_the_window_reads_each_era_from_the_change_log_of_its_name() {
-        let statement = statement(Ok(renamed_to_clients(|| Base::Captured)));
+        let statement = statement(Ok(renamed_to_clients(|| None)));
 
         assert!(statement.contains(concat!(
             "\"changes_1\" AS (\n",
@@ -1213,7 +1261,7 @@ mod tests {
 
     #[test]
     fn a_table_renamed_within_the_window_starts_from_what_the_capture_read_under_its_first_name() {
-        let statement = statement(Ok(renamed_to_clients(|| Base::Captured)));
+        let statement = statement(Ok(renamed_to_clients(|| None)));
 
         assert!(statement.contains(concat!(
             "  FROM \"mysql_shop_cdc\".\"mysql_shop_customers\"\n",
@@ -1223,8 +1271,8 @@ mod tests {
 
     #[test]
     fn a_table_renamed_within_the_window_is_snapshotted_under_its_last_name() {
-        let snapshots = renamed_to_clients(|| Base::Captured);
-        let statements = snapshots[0].statements().unwrap();
+        let snapshots = renamed_to_clients(|| None);
+        let statements = snapshots[0].create().unwrap();
 
         assert_eq!(snapshots[0].table(), &TableId::new("shop", "clients"));
         assert!(
@@ -1259,7 +1307,7 @@ mod tests {
                     TableChange::Altered(widened),
                 ],
             )],
-            || Base::Captured,
+            || None,
         ));
 
         assert!(statement.contains("    CAST(NULL AS TEXT) AS \"email\"\n  FROM \"era_1\"\n"));
@@ -1278,7 +1326,7 @@ mod tests {
             vec!["order_id".to_owned(), "line_no".to_owned()],
         );
 
-        let statement = statement(snapshots(items, vec![], || Base::Captured));
+        let statement = statement(snapshots(items, vec![], || None));
 
         assert!(statement.contains(concat!(
             "    PARTITION BY COALESCE(\"after\".\"order_id\", \"before\".\"order_id\"), ",
@@ -1297,9 +1345,7 @@ mod tests {
         let tagged = customers_with(vec![column("tags", ColumnType::Json)], &["tags"]);
 
         assert_eq!(
-            snapshots(tagged, vec![], || Base::Captured)
-                .map(drop)
-                .unwrap_err(),
+            snapshots(tagged, vec![], || None).map(drop).unwrap_err(),
             Untold::Unbuildable(UnbuildableArtifact::from(UnsupportedColumn::new(
                 &ColumnType::Json
             )))
@@ -1311,9 +1357,7 @@ mod tests {
         let keyless = customers_with(vec![column("id", ColumnType::Int64)], &[]);
 
         assert_eq!(
-            snapshots(keyless, vec![], || Base::Captured)
-                .map(drop)
-                .unwrap_err(),
+            snapshots(keyless, vec![], || None).map(drop).unwrap_err(),
             Untold::Unbuildable(UnbuildableArtifact::WithoutPrimaryKey(TableId::new(
                 "shop",
                 "customers"
@@ -1321,54 +1365,83 @@ mod tests {
         );
     }
 
-    struct Unlogged;
-
-    impl Placement for Unlogged {
-        fn change_log(&self, _: &TableId) -> Option<TablePath> {
-            None
-        }
-
-        fn snapshot(&self, table: &TableId) -> TablePath {
-            Shop.snapshot(table)
-        }
-    }
-
-    #[test]
-    fn a_table_whose_change_log_landed_nowhere_cannot_be_snapshotted() {
-        let mut snapshot: Snapshot<'_, Log, Engine> = Snapshot::new(
-            &Log,
-            &Unlogged,
-            TableId::new("shop", "customers"),
-            Base::Shard(TablePath::new("mysql_shop", "customers_20260919")),
-        );
-
-        assert_eq!(
-            SchemaChangeListener::<Offset>::era_boundary(
-                &mut snapshot,
-                &Engine,
-                &Era::new(
-                    customers(),
-                    Bound::Time(RecordedAt::from(100)),
-                    Bound::Time(RecordedAt::from(200))
-                ),
-            )
-            .unwrap_err(),
-            UnbuildableArtifact::WithoutChangeLog(TableId::new("shop", "customers"))
-        );
-    }
-
     #[test]
     fn a_snapshot_told_of_no_era_cannot_be_built() {
-        let snapshot: Snapshot<'_, Log, Engine> = Snapshot::new(
+        let snapshot: SnapshotBuilder<'_, Log, Engine> = SnapshotBuilder::new(
+            shop(),
             &Log,
-            &Shop,
             TableId::new("shop", "customers"),
-            Base::Captured,
+            window(),
+            None,
         );
 
         assert_eq!(
-            snapshot.statements().unwrap_err(),
+            snapshot.create().unwrap_err(),
             UnbuildableArtifact::WithoutEra(TableId::new("shop", "customers"))
+        );
+    }
+
+    #[test]
+    fn a_snapshot_is_named_after_its_table_and_the_day_its_window_opens() {
+        let snapshot = Snapshot::new("mysql_shop", "%Y%m%d");
+        let window = Window::new(
+            RecordedAt::from(1789862400000),
+            RecordedAt::from(1789948800000),
+        );
+
+        assert_eq!(
+            snapshot
+                .target(&TableId::new("shop", "customers"), &window)
+                .unwrap(),
+            TablePath::new("mysql_shop", "customers_20260920")
+        );
+    }
+
+    #[test]
+    fn a_window_opening_at_no_instant_a_day_can_hold_names_no_snapshot() {
+        let window = Window::new(RecordedAt::from(i64::MAX), RecordedAt::from(i64::MAX));
+
+        assert_eq!(
+            Snapshot::new("mysql_shop", "%Y%m%d")
+                .target(&TableId::new("shop", "customers"), &window)
+                .unwrap_err(),
+            UnbuildableArtifact::Unshardable(RecordedAt::from(i64::MAX))
+        );
+    }
+
+    #[test]
+    fn a_snapshot_hands_a_builder_that_builds_it_from_the_eras_it_is_told_of() {
+        let window = window();
+        let mut fold =
+            shop().builder::<Log, Engine>(&Log, TableId::new("shop", "customers"), &window, None);
+
+        fold.era_boundary(
+            &Engine,
+            &Era::new(
+                customers(),
+                Bound::Time(RecordedAt::from(100)),
+                Bound::Time(RecordedAt::from(200)),
+            ),
+        )
+        .unwrap();
+
+        assert!(
+            fold.create().unwrap()[1]
+                .as_str()
+                .starts_with("CREATE OR REPLACE TABLE \"mysql_shop\".\"customers_20260920\" AS\n")
+        );
+    }
+
+    #[test]
+    fn a_snapshot_is_created_from_the_select_its_builder_folds() {
+        let snapshot = snapshots(customers(), vec![], || None).unwrap().remove(0);
+        let select = snapshot.select().unwrap();
+
+        assert!(select.as_str().starts_with("WITH \"base\" AS (\n"));
+        assert_eq!(
+            snapshot.create().unwrap()[1],
+            format!("CREATE OR REPLACE TABLE \"mysql_shop\".\"customers_20260920\" AS\n{select}")
+                .as_str()
         );
     }
 }

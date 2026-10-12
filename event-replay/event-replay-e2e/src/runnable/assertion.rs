@@ -17,7 +17,7 @@ impl Assertion {
                 let (source, sink, watch) = pipeline.ends(snapshot.source(), snapshot.sink())?;
                 let model = sink.table_model(source, snapshot.table(), watch)?;
                 let held = source.rows(&model)?;
-                let built = sink.snapshot_rows(&model)?;
+                let built = sink.snapshot_rows(&model, watch)?;
 
                 report.compared(
                     step,

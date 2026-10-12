@@ -4,7 +4,6 @@ use std::fmt::{self, Display, Formatter};
 use event_replay_config::Unreadable;
 use event_replay_core::artifact::UnbuildableArtifact;
 use event_replay_core::listener::OutOfOrder;
-use event_replay_core::position::RecordedAt;
 use event_replay_protocol::sink::bigquery::client::Unqueryable;
 
 #[derive(Debug)]
@@ -14,7 +13,6 @@ pub enum Unreplayable {
     Unanswerable(Unqueryable),
     OutOfOrder(OutOfOrder),
     Unbuildable(UnbuildableArtifact),
-    Unshardable(RecordedAt),
     Unwritable(std::io::Error),
     UnknownSink(String),
     WithoutSource,
@@ -28,11 +26,6 @@ impl Display for Unreplayable {
             Self::Unanswerable(cause) => write!(formatter, "{cause}"),
             Self::OutOfOrder(cause) => write!(formatter, "{cause}"),
             Self::Unbuildable(cause) => write!(formatter, "{cause}"),
-            Self::Unshardable(at) => write!(
-                formatter,
-                "{} milliseconds since the epoch is no instant to name a shard after",
-                at.milliseconds_since_epoch()
-            ),
             Self::Unwritable(cause) => write!(formatter, "{cause}"),
             Self::UnknownSink(name) => {
                 write!(formatter, "nothing in this pipeline is sunk into {name}")
@@ -51,7 +44,7 @@ impl std::error::Error for Unreplayable {
             Self::OutOfOrder(cause) => Some(cause),
             Self::Unbuildable(cause) => Some(cause),
             Self::Unwritable(cause) => Some(cause),
-            Self::Unshardable(_) | Self::UnknownSink(_) | Self::WithoutSource => None,
+            Self::UnknownSink(_) | Self::WithoutSource => None,
         }
     }
 }

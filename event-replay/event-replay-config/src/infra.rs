@@ -5,11 +5,9 @@ use chrono::{DateTime, Utc};
 use semigroup::Semigroup;
 use serde::{Deserialize, Serialize};
 
-use event_replay_core::model::TableId;
 use event_replay_core::position::RecordedAt;
-use event_replay_core::sink::TablePath;
 
-use crate::Artifact;
+use crate::ArtifactKind;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -276,21 +274,6 @@ impl<W> Sink<W> {
         &self.change_log
     }
 
-    pub fn schema_changes<C>(&self, source: &Source<C>) -> Option<TablePath> {
-        source
-            .schema_changes()
-            .map(|topic| TablePath::new(&self.change_log, topic))
-    }
-
-    pub fn row_changes<C>(&self, source: &Source<C>, table: &TableId) -> Option<TablePath> {
-        source.schema_changes().map(|topic| {
-            TablePath::new(
-                &self.change_log,
-                &format!("{topic}.{}.{}", table.schema(), table.table()),
-            )
-        })
-    }
-
     pub fn warehouse(&self) -> &W {
         &self.warehouse
     }
@@ -309,22 +292,15 @@ pub struct ReplayTargets {
 }
 
 impl ReplayTargets {
-    pub fn namespace(&self, artifact: Artifact) -> &str {
-        match artifact {
-            Artifact::Snapshot => &self.snapshot,
-            Artifact::History => &self.history,
+    pub fn namespace(&self, kind: ArtifactKind) -> &str {
+        match kind {
+            ArtifactKind::Snapshot => &self.snapshot,
+            ArtifactKind::History => &self.history,
         }
     }
 
     pub fn shard(&self) -> &str {
         &self.shard
-    }
-
-    pub fn target(&self, artifact: Artifact, table: &TableId, at: DateTime<Utc>) -> TablePath {
-        TablePath::new(
-            self.namespace(artifact),
-            &format!("{}_{}", table.table(), at.format(&self.shard)),
-        )
     }
 }
 
@@ -502,50 +478,25 @@ mod tests {
     }
 
     #[test]
-    fn a_sink_says_where_the_schema_changes_of_a_source_landed() {
-        assert_eq!(
-            sinks()[0].schema_changes(&sources()[0]),
-            Some(TablePath::new("mysql_shop_cdc", "mysql"))
-        );
+    fn a_sink_says_the_namespace_its_change_logs_landed_in() {
+        assert_eq!(sinks()[0].change_log(), "mysql_shop_cdc");
     }
 
     #[test]
-    fn a_sink_says_where_the_row_changes_of_a_table_landed_under_the_topic_of_its_source() {
-        assert_eq!(
-            sinks()[0].row_changes(&sources()[0], &TableId::new("shop", "customers")),
-            Some(TablePath::new("mysql_shop_cdc", "mysql.shop.customers"))
-        );
-    }
-
-    #[test]
-    fn a_snapshot_is_built_into_its_namespace_under_the_shard_of_the_day_it_covers() {
-        let at = DateTime::parse_from_rfc3339("2026-09-20T00:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-
-        assert_eq!(
-            sinks()[0]
-                .replay()
-                .target(Artifact::Snapshot, &TableId::new("shop", "customers"), at),
-            TablePath::new("mysql_shop", "customers_20260920")
-        );
-    }
-
-    #[test]
-    fn a_source_captured_without_a_schema_change_topic_lands_no_schema_changes() {
-        assert_eq!(sinks()[0].schema_changes(&sources()[1]), None);
-        assert_eq!(
-            sinks()[0].row_changes(&sources()[1], &TableId::new("shop", "customers")),
-            None
-        );
+    fn a_source_says_the_topic_its_schema_changes_land_on_unless_it_captures_none() {
+        assert_eq!(sources()[0].schema_changes(), Some("mysql"));
+        assert_eq!(sources()[1].schema_changes(), None);
     }
 
     #[test]
     fn a_sink_builds_each_artifact_in_the_namespace_the_pipeline_names() {
         let replay = sinks()[1].replay().clone();
 
-        assert_eq!(replay.namespace(Artifact::Snapshot), "mysql_shop");
-        assert_eq!(replay.namespace(Artifact::History), "mysql_shop_history");
+        assert_eq!(replay.namespace(ArtifactKind::Snapshot), "mysql_shop");
+        assert_eq!(
+            replay.namespace(ArtifactKind::History),
+            "mysql_shop_history"
+        );
         assert_eq!(replay.shard(), "%Y%m%d");
     }
 

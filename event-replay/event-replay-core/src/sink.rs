@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::artifact::{Artifact, UnbuildableArtifact};
+use crate::artifact::{ArtifactBuilder, UnbuildableArtifact};
 use crate::model::{ColumnModel, ColumnType};
 use crate::source::{ColumnPath, SchemaChangeLog};
 use crate::sql::SqlString;
@@ -75,8 +75,14 @@ pub trait Warehouse {
 
     fn table_ref(&self, table: &TablePath) -> SqlString;
 
-    fn change_log_ref(&self, table: &TablePath) -> SqlString {
-        self.table_ref(table)
+    fn change_log_namespace(&self) -> &str;
+
+    fn change_log(&self, topic: &str) -> TablePath {
+        TablePath::new(self.change_log_namespace(), topic)
+    }
+
+    fn change_log_ref(&self, topic: &str) -> SqlString {
+        self.table_ref(&self.change_log(topic))
     }
 
     fn column_type(&self, column_type: &ColumnType) -> Result<SqlString, UnsupportedColumn>;
@@ -123,12 +129,7 @@ pub trait Warehouse {
         )
     }
 
-    fn select_schema_changes(
-        &self,
-        log: &impl SchemaChangeLog,
-        table: &TablePath,
-        window: &Window,
-    ) -> SqlString {
+    fn select_schema_changes(&self, log: &impl SchemaChangeLog, window: &Window) -> SqlString {
         let envelope = log
             .envelope()
             .map(|envelope| self.path(&envelope))
@@ -143,7 +144,7 @@ pub trait Warehouse {
 
         SqlString::from(format!(
             "SELECT {envelope}\nFROM {}\nWHERE {recorded_at} >= {} AND {recorded_at} < {}\nORDER BY {ordering}",
-            self.change_log_ref(table),
+            self.change_log_ref(&log.topic()),
             window.from().milliseconds_since_epoch(),
             window.to().milliseconds_since_epoch(),
         ))
@@ -161,11 +162,11 @@ pub trait WarehouseClient {
     // instead of being spelled out as SQL by every artifact.
     fn execute(&self, statement: &SqlString) -> Result<(), Self::Error>;
 
-    fn build<E>(&self, artifact: &impl Artifact) -> Result<(), E>
+    fn build<E>(&self, builder: &impl ArtifactBuilder) -> Result<(), E>
     where
         E: From<Self::Error> + From<UnbuildableArtifact>,
     {
-        for statement in artifact.statements()? {
+        for statement in builder.create()? {
             self.execute(&statement)?;
         }
 
@@ -178,11 +179,16 @@ mod tests {
     use std::cell::RefCell;
 
     use super::*;
+    use crate::model::TableId;
 
     struct Engine;
 
     impl Warehouse for Engine {
         type Config = ();
+
+        fn change_log_namespace(&self) -> &str {
+            "cdc"
+        }
 
         fn identifier(&self, name: &str) -> SqlString {
             SqlString::from(format!("\"{name}\""))
@@ -233,10 +239,18 @@ mod tests {
         }
     }
 
-    struct Namespaced;
+    struct Namespaced(TableId);
 
-    impl Artifact for Namespaced {
-        fn statements(&self) -> Result<Vec<SqlString>, UnbuildableArtifact> {
+    impl ArtifactBuilder for Namespaced {
+        fn table(&self) -> &TableId {
+            &self.0
+        }
+
+        fn select(&self) -> Result<SqlString, UnbuildableArtifact> {
+            Ok(SqlString::from("SELECT 1 AS id"))
+        }
+
+        fn create(&self) -> Result<Vec<SqlString>, UnbuildableArtifact> {
             Ok(vec![
                 Engine.create_namespace("replay"),
                 SqlString::from("CREATE TABLE replay.people (id BIGINT)"),
@@ -266,7 +280,9 @@ mod tests {
     fn a_client_builds_an_artifact_by_running_its_statements_in_order() {
         let client = Recorder::default();
 
-        client.build::<Unbuilt>(&Namespaced).unwrap();
+        client
+            .build::<Unbuilt>(&Namespaced(TableId::new("replay", "people")))
+            .unwrap();
 
         assert_eq!(
             client.executed.into_inner(),
@@ -278,9 +294,10 @@ mod tests {
     }
 
     #[test]
-    fn a_change_log_is_read_where_its_table_is_unless_the_warehouse_reads_it_elsewhere() {
-        let table = TablePath::new("cdc", "people");
-
-        assert_eq!(Engine.change_log_ref(&table), Engine.table_ref(&table));
+    fn a_change_log_is_read_from_the_topic_it_landed_on_in_the_namespace_of_the_warehouse() {
+        assert_eq!(
+            Engine.change_log_ref("mysql.shop.people"),
+            Engine.table_ref(&TablePath::new("cdc", "mysql.shop.people"))
+        );
     }
 }

@@ -9,6 +9,7 @@ license-file.workspace = true
 readme.workspace = true
 
 [dependencies]
+chrono = { workspace = true }
 event-replay-core = { workspace = true }
 
 [dev-dependencies]

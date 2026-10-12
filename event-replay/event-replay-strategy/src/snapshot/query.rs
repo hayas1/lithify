@@ -1,6 +1,6 @@
 use event_replay_core::artifact::UnbuildableArtifact;
 use event_replay_core::era::Era;
-use event_replay_core::model::{ColumnModel, TableModel};
+use event_replay_core::model::{ColumnModel, TableId, TableModel};
 use event_replay_core::position::Coordinate;
 use event_replay_core::sink::{TablePath, Warehouse};
 use event_replay_core::source::{ColumnPath, RowChangeLog};
@@ -13,6 +13,10 @@ pub(super) struct ChangeLogQuery<'a, L> {
 impl<'a, L: RowChangeLog> ChangeLogQuery<'a, L> {
     pub(super) fn new(log: &'a L) -> Self {
         Self { log }
+    }
+
+    pub(super) fn change_log<W: Warehouse>(&self, warehouse: &W, table: &TableId) -> SqlString {
+        warehouse.change_log_ref(&self.log.topic(table))
     }
 
     pub(super) fn captured<W: Warehouse>(
@@ -64,7 +68,7 @@ impl<'a, L: RowChangeLog> ChangeLogQuery<'a, L> {
             .collect()
     }
 
-    pub(super) fn fold<W: Warehouse>(
+    pub(super) fn fold_changes<W: Warehouse>(
         &self,
         warehouse: &W,
         table: &TableModel,

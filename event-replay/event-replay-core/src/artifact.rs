@@ -1,16 +1,20 @@
 use std::fmt;
 
+use crate::listener::SchemaChangeListener;
 use crate::model::TableId;
-use crate::sink::UnsupportedColumn;
+use crate::position::RecordedAt;
+use crate::sink::{TablePath, UnsupportedColumn, Warehouse};
+use crate::source::RowChangeLog;
 use crate::sql::SqlString;
+use crate::window::Window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnbuildableArtifact {
     WithoutPrimaryKey(TableId),
     PrimaryKeyChanged(TableId),
     WithoutEra(TableId),
-    WithoutChangeLog(TableId),
     UnsupportedColumn(UnsupportedColumn),
+    Unshardable(RecordedAt),
 }
 
 impl fmt::Display for UnbuildableArtifact {
@@ -25,13 +29,15 @@ impl fmt::Display for UnbuildableArtifact {
                     "{table} changed its primary key within the window"
                 )
             }
-            Self::WithoutChangeLog(table) => {
-                write!(formatter, "{table} has no change log to replay")
-            }
             Self::WithoutEra(table) => {
                 write!(formatter, "{table} lived through no era of the window")
             }
             Self::UnsupportedColumn(unsupported) => unsupported.fmt(formatter),
+            Self::Unshardable(at) => write!(
+                formatter,
+                "{} milliseconds since the epoch is no instant to name a shard after",
+                at.milliseconds_since_epoch()
+            ),
         }
     }
 }
@@ -45,17 +51,26 @@ impl From<UnsupportedColumn> for UnbuildableArtifact {
 }
 
 pub trait Artifact {
-    fn statements(&self) -> Result<Vec<SqlString>, UnbuildableArtifact>;
+    type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>: ArtifactBuilder
+        + SchemaChangeListener<L::Position, Context = W, Error = UnbuildableArtifact>
+    where
+        Self: 'a;
+
+    fn target(&self, table: &TableId, window: &Window) -> Result<TablePath, UnbuildableArtifact>;
+
+    fn builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>(
+        &'a self,
+        log: &'a L,
+        table: TableId,
+        window: &'a Window,
+        base: Option<TablePath>,
+    ) -> Self::Builder<'a, L, W>;
 }
 
-impl<A: Artifact> Artifact for Vec<A> {
-    fn statements(&self) -> Result<Vec<SqlString>, UnbuildableArtifact> {
-        let mut statements = Vec::new();
+pub trait ArtifactBuilder {
+    fn table(&self) -> &TableId;
 
-        for artifact in self {
-            statements.extend(artifact.statements()?);
-        }
+    fn select(&self) -> Result<SqlString, UnbuildableArtifact>;
 
-        Ok(statements)
-    }
+    fn create(&self) -> Result<Vec<SqlString>, UnbuildableArtifact>;
 }

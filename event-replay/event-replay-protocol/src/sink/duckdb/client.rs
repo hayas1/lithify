@@ -1,7 +1,7 @@
 use duckdb::types::{FromSql, Type};
 use duckdb::{Connection, Error, Statement};
 
-use event_replay_core::sink::{TablePath, Warehouse, WarehouseClient};
+use event_replay_core::sink::{Warehouse, WarehouseClient};
 use event_replay_core::source::{
     ChangeLogs, SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed,
 };
@@ -20,7 +20,7 @@ pub trait DuckDbChangeLogsFn {
 }
 
 pub trait DuckDbCapture {
-    fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(&self, f: F) -> F::Output;
+    fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(&self, prefix: &str, f: F) -> F::Output;
 }
 
 pub struct DuckDbClient {
@@ -96,15 +96,12 @@ where
     fn schema_changes<'a>(
         &'a self,
         log: &'a L,
-        table: &TablePath,
         window: &Window,
     ) -> Result<Self::Changes<'a>, Self::Error> {
         Ok(DuckDbSchemaChanges {
-            statement: self.connection.prepare(
-                self.warehouse
-                    .select_schema_changes(log, table, window)
-                    .as_str(),
-            )?,
+            statement: self
+                .connection
+                .prepare(self.warehouse.select_schema_changes(log, window).as_str())?,
             log,
         })
     }
@@ -141,10 +138,6 @@ mod tests {
             'tableChanges': [{'type': 'DROP', 'id': '\"shop\".\"orders\"', 'table': NULL}]})
         ) AS t(value)";
 
-    fn table() -> TablePath {
-        TablePath::new("mysql_shop_cdc", "mysql")
-    }
-
     fn window(from: i64, to: i64) -> Window {
         Window::new(RecordedAt::from(from), RecordedAt::from(to))
     }
@@ -152,9 +145,9 @@ mod tests {
     fn read(window: &Window) -> Vec<String> {
         let connection = Connection::open_in_memory().unwrap();
         connection.execute_batch(CHANGE_LOG).unwrap();
-        let client = DuckDbClient::new(connection, DuckDbWarehouse::default());
-        let log = Debezium::under("value", MySql);
-        let mut changes = client.schema_changes(&log, &table(), window).unwrap();
+        let client = DuckDbClient::new(connection, DuckDbWarehouse::new("mysql_shop_cdc"));
+        let log = Debezium::under("value", "mysql", MySql);
+        let mut changes = client.schema_changes(&log, window).unwrap();
 
         changes
             .stream()
@@ -212,13 +205,12 @@ mod tests {
     fn a_table_is_modelled_as_the_schema_changes_of_a_window_left_it() {
         let connection = Connection::open_in_memory().unwrap();
         connection.execute_batch(CHANGE_LOG).unwrap();
-        let client = DuckDbClient::new(connection, DuckDbWarehouse::default());
-        let log = Debezium::under("value", MySql);
+        let client = DuckDbClient::new(connection, DuckDbWarehouse::new("mysql_shop_cdc"));
+        let log = Debezium::under("value", "mysql", MySql);
 
         let customers = client
             .table::<Unread>(
                 &log,
-                &table(),
                 &TableId::new("shop", "customers"),
                 RecordedAt::from(1789900000001),
             )
@@ -238,11 +230,11 @@ mod tests {
     fn a_catalog_at_an_instant_holds_the_tables_the_schema_changes_before_it_left() {
         let connection = Connection::open_in_memory().unwrap();
         connection.execute_batch(CHANGE_LOG).unwrap();
-        let client = DuckDbClient::new(connection, DuckDbWarehouse::default());
-        let log = Debezium::under("value", MySql);
+        let client = DuckDbClient::new(connection, DuckDbWarehouse::new("mysql_shop_cdc"));
+        let log = Debezium::under("value", "mysql", MySql);
         let tables = |at: i64| {
             client
-                .catalog_at::<Unread>(&log, &table(), RecordedAt::from(at))
+                .catalog_at::<Unread>(&log, RecordedAt::from(at))
                 .unwrap()
                 .tables()
                 .map(|table| table.id().to_string())
@@ -272,7 +264,7 @@ mod tests {
     fn a_client_runs_statements_on_its_connection() {
         let client = DuckDbClient::new(
             Connection::open_in_memory().unwrap(),
-            DuckDbWarehouse::default(),
+            DuckDbWarehouse::new("mysql_shop_cdc"),
         );
 
         client
@@ -294,10 +286,10 @@ mod tests {
     #[test]
     fn a_table_that_does_not_hold_a_change_log_is_rejected() {
         let connection = Connection::open_in_memory().unwrap();
-        let client = DuckDbClient::new(connection, DuckDbWarehouse::default());
-        let log = Debezium::under("value", MySql);
+        let client = DuckDbClient::new(connection, DuckDbWarehouse::new("mysql_shop_cdc"));
+        let log = Debezium::under("value", "mysql", MySql);
 
-        let changes = client.schema_changes(&log, &table(), &window(0, 1));
+        let changes = client.schema_changes(&log, &window(0, 1));
 
         assert!(changes.is_err());
     }
@@ -332,6 +324,10 @@ mod tests {
     impl SchemaChangeLog for Ledger {
         type Record = String;
 
+        fn topic(&self) -> String {
+            "statements".to_owned()
+        }
+
         fn schema_change(
             &self,
             statement: Self::Record,
@@ -357,14 +353,8 @@ mod tests {
                  ) AS t(statement, line, written)",
             )
             .unwrap();
-        let client = DuckDbClient::new(connection, DuckDbWarehouse::default());
-        let mut changes = client
-            .schema_changes(
-                &Ledger,
-                &TablePath::new("ledger", "statements"),
-                &window(0, 3),
-            )
-            .unwrap();
+        let client = DuckDbClient::new(connection, DuckDbWarehouse::new("ledger"));
+        let mut changes = client.schema_changes(&Ledger, &window(0, 3)).unwrap();
 
         let statements: Vec<String> = changes
             .stream()

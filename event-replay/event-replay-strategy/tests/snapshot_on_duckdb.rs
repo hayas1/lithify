@@ -1,21 +1,21 @@
 use duckdb::Connection;
 
-use event_replay_core::artifact::UnbuildableArtifact;
+use event_replay_core::artifact::{Artifact, UnbuildableArtifact};
 use event_replay_core::era::{Bound, Era, EraTracker};
 use event_replay_core::listener::OutOfOrder;
 use event_replay_core::listener::SchemaChangeListener;
 use event_replay_core::model::{ColumnModel, ColumnType, TableId, TableModel};
 use event_replay_core::position::RecordedAt;
-use event_replay_core::sink::{TablePath, WarehouseClient};
+use event_replay_core::sink::WarehouseClient;
 use event_replay_core::source::SchemaChangeStream;
 use event_replay_core::sql::SqlString;
 use event_replay_core::window::Window;
 use event_replay_protocol::sink::duckdb::client::DuckDbClient;
 use event_replay_protocol::{Debezium, DuckDbWarehouse, MySql, MySqlPosition};
-use event_replay_strategy::snapshot::{Base, Placement, Snapshot};
+use event_replay_strategy::snapshot::Snapshot;
 
-const CHANGE_LOG: &str = "CREATE SCHEMA cdc;
-    CREATE TABLE cdc.people AS SELECT * FROM (VALUES
+const CHANGE_LOG: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
+    CREATE TABLE cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
       ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 1::BIGINT},
         'before': NULL, 'after': {'id': 1::BIGINT, 'name': 'Alice'}}),
       ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 2::BIGINT},
@@ -41,12 +41,14 @@ fn people() -> TableModel {
 fn a_snapshot_holds_each_key_as_the_change_log_last_left_it() {
     let client = DuckDbClient::new(
         Connection::open_in_memory().unwrap(),
-        DuckDbWarehouse::default(),
+        DuckDbWarehouse::new("cdc"),
     );
     client.execute(&SqlString::from(CHANGE_LOG)).unwrap();
-    let log = Debezium::under("value", MySql);
+    let log = Debezium::under("value", "mysql", MySql);
     let window = Window::new(RecordedAt::from(0), RecordedAt::from(10));
-    let mut snapshot = Snapshot::new(&log, &Shelves, people().id().clone(), Base::Captured);
+    let artifact = Snapshot::new("shop_snapshot", "%Y%m%d");
+    let mut snapshot =
+        artifact.builder::<_, DuckDbWarehouse>(&log, people().id().clone(), &window, None);
     SchemaChangeListener::<MySqlPosition>::era_boundary(
         &mut snapshot,
         client.warehouse(),
@@ -62,7 +64,7 @@ fn a_snapshot_holds_each_key_as_the_change_log_last_left_it() {
 
     let rows: Vec<(i64, String)> = client
         .connection()
-        .prepare("SELECT id, name FROM shop_snapshot.people ORDER BY id")
+        .prepare("SELECT id, name FROM shop_snapshot.people_19700101 ORDER BY id")
         .unwrap()
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
         .unwrap()
@@ -72,8 +74,8 @@ fn a_snapshot_holds_each_key_as_the_change_log_last_left_it() {
     assert_eq!(rows, [(1, "Alicia".to_owned())]);
 }
 
-const SCHEMA_CHANGES: &str = "CREATE SCHEMA ddl;
-    CREATE TABLE ddl.shop AS SELECT * FROM (VALUES
+const SCHEMA_CHANGES: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
+    CREATE TABLE cdc.mysql AS SELECT * FROM (VALUES
       ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL}, 'ts_ms': 0::BIGINT,
         'ddl': 'CREATE TABLE people (id BIGINT, name VARCHAR(64))',
         'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
@@ -98,7 +100,7 @@ const SCHEMA_CHANGES: &str = "CREATE SCHEMA ddl;
         'ddl': 'DROP TABLE gone',
         'tableChanges': [{'type': 'DROP', 'id': '\"shop\".\"gone\"', 'table': NULL}]})
     ) AS t(value);
-    CREATE TABLE cdc.pets AS SELECT * FROM (VALUES
+    CREATE TABLE cdc.\"mysql.shop.pets\" AS SELECT * FROM (VALUES
       ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 5::BIGINT},
         'before': NULL::STRUCT(id BIGINT), 'after': {'id': 7::BIGINT}})
     ) AS t(value)";
@@ -115,29 +117,24 @@ fn rows(client: &DuckDbClient, query: &str) -> Vec<String> {
 }
 
 fn replay(client: &DuckDbClient, window: &Window) {
-    let log = Debezium::under("value", MySql);
+    let log = Debezium::under("value", "mysql", MySql);
+    let artifact = Snapshot::new("shop_snapshot", "%Y%m%d");
     let mut tracker = EraTracker::new(window.clone(), |table: &TableId| {
-        Ok::<_, Unbuilt>(Snapshot::new(&log, &Shelves, table.clone(), Base::Captured))
+        Ok::<_, Unbuilt>(artifact.builder::<_, DuckDbWarehouse>(&log, table.clone(), window, None))
     });
     let catalog = client
-        .replay::<Unbuilt, _>(
-            client.warehouse(),
-            &log,
-            &TablePath::new("ddl", "shop"),
-            window,
-            &mut tracker,
-        )
+        .replay::<Unbuilt, _>(client.warehouse(), &log, window, &mut tracker)
         .unwrap();
-    let snapshots = tracker.finish(client.warehouse(), &catalog).unwrap();
-
-    client.build::<Unbuilt>(&snapshots).unwrap();
+    for snapshot in tracker.finish(client.warehouse(), &catalog).unwrap() {
+        client.build::<Unbuilt>(&snapshot).unwrap();
+    }
 }
 
 #[test]
 fn a_replay_of_the_schema_changes_builds_a_snapshot_of_every_table_left_standing() {
     let client = DuckDbClient::new(
         Connection::open_in_memory().unwrap(),
-        DuckDbWarehouse::default(),
+        DuckDbWarehouse::new("cdc"),
     );
     client.execute(&SqlString::from(CHANGE_LOG)).unwrap();
     client.execute(&SqlString::from(SCHEMA_CHANGES)).unwrap();
@@ -146,13 +143,16 @@ fn a_replay_of_the_schema_changes_builds_a_snapshot_of_every_table_left_standing
     replay(&client, &window);
 
     assert_eq!(
-        rows(&client, "SELECT name FROM shop_snapshot.people ORDER BY id"),
+        rows(
+            &client,
+            "SELECT name FROM shop_snapshot.people_19700101 ORDER BY id"
+        ),
         ["Alicia"]
     );
     assert_eq!(
         rows(
             &client,
-            "SELECT id::VARCHAR FROM shop_snapshot.pets ORDER BY id"
+            "SELECT id::VARCHAR FROM shop_snapshot.pets_19700101 ORDER BY id"
         ),
         ["7"]
     );
@@ -161,7 +161,7 @@ fn a_replay_of_the_schema_changes_builds_a_snapshot_of_every_table_left_standing
             &client,
             "SELECT table_name FROM information_schema.tables WHERE table_schema = 'shop_snapshot' ORDER BY table_name"
         ),
-        ["people", "pets"]
+        ["people_19700101", "pets_19700101"]
     );
 }
 
@@ -169,7 +169,7 @@ fn a_replay_of_the_schema_changes_builds_a_snapshot_of_every_table_left_standing
 fn a_table_created_before_the_window_is_snapshotted_too() {
     let client = DuckDbClient::new(
         Connection::open_in_memory().unwrap(),
-        DuckDbWarehouse::default(),
+        DuckDbWarehouse::new("cdc"),
     );
     client.execute(&SqlString::from(CHANGE_LOG)).unwrap();
     client.execute(&SqlString::from(SCHEMA_CHANGES)).unwrap();
@@ -182,12 +182,12 @@ fn a_table_created_before_the_window_is_snapshotted_too() {
             &client,
             "SELECT table_name FROM information_schema.tables WHERE table_schema = 'shop_snapshot' ORDER BY table_name"
         ),
-        ["people", "pets"]
+        ["people_19700101", "pets_19700101"]
     );
 }
 
-const WIDENED: &str = "CREATE SCHEMA ddl;
-    CREATE TABLE ddl.shop AS SELECT * FROM (VALUES
+const WIDENED: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
+    CREATE TABLE cdc.mysql AS SELECT * FROM (VALUES
       ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL}, 'ts_ms': 0::BIGINT,
         'ddl': 'CREATE TABLE people (id BIGINT, name VARCHAR(64))',
         'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
@@ -207,8 +207,8 @@ const WIDENED: &str = "CREATE SCHEMA ddl;
             {'name': 'email', 'typeName': 'VARCHAR', 'position': 3, 'optional': true,
              'defaultValueExpression': 'none', 'length': 64, 'scale': NULL}]}}]})
     ) AS t(value);
-    CREATE SCHEMA cdc;
-    CREATE TABLE cdc.people AS SELECT * FROM (VALUES
+    CREATE SCHEMA IF NOT EXISTS cdc;
+    CREATE TABLE cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
       ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 2::BIGINT},
         'before': NULL::STRUCT(id BIGINT, name VARCHAR, email VARCHAR),
         'after': {'id': 1::BIGINT, 'name': 'Alice', 'email': NULL::VARCHAR}}),
@@ -224,7 +224,7 @@ const WIDENED: &str = "CREATE SCHEMA ddl;
 fn a_column_added_within_the_window_is_filled_in_for_the_rows_last_changed_before_it() {
     let client = DuckDbClient::new(
         Connection::open_in_memory().unwrap(),
-        DuckDbWarehouse::default(),
+        DuckDbWarehouse::new("cdc"),
     );
     client.execute(&SqlString::from(WIDENED)).unwrap();
 
@@ -236,14 +236,14 @@ fn a_column_added_within_the_window_is_filled_in_for_the_rows_last_changed_befor
     assert_eq!(
         rows(
             &client,
-            "SELECT id::VARCHAR || ' ' || name || ' ' || email FROM shop_snapshot.people ORDER BY id"
+            "SELECT id::VARCHAR || ' ' || name || ' ' || email FROM shop_snapshot.people_19700101 ORDER BY id"
         ),
         ["1 Alicia alicia@example.com", "2 Bob none"]
     );
 }
 
-const RESHAPED: &str = "CREATE SCHEMA ddl;
-    CREATE TABLE ddl.shop AS SELECT * FROM (VALUES
+const RESHAPED: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
+    CREATE TABLE cdc.mysql AS SELECT * FROM (VALUES
       ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL}, 'ts_ms': 0::BIGINT,
         'ddl': 'CREATE TABLE people (id BIGINT, name VARCHAR(64), email VARCHAR(64))',
         'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
@@ -267,8 +267,8 @@ const RESHAPED: &str = "CREATE SCHEMA ddl;
             {'name': 'nickname', 'typeName': 'VARCHAR', 'position': 4, 'optional': true,
              'defaultValueExpression': NULL, 'length': 64, 'scale': NULL}]}}]})
     ) AS t(value);
-    CREATE SCHEMA cdc;
-    CREATE TABLE cdc.people AS SELECT * FROM (VALUES
+    CREATE SCHEMA IF NOT EXISTS cdc;
+    CREATE TABLE cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
       ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 2::BIGINT},
         'before': NULL::STRUCT(id BIGINT, name VARCHAR, email VARCHAR, phone VARCHAR, nickname VARCHAR),
         'after': {'id': 1::BIGINT, 'name': 'Alice', 'email': 'alice@example.com', 'phone': NULL::VARCHAR, 'nickname': NULL::VARCHAR}}),
@@ -284,7 +284,7 @@ const RESHAPED: &str = "CREATE SCHEMA ddl;
 fn columns_one_statement_dropped_and_added_reshape_the_rows_last_changed_before_it() {
     let client = DuckDbClient::new(
         Connection::open_in_memory().unwrap(),
-        DuckDbWarehouse::default(),
+        DuckDbWarehouse::new("cdc"),
     );
     client.execute(&SqlString::from(RESHAPED)).unwrap();
 
@@ -296,21 +296,21 @@ fn columns_one_statement_dropped_and_added_reshape_the_rows_last_changed_before_
     assert_eq!(
         rows(
             &client,
-            "SELECT column_name FROM information_schema.columns WHERE table_schema = 'shop_snapshot' AND table_name = 'people' ORDER BY ordinal_position"
+            "SELECT column_name FROM information_schema.columns WHERE table_schema = 'shop_snapshot' AND table_name = 'people_19700101' ORDER BY ordinal_position"
         ),
         ["id", "phone", "name", "nickname"]
     );
     assert_eq!(
         rows(
             &client,
-            "SELECT concat_ws(' ', id, phone, name, coalesce(nickname, '-')) FROM shop_snapshot.people ORDER BY id"
+            "SELECT concat_ws(' ', id, phone, name, coalesce(nickname, '-')) FROM shop_snapshot.people_19700101 ORDER BY id"
         ),
         ["1 0123 Alicia Ali", "2 unknown Bob -"]
     );
 }
 
-const RENAMED: &str = "CREATE SCHEMA ddl;
-    CREATE TABLE ddl.shop AS SELECT * FROM (VALUES
+const RENAMED: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
+    CREATE TABLE cdc.mysql AS SELECT * FROM (VALUES
       ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL}, 'ts_ms': 0::BIGINT,
         'ddl': 'CREATE TABLE people (id BIGINT, name VARCHAR(64))',
         'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
@@ -328,8 +328,8 @@ const RENAMED: &str = "CREATE SCHEMA ddl;
             {'name': 'full_name', 'typeName': 'VARCHAR', 'position': 2, 'optional': false,
              'defaultValueExpression': NULL, 'length': 64, 'scale': NULL}]}}]})
     ) AS t(value);
-    CREATE SCHEMA cdc;
-    CREATE TABLE cdc.people AS SELECT * FROM (VALUES
+    CREATE SCHEMA IF NOT EXISTS cdc;
+    CREATE TABLE cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
       ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 2::BIGINT},
         'before': NULL::STRUCT(id BIGINT, name VARCHAR, full_name VARCHAR),
         'after': {'id': 1::BIGINT, 'name': 'Alice', 'full_name': NULL::VARCHAR}}),
@@ -345,7 +345,7 @@ const RENAMED: &str = "CREATE SCHEMA ddl;
 fn a_column_renamed_within_the_window_keeps_the_values_of_the_rows_last_changed_before_it() {
     let client = DuckDbClient::new(
         Connection::open_in_memory().unwrap(),
-        DuckDbWarehouse::default(),
+        DuckDbWarehouse::new("cdc"),
     );
     client.execute(&SqlString::from(RENAMED)).unwrap();
 
@@ -357,21 +357,21 @@ fn a_column_renamed_within_the_window_keeps_the_values_of_the_rows_last_changed_
     assert_eq!(
         rows(
             &client,
-            "SELECT column_name FROM information_schema.columns WHERE table_schema = 'shop_snapshot' AND table_name = 'people' ORDER BY ordinal_position"
+            "SELECT column_name FROM information_schema.columns WHERE table_schema = 'shop_snapshot' AND table_name = 'people_19700101' ORDER BY ordinal_position"
         ),
         ["id", "full_name"]
     );
     assert_eq!(
         rows(
             &client,
-            "SELECT concat_ws(' ', id, full_name) FROM shop_snapshot.people ORDER BY id"
+            "SELECT concat_ws(' ', id, full_name) FROM shop_snapshot.people_19700101 ORDER BY id"
         ),
         ["1 Alicia Liddell", "2 Bob"]
     );
 }
 
-const MOVED: &str = "CREATE SCHEMA ddl;
-    CREATE TABLE ddl.shop AS SELECT * FROM (VALUES
+const MOVED: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
+    CREATE TABLE cdc.mysql AS SELECT * FROM (VALUES
       ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL}, 'ts_ms': 0::BIGINT,
         'ddl': 'CREATE TABLE people (id BIGINT, name VARCHAR(64))',
         'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
@@ -389,14 +389,14 @@ const MOVED: &str = "CREATE SCHEMA ddl;
             {'name': 'name', 'typeName': 'VARCHAR', 'position': 2, 'optional': false,
              'defaultValueExpression': NULL, 'length': 64, 'scale': NULL}]}}]})
     ) AS t(value);
-    CREATE SCHEMA cdc;
-    CREATE TABLE cdc.people AS SELECT * FROM (VALUES
+    CREATE SCHEMA IF NOT EXISTS cdc;
+    CREATE TABLE cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
       ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 2::BIGINT},
         'before': NULL::STRUCT(id BIGINT, name VARCHAR), 'after': {'id': 1::BIGINT, 'name': 'Alice'}}),
       ({'op': 'c', 'ts_ms': 2::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 3::BIGINT},
         'before': NULL::STRUCT(id BIGINT, name VARCHAR), 'after': {'id': 2::BIGINT, 'name': 'Bob'}})
     ) AS t(value);
-    CREATE TABLE cdc.persons AS SELECT * FROM (VALUES
+    CREATE TABLE cdc.\"mysql.shop.persons\" AS SELECT * FROM (VALUES
       ({'op': 'u', 'ts_ms': 6::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 5::BIGINT},
         'before': {'id': 1::BIGINT, 'name': 'Alice'}, 'after': {'id': 1::BIGINT, 'name': 'Alicia'}}),
       ({'op': 'c', 'ts_ms': 7::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 6::BIGINT},
@@ -407,7 +407,7 @@ const MOVED: &str = "CREATE SCHEMA ddl;
 fn a_table_renamed_within_the_window_is_snapshotted_under_its_new_name_with_every_row() {
     let client = DuckDbClient::new(
         Connection::open_in_memory().unwrap(),
-        DuckDbWarehouse::default(),
+        DuckDbWarehouse::new("cdc"),
     );
     client.execute(&SqlString::from(MOVED)).unwrap();
 
@@ -421,19 +421,19 @@ fn a_table_renamed_within_the_window_is_snapshotted_under_its_new_name_with_ever
             &client,
             "SELECT table_name FROM information_schema.tables WHERE table_schema = 'shop_snapshot' ORDER BY table_name"
         ),
-        ["persons"]
+        ["persons_19700101"]
     );
     assert_eq!(
         rows(
             &client,
-            "SELECT concat_ws(' ', id, name) FROM shop_snapshot.persons ORDER BY id"
+            "SELECT concat_ws(' ', id, name) FROM shop_snapshot.persons_19700101 ORDER BY id"
         ),
         ["1 Alicia", "2 Bob", "3 Carol"]
     );
 }
 
-const STAMPED: &str = "CREATE SCHEMA ddl;
-    CREATE TABLE ddl.shop AS SELECT * FROM (VALUES
+const STAMPED: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
+    CREATE TABLE cdc.mysql AS SELECT * FROM (VALUES
       ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL}, 'ts_ms': 0::BIGINT,
         'ddl': 'CREATE TABLE people (id BIGINT)',
         'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
@@ -449,8 +449,8 @@ const STAMPED: &str = "CREATE SCHEMA ddl;
             {'name': 'seen_at', 'typeName': 'DATETIME', 'position': 2, 'optional': true,
              'defaultValueExpression': 'CURRENT_TIMESTAMP', 'length': NULL, 'scale': NULL}]}}]})
     ) AS t(value);
-    CREATE SCHEMA cdc;
-    CREATE TABLE cdc.people AS SELECT * FROM (VALUES
+    CREATE SCHEMA IF NOT EXISTS cdc;
+    CREATE TABLE cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
       ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 2::BIGINT},
         'before': NULL::STRUCT(id BIGINT, seen_at BIGINT), 'after': {'id': 1::BIGINT, 'seen_at': NULL::BIGINT}})
     ) AS t(value)";
@@ -459,7 +459,7 @@ const STAMPED: &str = "CREATE SCHEMA ddl;
 fn a_column_added_with_a_default_no_literal_spells_is_filled_with_null_rather_than_failing() {
     let client = DuckDbClient::new(
         Connection::open_in_memory().unwrap(),
-        DuckDbWarehouse::default(),
+        DuckDbWarehouse::new("cdc"),
     );
     client.execute(&SqlString::from(STAMPED)).unwrap();
 
@@ -471,14 +471,14 @@ fn a_column_added_with_a_default_no_literal_spells_is_filled_with_null_rather_th
     assert_eq!(
         rows(
             &client,
-            "SELECT concat_ws(' ', id, coalesce(seen_at::VARCHAR, 'unknown')) FROM shop_snapshot.people ORDER BY id"
+            "SELECT concat_ws(' ', id, coalesce(seen_at::VARCHAR, 'unknown')) FROM shop_snapshot.people_19700101 ORDER BY id"
         ),
         ["1 unknown"]
     );
 }
 
-const SIMULTANEOUS: &str = "CREATE SCHEMA ddl;
-    CREATE TABLE ddl.shop AS SELECT * FROM (VALUES
+const SIMULTANEOUS: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
+    CREATE TABLE cdc.mysql AS SELECT * FROM (VALUES
       ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL}, 'ts_ms': 0::BIGINT,
         'ddl': 'CREATE TABLE people (id BIGINT, name VARCHAR(64))',
         'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
@@ -498,8 +498,8 @@ const SIMULTANEOUS: &str = "CREATE SCHEMA ddl;
             {'name': 'email', 'typeName': 'VARCHAR', 'position': 3, 'optional': true,
              'defaultValueExpression': 'none', 'length': 64, 'scale': NULL}]}}]})
     ) AS t(value);
-    CREATE SCHEMA cdc;
-    CREATE TABLE cdc.people AS SELECT * FROM (VALUES
+    CREATE SCHEMA IF NOT EXISTS cdc;
+    CREATE TABLE cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
       ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 2::BIGINT},
         'before': NULL::STRUCT(id BIGINT, name VARCHAR, email VARCHAR),
         'after': {'id': 1::BIGINT, 'name': 'Alice', 'email': NULL::VARCHAR}}),
@@ -518,7 +518,7 @@ const SIMULTANEOUS: &str = "CREATE SCHEMA ddl;
 fn changes_recorded_in_the_instant_of_a_schema_change_fall_on_its_side_their_position_puts_them() {
     let client = DuckDbClient::new(
         Connection::open_in_memory().unwrap(),
-        DuckDbWarehouse::default(),
+        DuckDbWarehouse::new("cdc"),
     );
     client.execute(&SqlString::from(SIMULTANEOUS)).unwrap();
 
@@ -530,22 +530,10 @@ fn changes_recorded_in_the_instant_of_a_schema_change_fall_on_its_side_their_pos
     assert_eq!(
         rows(
             &client,
-            "SELECT concat_ws(' ', id, name, coalesce(email, 'null')) FROM shop_snapshot.people ORDER BY id"
+            "SELECT concat_ws(' ', id, name, coalesce(email, 'null')) FROM shop_snapshot.people_19700101 ORDER BY id"
         ),
         ["1 Alicia alicia@example.com", "2 Bobby none"]
     );
-}
-
-struct Shelves;
-
-impl Placement for Shelves {
-    fn change_log(&self, table: &TableId) -> Option<TablePath> {
-        Some(TablePath::new("cdc", table.table()))
-    }
-
-    fn snapshot(&self, table: &TableId) -> TablePath {
-        TablePath::new("shop_snapshot", table.table())
-    }
 }
 
 #[derive(Debug)]

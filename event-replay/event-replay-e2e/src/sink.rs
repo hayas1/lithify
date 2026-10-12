@@ -4,22 +4,23 @@ use chrono::DateTime;
 use duckdb::types::{FromSql, TimeUnit, Value};
 
 use event_replay_cli::pipeline::{self, Capture};
-use event_replay_core::artifact::UnbuildableArtifact;
+use event_replay_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
 use event_replay_core::era::EraTracker;
 use event_replay_core::listener::OutOfOrder;
 use event_replay_core::model::{TableId, TableModel};
 use event_replay_core::position::RecordedAt;
 use event_replay_core::sink::{TablePath, Warehouse, WarehouseClient};
 use event_replay_core::source::{
-    ChangeLog, ChangeLogs, ColumnPath, SchemaChangeLog, SchemaChangeStream,
+    ChangeLog, ChangeLogs, ColumnPath, RowChangeLog, SchemaChangeLog, SchemaChangeStream,
 };
 use event_replay_core::sql::SqlString;
 use event_replay_core::window::Window;
+use event_replay_protocol::DuckDbWarehouse;
 use event_replay_protocol::sink::duckdb::client::{
     DuckDbCapture, DuckDbChangeLogsFn, DuckDbClient,
 };
 use event_replay_protocol::sink::duckdb::store::ObjectStore;
-use event_replay_strategy::snapshot::{Base, Placement, Snapshot};
+use event_replay_strategy::snapshot::Snapshot;
 
 use crate::row::{Cell, Row, Rows};
 
@@ -28,15 +29,16 @@ pub trait Sink {
 
     fn landed(
         &mut self,
-        changes: &TablePath,
         capture: &Capture,
+        prefix: &str,
+        table: &TableId,
         at: RecordedAt,
     ) -> Result<u64, Unbuildable>;
 
     fn model(
         &mut self,
         capture: &Capture,
-        statements: &TablePath,
+        prefix: &str,
         table: &TableId,
         at: RecordedAt,
     ) -> Result<TableModel, Unbuildable>;
@@ -44,10 +46,9 @@ pub trait Sink {
     fn snapshot(
         &mut self,
         capture: &Capture,
-        schema_changes: &TablePath,
+        prefix: &str,
         table: &TableId,
-        changes: &TablePath,
-        into: &TablePath,
+        artifact: &Snapshot,
         window: &Window,
     ) -> Result<(), Unbuildable>;
 
@@ -57,12 +58,14 @@ pub trait Sink {
 impl dyn Sink {
     pub fn connect(
         warehouse: &pipeline::Warehouse,
+        change_log: &str,
         key_id: &str,
         secret: &str,
     ) -> Result<Box<Self>, Unbuildable> {
         match warehouse {
             pipeline::Warehouse::DuckDb(store) => Ok(Box::new(DuckDb::connect(
                 &ObjectStore::open(store, key_id, secret),
+                change_log,
             )?)),
             pipeline::Warehouse::BigQuery(_) => Err(Unbuildable::Unverified("bigquery")),
         }
@@ -74,9 +77,9 @@ pub struct DuckDb {
 }
 
 impl DuckDb {
-    pub fn connect(store: &ObjectStore) -> Result<Self, Unbuildable> {
+    pub fn connect(store: &ObjectStore, change_log: &str) -> Result<Self, Unbuildable> {
         Ok(Self {
-            client: store.client()?,
+            client: store.client(change_log)?,
         })
     }
 
@@ -129,17 +132,18 @@ impl Sink for DuckDb {
 
     fn landed(
         &mut self,
-        changes: &TablePath,
         capture: &Capture,
+        prefix: &str,
+        table: &TableId,
         at: RecordedAt,
     ) -> Result<u64, Unbuildable> {
-        let recorded_at = capture.with_duckdb_change_logs(ChangeTime);
+        let (topic, recorded_at) = capture.with_duckdb_change_logs(prefix, Landing { table });
 
         let warehouse = self.client.warehouse();
         let landed = self.client.connection().query_row(
             &format!(
                 "SELECT COUNT(*) FROM {} WHERE {} >= {}",
-                warehouse.change_log_ref(changes),
+                warehouse.change_log_ref(&topic),
                 warehouse.path(&recorded_at),
                 at.milliseconds_since_epoch()
             ),
@@ -157,16 +161,18 @@ impl Sink for DuckDb {
     fn model(
         &mut self,
         capture: &Capture,
-        statements: &TablePath,
+        prefix: &str,
         table: &TableId,
         at: RecordedAt,
     ) -> Result<TableModel, Unbuildable> {
-        let read = capture.with_duckdb_change_logs(Catalog {
-            client: &self.client,
-            schema_changes: statements,
-            table,
-            at,
-        })?;
+        let read = capture.with_duckdb_change_logs(
+            prefix,
+            Catalog {
+                client: &self.client,
+                table,
+                at,
+            },
+        )?;
 
         read.ok_or_else(|| Unbuildable::UnknownTable(table.clone()))
     }
@@ -174,20 +180,20 @@ impl Sink for DuckDb {
     fn snapshot(
         &mut self,
         capture: &Capture,
-        schema_changes: &TablePath,
+        prefix: &str,
         table: &TableId,
-        changes: &TablePath,
-        into: &TablePath,
+        artifact: &Snapshot,
         window: &Window,
     ) -> Result<(), Unbuildable> {
-        capture.with_duckdb_change_logs(Fold {
-            client: &self.client,
-            schema_changes,
-            table,
-            changes,
-            into,
-            window,
-        })
+        capture.with_duckdb_change_logs(
+            prefix,
+            SnapshotBuild {
+                client: &self.client,
+                table,
+                artifact,
+                window,
+            },
+        )
     }
 
     fn rows(&mut self, table: &TablePath, model: &TableModel) -> Result<Rows, Unbuildable> {
@@ -229,23 +235,27 @@ impl From<&Value> for Cell {
     }
 }
 
-struct ChangeTime;
+struct Landing<'a> {
+    table: &'a TableId,
+}
 
-impl DuckDbChangeLogsFn for ChangeTime {
-    type Output = ColumnPath;
+impl DuckDbChangeLogsFn for Landing<'_> {
+    type Output = (String, ColumnPath);
 
     fn call_duckdb<C>(self, logs: C) -> Self::Output
     where
         C: ChangeLogs,
         <C::Schema as SchemaChangeLog>::Record: FromSql,
     {
-        logs.row_changes().recorded_at()
+        (
+            logs.row_changes().topic(self.table),
+            logs.row_changes().recorded_at(),
+        )
     }
 }
 
 struct Catalog<'a> {
     client: &'a DuckDbClient,
-    schema_changes: &'a TablePath,
     table: &'a TableId,
     at: RecordedAt,
 }
@@ -258,35 +268,19 @@ impl DuckDbChangeLogsFn for Catalog<'_> {
         C: ChangeLogs,
         <C::Schema as SchemaChangeLog>::Record: FromSql,
     {
-        self.client.table(
-            logs.schema_changes(),
-            self.schema_changes,
-            self.table,
-            self.at,
-        )
+        self.client
+            .table(logs.schema_changes(), self.table, self.at)
     }
 }
 
-struct Fold<'a> {
+struct SnapshotBuild<'a> {
     client: &'a DuckDbClient,
-    schema_changes: &'a TablePath,
     table: &'a TableId,
-    changes: &'a TablePath,
-    into: &'a TablePath,
+    artifact: &'a Snapshot,
     window: &'a Window,
 }
 
-impl Placement for Fold<'_> {
-    fn change_log(&self, _: &TableId) -> Option<TablePath> {
-        Some(self.changes.clone())
-    }
-
-    fn snapshot(&self, _: &TableId) -> TablePath {
-        self.into.clone()
-    }
-}
-
-impl DuckDbChangeLogsFn for Fold<'_> {
+impl DuckDbChangeLogsFn for SnapshotBuild<'_> {
     type Output = Result<(), Unbuildable>;
 
     fn call_duckdb<C>(self, logs: C) -> Self::Output
@@ -295,17 +289,16 @@ impl DuckDbChangeLogsFn for Fold<'_> {
         <C::Schema as SchemaChangeLog>::Record: FromSql,
     {
         let mut tracker = EraTracker::new(self.window.clone(), |table: &TableId| {
-            Ok::<_, Unbuildable>(Snapshot::new(
+            Ok::<_, Unbuildable>(self.artifact.builder::<_, DuckDbWarehouse>(
                 logs.row_changes(),
-                &self,
                 table.clone(),
-                Base::Captured,
+                self.window,
+                None,
             ))
         });
         let catalog = self.client.replay::<Unbuildable, _>(
             self.client.warehouse(),
             logs.schema_changes(),
-            self.schema_changes,
             self.window,
             &mut tracker,
         )?;

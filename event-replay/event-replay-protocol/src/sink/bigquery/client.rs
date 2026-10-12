@@ -8,7 +8,7 @@ use google_cloud_gax::client_builder;
 use tokio::runtime::Runtime;
 
 use event_replay_core::event::MalformedEvent;
-use event_replay_core::sink::{TablePath, Warehouse, WarehouseClient};
+use event_replay_core::sink::{Warehouse, WarehouseClient};
 use event_replay_core::source::{
     ChangeLogs, SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed,
 };
@@ -28,7 +28,7 @@ pub trait BigQueryChangeLogsFn {
 }
 
 pub trait BigQueryCapture {
-    fn with_bigquery_change_logs<F: BigQueryChangeLogsFn>(&self, f: F) -> F::Output;
+    fn with_bigquery_change_logs<F: BigQueryChangeLogsFn>(&self, prefix: &str, f: F) -> F::Output;
 }
 
 pub struct BigQueryClient {
@@ -38,7 +38,7 @@ pub struct BigQueryClient {
 }
 
 impl BigQueryClient {
-    pub fn open(config: &Config) -> Result<Self, Unqueryable> {
+    pub fn open(config: &Config, change_log: &str) -> Result<Self, Unqueryable> {
         let runtime = Runtime::new().map_err(Unqueryable::Unrunnable)?;
         let builder = BigQuery::builder()
             .with_project_id(config.project())
@@ -52,7 +52,7 @@ impl BigQueryClient {
             .map_err(Unqueryable::Unbuildable)?;
 
         Ok(Self {
-            warehouse: BigQueryWarehouse::new(config.project()),
+            warehouse: BigQueryWarehouse::new(config.project(), change_log),
             client,
             runtime,
         })
@@ -125,11 +125,10 @@ where
     fn schema_changes<'a>(
         &'a self,
         log: &'a L,
-        table: &TablePath,
         window: &Window,
     ) -> Result<Self::Changes<'a>, Self::Error> {
         Ok(BigQuerySchemaChanges {
-            records: self.records(&self.warehouse.select_schema_changes(log, table, window))?,
+            records: self.records(&self.warehouse.select_schema_changes(log, window))?,
             log,
         })
     }

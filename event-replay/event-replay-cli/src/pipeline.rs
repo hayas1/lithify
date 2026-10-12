@@ -13,17 +13,17 @@ pub enum Capture {
 }
 
 impl DuckDbCapture for Capture {
-    fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(&self, f: F) -> F::Output {
+    fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(&self, prefix: &str, f: F) -> F::Output {
         match self {
-            Self::Debezium(debezium) => debezium.with_duckdb_change_logs(f),
+            Self::Debezium(debezium) => debezium.with_duckdb_change_logs(prefix, f),
         }
     }
 }
 
 impl BigQueryCapture for Capture {
-    fn with_bigquery_change_logs<F: BigQueryChangeLogsFn>(&self, f: F) -> F::Output {
+    fn with_bigquery_change_logs<F: BigQueryChangeLogsFn>(&self, prefix: &str, f: F) -> F::Output {
         match self {
-            Self::Debezium(debezium) => debezium.with_bigquery_change_logs(f),
+            Self::Debezium(debezium) => debezium.with_bigquery_change_logs(prefix, f),
         }
     }
 }
@@ -70,7 +70,7 @@ mod tests {
         let capture: Capture = toml::from_str("[debezium]\ndialect = \"postgres\"").unwrap();
 
         assert_eq!(
-            capture.with_duckdb_change_logs(Probe),
+            capture.with_duckdb_change_logs("postgres", Probe),
             std::any::type_name::<Debezium<Postgres>>()
         );
     }

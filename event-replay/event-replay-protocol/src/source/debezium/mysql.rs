@@ -149,7 +149,7 @@ mod tests {
 
     #[test]
     fn a_statement_whose_source_carries_no_binlog_offset_is_rejected() {
-        let statement = Debezium::new(MySql).schema_change_json(json!({
+        let statement = Debezium::new("mysql", MySql).schema_change_json(json!({
             "source": {"lsn": 26738384i64},
             "ts_ms": 1789800000000i64,
             "ddl": "",
@@ -224,7 +224,7 @@ mod tests {
 
     #[test]
     fn a_column_of_a_schema_change_carries_its_type() {
-        let change = Debezium::new(MySql)
+        let change = Debezium::new("mysql", MySql)
             .schema_change_json(json!({
                 "source": {"file": "binlog.000002", "pos": 448},
                 "ts_ms": 1789800000000i64,
@@ -254,7 +254,7 @@ mod tests {
 
     #[test]
     fn a_schema_change_is_positioned_by_its_binlog_offset() {
-        let change = Debezium::new(MySql)
+        let change = Debezium::new("mysql", MySql)
             .schema_change_json(json!({
                 "source": {"file": "binlog.000002", "pos": 448},
                 "ts_ms": 1789800000000i64,
@@ -280,7 +280,7 @@ mod tests {
                 })
             })
             .collect();
-        let change = Debezium::new(MySql)
+        let change = Debezium::new("mysql", MySql)
             .schema_change_json(json!({
                 "source": {"file": "binlog.000002", "pos": 448},
                 "ts_ms": 1789800000000i64,
@@ -442,7 +442,7 @@ mod tests {
     }
 
     fn captured(source: Value) -> bool {
-        Debezium::new(MySql)
+        Debezium::new("mysql", MySql)
             .schema_change_json(json!({
                 "source": source,
                 "ts_ms": 1789800000000i64,

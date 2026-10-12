@@ -70,11 +70,10 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::Artifact;
+    use crate::ArtifactKind;
     use crate::infra::Miswiring;
     use crate::table::Replayed;
     use crate::unreadable::Cause;
-    use event_replay_core::sink::TablePath;
     use event_replay_protocol::sink::bigquery::config as bigquery;
     use event_replay_protocol::sink::duckdb::config::Store;
     use event_replay_protocol::source::debezium::config as debezium;
@@ -128,22 +127,12 @@ mod tests {
     }
 
     #[test]
-    fn a_pipeline_says_where_each_sink_holds_the_schema_changes_of_its_source() {
+    fn a_pipeline_says_the_namespace_each_sink_holds_the_change_logs_in() {
         let pipeline = pipeline("mysql");
-        let source = pipeline.sources().next().unwrap();
 
-        let tables: Vec<_> = pipeline
-            .sinks()
-            .map(|sink| sink.schema_changes(source))
-            .collect();
+        let change_logs: Vec<_> = pipeline.sinks().map(|sink| sink.change_log()).collect();
 
-        assert_eq!(
-            tables,
-            [
-                Some(TablePath::new("mysql_shop_cdc", "mysql")),
-                Some(TablePath::new("mysql_shop_cdc", "mysql"))
-            ]
-        );
+        assert_eq!(change_logs, ["mysql_shop_cdc", "mysql_shop_cdc"]);
     }
 
     #[test]
@@ -151,8 +140,8 @@ mod tests {
         let pipeline = pipeline("mysql");
         let table = pipeline.table(&TableId::new("shop", "order_items"));
 
-        assert!(table.builds(Artifact::Snapshot));
-        assert!(!table.builds(Artifact::History));
+        assert!(table.builds(ArtifactKind::Snapshot));
+        assert!(!table.builds(ArtifactKind::History));
         assert_eq!(table.replayed("sku"), Replayed::Value);
     }
 
@@ -161,8 +150,8 @@ mod tests {
         let pipeline = pipeline("mysql");
         let table = pipeline.table(&TableId::new("shop", "orders"));
 
-        assert!(table.builds(Artifact::Snapshot));
-        assert!(table.builds(Artifact::History));
+        assert!(table.builds(ArtifactKind::Snapshot));
+        assert!(table.builds(ArtifactKind::History));
         assert_eq!(table.replayed("attributes"), Replayed::Null);
         assert_eq!(table.replayed("amount"), Replayed::Value);
     }

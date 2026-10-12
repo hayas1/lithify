@@ -95,21 +95,23 @@ pub struct DdlColumn {
 pub struct Debezium<D> {
     dialect: D,
     envelope: Option<ColumnPath>,
+    prefix: String,
 }
 
 impl<D: Dialect> Debezium<D> {
-    pub fn new(dialect: D) -> Self {
-        Self::within(None, dialect)
+    pub fn new(prefix: &str, dialect: D) -> Self {
+        Self::within(None, prefix, dialect)
     }
 
-    pub fn under(column: &str, dialect: D) -> Self {
-        Self::within(Some(column), dialect)
+    pub fn under(column: &str, prefix: &str, dialect: D) -> Self {
+        Self::within(Some(column), prefix, dialect)
     }
 
-    pub fn within(envelope: Option<&str>, dialect: D) -> Self {
+    pub fn within(envelope: Option<&str>, prefix: &str, dialect: D) -> Self {
         Self {
             dialect,
             envelope: envelope.map(ColumnPath::from),
+            prefix: prefix.to_owned(),
         }
     }
 
@@ -235,6 +237,10 @@ impl<D: Dialect> ChangeLogs for Debezium<D> {
 impl<D: Dialect> SchemaChangeLog for Debezium<D> {
     type Record = DebeziumDdl<D::Source>;
 
+    fn topic(&self) -> String {
+        self.prefix.clone()
+    }
+
     fn schema_change(
         &self,
         statement: Self::Record,
@@ -265,6 +271,10 @@ impl<D: Dialect> SchemaChangeLog for Debezium<D> {
 }
 
 impl<D: Dialect> RowChangeLog for Debezium<D> {
+    fn topic(&self, table: &TableId) -> String {
+        format!("{}.{}.{}", self.prefix, table.schema(), table.table())
+    }
+
     fn operation(&self) -> ColumnPath {
         self.path("op")
     }
@@ -311,7 +321,7 @@ mod tests {
 
     #[test]
     fn a_table_holds_its_columns_in_the_order_the_source_positioned_them() {
-        let statement = Debezium::new(MySql)
+        let statement = Debezium::new("mysql", MySql)
             .schema_change_json(json!({
                 "source": {"file": "binlog.000002", "pos": 448, "gtid": null},
                 "ts_ms": 1789800000000i64,
@@ -350,6 +360,25 @@ mod tests {
         assert_eq!(
             table.columns().map(ColumnModel::name).collect::<Vec<_>>(),
             ["id", "nickname", "name"]
+        );
+    }
+
+    #[test]
+    fn the_row_changes_of_a_table_land_on_the_topic_named_after_the_prefix_and_the_table() {
+        assert_eq!(
+            RowChangeLog::topic(
+                &Debezium::new("mysql", MySql),
+                &TableId::new("shop", "customers")
+            ),
+            "mysql.shop.customers"
+        );
+    }
+
+    #[test]
+    fn the_schema_changes_land_on_the_topic_named_after_the_prefix_alone() {
+        assert_eq!(
+            SchemaChangeLog::topic(&Debezium::new("mysql", MySql)),
+            "mysql"
         );
     }
 }

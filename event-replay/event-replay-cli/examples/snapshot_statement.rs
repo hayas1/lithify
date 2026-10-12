@@ -1,4 +1,4 @@
-use event_replay_core::artifact::Artifact;
+use event_replay_core::artifact::{Artifact, ArtifactBuilder};
 use event_replay_core::era::{Bound, Era};
 use event_replay_core::listener::SchemaChangeListener;
 use event_replay_core::model::{ColumnModel, ColumnType, TableId, TableModel};
@@ -6,7 +6,7 @@ use event_replay_core::position::RecordedAt;
 use event_replay_core::sink::{TablePath, Warehouse};
 use event_replay_core::window::Window;
 use event_replay_protocol::{BigQueryWarehouse, Debezium, DuckDbWarehouse, MySql, MySqlPosition};
-use event_replay_strategy::snapshot::{Base, Placement, Snapshot};
+use event_replay_strategy::snapshot::Snapshot;
 
 fn column(name: &str, type_name: &str, column_type: ColumnType) -> ColumnModel {
     ColumnModel::new(name, type_name, column_type, false, None)
@@ -28,32 +28,20 @@ fn customers() -> TableModel {
     )
 }
 
-struct Shop;
-
-impl Placement for Shop {
-    fn change_log(&self, table: &TableId) -> Option<TablePath> {
-        Some(TablePath::new(
-            "mysql_shop_cdc",
-            &format!("mysql_{}_{}", table.schema(), table.table()),
-        ))
-    }
-
-    fn snapshot(&self, table: &TableId) -> TablePath {
-        TablePath::new("mysql_shop", &format!("{}_20260920", table.table()))
-    }
-}
-
 fn statements<W: Warehouse>(warehouse: &W) -> String {
-    let log = Debezium::new(MySql);
-    let window = Window::new(RecordedAt::from(0), RecordedAt::from(4102444800000));
-    let mut snapshot: Snapshot<'_, _, W> = Snapshot::new(
+    let log = Debezium::new("mysql", MySql);
+    let window = Window::new(
+        RecordedAt::from(1789862400000),
+        RecordedAt::from(1789948800000),
+    );
+    let artifact = Snapshot::new("mysql_shop", "%Y%m%d");
+    let mut snapshot = artifact.builder::<_, W>(
         &log,
-        &Shop,
         customers().id().clone(),
-        match std::env::args().nth(2).as_deref() {
-            Some(shard) => Base::Shard(TablePath::new("mysql_shop", shard)),
-            None => Base::Captured,
-        },
+        &window,
+        std::env::args()
+            .nth(2)
+            .map(|shard| TablePath::new("mysql_shop", &shard)),
     );
 
     SchemaChangeListener::<MySqlPosition>::era_boundary(
@@ -67,12 +55,15 @@ fn statements<W: Warehouse>(warehouse: &W) -> String {
     )
     .unwrap();
 
-    snapshot.statements().unwrap().join(";\n")
+    snapshot.create().unwrap().join(";\n")
 }
 
 fn main() {
     match std::env::args().nth(1).as_deref() {
-        Some("bigquery") => println!("{}", statements(&BigQueryWarehouse::new("local-project"))),
-        _ => println!("{}", statements(&DuckDbWarehouse::default())),
+        Some("bigquery") => println!(
+            "{}",
+            statements(&BigQueryWarehouse::new("local-project", "mysql_shop_cdc"))
+        ),
+        _ => println!("{}", statements(&DuckDbWarehouse::new("mysql_shop_cdc"))),
     }
 }

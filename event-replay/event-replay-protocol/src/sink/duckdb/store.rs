@@ -21,13 +21,13 @@ impl ObjectStore {
         }
     }
 
-    pub fn client(&self) -> Result<DuckDbClient, duckdb::Error> {
+    pub fn client(&self, change_log: &str) -> Result<DuckDbClient, duckdb::Error> {
         let connection = Connection::open_in_memory()?;
         connection.execute_batch(self.secret().as_str())?;
 
         Ok(DuckDbClient::new(
             connection,
-            DuckDbWarehouse::over(self.store.clone()),
+            DuckDbWarehouse::over(change_log, self.store.clone()),
         ))
     }
 

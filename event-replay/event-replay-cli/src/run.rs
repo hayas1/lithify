@@ -5,7 +5,6 @@ use chrono::{DateTime, Utc};
 use event_replay_config::Pipeline;
 use event_replay_config::infra::{Sink, Source};
 use event_replay_core::listener::CatalogModel;
-use event_replay_core::sink::TablePath;
 use event_replay_core::source::{ChangeLogs, SchemaChangeLog, SchemaChangeStream};
 use event_replay_core::sql::SqlString;
 use event_replay_core::window::Window;
@@ -53,14 +52,12 @@ impl Run {
     }
 
     pub fn report(&self) -> Result<Journal, Unreplayable> {
-        self.each_sink(|sink, source, schema_changes, journal| {
-            self.read(sink, source, schema_changes, journal)
-        })
+        self.each_sink(|sink, source, prefix, journal| self.read(sink, source, prefix, journal))
     }
 
     pub fn plan(&self, into: &Path) -> Result<Journal, Unreplayable> {
-        self.each_sink(|sink, source, schema_changes, journal| {
-            let statements = self.plan_statements(sink, source, schema_changes)?;
+        self.each_sink(|sink, source, prefix, journal| {
+            let statements = self.plan_statements(sink, source, prefix)?;
 
             Self::write_plan(into, sink, &statements, journal)
         })
@@ -71,7 +68,7 @@ impl Run {
         mut act: impl FnMut(
             &Sink<Warehouse>,
             &Source<Capture>,
-            &TablePath,
+            &str,
             &mut Journal,
         ) -> Result<(), Unreplayable>,
     ) -> Result<Journal, Unreplayable> {
@@ -88,13 +85,13 @@ impl Run {
         for sink in self.sinks(&pipeline)? {
             journal.sink(sink.name());
 
-            let Some(schema_changes) = sink.schema_changes(source) else {
+            let Some(prefix) = source.schema_changes() else {
                 journal.note(&format!("{} lands no schema changes", source.name()));
 
                 continue;
             };
 
-            if let Err(unreplayable) = act(sink, source, &schema_changes, &mut journal) {
+            if let Err(unreplayable) = act(sink, source, prefix, &mut journal) {
                 journal.failed(sink.name(), &unreplayable);
             }
         }
@@ -106,31 +103,17 @@ impl Run {
         &self,
         sink: &Sink<Warehouse>,
         source: &Source<Capture>,
-        schema_changes: &TablePath,
+        prefix: &str,
     ) -> Result<Vec<SqlString>, Unreplayable> {
         match sink.warehouse() {
-            Warehouse::DuckDb(store) => {
-                source.capture().with_duckdb_change_logs(SnapshotPlan::new(
-                    &self.duckdb(store)?,
-                    sink,
-                    source,
-                    schema_changes,
-                    &self.window,
-                    self.onto,
-                ))
-            }
-            Warehouse::BigQuery(config) => {
-                source
-                    .capture()
-                    .with_bigquery_change_logs(SnapshotPlan::new(
-                        &self.bigquery(config)?,
-                        sink,
-                        source,
-                        schema_changes,
-                        &self.window,
-                        self.onto,
-                    ))
-            }
+            Warehouse::DuckDb(store) => source.capture().with_duckdb_change_logs(
+                prefix,
+                SnapshotPlan::new(&self.duckdb(sink, store)?, sink, &self.window, self.onto),
+            ),
+            Warehouse::BigQuery(config) => source.capture().with_bigquery_change_logs(
+                prefix,
+                SnapshotPlan::new(&self.bigquery(sink, config)?, sink, &self.window, self.onto),
+            ),
         }
     }
 
@@ -160,30 +143,34 @@ impl Run {
         Ok(())
     }
 
-    fn duckdb(&self, store: &Store) -> Result<DuckDbClient, Unreplayable> {
+    fn duckdb(&self, sink: &Sink<Warehouse>, store: &Store) -> Result<DuckDbClient, Unreplayable> {
         Ok(
             ObjectStore::open(store, self.credential.key_id(), self.credential.secret())
-                .client()?,
+                .client(sink.change_log())?,
         )
     }
 
-    fn bigquery(&self, config: &bigquery::config::Config) -> Result<BigQueryClient, Unreplayable> {
-        Ok(BigQueryClient::open(config)?)
+    fn bigquery(
+        &self,
+        sink: &Sink<Warehouse>,
+        config: &bigquery::config::Config,
+    ) -> Result<BigQueryClient, Unreplayable> {
+        Ok(BigQueryClient::open(config, sink.change_log())?)
     }
 
     fn read(
         &self,
         sink: &Sink<Warehouse>,
         source: &Source<Capture>,
-        schema_changes: &TablePath,
+        prefix: &str,
         journal: &mut Journal,
     ) -> Result<(), Unreplayable> {
         match sink.warehouse() {
             Warehouse::DuckDb(store) => {
-                self.read_duckdb(&self.duckdb(store)?, schema_changes, source, journal)
+                self.read_duckdb(&self.duckdb(sink, store)?, prefix, source, journal)
             }
             Warehouse::BigQuery(config) => {
-                self.read_bigquery(&self.bigquery(config)?, schema_changes, source, journal)
+                self.read_bigquery(&self.bigquery(sink, config)?, prefix, source, journal)
             }
         }
     }
@@ -191,31 +178,25 @@ impl Run {
     fn read_duckdb(
         &self,
         client: &DuckDbClient,
-        schema_changes: &TablePath,
+        prefix: &str,
         source: &Source<Capture>,
         journal: &mut Journal,
     ) -> Result<(), Unreplayable> {
-        source.capture().with_duckdb_change_logs(Catalog::new(
-            client,
-            schema_changes,
-            &self.window,
-            journal,
-        ))
+        source
+            .capture()
+            .with_duckdb_change_logs(prefix, Catalog::new(client, &self.window, journal))
     }
 
     fn read_bigquery(
         &self,
         client: &BigQueryClient,
-        schema_changes: &TablePath,
+        prefix: &str,
         source: &Source<Capture>,
         journal: &mut Journal,
     ) -> Result<(), Unreplayable> {
-        source.capture().with_bigquery_change_logs(Catalog::new(
-            client,
-            schema_changes,
-            &self.window,
-            journal,
-        ))
+        source
+            .capture()
+            .with_bigquery_change_logs(prefix, Catalog::new(client, &self.window, journal))
     }
 
     fn sinks<'a>(
@@ -239,21 +220,14 @@ impl Run {
 
 struct Catalog<'a, C> {
     reader: &'a C,
-    schema_changes: &'a TablePath,
     window: &'a Window,
     journal: &'a mut Journal,
 }
 
 impl<'a, C> Catalog<'a, C> {
-    fn new(
-        reader: &'a C,
-        schema_changes: &'a TablePath,
-        window: &'a Window,
-        journal: &'a mut Journal,
-    ) -> Self {
+    fn new(reader: &'a C, window: &'a Window, journal: &'a mut Journal) -> Self {
         Self {
             reader,
-            schema_changes,
             window,
             journal,
         }
@@ -271,7 +245,6 @@ impl DuckDbChangeLogsFn for Catalog<'_, DuckDbClient> {
         self.reader.catalog::<Unreplayable, Journal>(
             &(),
             logs.schema_changes(),
-            self.schema_changes,
             self.window,
             &mut CatalogModel::default(),
             self.journal,
@@ -290,7 +263,6 @@ impl BigQueryChangeLogsFn for Catalog<'_, BigQueryClient> {
         self.reader.catalog::<Unreplayable, Journal>(
             &(),
             logs.schema_changes(),
-            self.schema_changes,
             self.window,
             &mut CatalogModel::default(),
             self.journal,

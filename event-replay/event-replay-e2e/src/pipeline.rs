@@ -3,11 +3,13 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 
 use event_replay_cli::pipeline::{Capture, Warehouse};
-use event_replay_config::{Artifact, Pipeline, infra};
+use event_replay_config::{ArtifactKind, Pipeline, infra};
+use event_replay_core::artifact::Artifact;
 use event_replay_core::model::{TableId, TableModel};
 use event_replay_core::position::RecordedAt;
 use event_replay_core::sink::TablePath;
 use event_replay_core::window::Window;
+use event_replay_strategy::snapshot::Snapshot;
 
 use crate::row::Rows;
 use crate::run::Unverifiable;
@@ -185,7 +187,7 @@ impl<'a> SinkEnd<'a> {
 
         Ok(Self {
             config,
-            client: <dyn Sink>::connect(config.warehouse(), key_id, secret)?,
+            client: <dyn Sink>::connect(config.warehouse(), config.change_log(), key_id, secret)?,
         })
     }
 
@@ -204,14 +206,14 @@ impl<'a> SinkEnd<'a> {
         watch: &Watch,
     ) -> Result<TableModel, Unverifiable> {
         let changes = &self.changes(source, table);
-        let statements = self.schema_changes(source)?;
+        let prefix = Self::prefix(source)?;
 
-        self.settle(source, changes, watch)?;
+        self.settle(source, prefix, table, changes, watch)?;
 
         watch.wait(changes, || {
             match self
                 .client
-                .model(source.capture(), &statements, table, Watch::end())
+                .model(source.capture(), prefix, table, Watch::end())
             {
                 Ok(model) => Ok(Some(model)),
                 Err(Unbuildable::UnknownTable(_)) => Ok(None),
@@ -223,6 +225,8 @@ impl<'a> SinkEnd<'a> {
     fn settle(
         &mut self,
         source: &SourceEnd,
+        prefix: &str,
+        table: &TableId,
         changes: &TablePath,
         watch: &Watch,
     ) -> Result<(), Unverifiable> {
@@ -232,7 +236,7 @@ impl<'a> SinkEnd<'a> {
         let mut settling = (0, Instant::now());
 
         watch.wait(changes, || {
-            let landed = self.client.landed(changes, source.capture(), at)?;
+            let landed = self.client.landed(source.capture(), prefix, table, at)?;
             let (previous, since) = settling;
 
             match (landed, landed == previous) {
@@ -258,29 +262,37 @@ impl<'a> SinkEnd<'a> {
 
         Ok(self.client.snapshot(
             source.capture(),
-            &self.schema_changes(source)?,
+            Self::prefix(source)?,
             table,
-            &self.changes(source, table),
-            &self.snapshot(table),
+            &self.snapshot(),
             &watch.changes(),
         )?)
     }
 
-    fn schema_changes(&self, source: &SourceEnd) -> Result<TablePath, Unverifiable> {
-        self.config
-            .schema_changes(source.config)
+    fn prefix<'s>(source: &'s SourceEnd) -> Result<&'s str, Unverifiable> {
+        source
+            .config
+            .schema_changes()
             .ok_or(Unverifiable::WithoutSchemaChanges)
     }
 
-    pub fn snapshot_rows(&mut self, model: &TableModel) -> Result<Rows, Unverifiable> {
-        Ok(self.client.rows(&self.snapshot(model.id()), model)?)
+    pub fn snapshot_rows(
+        &mut self,
+        model: &TableModel,
+        watch: &Watch,
+    ) -> Result<Rows, Unverifiable> {
+        let target = self
+            .snapshot()
+            .target(model.id(), &watch.changes())
+            .map_err(Unbuildable::from)?;
+
+        Ok(self.client.rows(&target, model)?)
     }
 
-    fn snapshot(&self, table: &TableId) -> TablePath {
-        TablePath::new(
-            self.config.replay().namespace(Artifact::Snapshot),
-            table.table(),
-        )
+    fn snapshot(&self) -> Snapshot {
+        let replay = self.config.replay();
+
+        Snapshot::new(replay.namespace(ArtifactKind::Snapshot), replay.shard())
     }
 
     fn changes(&self, source: &SourceEnd, table: &TableId) -> TablePath {

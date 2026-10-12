@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use event_replay_core::model::TableId;
 
-use crate::Artifact;
+use crate::ArtifactKind;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -20,12 +20,12 @@ pub(crate) struct Listing {
 #[serde(deny_unknown_fields)]
 struct Defaults {
     #[serde(default = "Defaults::snapshot")]
-    artifacts: BTreeSet<Artifact>,
+    artifacts: BTreeSet<ArtifactKind>,
 }
 
 impl Defaults {
-    fn snapshot() -> BTreeSet<Artifact> {
-        BTreeSet::from([Artifact::Snapshot])
+    fn snapshot() -> BTreeSet<ArtifactKind> {
+        BTreeSet::from([ArtifactKind::Snapshot])
     }
 }
 
@@ -42,7 +42,7 @@ impl Default for Defaults {
 struct ListedTable {
     schema: String,
     name: String,
-    artifacts: Option<BTreeSet<Artifact>>,
+    artifacts: Option<BTreeSet<ArtifactKind>>,
     #[serde(default, rename = "column")]
     columns: BTreeMap<String, ListedColumn>,
 }
@@ -114,13 +114,13 @@ impl Display for Mislisting {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Table {
-    artifacts: BTreeSet<Artifact>,
+    artifacts: BTreeSet<ArtifactKind>,
     columns: BTreeMap<String, Replayed>,
 }
 
 impl Table {
-    pub fn builds(&self, artifact: Artifact) -> bool {
-        self.artifacts.contains(&artifact)
+    pub fn builds(&self, kind: ArtifactKind) -> bool {
+        self.artifacts.contains(&kind)
     }
 
     pub fn replayed(&self, column: &str) -> Replayed {
@@ -175,24 +175,24 @@ mod tests {
     fn a_table_that_is_not_configured_takes_the_defaults() {
         let table = table("shop", "customers");
 
-        assert!(table.builds(Artifact::Snapshot));
-        assert!(!table.builds(Artifact::History));
+        assert!(table.builds(ArtifactKind::Snapshot));
+        assert!(!table.builds(ArtifactKind::History));
     }
 
     #[test]
     fn a_configured_table_builds_the_artifacts_it_names() {
         let table = table("shop", "orders");
 
-        assert!(table.builds(Artifact::Snapshot));
-        assert!(table.builds(Artifact::History));
+        assert!(table.builds(ArtifactKind::Snapshot));
+        assert!(table.builds(ArtifactKind::History));
     }
 
     #[test]
     fn a_table_can_be_left_out_of_every_artifact() {
         let table = table("shop", "audit_log");
 
-        assert!(!table.builds(Artifact::Snapshot));
-        assert!(!table.builds(Artifact::History));
+        assert!(!table.builds(ArtifactKind::Snapshot));
+        assert!(!table.builds(ArtifactKind::History));
     }
 
     #[test]
@@ -209,16 +209,16 @@ mod tests {
             .table(&TableId::new("shop", "customers"))
             .clone();
 
-        assert!(table.builds(Artifact::Snapshot));
-        assert!(!table.builds(Artifact::History));
+        assert!(table.builds(ArtifactKind::Snapshot));
+        assert!(!table.builds(ArtifactKind::History));
     }
 
     #[test]
     fn a_configuration_without_defaults_snapshots_every_table() {
         let table = tables("").table(&TableId::new("shop", "customers")).clone();
 
-        assert!(table.builds(Artifact::Snapshot));
-        assert!(!table.builds(Artifact::History));
+        assert!(table.builds(ArtifactKind::Snapshot));
+        assert!(!table.builds(ArtifactKind::History));
     }
 
     #[test]

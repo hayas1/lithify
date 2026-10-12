@@ -3,11 +3,12 @@ use duckdb::types::FromSql;
 use google_cloud_bigquery::error::RowError;
 use google_cloud_bigquery::query::Row;
 
-use event_replay_config::Artifact;
-use event_replay_config::infra::{Sink, Source};
-use event_replay_core::artifact::{self, UnbuildableArtifact};
+use event_replay_config::ArtifactKind;
+use event_replay_config::infra::Sink;
+use event_replay_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
 use event_replay_core::era::EraTracker;
 use event_replay_core::model::TableId;
+use event_replay_core::position::RecordedAt;
 use event_replay_core::sink::TablePath;
 use event_replay_core::sink::WarehouseClient;
 use event_replay_core::source::{ChangeLogs, SchemaChangeLog, SchemaChangeStream};
@@ -15,16 +16,14 @@ use event_replay_core::sql::SqlString;
 use event_replay_core::window::Window;
 use event_replay_protocol::sink::bigquery::client::{BigQueryChangeLogsFn, BigQueryClient};
 use event_replay_protocol::sink::duckdb::client::{DuckDbChangeLogsFn, DuckDbClient};
-use event_replay_strategy::snapshot::{Base, Placement, Snapshot};
+use event_replay_strategy::snapshot::Snapshot;
 
-use crate::pipeline::{Capture, Warehouse};
+use crate::pipeline::Warehouse;
 use crate::unreplayable::Unreplayable;
 
 pub struct SnapshotPlan<'a, K> {
     client: &'a K,
     sink: &'a Sink<Warehouse>,
-    source: &'a Source<Capture>,
-    schema_changes: &'a TablePath,
     window: &'a Window,
     onto: Option<DateTime<Utc>>,
 }
@@ -33,34 +32,30 @@ impl<'a, K> SnapshotPlan<'a, K> {
     pub fn new(
         client: &'a K,
         sink: &'a Sink<Warehouse>,
-        source: &'a Source<Capture>,
-        schema_changes: &'a TablePath,
         window: &'a Window,
         onto: Option<DateTime<Utc>>,
     ) -> Self {
         Self {
             client,
             sink,
-            source,
-            schema_changes,
             window,
             onto,
         }
     }
 
-    fn base(&self, table: &TableId) -> Base {
-        match self.onto {
-            Some(shard) => Base::Shard(self.placement(shard).snapshot(table)),
-            None => Base::Captured,
-        }
-    }
-
-    fn placement(&self, shard: DateTime<Utc>) -> SinkPlacement<'a> {
-        SinkPlacement {
-            sink: self.sink,
-            source: self.source,
-            shard,
-        }
+    fn base(
+        &self,
+        snapshot: &Snapshot,
+        table: &TableId,
+    ) -> Result<Option<TablePath>, UnbuildableArtifact> {
+        self.onto
+            .map(|onto| {
+                snapshot.target(
+                    table,
+                    &Window::new(RecordedAt::from(onto), *self.window.from()),
+                )
+            })
+            .transpose()
     }
 
     fn statements<C>(&self, logs: C) -> Result<Vec<SqlString>, Unreplayable>
@@ -69,45 +64,29 @@ impl<'a, K> SnapshotPlan<'a, K> {
         K: SchemaChangeStream<C::Schema> + WarehouseClient,
         <K as SchemaChangeStream<C::Schema>>::Error: Into<Unreplayable>,
     {
-        let placement = self.placement(
-            DateTime::<Utc>::try_from(*self.window.from()).map_err(Unreplayable::Unshardable)?,
-        );
+        let replay = self.sink.replay();
+        let snapshot = Snapshot::new(replay.namespace(ArtifactKind::Snapshot), replay.shard());
         let mut tracker = EraTracker::new(self.window.clone(), |table: &TableId| {
-            Ok::<_, UnbuildableArtifact>(Snapshot::new(
+            Ok::<_, UnbuildableArtifact>(snapshot.builder::<_, K::Warehouse>(
                 logs.row_changes(),
-                &placement,
                 table.clone(),
-                self.base(table),
+                self.window,
+                self.base(&snapshot, table)?,
             ))
         });
         let catalog = self.client.replay::<Unreplayable, _>(
             self.client.warehouse(),
             logs.schema_changes(),
-            self.schema_changes,
             self.window,
             &mut tracker,
         )?;
-        let snapshots = tracker.finish(self.client.warehouse(), &catalog)?;
+        let builders = tracker.finish(self.client.warehouse(), &catalog)?;
 
-        Ok(artifact::Artifact::statements(&snapshots)?)
-    }
-}
-
-struct SinkPlacement<'a> {
-    sink: &'a Sink<Warehouse>,
-    source: &'a Source<Capture>,
-    shard: DateTime<Utc>,
-}
-
-impl Placement for SinkPlacement<'_> {
-    fn change_log(&self, table: &TableId) -> Option<TablePath> {
-        self.sink.row_changes(self.source, table)
-    }
-
-    fn snapshot(&self, table: &TableId) -> TablePath {
-        self.sink
-            .replay()
-            .target(Artifact::Snapshot, table, self.shard)
+        Ok(builders
+            .iter()
+            .map(ArtifactBuilder::create)
+            .collect::<Result<Vec<_>, _>>()?
+            .concat())
     }
 }
 
@@ -148,6 +127,7 @@ mod tests {
     use event_replay_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbClient};
 
     use super::*;
+    use crate::pipeline::Capture;
 
     const CHANGE_LOGS: &str = "CREATE SCHEMA mysql_shop_cdc;
         CREATE TABLE mysql_shop_cdc.mysql AS SELECT * FROM (VALUES
@@ -174,10 +154,9 @@ mod tests {
             .sinks()
             .find(|sink| sink.name() == "minio")
             .unwrap();
-        let schema_changes = sink.schema_changes(source).unwrap();
         let client = DuckDbClient::new(
             Connection::open_in_memory().unwrap(),
-            DuckDbWarehouse::default(),
+            DuckDbWarehouse::new(sink.change_log()),
         );
         client.execute(&SqlString::from(CHANGE_LOGS)).unwrap();
         let window = Window::new(
@@ -187,14 +166,10 @@ mod tests {
 
         let statements = source
             .capture()
-            .with_duckdb_change_logs(SnapshotPlan::new(
-                &client,
-                sink,
-                source,
-                &schema_changes,
-                &window,
-                None,
-            ))
+            .with_duckdb_change_logs(
+                source.schema_changes().unwrap(),
+                SnapshotPlan::new(&client, sink, &window, None),
+            )
             .unwrap();
 
         assert_eq!(statements[0], "CREATE SCHEMA IF NOT EXISTS \"mysql_shop\"");
@@ -219,10 +194,9 @@ mod tests {
             .sinks()
             .find(|sink| sink.name() == "minio")
             .unwrap();
-        let schema_changes = sink.schema_changes(source).unwrap();
         let client = DuckDbClient::new(
             Connection::open_in_memory().unwrap(),
-            DuckDbWarehouse::default(),
+            DuckDbWarehouse::new(sink.change_log()),
         );
         client.execute(&SqlString::from(CHANGE_LOGS)).unwrap();
         let window = Window::new(
@@ -235,14 +209,10 @@ mod tests {
 
         let statements = source
             .capture()
-            .with_duckdb_change_logs(SnapshotPlan::new(
-                &client,
-                sink,
-                source,
-                &schema_changes,
-                &window,
-                Some(onto),
-            ))
+            .with_duckdb_change_logs(
+                source.schema_changes().unwrap(),
+                SnapshotPlan::new(&client, sink, &window, Some(onto)),
+            )
             .unwrap();
 
         assert!(

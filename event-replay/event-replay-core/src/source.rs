@@ -5,7 +5,6 @@ use crate::event::{MalformedEvent, SchemaChange};
 use crate::listener::{CatalogModel, OutOfOrder, SchemaChangeListener};
 use crate::model::{TableId, TableModel};
 use crate::position::{Coordinate, Position, RecordedAt};
-use crate::sink::TablePath;
 use crate::window::Window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +65,8 @@ pub trait ChangeLog {
 pub trait SchemaChangeLog: ChangeLog {
     type Record;
 
+    fn topic(&self) -> String;
+
     fn schema_change(
         &self,
         record: Self::Record,
@@ -73,6 +74,8 @@ pub trait SchemaChangeLog: ChangeLog {
 }
 
 pub trait RowChangeLog: ChangeLog {
+    fn topic(&self, table: &TableId) -> String;
+
     fn operation(&self) -> ColumnPath;
 
     fn before(&self) -> ColumnPath;
@@ -104,23 +107,19 @@ pub trait SchemaChangeStream<L: SchemaChangeLog> {
     fn schema_changes<'a>(
         &'a self,
         log: &'a L,
-        table: &TablePath,
         window: &Window,
     ) -> Result<Self::Changes<'a>, Self::Error>;
 
     fn each_schema_change<E>(
         &self,
         log: &L,
-        table: &TablePath,
         window: &Window,
         mut visit: impl FnMut(SchemaChange<L::Position>) -> Result<(), E>,
     ) -> Result<(), E>
     where
         Self::Error: Into<E>,
     {
-        let mut changes = self
-            .schema_changes(log, table, window)
-            .map_err(Into::into)?;
+        let mut changes = self.schema_changes(log, window).map_err(Into::into)?;
 
         for change in changes.stream().map_err(Into::into)? {
             visit(change.map_err(Into::into)?)?;
@@ -133,7 +132,6 @@ pub trait SchemaChangeStream<L: SchemaChangeLog> {
         &self,
         context: &V::Context,
         log: &L,
-        table: &TablePath,
         window: &Window,
         catalog: &mut CatalogModel<L::Position>,
         listener: &mut V,
@@ -143,24 +141,19 @@ pub trait SchemaChangeStream<L: SchemaChangeLog> {
         Self::Error: Into<E>,
         E: From<OutOfOrder> + From<V::Error>,
     {
-        self.each_schema_change(log, table, window, |change| {
+        self.each_schema_change(log, window, |change| {
             catalog.accept::<E, V>(context, &change, listener)
         })
     }
 
-    fn catalog_at<E>(
-        &self,
-        log: &L,
-        schema_changes: &TablePath,
-        at: RecordedAt,
-    ) -> Result<CatalogModel<L::Position>, E>
+    fn catalog_at<E>(&self, log: &L, at: RecordedAt) -> Result<CatalogModel<L::Position>, E>
     where
         Self::Error: Into<E>,
         E: From<OutOfOrder>,
     {
         let mut catalog = CatalogModel::default();
 
-        self.each_schema_change::<E>(log, schema_changes, &Window::until(at), |change| {
+        self.each_schema_change::<E>(log, &Window::until(at), |change| {
             Ok(catalog.accept::<OutOfOrder, ()>(&(), &change, &mut ())?)
         })?;
 
@@ -171,7 +164,6 @@ pub trait SchemaChangeStream<L: SchemaChangeLog> {
         &self,
         context: &V::Context,
         log: &L,
-        schema_changes: &TablePath,
         window: &Window,
         listener: &mut V,
     ) -> Result<CatalogModel<L::Position>, E>
@@ -180,25 +172,19 @@ pub trait SchemaChangeStream<L: SchemaChangeLog> {
         Self::Error: Into<E>,
         E: From<OutOfOrder> + From<V::Error>,
     {
-        let mut catalog = self.catalog_at::<E>(log, schema_changes, *window.from())?;
+        let mut catalog = self.catalog_at::<E>(log, *window.from())?;
 
-        self.catalog::<E, V>(context, log, schema_changes, window, &mut catalog, listener)?;
+        self.catalog::<E, V>(context, log, window, &mut catalog, listener)?;
 
         Ok(catalog)
     }
 
-    fn table<E>(
-        &self,
-        log: &L,
-        schema_changes: &TablePath,
-        table: &TableId,
-        at: RecordedAt,
-    ) -> Result<Option<TableModel>, E>
+    fn table<E>(&self, log: &L, table: &TableId, at: RecordedAt) -> Result<Option<TableModel>, E>
     where
         Self::Error: Into<E>,
         E: From<OutOfOrder>,
     {
-        let catalog = self.catalog_at::<E>(log, schema_changes, at)?;
+        let catalog = self.catalog_at::<E>(log, at)?;
 
         Ok(catalog.table(table).cloned())
     }

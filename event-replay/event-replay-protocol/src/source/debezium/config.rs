@@ -41,17 +41,17 @@ pub enum Dialect {
 
 #[cfg(feature = "duckdb")]
 impl DuckDbCapture for Config {
-    fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(&self, f: F) -> F::Output {
+    fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(&self, prefix: &str, f: F) -> F::Output {
         self.dialect
-            .with_duckdb_change_logs(Self::DUCKDB_ENVELOPE, f)
+            .with_duckdb_change_logs(Self::DUCKDB_ENVELOPE, prefix, f)
     }
 }
 
 #[cfg(feature = "bigquery")]
 impl BigQueryCapture for Config {
-    fn with_bigquery_change_logs<F: BigQueryChangeLogsFn>(&self, f: F) -> F::Output {
+    fn with_bigquery_change_logs<F: BigQueryChangeLogsFn>(&self, prefix: &str, f: F) -> F::Output {
         self.dialect
-            .with_bigquery_change_logs(Self::BIGQUERY_ENVELOPE, f)
+            .with_bigquery_change_logs(Self::BIGQUERY_ENVELOPE, prefix, f)
     }
 }
 
@@ -60,11 +60,12 @@ impl Dialect {
     fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(
         self,
         envelope: Option<&str>,
+        prefix: &str,
         f: F,
     ) -> F::Output {
         match self {
-            Self::MySql => f.call_duckdb(Debezium::within(envelope, MySql)),
-            Self::Postgres => f.call_duckdb(Debezium::within(envelope, Postgres)),
+            Self::MySql => f.call_duckdb(Debezium::within(envelope, prefix, MySql)),
+            Self::Postgres => f.call_duckdb(Debezium::within(envelope, prefix, Postgres)),
         }
     }
 
@@ -72,11 +73,12 @@ impl Dialect {
     fn with_bigquery_change_logs<F: BigQueryChangeLogsFn>(
         self,
         envelope: Option<&str>,
+        prefix: &str,
         f: F,
     ) -> F::Output {
         match self {
-            Self::MySql => f.call_bigquery(Debezium::within(envelope, MySql)),
-            Self::Postgres => f.call_bigquery(Debezium::within(envelope, Postgres)),
+            Self::MySql => f.call_bigquery(Debezium::within(envelope, prefix, MySql)),
+            Self::Postgres => f.call_bigquery(Debezium::within(envelope, prefix, Postgres)),
         }
     }
 }
@@ -88,12 +90,13 @@ mod tests {
     use event_replay_core::source::{ChangeLog, ChangeLogs, ColumnPath, SchemaChangeLog};
 
     #[cfg(any(feature = "bigquery", feature = "duckdb"))]
-    type Probed = (&'static str, Option<ColumnPath>, Option<ColumnPath>);
+    type Probed = (&'static str, String, Option<ColumnPath>, Option<ColumnPath>);
 
     #[cfg(any(feature = "bigquery", feature = "duckdb"))]
     fn probe<C: ChangeLogs>(logs: C) -> Probed {
         (
             std::any::type_name::<C>(),
+            logs.schema_changes().topic(),
             logs.schema_changes().envelope(),
             logs.row_changes().envelope(),
         )
@@ -109,7 +112,8 @@ mod tests {
 
     #[cfg(feature = "duckdb")]
     #[test]
-    fn a_duckdb_fn_is_called_with_the_logs_of_the_dialect_under_the_value_of_each_record() {
+    fn a_duckdb_fn_is_called_with_the_logs_of_the_dialect_on_the_prefix_under_the_value_of_each_record()
+     {
         struct Probe;
 
         impl DuckDbChangeLogsFn for Probe {
@@ -127,17 +131,19 @@ mod tests {
         let value = Some(ColumnPath::from("value"));
 
         assert_eq!(
-            Config::of(Dialect::MySql).with_duckdb_change_logs(Probe),
+            Config::of(Dialect::MySql).with_duckdb_change_logs("mysql", Probe),
             (
                 std::any::type_name::<Debezium<MySql>>(),
+                "mysql".to_owned(),
                 value.clone(),
                 value.clone()
             )
         );
         assert_eq!(
-            Config::of(Dialect::Postgres).with_duckdb_change_logs(Probe),
+            Config::of(Dialect::Postgres).with_duckdb_change_logs("postgres", Probe),
             (
                 std::any::type_name::<Debezium<Postgres>>(),
+                "postgres".to_owned(),
                 value.clone(),
                 value
             )
@@ -146,7 +152,7 @@ mod tests {
 
     #[cfg(feature = "bigquery")]
     #[test]
-    fn a_bigquery_fn_is_called_with_the_logs_of_the_dialect_at_the_top_of_each_row() {
+    fn a_bigquery_fn_is_called_with_the_logs_of_the_dialect_on_the_prefix_at_the_top_of_each_row() {
         struct Probe;
 
         impl BigQueryChangeLogsFn for Probe {
@@ -165,12 +171,22 @@ mod tests {
         }
 
         assert_eq!(
-            Config::of(Dialect::MySql).with_bigquery_change_logs(Probe),
-            (std::any::type_name::<Debezium<MySql>>(), None, None)
+            Config::of(Dialect::MySql).with_bigquery_change_logs("mysql", Probe),
+            (
+                std::any::type_name::<Debezium<MySql>>(),
+                "mysql".to_owned(),
+                None,
+                None
+            )
         );
         assert_eq!(
-            Config::of(Dialect::Postgres).with_bigquery_change_logs(Probe),
-            (std::any::type_name::<Debezium<Postgres>>(), None, None)
+            Config::of(Dialect::Postgres).with_bigquery_change_logs("postgres", Probe),
+            (
+                std::any::type_name::<Debezium<Postgres>>(),
+                "postgres".to_owned(),
+                None,
+                None
+            )
         );
     }
 
