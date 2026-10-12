@@ -174,7 +174,7 @@ impl<L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Position> for Snapsh
         _: &W,
         event: &TableCreated<'_>,
     ) -> Result<(), UnbuildableArtifact> {
-        if event.origin().is_logged_from_start() {
+        if event.appearance().is_logged_from_start() {
             self.base = Base::Captured;
         }
 

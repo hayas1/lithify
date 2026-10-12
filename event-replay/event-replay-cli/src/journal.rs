@@ -66,7 +66,7 @@ impl<P> SchemaChangeListener<P> for Journal {
     fn table_created(&mut self, _: &(), event: &TableCreated<'_>) -> Result<(), Infallible> {
         self.table(format!(
             "{} {} ({} columns, key {:?})",
-            event.origin(),
+            event.appearance(),
             event.table().id(),
             event.table().columns().count(),
             event.table().primary_key().collect::<Vec<_>>()

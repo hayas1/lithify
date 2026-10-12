@@ -128,13 +128,13 @@ impl<P> SchemaChangeListener<P> for () {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Origin {
+pub enum Appearance {
     Created,
     Captured,
     Discovered,
 }
 
-impl fmt::Display for Origin {
+impl fmt::Display for Appearance {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Created => formatter.write_str("created"),
@@ -144,7 +144,7 @@ impl fmt::Display for Origin {
     }
 }
 
-impl Origin {
+impl Appearance {
     pub fn is_logged_from_start(&self) -> bool {
         match self {
             Self::Created | Self::Captured => true,
@@ -162,7 +162,7 @@ impl Origin {
 
 pub struct TableCreated<'a> {
     table: &'a TableModel,
-    origin: Origin,
+    appearance: Appearance,
 }
 
 impl<'a> TableCreated<'a> {
@@ -170,8 +170,8 @@ impl<'a> TableCreated<'a> {
         self.table
     }
 
-    pub fn origin(&self) -> Origin {
-        self.origin
+    pub fn appearance(&self) -> Appearance {
+        self.appearance
     }
 }
 
@@ -500,7 +500,7 @@ impl<P: Position> CatalogModel<P> {
         for table in change.tables() {
             match table {
                 TableChange::Created(table) => {
-                    self.create(context, change, table, Origin::of(change), listener)?
+                    self.create(context, change, table, Appearance::of(change), listener)?
                 }
                 TableChange::Renamed { from, to } => {
                     self.rename(context, change, from, to, listener)?
@@ -532,10 +532,10 @@ impl<P: Position> CatalogModel<P> {
         context: &L::Context,
         change: &SchemaChange<P>,
         table: &TableModel,
-        origin: Origin,
+        appearance: Appearance,
         listener: &mut L,
     ) -> Result<(), L::Error> {
-        TableEvent::TableCreated(TableCreated { table, origin }).accept(context, listener)?;
+        TableEvent::TableCreated(TableCreated { table, appearance }).accept(context, listener)?;
         self.remember(change, table);
 
         Ok(())
@@ -617,7 +617,7 @@ impl<P: Position> CatalogModel<P> {
         listener: &mut L,
     ) -> Result<(), L::Error> {
         let Some(before) = self.tables.get(after.id()).cloned() else {
-            return self.create(context, change, after, Origin::Discovered, listener);
+            return self.create(context, change, after, Appearance::Discovered, listener);
         };
         let alterations = Alteration::between(&before, after);
         Alteration::warn_of_unread_rename(&alterations, after.id(), change);
@@ -1889,59 +1889,63 @@ mod tests {
     }
 
     #[derive(Debug, Default)]
-    struct Origins {
-        told: Vec<(TableId, Origin)>,
+    struct Appearances {
+        told: Vec<(TableId, Appearance)>,
     }
 
-    impl SchemaChangeListener<Offset> for Origins {
+    impl SchemaChangeListener<Offset> for Appearances {
         type Context = ();
         type Error = Infallible;
 
         fn table_created(&mut self, _: &(), event: &TableCreated<'_>) -> Result<(), Infallible> {
-            self.told.push((event.table().id().clone(), event.origin()));
+            self.told
+                .push((event.table().id().clone(), event.appearance()));
 
             Ok(())
         }
     }
 
-    fn origins(changes: Vec<SchemaChange<Offset>>) -> Vec<(TableId, Origin)> {
+    fn appearances(changes: Vec<SchemaChange<Offset>>) -> Vec<(TableId, Appearance)> {
         let mut catalog = CatalogModel::default();
-        let mut origins = Origins::default();
+        let mut appearances = Appearances::default();
 
         for change in &changes {
             catalog
-                .accept::<OutOfOrder, _>(&(), change, &mut origins)
+                .accept::<OutOfOrder, _>(&(), change, &mut appearances)
                 .unwrap();
         }
 
-        origins.told
+        appearances.told
     }
 
     #[test]
     fn a_table_created_at_the_source_is_announced_as_created() {
-        assert_eq!(origins(vec![created(1)]), [(customers(), Origin::Created)]);
+        assert_eq!(
+            appearances(vec![created(1)]),
+            [(customers(), Appearance::Created)]
+        );
     }
 
     #[test]
     fn a_table_the_snapshot_of_a_connector_took_is_announced_as_captured() {
         assert_eq!(
-            origins(vec![created(1).captured()]),
-            [(customers(), Origin::Captured)]
+            appearances(vec![created(1).captured()]),
+            [(customers(), Appearance::Captured)]
         );
     }
 
     #[test]
     fn a_table_first_seen_altered_is_announced_as_discovered() {
         assert_eq!(
-            origins(vec![altered(1, vec![identifier()], &["id"])]),
-            [(customers(), Origin::Discovered)]
+            appearances(vec![altered(1, vec![identifier()], &["id"])]),
+            [(customers(), Appearance::Discovered)]
         );
     }
 
     #[test]
     fn a_table_first_seen_renamed_onto_is_announced_as_discovered() {
         assert_eq!(
-            origins(vec![change(
+            appearances(vec![change(
                 1,
                 vec![
                     TableChange::Renamed {
@@ -1951,14 +1955,33 @@ mod tests {
                     TableChange::Altered(table(vec![identifier()], &["id"]).with_id(&clients())),
                 ]
             )]),
-            [(clients(), Origin::Discovered)]
+            [(clients(), Appearance::Discovered)]
         );
     }
 
     #[test]
     fn a_table_created_or_captured_is_logged_from_its_start_but_one_discovered_is_not() {
-        assert!(Origin::Created.is_logged_from_start());
-        assert!(Origin::Captured.is_logged_from_start());
-        assert!(!Origin::Discovered.is_logged_from_start());
+        assert!(Appearance::Created.is_logged_from_start());
+        assert!(Appearance::Captured.is_logged_from_start());
+        assert!(!Appearance::Discovered.is_logged_from_start());
+    }
+
+    #[test]
+    fn a_drop_of_a_table_the_catalog_never_saw_announces_nothing_yet_rejects_changes_older_than_it()
+    {
+        let mut catalog = CatalogModel::default();
+
+        let entries = accept(
+            &mut catalog,
+            change(2, vec![TableChange::Dropped(customers())]),
+        );
+
+        assert!(entries.is_empty());
+        assert_eq!(
+            catalog
+                .accept::<OutOfOrder, _>(&(), &created(1), &mut Journal::default())
+                .unwrap_err(),
+            OutOfOrder { table: customers() }
+        );
     }
 }
