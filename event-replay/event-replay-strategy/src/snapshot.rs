@@ -169,14 +169,15 @@ impl<'a, L: RowChangeLog, W: Warehouse> Snapshot<'a, L, W> {
     }
 
     fn fill(warehouse: &W, column: &ColumnModel) -> Result<SqlString, UnbuildableArtifact> {
-        Ok(SqlString::from(format!(
-            "CAST({} AS {})",
-            column
-                .default_value()
-                .map(|default| warehouse.literal(default))
-                .unwrap_or_else(|| SqlString::from("NULL")),
-            warehouse.column_type(column.column_type())?,
-        )))
+        match column.default_value() {
+            Some(default) => {
+                Ok(warehouse.cast_or_null(&warehouse.literal(default), column.column_type())?)
+            }
+            None => Ok(SqlString::from(format!(
+                "CAST(NULL AS {})",
+                warehouse.column_type(column.column_type())?
+            ))),
+        }
     }
 
     fn with(folding: &Folding, relations: &[(SqlString, SqlString)]) -> SqlString {
@@ -531,6 +532,17 @@ mod tests {
                 self.column_type(column_type)?
             )))
         }
+
+        fn cast_or_null(
+            &self,
+            expression: &SqlString,
+            column_type: &ColumnType,
+        ) -> Result<SqlString, UnsupportedColumn> {
+            Ok(SqlString::from(format!(
+                "TRY_CAST({expression} AS {})",
+                self.column_type(column_type)?
+            )))
+        }
     }
 
     struct Lake;
@@ -564,6 +576,14 @@ mod tests {
             column_type: &ColumnType,
         ) -> Result<SqlString, UnsupportedColumn> {
             Engine.read(expression, column_type)
+        }
+
+        fn cast_or_null(
+            &self,
+            expression: &SqlString,
+            column_type: &ColumnType,
+        ) -> Result<SqlString, UnsupportedColumn> {
+            Engine.cast_or_null(expression, column_type)
         }
     }
     fn column(name: &str, column_type: ColumnType) -> ColumnModel {
@@ -815,7 +835,7 @@ mod tests {
             "  SELECT\n",
             "    \"id\" AS \"id\",\n",
             "    \"name\" AS \"name\",\n",
-            "    CAST('none' AS TEXT) AS \"email\"\n",
+            "    TRY_CAST('none' AS TEXT) AS \"email\"\n",
             "  FROM \"era_1\"\n",
             "),\n",
         )));

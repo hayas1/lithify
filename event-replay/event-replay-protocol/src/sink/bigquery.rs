@@ -94,6 +94,17 @@ impl Warehouse for BigQueryWarehouse {
         }
     }
 
+    fn cast_or_null(
+        &self,
+        expression: &SqlString,
+        column_type: &ColumnType,
+    ) -> Result<SqlString, UnsupportedColumn> {
+        Ok(SqlString::from(format!(
+            "SAFE_CAST({expression} AS {})",
+            self.column_type(column_type)?
+        )))
+    }
+
     fn read(
         &self,
         expression: &SqlString,
@@ -128,6 +139,19 @@ mod tests {
         bigquery()
             .read(&SqlString::from("`after`.`amount`"), &column_type)
             .unwrap()
+    }
+
+    #[test]
+    fn a_value_that_cannot_take_the_type_of_its_column_is_cast_into_null() {
+        assert_eq!(
+            bigquery()
+                .cast_or_null(
+                    &SqlString::from("'CURRENT_TIMESTAMP'"),
+                    &ColumnType::Timestamp
+                )
+                .unwrap(),
+            "SAFE_CAST('CURRENT_TIMESTAMP' AS DATETIME)"
+        );
     }
 
     #[test]

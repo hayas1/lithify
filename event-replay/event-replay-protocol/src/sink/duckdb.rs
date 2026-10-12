@@ -70,6 +70,17 @@ impl Warehouse for DuckDbWarehouse {
         }
     }
 
+    fn cast_or_null(
+        &self,
+        expression: &SqlString,
+        column_type: &ColumnType,
+    ) -> Result<SqlString, UnsupportedColumn> {
+        Ok(SqlString::from(format!(
+            "TRY_CAST({expression} AS {})",
+            self.column_type(column_type)?
+        )))
+    }
+
     fn read(
         &self,
         expression: &SqlString,
@@ -106,6 +117,19 @@ mod tests {
         DuckDbWarehouse::default()
             .read(&SqlString::from("\"after\".\"amount\""), &column_type)
             .unwrap()
+    }
+
+    #[test]
+    fn a_value_that_cannot_take_the_type_of_its_column_is_cast_into_null() {
+        assert_eq!(
+            DuckDbWarehouse::default()
+                .cast_or_null(
+                    &SqlString::from("'CURRENT_TIMESTAMP'"),
+                    &ColumnType::Timestamp
+                )
+                .unwrap(),
+            "TRY_CAST('CURRENT_TIMESTAMP' AS TIMESTAMP)"
+        );
     }
 
     #[test]

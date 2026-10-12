@@ -428,6 +428,51 @@ fn a_table_renamed_within_the_window_is_snapshotted_under_its_new_name_with_ever
     );
 }
 
+const STAMPED: &str = "CREATE SCHEMA ddl;
+    CREATE TABLE ddl.shop AS SELECT * FROM (VALUES
+      ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL}, 'ts_ms': 0::BIGINT,
+        'ddl': 'CREATE TABLE people (id BIGINT)',
+        'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
+          'table': {'primaryKeyColumnNames': ['id'], 'columns': [
+            {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
+             'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]}),
+      ({'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL}, 'ts_ms': 5::BIGINT,
+        'ddl': 'ALTER TABLE people ADD COLUMN seen_at DATETIME DEFAULT CURRENT_TIMESTAMP',
+        'tableChanges': [{'type': 'ALTER', 'id': '\"shop\".\"people\"',
+          'table': {'primaryKeyColumnNames': ['id'], 'columns': [
+            {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
+             'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL},
+            {'name': 'seen_at', 'typeName': 'DATETIME', 'position': 2, 'optional': true,
+             'defaultValueExpression': 'CURRENT_TIMESTAMP', 'length': NULL, 'scale': NULL}]}}]})
+    ) AS t(value);
+    CREATE SCHEMA cdc;
+    CREATE TABLE cdc.people AS SELECT * FROM (VALUES
+      ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 2::BIGINT},
+        'before': NULL::STRUCT(id BIGINT, seen_at BIGINT), 'after': {'id': 1::BIGINT, 'seen_at': NULL::BIGINT}})
+    ) AS t(value)";
+
+#[test]
+fn a_column_added_with_a_default_no_literal_spells_is_filled_with_null_rather_than_failing() {
+    let client = DuckDbClient::new(
+        Connection::open_in_memory().unwrap(),
+        DuckDbWarehouse::default(),
+    );
+    client.execute(&SqlString::from(STAMPED)).unwrap();
+
+    replay(
+        &client,
+        &Window::new(RecordedAt::from(0), RecordedAt::from(10)),
+    );
+
+    assert_eq!(
+        rows(
+            &client,
+            "SELECT concat_ws(' ', id, coalesce(seen_at::VARCHAR, 'unknown')) FROM shop_snapshot.people ORDER BY id"
+        ),
+        ["1 unknown"]
+    );
+}
+
 struct Shelves;
 
 impl Placement for Shelves {

@@ -87,6 +87,12 @@ pub trait Warehouse {
         column_type: &ColumnType,
     ) -> Result<SqlString, UnsupportedColumn>;
 
+    fn cast_or_null(
+        &self,
+        expression: &SqlString,
+        column_type: &ColumnType,
+    ) -> Result<SqlString, UnsupportedColumn>;
+
     fn literal(&self, text: &str) -> SqlString {
         SqlString::from(format!("'{}'", text.replace('\'', "''")))
     }
@@ -181,6 +187,14 @@ mod tests {
         }
 
         fn read(
+            &self,
+            _: &SqlString,
+            column_type: &ColumnType,
+        ) -> Result<SqlString, UnsupportedColumn> {
+            Err(UnsupportedColumn::new(column_type))
+        }
+
+        fn cast_or_null(
             &self,
             _: &SqlString,
             column_type: &ColumnType,
