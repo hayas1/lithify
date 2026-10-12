@@ -2,19 +2,13 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 
-use google_cloud_bigquery::error::RowError;
-use google_cloud_bigquery::query::Row;
 use lithify_config::Pipeline;
 use lithify_config::infra::{Sink, Source};
-use lithify_core::listener::CatalogModel;
-use lithify_core::source::{ChangeLogs, SchemaChangeLog, SchemaChangeStream};
 use lithify_core::sql::SqlString;
 use lithify_core::window::Window;
 use lithify_protocol::sink::bigquery;
-use lithify_protocol::sink::bigquery::client::{
-    BigQueryCapture, BigQueryChangeLogsFn, BigQueryClient,
-};
-use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbChangeLogsFn, DuckDbClient};
+use lithify_protocol::sink::bigquery::client::{BigQueryCapture, BigQueryClient};
+use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbClient};
 use lithify_protocol::sink::duckdb::config::Store;
 use lithify_protocol::sink::duckdb::store::ObjectStore;
 
@@ -47,12 +41,6 @@ impl Run {
             sink,
             onto,
         }
-    }
-
-    pub fn report(&self) -> Result<Journal, Unrunnable> {
-        self.each_sink(|sink, source, topic_prefix, journal| {
-            self.read(sink, source, topic_prefix, journal)
-        })
     }
 
     pub fn plan(&self, into: &Path) -> Result<Journal, Unrunnable> {
@@ -161,47 +149,6 @@ impl Run {
         Ok(BigQueryClient::open(config, sink.change_log())?)
     }
 
-    fn read(
-        &self,
-        sink: &Sink<Warehouse>,
-        source: &Source<Capture>,
-        topic_prefix: &str,
-        journal: &mut Journal,
-    ) -> Result<(), Unrunnable> {
-        match sink.warehouse() {
-            Warehouse::DuckDb(store) => {
-                self.read_duckdb(&self.duckdb(sink, store)?, topic_prefix, source, journal)
-            }
-            Warehouse::BigQuery(config) => {
-                self.read_bigquery(&self.bigquery(sink, config)?, topic_prefix, source, journal)
-            }
-        }
-    }
-
-    fn read_duckdb(
-        &self,
-        client: &DuckDbClient,
-        topic_prefix: &str,
-        source: &Source<Capture>,
-        journal: &mut Journal,
-    ) -> Result<(), Unrunnable> {
-        source
-            .capture()
-            .with_duckdb_change_logs(topic_prefix, Catalog::new(client, &self.window, journal))
-    }
-
-    fn read_bigquery(
-        &self,
-        client: &BigQueryClient,
-        topic_prefix: &str,
-        source: &Source<Capture>,
-        journal: &mut Journal,
-    ) -> Result<(), Unrunnable> {
-        source
-            .capture()
-            .with_bigquery_change_logs(topic_prefix, Catalog::new(client, &self.window, journal))
-    }
-
     fn sinks<'a>(
         &self,
         pipeline: &'a Pipeline<Capture, Warehouse>,
@@ -218,57 +165,5 @@ impl Run {
             (true, Some(named)) => Err(Unrunnable::UnknownSink(named.clone())),
             _ => Ok(sinks),
         }
-    }
-}
-
-struct Catalog<'a, C> {
-    reader: &'a C,
-    window: &'a Window,
-    journal: &'a mut Journal,
-}
-
-impl<'a, C> Catalog<'a, C> {
-    fn new(reader: &'a C, window: &'a Window, journal: &'a mut Journal) -> Self {
-        Self {
-            reader,
-            window,
-            journal,
-        }
-    }
-}
-
-impl DuckDbChangeLogsFn for Catalog<'_, DuckDbClient> {
-    type Output = Result<(), Unrunnable>;
-
-    fn call_duckdb<C>(self, logs: C) -> Self::Output
-    where
-        C: ChangeLogs,
-        <C::Schema as SchemaChangeLog>::Record: duckdb::types::FromSql,
-    {
-        self.reader.catalog::<Unrunnable, Journal>(
-            &(),
-            logs.schema_changes(),
-            self.window,
-            &mut CatalogModel::default(),
-            self.journal,
-        )
-    }
-}
-
-impl BigQueryChangeLogsFn for Catalog<'_, BigQueryClient> {
-    type Output = Result<(), Unrunnable>;
-
-    fn call_bigquery<C>(self, logs: C) -> Self::Output
-    where
-        C: ChangeLogs,
-        <C::Schema as SchemaChangeLog>::Record: TryFrom<Row, Error = RowError>,
-    {
-        self.reader.catalog::<Unrunnable, Journal>(
-            &(),
-            logs.schema_changes(),
-            self.window,
-            &mut CatalogModel::default(),
-            self.journal,
-        )
     }
 }

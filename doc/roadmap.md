@@ -61,7 +61,7 @@ The change log only replays if the source and sink connectors write it the way a
 
 | Support | Why | Status | Target |
 | --- | --- | --- | --- |
-| Execute artifacts | Only reporting schema changes and writing planned statements is possible from the command line | Partial: dry run only | |
+| Execute artifacts | Only writing planned statements (`lithify run --dry-run`) is possible from the command line | Partial: dry run only | |
 | Record runs as a table | Which window was built when, by which version, with what outcome, so the next run, a backfill and an audit read the same record | Not started | |
 | Resume from the last built window | A daily run picks its window from what was built rather than from the clock, and a missed day is caught up | Not started | |
 | Backfill a range | Rebuild a range of windows in order, each on top of the one before it | Not started | |
