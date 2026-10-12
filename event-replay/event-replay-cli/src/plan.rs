@@ -15,7 +15,7 @@ use event_replay_core::sql::SqlString;
 use event_replay_core::window::Window;
 use event_replay_protocol::sink::bigquery::client::{BigQueryChangeLogsFn, BigQueryClient};
 use event_replay_protocol::sink::duckdb::client::{DuckDbChangeLogsFn, DuckDbClient};
-use event_replay_strategy::snapshot::{Base, Snapshot};
+use event_replay_strategy::snapshot::{Base, Placement, Snapshot};
 
 use crate::pipeline::{Capture, Warehouse};
 use crate::unreplayable::Unreplayable;
@@ -61,19 +61,17 @@ impl<'a, K> SnapshotPlan<'a, K> {
         K: SchemaChangeStream<C::Schema> + WarehouseClient,
         <K as SchemaChangeStream<C::Schema>>::Error: Into<Unreplayable>,
     {
-        let shard =
-            DateTime::<Utc>::try_from(*self.window.from()).map_err(Unreplayable::Unshardable)?;
+        let placement = SinkPlacement {
+            sink: self.sink,
+            source: self.source,
+            shard: DateTime::<Utc>::try_from(*self.window.from())
+                .map_err(Unreplayable::Unshardable)?,
+        };
         let mut tracker = EraTracker::new(self.window.clone(), |table: &TableId| {
-            let changes = self
-                .sink
-                .row_changes(self.source, table)
-                .ok_or_else(|| UnbuildableArtifact::WithoutChangeLog(table.clone()))?;
-
             Ok::<_, UnbuildableArtifact>(Snapshot::new(
                 logs.row_changes(),
+                &placement,
                 table.clone(),
-                changes,
-                self.sink.replay().target(Artifact::Snapshot, table, shard),
                 self.base(table),
             ))
         });
@@ -87,6 +85,24 @@ impl<'a, K> SnapshotPlan<'a, K> {
         let snapshots = tracker.finish(self.client.warehouse(), &catalog)?;
 
         Ok(artifact::Artifact::statements(&snapshots)?)
+    }
+}
+
+struct SinkPlacement<'a> {
+    sink: &'a Sink<Warehouse>,
+    source: &'a Source<Capture>,
+    shard: DateTime<Utc>,
+}
+
+impl Placement for SinkPlacement<'_> {
+    fn change_log(&self, table: &TableId) -> Option<TablePath> {
+        self.sink.row_changes(self.source, table)
+    }
+
+    fn snapshot(&self, table: &TableId) -> TablePath {
+        self.sink
+            .replay()
+            .target(Artifact::Snapshot, table, self.shard)
     }
 }
 

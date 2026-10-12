@@ -11,6 +11,12 @@ use event_replay_core::sink::{TablePath, Warehouse};
 use event_replay_core::source::RowChangeLog;
 use event_replay_core::sql::SqlString;
 
+pub trait Placement {
+    fn change_log(&self, table: &TableId) -> Option<TablePath>;
+
+    fn snapshot(&self, table: &TableId) -> TablePath;
+}
+
 pub enum Base {
     Captured,
     Shard(TablePath),
@@ -32,7 +38,7 @@ impl Base {
             Self::Captured => Ok(SqlString::from(format!(
                 "  SELECT\n{}\n  FROM {}\n  WHERE {} = 'r'\n{}",
                 snapshot.reads(warehouse, table, "    ")?,
-                warehouse.change_log_ref(&snapshot.cdc),
+                snapshot.change_log(warehouse, table.id())?,
                 warehouse.path(&snapshot.log.operation()),
                 snapshot.latest(warehouse, table),
             ))),
@@ -42,9 +48,8 @@ impl Base {
 
 pub struct Snapshot<'a, L, W> {
     log: &'a L,
+    placement: &'a dyn Placement,
     table: TableId,
-    cdc: TablePath,
-    target: TablePath,
     base: Base,
     folding: Option<Folding>,
     relations: Vec<(SqlString, SqlString)>,
@@ -58,12 +63,11 @@ struct Folding {
 }
 
 impl<'a, L: RowChangeLog, W: Warehouse> Snapshot<'a, L, W> {
-    pub fn new(log: &'a L, table: TableId, cdc: TablePath, target: TablePath, base: Base) -> Self {
+    pub fn new(log: &'a L, placement: &'a dyn Placement, table: TableId, base: Base) -> Self {
         Self {
             log,
+            placement,
             table,
-            cdc,
-            target,
             base,
             folding: None,
             relations: Vec::new(),
@@ -87,12 +91,25 @@ impl<'a, L: RowChangeLog, W: Warehouse> Snapshot<'a, L, W> {
         let base = self.base.select(warehouse, self, table)?;
 
         self.relations.push((warehouse.identifier("base"), base));
-        self.folding = Some(Folding {
-            namespace: warehouse.create_namespace(self.target.namespace()),
-            target: warehouse.table_ref(&self.target),
-        });
+        self.folding = Some(self.folding(warehouse));
 
         Ok(())
+    }
+
+    fn folding(&self, warehouse: &W) -> Folding {
+        let target = self.placement.snapshot(&self.table);
+
+        Folding {
+            namespace: warehouse.create_namespace(target.namespace()),
+            target: warehouse.table_ref(&target),
+        }
+    }
+
+    fn change_log(&self, warehouse: &W, table: &TableId) -> Result<SqlString, UnbuildableArtifact> {
+        self.placement
+            .change_log(table)
+            .map(|path| warehouse.change_log_ref(&path))
+            .ok_or_else(|| UnbuildableArtifact::WithoutChangeLog(table.clone()))
     }
 
     fn previous(&self) -> Result<SqlString, UnbuildableArtifact> {
@@ -115,7 +132,8 @@ impl<'a, L: RowChangeLog, W: Warehouse> Snapshot<'a, L, W> {
         let folded = warehouse.identifier(&format!("era_{}", self.steps));
         let fold = self.fold(warehouse, era.table(), &previous, &changes)?;
 
-        self.relations.push((changes, self.changes(warehouse, era)));
+        self.relations
+            .push((changes, self.changes(warehouse, era)?));
         self.relations.push((folded, fold));
 
         Ok(())
@@ -178,16 +196,16 @@ impl<'a, L: RowChangeLog, W: Warehouse> Snapshot<'a, L, W> {
         ))
     }
 
-    fn changes(&self, warehouse: &W, era: &Era) -> SqlString {
+    fn changes(&self, warehouse: &W, era: &Era) -> Result<SqlString, UnbuildableArtifact> {
         let recorded_at = warehouse.path(&self.log.recorded_at());
 
-        SqlString::from(format!(
+        Ok(SqlString::from(format!(
             "  SELECT *\n  FROM {}\n  WHERE {recorded_at} >= {} AND {recorded_at} < {}\n{}",
-            warehouse.change_log_ref(&self.cdc),
+            self.change_log(warehouse, era.table().id())?,
             era.window().from().milliseconds_since_epoch(),
             era.window().to().milliseconds_since_epoch(),
             self.latest(warehouse, era.table()),
-        ))
+        )))
     }
 
     fn fold(
@@ -607,6 +625,21 @@ mod tests {
         }
     }
 
+    struct Shop;
+
+    impl Placement for Shop {
+        fn change_log(&self, table: &TableId) -> Option<TablePath> {
+            Some(TablePath::new(
+                "mysql_shop_cdc",
+                &format!("mysql_{}_{}", table.schema(), table.table()),
+            ))
+        }
+
+        fn snapshot(&self, table: &TableId) -> TablePath {
+            TablePath::new("mysql_shop", &format!("{}_20260920", table.table()))
+        }
+    }
+
     fn snapshots_in<W: Warehouse>(
         warehouse: &W,
         created: TableModel,
@@ -617,15 +650,7 @@ mod tests {
         catalog.accept::<OutOfOrder, _>(&(), &change(1, TableChange::Created(created)), &mut ())?;
         let mut tracker = EraTracker::new(
             Window::new(RecordedAt::from(100), RecordedAt::from(200)),
-            |table: &TableId| {
-                Ok::<_, Untold>(Snapshot::new(
-                    &Log,
-                    table.clone(),
-                    TablePath::new("mysql_shop_cdc", "mysql_shop_customers"),
-                    TablePath::new("mysql_shop", "customers_20260920"),
-                    base(),
-                ))
-            },
+            |table: &TableId| Ok::<_, Untold>(Snapshot::new(&Log, &Shop, table.clone(), base())),
         );
         for change in &within {
             catalog.accept::<Untold, _>(warehouse, change, &mut tracker)?;
@@ -1277,13 +1302,47 @@ mod tests {
         );
     }
 
+    struct Unlogged;
+
+    impl Placement for Unlogged {
+        fn change_log(&self, _: &TableId) -> Option<TablePath> {
+            None
+        }
+
+        fn snapshot(&self, table: &TableId) -> TablePath {
+            Shop.snapshot(table)
+        }
+    }
+
+    #[test]
+    fn a_table_whose_change_log_landed_nowhere_cannot_be_snapshotted() {
+        let mut snapshot: Snapshot<'_, Log, Engine> = Snapshot::new(
+            &Log,
+            &Unlogged,
+            TableId::new("shop", "customers"),
+            Base::Shard(TablePath::new("mysql_shop", "customers_20260919")),
+        );
+
+        assert_eq!(
+            SchemaChangeListener::<Offset>::era_boundary(
+                &mut snapshot,
+                &Engine,
+                &Era::new(
+                    customers(),
+                    Window::new(RecordedAt::from(100), RecordedAt::from(200))
+                ),
+            )
+            .unwrap_err(),
+            UnbuildableArtifact::WithoutChangeLog(TableId::new("shop", "customers"))
+        );
+    }
+
     #[test]
     fn a_snapshot_told_of_no_era_cannot_be_built() {
         let snapshot: Snapshot<'_, Log, Engine> = Snapshot::new(
             &Log,
+            &Shop,
             TableId::new("shop", "customers"),
-            TablePath::new("mysql_shop_cdc", "mysql_shop_customers"),
-            TablePath::new("mysql_shop", "customers_20260920"),
             Base::Captured,
         );
 

@@ -6,7 +6,7 @@ use event_replay_core::position::RecordedAt;
 use event_replay_core::sink::{TablePath, Warehouse};
 use event_replay_core::window::Window;
 use event_replay_protocol::{BigQueryWarehouse, Debezium, DuckDbWarehouse, MySql, MySqlPosition};
-use event_replay_strategy::snapshot::{Base, Snapshot};
+use event_replay_strategy::snapshot::{Base, Placement, Snapshot};
 
 fn column(name: &str, type_name: &str, column_type: ColumnType) -> ColumnModel {
     ColumnModel::new(name, type_name, column_type, false, None)
@@ -28,14 +28,28 @@ fn customers() -> TableModel {
     )
 }
 
+struct Shop;
+
+impl Placement for Shop {
+    fn change_log(&self, table: &TableId) -> Option<TablePath> {
+        Some(TablePath::new(
+            "mysql_shop_cdc",
+            &format!("mysql_{}_{}", table.schema(), table.table()),
+        ))
+    }
+
+    fn snapshot(&self, table: &TableId) -> TablePath {
+        TablePath::new("mysql_shop", &format!("{}_20260920", table.table()))
+    }
+}
+
 fn statements<W: Warehouse>(warehouse: &W) -> String {
     let log = Debezium::new(MySql);
     let window = Window::new(RecordedAt::from(0), RecordedAt::from(4102444800000));
     let mut snapshot: Snapshot<'_, _, W> = Snapshot::new(
         &log,
+        &Shop,
         customers().id().clone(),
-        TablePath::new("mysql_shop_cdc", "mysql_shop_customers"),
-        TablePath::new("mysql_shop", "customers_20260920"),
         match std::env::args().nth(2).as_deref() {
             Some(shard) => Base::Shard(TablePath::new("mysql_shop", shard)),
             None => Base::Captured,

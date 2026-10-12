@@ -19,7 +19,7 @@ use event_replay_protocol::sink::duckdb::client::{
     DuckDbCapture, DuckDbChangeLogsFn, DuckDbClient,
 };
 use event_replay_protocol::sink::duckdb::store::ObjectStore;
-use event_replay_strategy::snapshot::{Base, Snapshot};
+use event_replay_strategy::snapshot::{Base, Placement, Snapshot};
 
 use crate::row::{Cell, Row, Rows};
 
@@ -276,6 +276,16 @@ struct Fold<'a> {
     window: &'a Window,
 }
 
+impl Placement for Fold<'_> {
+    fn change_log(&self, _: &TableId) -> Option<TablePath> {
+        Some(self.changes.clone())
+    }
+
+    fn snapshot(&self, _: &TableId) -> TablePath {
+        self.into.clone()
+    }
+}
+
 impl DuckDbChangeLogsFn for Fold<'_> {
     type Output = Result<(), Unbuildable>;
 
@@ -287,9 +297,8 @@ impl DuckDbChangeLogsFn for Fold<'_> {
         let mut tracker = EraTracker::new(self.window.clone(), |table: &TableId| {
             Ok::<_, Unbuildable>(Snapshot::new(
                 logs.row_changes(),
+                &self,
                 table.clone(),
-                self.changes.clone(),
-                self.into.clone(),
                 Base::Captured,
             ))
         });

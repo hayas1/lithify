@@ -12,7 +12,7 @@ use event_replay_core::sql::SqlString;
 use event_replay_core::window::Window;
 use event_replay_protocol::sink::duckdb::client::DuckDbClient;
 use event_replay_protocol::{Debezium, DuckDbWarehouse, MySql, MySqlPosition};
-use event_replay_strategy::snapshot::{Base, Snapshot};
+use event_replay_strategy::snapshot::{Base, Placement, Snapshot};
 
 const CHANGE_LOG: &str = "CREATE SCHEMA cdc;
     CREATE TABLE cdc.people AS SELECT * FROM (VALUES
@@ -46,13 +46,7 @@ fn a_snapshot_holds_each_key_as_the_change_log_last_left_it() {
     client.execute(&SqlString::from(CHANGE_LOG)).unwrap();
     let log = Debezium::under("value", MySql);
     let window = Window::new(RecordedAt::from(0), RecordedAt::from(10));
-    let mut snapshot = Snapshot::new(
-        &log,
-        people().id().clone(),
-        TablePath::new("cdc", "people"),
-        TablePath::new("shop_snapshot", "people"),
-        Base::Captured,
-    );
+    let mut snapshot = Snapshot::new(&log, &Shelves, people().id().clone(), Base::Captured);
     SchemaChangeListener::<MySqlPosition>::era_boundary(
         &mut snapshot,
         client.warehouse(),
@@ -119,13 +113,7 @@ fn rows(client: &DuckDbClient, query: &str) -> Vec<String> {
 fn replay(client: &DuckDbClient, window: &Window) {
     let log = Debezium::under("value", MySql);
     let mut tracker = EraTracker::new(window.clone(), |table: &TableId| {
-        Ok::<_, Unbuilt>(Snapshot::new(
-            &log,
-            table.clone(),
-            TablePath::new("cdc", table.table()),
-            TablePath::new("shop_snapshot", table.table()),
-            Base::Captured,
-        ))
+        Ok::<_, Unbuilt>(Snapshot::new(&log, &Shelves, table.clone(), Base::Captured))
     });
     let catalog = client
         .replay::<Unbuilt, _>(
@@ -376,6 +364,18 @@ fn a_column_renamed_within_the_window_keeps_the_values_of_the_rows_last_changed_
         ),
         ["1 Alicia Liddell", "2 Bob"]
     );
+}
+
+struct Shelves;
+
+impl Placement for Shelves {
+    fn change_log(&self, table: &TableId) -> Option<TablePath> {
+        Some(TablePath::new("cdc", table.table()))
+    }
+
+    fn snapshot(&self, table: &TableId) -> TablePath {
+        TablePath::new("shop_snapshot", table.table())
+    }
 }
 
 #[derive(Debug)]
