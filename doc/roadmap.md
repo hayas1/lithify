@@ -1,6 +1,6 @@
 # Roadmap
 
-What event-replay runs into once it leaves the playground, and how far it has come in handling each.
+What lithify runs into once it leaves the playground, and how far it has come in handling each.
 
 ## Hazards
 
@@ -25,7 +25,7 @@ Status is one of:
 
 ## Operations
 
-What running event-replay in production needs beyond replaying a change log.
+What running lithify in production needs beyond replaying a change log.
 
 Status is one of:
 

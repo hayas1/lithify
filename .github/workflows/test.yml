@@ -51,7 +51,7 @@ jobs:
     timeout-minutes: 15
     defaults:
       run:
-        working-directory: event-replay
+        working-directory: lithify
     steps:
       - uses: actions/checkout@v5
 

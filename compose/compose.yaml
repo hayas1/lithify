@@ -1,4 +1,4 @@
-name: event-replay
+name: lithify
 
 x-register-connectors: &register-connectors
   image: curlimages/curl:8.16.0

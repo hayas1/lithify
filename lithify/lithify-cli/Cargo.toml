@@ -1,0 +1,32 @@
+[package]
+name = "lithify-cli"
+version.workspace = true
+description.workspace = true
+authors.workspace = true
+edition.workspace = true
+repository.workspace = true
+license-file.workspace = true
+readme.workspace = true
+
+[lib]
+name = "lithify_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lithify"
+path = "src/main.rs"
+
+[dependencies]
+chrono = { workspace = true }
+clap = { workspace = true }
+duckdb = { workspace = true }
+lithify-config = { workspace = true }
+lithify-core = { workspace = true }
+lithify-protocol = { workspace = true, features = ["bigquery", "duckdb"] }
+lithify-strategy = { workspace = true }
+google-cloud-bigquery = { workspace = true }
+serde = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+toml = { workspace = true }

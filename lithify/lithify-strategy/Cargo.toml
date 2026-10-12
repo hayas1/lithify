@@ -1,0 +1,17 @@
+[package]
+name = "lithify-strategy"
+version.workspace = true
+description.workspace = true
+authors.workspace = true
+edition.workspace = true
+repository.workspace = true
+license-file.workspace = true
+readme.workspace = true
+
+[dependencies]
+chrono = { workspace = true }
+lithify-core = { workspace = true }
+
+[dev-dependencies]
+duckdb = { workspace = true }
+lithify-protocol = { workspace = true, features = ["duckdb"] }

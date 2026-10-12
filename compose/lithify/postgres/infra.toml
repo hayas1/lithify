@@ -1,0 +1,23 @@
+[default]
+source.capture.debezium.dialect = "postgres"
+sink.change_log = "postgres_shop_cdc"
+sink.replay.snapshot = "postgres_shop"
+sink.replay.history = "postgres_shop_history"
+sink.replay.shard = "%Y%m%d"
+
+[[source]]
+name = "primary"
+since = "1970-01-01T00:00:00Z"
+
+[[sink]]
+name = "warehouse"
+warehouse.bigquery.project = "local-project"
+warehouse.bigquery.endpoint = "http://bigquery-emulator:9050"
+warehouse.bigquery.credentials = "anonymous"
+
+[[sink]]
+name = "minio"
+warehouse.duckdb.s3.endpoint = "http://minio:9000"
+warehouse.duckdb.s3.region = "us-east-1"
+warehouse.duckdb.s3.bucket = "lithify"
+warehouse.duckdb.s3.format = "parquet"

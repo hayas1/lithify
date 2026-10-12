@@ -1,8 +1,9 @@
-# event-replay
+# lithify
 
-A local CDC playground: MySQL / PostgreSQL changes are captured by Debezium, published to Kafka, and sunk into analytical stores as a raw change log.
-It is the groundwork for an application that replays the change log to reproduce the source database in a sink.
-Everything the stack is made of lives in `compose/`, so the application can grow next to it. `scripts/` stays at the root because it installs clients on the developer's machine, not in the stack.
+lithify turns the change log a database leaves behind into tables a warehouse can query: a snapshot of every table at the end of a window (and, on the [roadmap](doc/roadmap.md), a history of every row), carried through the schema changes the source went through.
+Everything is built inside the warehouse from the raw change log, which is kept as it was captured, so any table can be rebuilt from it at any time.
+
+The application lives in `lithify/`. A local CDC stack to run it against lives in `compose/`: MySQL / PostgreSQL changes are captured by Debezium, published to Kafka, and sunk into analytical stores as a raw change log. `scripts/` stays at the root because it installs clients on the developer's machine, not in the stack.
 
 ```mermaid
 flowchart LR
@@ -86,7 +87,7 @@ PGPASSWORD=postgres psql -h postgres -U postgres shop -c "UPDATE shop.customers 
 bq --api=http://bigquery-emulator:9050 --project_id=local-project query --use_legacy_sql=false \
   "SELECT op, after.name, _kafka.offset FROM mysql_shop_cdc.mysql_shop_customers ORDER BY _kafka.offset"
 
-S3_ENDPOINT=http://minio:9000 S3_REGION=us-east-1 S3_BUCKET=event-replay S3_ACCESS_KEY_ID=minioadmin S3_SECRET_ACCESS_KEY=minioadmin \
+S3_ENDPOINT=http://minio:9000 S3_REGION=us-east-1 S3_BUCKET=lithify S3_ACCESS_KEY_ID=minioadmin S3_SECRET_ACCESS_KEY=minioadmin \
   duckdb -init duckdb/cdc.sql -c "SELECT op, after.name, _kafka.offset FROM cdc_events('mysql_shop_cdc', 'mysql.shop.customers')"
 ```
 

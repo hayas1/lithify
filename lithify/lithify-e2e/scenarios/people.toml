@@ -1,0 +1,48 @@
+[pipeline]
+path = "../../../compose/lithify/mysql"
+
+[source.primary]
+url = "mysql://root:root@mysql:3306/shop"
+
+[sink.minio]
+
+[setup]
+source.primary.query = [
+    "CREATE TABLE IF NOT EXISTS shop.people (id BIGINT PRIMARY KEY, name VARCHAR(64) NOT NULL, born DATE)",
+]
+
+[cleanup]
+source.primary.query = [
+    "DROP TABLE IF EXISTS shop.people",
+]
+sink.minio.query = [
+    "DROP TABLE IF EXISTS mysql_shop.people",
+]
+
+[[step]]
+name = "rows the scenario inserts"
+source.primary.query = [
+    "INSERT INTO shop.people VALUES (1, 'Alice', '1990-01-01'), (2, 'Bob', NULL), (3, 'Carol', '1985-06-15')",
+]
+build = [
+    { snapshot = { sink = "minio", source = "primary", table = "shop.people" } },
+]
+assert = [
+    { snapshot = { sink = "minio", source = "primary", table = "shop.people" } },
+]
+
+[[step]]
+name = "rows that changed and a row that went away"
+source.primary.query = [
+    "UPDATE shop.people SET name = 'Alicia' WHERE id = 1",
+    "DELETE FROM shop.people WHERE id = 2",
+]
+
+[[step]]
+name = "the snapshot after the changes"
+build = [
+    { snapshot = { sink = "minio", source = "primary", table = "shop.people" } },
+]
+assert = [
+    { snapshot = { sink = "minio", source = "primary", table = "shop.people" } },
+]
