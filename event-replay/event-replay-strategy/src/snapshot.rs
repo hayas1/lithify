@@ -3,7 +3,8 @@ use std::marker::PhantomData;
 use event_replay_core::artifact::{Artifact, UnbuildableArtifact};
 use event_replay_core::era::Era;
 use event_replay_core::listener::{
-    ColumnAdded, ColumnDropped, ColumnRetyped, PrimaryKeyChanged, SchemaChangeListener,
+    ColumnAdded, ColumnDropped, ColumnRenamed, ColumnRetyped, PrimaryKeyChanged,
+    SchemaChangeListener, TableRenamed,
 };
 use event_replay_core::model::{ColumnModel, TableId, TableModel};
 use event_replay_core::sink::{TablePath, Warehouse};
@@ -321,6 +322,37 @@ impl<P, L: RowChangeLog, W: Warehouse> SchemaChangeListener<P> for Snapshot<'_, 
         self.fold_era(warehouse, era)
     }
 
+    // TODO: follow a renamed table by reading each era from the sink table of the name the table
+    // had in it. The sink names its tables after the table id (Sink::row_changes), yet a snapshot
+    // is handed one sink table when it opens; it needs a way to name the sink table of the id the
+    // rename leads to, and the target has to be named after one of the names. Until then a rename
+    // fails the snapshot rather than losing the rows changed before it.
+    fn visit_renamed(
+        &mut self,
+        _: &W,
+        event: &TableRenamed<'_>,
+    ) -> Result<(), UnbuildableArtifact> {
+        Err(UnbuildableArtifact::Renamed(event.before().id().clone()))
+    }
+
+    fn visit_column_renamed(
+        &mut self,
+        warehouse: &W,
+        event: &ColumnRenamed<'_>,
+    ) -> Result<(), UnbuildableArtifact> {
+        self.begin(warehouse, event.before())?;
+
+        let renamed = event.column();
+        let previous = warehouse.identifier(event.previous().name());
+
+        self.carry(warehouse, event.after(), |column, name| {
+            match column.name() == renamed.name() {
+                true => Ok(previous.clone()),
+                false => Ok(name.clone()),
+            }
+        })
+    }
+
     fn visit_column_added(
         &mut self,
         warehouse: &W,
@@ -536,7 +568,19 @@ mod tests {
     }
 
     fn change(at: i64, table: TableChange) -> SchemaChange<Offset> {
-        SchemaChange::new(Offset(at as u64), RecordedAt::from(at), "", vec![table])
+        changes(at, vec![table])
+    }
+
+    fn changes(at: i64, tables: Vec<TableChange>) -> SchemaChange<Offset> {
+        SchemaChange::new(Offset(at as u64), RecordedAt::from(at), "", tables)
+    }
+
+    fn renamed(from: &str, to: &str) -> TableChange {
+        TableChange::ColumnRenamed {
+            table: TableId::new("shop", "customers"),
+            from: from.to_owned(),
+            to: to.to_owned(),
+        }
     }
 
     #[derive(Debug, PartialEq, Eq)]
@@ -1005,6 +1049,138 @@ mod tests {
             .map(drop)
             .unwrap_err(),
             Untold::Unbuildable(UnbuildableArtifact::PrimaryKeyChanged(TableId::new(
+                "shop",
+                "customers"
+            )))
+        );
+    }
+
+    #[test]
+    fn a_column_renamed_within_the_window_carries_the_rows_folded_before_it_under_its_new_name() {
+        let renamed_to = customers_with(
+            vec![
+                column("id", ColumnType::Int64),
+                column("full_name", ColumnType::Text),
+            ],
+            &["id"],
+        );
+
+        let statement = statement(snapshots(
+            customers(),
+            vec![changes(
+                150,
+                vec![
+                    renamed("name", "full_name"),
+                    TableChange::Altered(renamed_to),
+                ],
+            )],
+            || Base::Captured,
+        ));
+
+        assert!(statement.contains(concat!(
+            "\"era_2\" AS (\n",
+            "  SELECT\n",
+            "    \"id\" AS \"id\",\n",
+            "    \"name\" AS \"full_name\"\n",
+            "  FROM \"era_1\"\n",
+            "),\n",
+        )));
+        assert!(statement.contains("    CAST(\"after\".\"full_name\" AS TEXT) AS \"full_name\"\n"));
+        assert!(statement.ends_with("SELECT * FROM \"era_3\""));
+    }
+
+    #[test]
+    fn a_column_renamed_and_another_added_by_one_statement_are_carried_one_after_the_other() {
+        let reshaped = customers_with(
+            vec![
+                column("id", ColumnType::Int64),
+                column("full_name", ColumnType::Text),
+                column("email", ColumnType::Text),
+            ],
+            &["id"],
+        );
+
+        let statement = statement(snapshots(
+            customers(),
+            vec![changes(
+                150,
+                vec![renamed("name", "full_name"), TableChange::Altered(reshaped)],
+            )],
+            || Base::Captured,
+        ));
+
+        assert!(statement.contains(concat!(
+            "    \"name\" AS \"full_name\"\n",
+            "  FROM \"era_1\"\n",
+            "),\n",
+            "\"era_3\" AS (\n",
+            "  SELECT\n",
+            "    \"id\" AS \"id\",\n",
+            "    \"full_name\" AS \"full_name\",\n",
+            "    CAST(NULL AS TEXT) AS \"email\"\n",
+            "  FROM \"era_2\"\n",
+        )));
+    }
+
+    #[test]
+    fn a_renamed_key_column_keys_each_era_by_the_name_it_had_in_it() {
+        let rekeyed = customers_with(
+            vec![
+                column("customer_id", ColumnType::Int64),
+                column("name", ColumnType::Text),
+            ],
+            &["customer_id"],
+        );
+
+        let statement = statement(snapshots(
+            customers(),
+            vec![changes(
+                150,
+                vec![renamed("id", "customer_id"), TableChange::Altered(rekeyed)],
+            )],
+            || Base::Captured,
+        ));
+
+        assert!(statement.contains(concat!(
+            "  WHERE \"ts_ms\" >= 100 AND \"ts_ms\" < 150\n",
+            "  QUALIFY ROW_NUMBER() OVER (\n",
+            "    PARTITION BY COALESCE(\"after\".\"id\", \"before\".\"id\")\n",
+        )));
+        assert!(statement.contains("    \"id\" AS \"customer_id\",\n"));
+        assert!(statement.contains(concat!(
+            "  WHERE \"ts_ms\" >= 150 AND \"ts_ms\" < 200\n",
+            "  QUALIFY ROW_NUMBER() OVER (\n",
+            "    PARTITION BY COALESCE(\"after\".\"customer_id\", \"before\".\"customer_id\")\n",
+        )));
+        assert!(statement.contains(concat!(
+            "    WHERE COALESCE(\"changes_3\".\"after\".\"customer_id\", \"changes_3\".\"before\".\"customer_id\")",
+            " = \"era_2\".\"customer_id\"\n"
+        )));
+    }
+
+    #[test]
+    fn a_table_renamed_within_the_window_cannot_be_snapshotted_yet() {
+        let clients = TableId::new("shop", "clients");
+        let moved = customers().with_id(&clients);
+
+        assert_eq!(
+            snapshots(
+                customers(),
+                vec![changes(
+                    150,
+                    vec![
+                        TableChange::Renamed {
+                            from: TableId::new("shop", "customers"),
+                            to: clients,
+                        },
+                        TableChange::Altered(moved),
+                    ],
+                )],
+                || Base::Captured
+            )
+            .map(drop)
+            .unwrap_err(),
+            Untold::Unbuildable(UnbuildableArtifact::Renamed(TableId::new(
                 "shop",
                 "customers"
             )))

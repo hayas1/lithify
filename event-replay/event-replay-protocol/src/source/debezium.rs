@@ -1,6 +1,7 @@
 pub mod config;
 pub mod mysql;
 pub mod postgres;
+pub mod rename;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,8 @@ use event_replay_core::source::{
     CdcFormat, ChangeLog, ChangeLogs, ColumnPath, RowChangeLog, SchemaChangeLog,
 };
 
+use rename::RenameReader;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DebeziumFormat;
 
@@ -23,12 +26,19 @@ impl CdcFormat for DebeziumFormat {
 pub trait Dialect {
     type Source;
     type Position: Position;
+    type Syntax: sqlparser::dialect::Dialect;
 
     fn position(&self, source: &Self::Source) -> Self::Position;
 
     fn column_type(&self, type_name: &str, length: Option<u32>, scale: Option<u32>) -> ColumnType;
 
     fn ordering(&self) -> Vec<ColumnPath>;
+
+    fn syntax(&self) -> Self::Syntax;
+
+    fn renames(&self, ddl: &str, schema: &str) -> Vec<TableChange> {
+        RenameReader::new(self.syntax()).read(ddl, schema)
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -215,11 +225,16 @@ impl<D: Dialect> SchemaChangeLog for Debezium<D> {
         &self,
         statement: Self::Record,
     ) -> Result<SchemaChange<Self::Position>, MalformedEvent> {
-        let tables = statement
+        let altered = statement
             .table_changes
             .into_iter()
             .map(|change| self.table_change(change))
-            .collect::<Result<_, _>>()?;
+            .collect::<Result<Vec<_>, _>>()?;
+        let renamed = altered
+            .first()
+            .map(|change| self.dialect.renames(&statement.ddl, change.id().schema()))
+            .unwrap_or_default();
+        let tables = renamed.into_iter().chain(altered).collect();
 
         Ok(SchemaChange::new(
             self.dialect.position(&statement.source),

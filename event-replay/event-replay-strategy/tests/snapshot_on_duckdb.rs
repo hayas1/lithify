@@ -317,6 +317,67 @@ fn columns_one_statement_dropped_and_added_reshape_the_rows_last_changed_before_
     );
 }
 
+const RENAMED: &str = "CREATE SCHEMA ddl;
+    CREATE TABLE ddl.shop AS SELECT * FROM (VALUES
+      ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL}, 'ts_ms': 0::BIGINT,
+        'ddl': 'CREATE TABLE people (id BIGINT, name VARCHAR(64))',
+        'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
+          'table': {'primaryKeyColumnNames': ['id'], 'columns': [
+            {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
+             'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL},
+            {'name': 'name', 'typeName': 'VARCHAR', 'position': 2, 'optional': false,
+             'defaultValueExpression': NULL, 'length': 64, 'scale': NULL}]}}]}),
+      ({'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL}, 'ts_ms': 5::BIGINT,
+        'ddl': 'ALTER TABLE people RENAME COLUMN name TO full_name',
+        'tableChanges': [{'type': 'ALTER', 'id': '\"shop\".\"people\"',
+          'table': {'primaryKeyColumnNames': ['id'], 'columns': [
+            {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
+             'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL},
+            {'name': 'full_name', 'typeName': 'VARCHAR', 'position': 2, 'optional': false,
+             'defaultValueExpression': NULL, 'length': 64, 'scale': NULL}]}}]})
+    ) AS t(value);
+    CREATE SCHEMA cdc;
+    CREATE TABLE cdc.people AS SELECT * FROM (VALUES
+      ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 2::BIGINT},
+        'before': NULL::STRUCT(id BIGINT, name VARCHAR, full_name VARCHAR),
+        'after': {'id': 1::BIGINT, 'name': 'Alice', 'full_name': NULL::VARCHAR}}),
+      ({'op': 'c', 'ts_ms': 2::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 3::BIGINT},
+        'before': NULL::STRUCT(id BIGINT, name VARCHAR, full_name VARCHAR),
+        'after': {'id': 2::BIGINT, 'name': 'Bob', 'full_name': NULL::VARCHAR}}),
+      ({'op': 'u', 'ts_ms': 6::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 5::BIGINT},
+        'before': {'id': 1::BIGINT, 'name': NULL::VARCHAR, 'full_name': 'Alice'},
+        'after': {'id': 1::BIGINT, 'name': NULL::VARCHAR, 'full_name': 'Alicia Liddell'}})
+    ) AS t(value)";
+
+#[test]
+fn a_column_renamed_within_the_window_keeps_the_values_of_the_rows_last_changed_before_it() {
+    let client = DuckDbClient::new(
+        Connection::open_in_memory().unwrap(),
+        DuckDbWarehouse::default(),
+    );
+    client.execute(&SqlString::from(RENAMED)).unwrap();
+
+    replay(
+        &client,
+        &Window::new(RecordedAt::from(0), RecordedAt::from(10)),
+    );
+
+    assert_eq!(
+        rows(
+            &client,
+            "SELECT column_name FROM information_schema.columns WHERE table_schema = 'shop_snapshot' AND table_name = 'people' ORDER BY ordinal_position"
+        ),
+        ["id", "full_name"]
+    );
+    assert_eq!(
+        rows(
+            &client,
+            "SELECT concat_ws(' ', id, full_name) FROM shop_snapshot.people ORDER BY id"
+        ),
+        ["1 Alicia Liddell", "2 Bob"]
+    );
+}
+
 #[derive(Debug)]
 struct Unbuilt;
 

@@ -4,8 +4,8 @@ use std::marker::PhantomData;
 
 use crate::event::SchemaChange;
 use crate::listener::{
-    CatalogModel, ColumnAdded, ColumnDropped, ColumnRetyped, PrimaryKeyChanged,
-    SchemaChangeListener, TableCreated, TableDropped,
+    CatalogModel, ColumnAdded, ColumnDropped, ColumnRenamed, ColumnRetyped, PrimaryKeyChanged,
+    SchemaChangeListener, TableCreated, TableDropped, TableRenamed,
 };
 use crate::model::{TableId, TableModel};
 use crate::position::{Position, RecordedAt};
@@ -148,11 +148,16 @@ impl<F, L, E> EraTracker<F, L, E> {
         }
     }
 
+    fn follow(&mut self, from: &TableId, to: &TableId) {
+        if let Some(track) = self.tables.remove(from) {
+            self.tables.insert(to.clone(), track);
+        }
+    }
+
     fn alter<P>(
         &mut self,
         context: &L::Context,
         before: &TableModel,
-        after: &TableModel,
         visit: impl FnOnce(&mut L) -> Result<(), L::Error>,
     ) -> Result<(), E>
     where
@@ -161,7 +166,7 @@ impl<F, L, E> EraTracker<F, L, E> {
         E: From<L::Error>,
     {
         let at = self.at;
-        let track = self.track(after.id())?;
+        let track = self.track(before.id())?;
 
         track.advance(context, at, before)?;
 
@@ -212,12 +217,35 @@ where
         }
     }
 
+    fn visit_renamed(
+        &mut self,
+        context: &Self::Context,
+        event: &TableRenamed<'_>,
+    ) -> Result<(), Self::Error> {
+        self.alter(context, event.before(), |listener| {
+            listener.visit_renamed(context, event)
+        })?;
+        self.follow(event.before().id(), event.after().id());
+
+        Ok(())
+    }
+
+    fn visit_column_renamed(
+        &mut self,
+        context: &Self::Context,
+        event: &ColumnRenamed<'_>,
+    ) -> Result<(), Self::Error> {
+        self.alter(context, event.before(), |listener| {
+            listener.visit_column_renamed(context, event)
+        })
+    }
+
     fn visit_column_added(
         &mut self,
         context: &Self::Context,
         event: &ColumnAdded<'_>,
     ) -> Result<(), Self::Error> {
-        self.alter(context, event.before(), event.after(), |listener| {
+        self.alter(context, event.before(), |listener| {
             listener.visit_column_added(context, event)
         })
     }
@@ -227,7 +255,7 @@ where
         context: &Self::Context,
         event: &ColumnDropped<'_>,
     ) -> Result<(), Self::Error> {
-        self.alter(context, event.before(), event.after(), |listener| {
+        self.alter(context, event.before(), |listener| {
             listener.visit_column_dropped(context, event)
         })
     }
@@ -237,7 +265,7 @@ where
         context: &Self::Context,
         event: &ColumnRetyped<'_>,
     ) -> Result<(), Self::Error> {
-        self.alter(context, event.before(), event.after(), |listener| {
+        self.alter(context, event.before(), |listener| {
             listener.visit_column_retyped(context, event)
         })
     }
@@ -247,7 +275,7 @@ where
         context: &Self::Context,
         event: &PrimaryKeyChanged<'_>,
     ) -> Result<(), Self::Error> {
-        self.alter(context, event.before(), event.after(), |listener| {
+        self.alter(context, event.before(), |listener| {
             listener.visit_primary_key_changed(context, event)
         })
     }
@@ -257,7 +285,10 @@ where
 mod tests {
     use super::*;
     use crate::event::{SchemaChange, TableChange};
-    use crate::listener::{ColumnAdded, ColumnDropped, OutOfOrder, TableCreated, TableDropped};
+    use crate::listener::{
+        ColumnAdded, ColumnDropped, ColumnRenamed, OutOfOrder, TableCreated, TableDropped,
+        TableRenamed,
+    };
     use crate::model::{ColumnModel, ColumnType, TableModel};
     use crate::position::Position;
 
@@ -310,6 +341,30 @@ mod tests {
 
         fn visit_dropped(&mut self, _: &(), event: &TableDropped<'_>) -> Result<(), Untold> {
             self.told.push(format!("dropped {}", event.table().id()));
+
+            Ok(())
+        }
+
+        fn visit_renamed(&mut self, _: &(), event: &TableRenamed<'_>) -> Result<(), Untold> {
+            self.told.push(format!(
+                "renamed {} to {}",
+                event.before().id(),
+                event.after().id()
+            ));
+
+            Ok(())
+        }
+
+        fn visit_column_renamed(
+            &mut self,
+            _: &(),
+            event: &ColumnRenamed<'_>,
+        ) -> Result<(), Untold> {
+            self.told.push(format!(
+                "renamed {} to {}",
+                event.previous().name(),
+                event.column().name()
+            ));
 
             Ok(())
         }
@@ -473,6 +528,109 @@ mod tests {
                     "dropped name".to_owned(),
                     "added born".to_owned(),
                     "era [\"id\", \"born\"] 15..20".to_owned()
+                ]
+            )]
+        );
+    }
+
+    fn persons() -> TableId {
+        TableId::new("shop", "persons")
+    }
+
+    #[test]
+    fn a_renamed_column_ends_the_era_of_its_old_name() {
+        assert_eq!(
+            stories(
+                vec![change(
+                    1,
+                    vec![TableChange::Created(table(people(), &["id", "name"]))]
+                )],
+                vec![change(
+                    15,
+                    vec![
+                        TableChange::ColumnRenamed {
+                            table: people(),
+                            from: "name".to_owned(),
+                            to: "full_name".to_owned(),
+                        },
+                        TableChange::Altered(table(people(), &["id", "full_name"])),
+                    ]
+                )],
+            ),
+            [(
+                people(),
+                vec![
+                    "era [\"id\", \"name\"] 10..15".to_owned(),
+                    "renamed name to full_name".to_owned(),
+                    "era [\"id\", \"full_name\"] 15..20".to_owned()
+                ]
+            )]
+        );
+    }
+
+    #[test]
+    fn a_renamed_table_goes_on_with_the_listener_it_had_under_its_old_name() {
+        assert_eq!(
+            stories(
+                vec![change(
+                    1,
+                    vec![TableChange::Created(table(people(), &["id"]))]
+                )],
+                vec![change(
+                    15,
+                    vec![
+                        TableChange::Renamed {
+                            from: people(),
+                            to: persons(),
+                        },
+                        TableChange::Altered(table(persons(), &["id"])),
+                    ]
+                )],
+            ),
+            [(
+                people(),
+                vec![
+                    "era [\"id\"] 10..15".to_owned(),
+                    "renamed shop.people to shop.persons".to_owned(),
+                    "era [\"id\"] 15..20".to_owned()
+                ]
+            )]
+        );
+    }
+
+    #[test]
+    fn a_table_renamed_twice_within_the_window_goes_on_with_one_listener() {
+        assert_eq!(
+            stories(
+                vec![change(
+                    1,
+                    vec![TableChange::Created(table(people(), &["id"]))]
+                )],
+                vec![
+                    change(
+                        12,
+                        vec![TableChange::Renamed {
+                            from: people(),
+                            to: persons(),
+                        }]
+                    ),
+                    change(
+                        15,
+                        vec![TableChange::Renamed {
+                            from: persons(),
+                            to: pets(),
+                        }]
+                    ),
+                ],
+            ),
+            [(
+                people(),
+                vec![
+                    "era [\"id\"] 10..12".to_owned(),
+                    "renamed shop.people to shop.persons".to_owned(),
+                    "era [\"id\"] 12..15".to_owned(),
+                    "renamed shop.persons to shop.pets".to_owned(),
+                    "era [\"id\"] 15..20".to_owned()
                 ]
             )]
         );

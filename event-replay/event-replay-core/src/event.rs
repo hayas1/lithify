@@ -6,6 +6,15 @@ use crate::position::RecordedAt;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TableChange {
     Created(TableModel),
+    Renamed {
+        from: TableId,
+        to: TableId,
+    },
+    ColumnRenamed {
+        table: TableId,
+        from: String,
+        to: String,
+    },
     Altered(TableModel),
     Dropped(TableId),
 }
@@ -14,7 +23,16 @@ impl TableChange {
     pub fn id(&self) -> &TableId {
         match self {
             Self::Created(table) | Self::Altered(table) => table.id(),
+            Self::Renamed { from, .. } => from,
+            Self::ColumnRenamed { table, .. } => table,
             Self::Dropped(id) => id,
+        }
+    }
+
+    pub fn ids(&self) -> Vec<&TableId> {
+        match self {
+            Self::Renamed { from, to } => vec![from, to],
+            other => vec![other.id()],
         }
     }
 }

@@ -112,6 +112,13 @@ impl ColumnModel {
     pub fn default_value(&self) -> Option<&str> {
         self.default_value.as_deref()
     }
+
+    pub fn named(&self, name: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            ..self.clone()
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,6 +179,30 @@ impl TableModel {
                 .chain(appended)
                 .cloned()
                 .collect(),
+            primary_key: self.primary_key.clone(),
+        }
+    }
+
+    pub fn with_column_renamed(&self, previous: &str, name: &str) -> Self {
+        let rename = |held: &str| match held == previous {
+            true => name.to_owned(),
+            false => held.to_owned(),
+        };
+
+        Self {
+            id: self.id.clone(),
+            columns: self
+                .columns()
+                .map(|held| held.named(&rename(held.name())))
+                .collect(),
+            primary_key: self.primary_key().map(rename).collect(),
+        }
+    }
+
+    pub fn with_id(&self, id: &TableId) -> Self {
+        Self {
+            id: id.clone(),
+            columns: self.columns.clone(),
             primary_key: self.primary_key.clone(),
         }
     }
@@ -251,5 +282,37 @@ mod tests {
 
         assert_eq!(rekeyed.primary_key().collect::<Vec<_>>(), ["id", "email"]);
         assert_eq!(names(&rekeyed), ["id", "name", "email"]);
+    }
+
+    #[test]
+    fn a_table_with_a_column_renamed_holds_it_in_place_under_its_new_name() {
+        let renamed = customers().with_column_renamed("name", "full_name");
+
+        assert_eq!(names(&renamed), ["id", "full_name", "email"]);
+        assert_eq!(renamed.column("full_name").unwrap().type_name(), "VARCHAR");
+    }
+
+    #[test]
+    fn a_table_with_a_key_column_renamed_stays_keyed_by_it() {
+        let renamed = customers().with_column_renamed("id", "customer_id");
+
+        assert_eq!(renamed.primary_key().collect::<Vec<_>>(), ["customer_id"]);
+    }
+
+    #[test]
+    fn a_table_under_another_id_keeps_its_columns_and_key() {
+        let moved = customers().with_id(&TableId::new("shop", "clients"));
+
+        assert_eq!(moved.id(), &TableId::new("shop", "clients"));
+        assert_eq!(names(&moved), ["id", "name", "email"]);
+        assert_eq!(moved.primary_key().collect::<Vec<_>>(), ["id"]);
+    }
+
+    #[test]
+    fn a_table_with_a_column_it_never_had_renamed_stays_as_it_was() {
+        assert_eq!(
+            customers().with_column_renamed("nickname", "alias"),
+            customers()
+        );
     }
 }

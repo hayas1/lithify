@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use sqlparser::dialect::MySqlDialect;
+
 use event_replay_core::model::ColumnType;
 use event_replay_core::position::Position;
 use event_replay_core::source::ColumnPath;
@@ -53,9 +55,14 @@ pub struct MySql;
 impl Dialect for MySql {
     type Source = MySqlSource;
     type Position = MySqlPosition;
+    type Syntax = MySqlDialect;
 
     fn position(&self, source: &Self::Source) -> Self::Position {
         MySqlPosition::from(source)
+    }
+
+    fn syntax(&self) -> Self::Syntax {
+        MySqlDialect {}
     }
 
     fn ordering(&self) -> Vec<ColumnPath> {
@@ -239,5 +246,180 @@ mod tests {
             .unwrap();
 
         assert_eq!(change.position(), &position("binlog.000002", 448));
+    }
+
+    fn altered(ddl: &str, ids: &[&str]) -> Vec<String> {
+        let table_changes: Vec<Value> = ids
+            .iter()
+            .map(|id| {
+                json!({
+                    "type": "ALTER",
+                    "id": id,
+                    "table": {"primaryKeyColumnNames": ["id"], "columns": [
+                        {"name": "id", "typeName": "BIGINT", "position": 1, "optional": false,
+                         "length": null, "scale": null, "defaultValueExpression": null}
+                    ]}
+                })
+            })
+            .collect();
+        let change = Debezium::new(MySql)
+            .schema_change_json(json!({
+                "source": {"file": "binlog.000002", "pos": 448},
+                "ts_ms": 1789800000000i64,
+                "ddl": ddl,
+                "tableChanges": table_changes
+            }))
+            .unwrap();
+
+        change
+            .tables()
+            .map(|table| match table {
+                TableChange::Renamed { from, to } => format!("renamed {from} to {to}"),
+                TableChange::ColumnRenamed { table, from, to } => {
+                    format!("renamed {table}.{from} to {to}")
+                }
+                TableChange::Altered(table) => format!("altered {}", table.id()),
+                TableChange::Created(table) => format!("created {}", table.id()),
+                TableChange::Dropped(id) => format!("dropped {id}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_column_renamed_by_rename_column_is_renamed_before_the_table_is_altered() {
+        assert_eq!(
+            altered(
+                "ALTER TABLE probe RENAME COLUMN name TO full_name",
+                &["\"shop\".\"probe\""]
+            ),
+            ["renamed shop.probe.name to full_name", "altered shop.probe"]
+        );
+    }
+
+    #[test]
+    fn a_column_renamed_by_change_is_renamed_before_the_table_is_altered() {
+        assert_eq!(
+            altered(
+                "ALTER TABLE probe CHANGE email mail VARCHAR(128)",
+                &["\"shop\".\"probe\""]
+            ),
+            ["renamed shop.probe.email to mail", "altered shop.probe"]
+        );
+    }
+
+    #[test]
+    fn a_change_that_keeps_the_name_of_its_column_renames_nothing() {
+        assert_eq!(
+            altered(
+                "ALTER TABLE probe CHANGE email email VARCHAR(128)",
+                &["\"shop\".\"probe\""]
+            ),
+            ["altered shop.probe"]
+        );
+    }
+
+    #[test]
+    fn a_table_renamed_by_rename_table_is_renamed_within_the_schema_it_landed_in() {
+        assert_eq!(
+            altered("RENAME TABLE probe TO probe2", &["\"shop\".\"probe2\""]),
+            ["renamed shop.probe to shop.probe2", "altered shop.probe2"]
+        );
+    }
+
+    #[test]
+    fn every_table_one_rename_table_renames_is_renamed_in_its_order() {
+        assert_eq!(
+            altered(
+                "RENAME TABLE a TO b, b TO c",
+                &["\"shop\".\"b\"", "\"shop\".\"c\""]
+            ),
+            [
+                "renamed shop.a to shop.b",
+                "renamed shop.b to shop.c",
+                "altered shop.b",
+                "altered shop.c"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_table_renamed_by_alter_table_is_renamed_whether_to_or_as() {
+        assert_eq!(
+            altered(
+                "ALTER TABLE probe2 RENAME TO probe3",
+                &["\"shop\".\"probe3\""]
+            ),
+            ["renamed shop.probe2 to shop.probe3", "altered shop.probe3"]
+        );
+        assert_eq!(
+            altered(
+                "ALTER TABLE probe2 RENAME AS probe3",
+                &["\"shop\".\"probe3\""]
+            ),
+            ["renamed shop.probe2 to shop.probe3", "altered shop.probe3"]
+        );
+    }
+
+    #[test]
+    fn columns_are_renamed_under_the_old_name_of_a_table_renamed_by_the_same_statement() {
+        assert_eq!(
+            altered(
+                "ALTER TABLE `probe` RENAME COLUMN `name` TO `full_name`, RENAME TO `probe2`, ADD COLUMN age INT",
+                &["\"shop\".\"probe2\""]
+            ),
+            [
+                "renamed shop.probe.name to full_name",
+                "renamed shop.probe to shop.probe2",
+                "altered shop.probe2"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_qualified_name_keeps_the_schema_it_names() {
+        assert_eq!(
+            altered(
+                "RENAME TABLE archive.probe TO shop.probe",
+                &["\"shop\".\"probe\""]
+            ),
+            ["renamed archive.probe to shop.probe", "altered shop.probe"]
+        );
+    }
+
+    #[test]
+    fn a_statement_the_dialect_cannot_read_renames_nothing() {
+        assert_eq!(
+            altered(
+                "ALTER TABLE probe SOMETHING NO PARSER KNOWS",
+                &["\"shop\".\"probe\""]
+            ),
+            ["altered shop.probe"]
+        );
+    }
+
+    #[test]
+    fn a_statement_that_renames_nothing_only_alters() {
+        assert_eq!(
+            altered(
+                "ALTER TABLE probe ADD COLUMN age INT",
+                &["\"shop\".\"probe\""]
+            ),
+            ["altered shop.probe"]
+        );
+    }
+
+    #[test]
+    fn columns_are_renamed_under_the_old_name_even_when_the_table_is_renamed_first() {
+        assert_eq!(
+            altered(
+                "ALTER TABLE probe RENAME TO probe2, RENAME COLUMN name TO full_name",
+                &["\"shop\".\"probe2\""]
+            ),
+            [
+                "renamed shop.probe.name to full_name",
+                "renamed shop.probe to shop.probe2",
+                "altered shop.probe2"
+            ]
+        );
     }
 }

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sqlparser::dialect::PostgreSqlDialect;
 
 use event_replay_core::model::ColumnType;
 use event_replay_core::position::Position;
@@ -37,9 +38,14 @@ pub struct Postgres;
 impl Dialect for Postgres {
     type Source = PostgresSource;
     type Position = PostgresPosition;
+    type Syntax = PostgreSqlDialect;
 
     fn position(&self, source: &Self::Source) -> Self::Position {
         PostgresPosition::from(source)
+    }
+
+    fn syntax(&self) -> Self::Syntax {
+        PostgreSqlDialect {}
     }
 
     fn ordering(&self) -> Vec<ColumnPath> {
@@ -80,8 +86,8 @@ impl Dialect for Postgres {
 mod tests {
     use super::super::Debezium;
     use super::*;
-    use event_replay_core::event::MalformedEvent;
-    use event_replay_core::model::ColumnType;
+    use event_replay_core::event::{MalformedEvent, TableChange};
+    use event_replay_core::model::{ColumnType, TableId};
     use serde_json::json;
 
     fn position(lsn: i64) -> PostgresPosition {
@@ -178,5 +184,33 @@ mod tests {
             .unwrap();
 
         assert_eq!(change.position(), &position(26738384));
+    }
+
+    #[test]
+    fn a_rename_is_read_from_the_ddl_in_the_syntax_of_postgres() {
+        let change = Debezium::new(Postgres)
+            .schema_change_json(json!({
+                "source": {"lsn": 26738384i64},
+                "ts_ms": 1789800000000i64,
+                "ddl": "ALTER TABLE shop.customers RENAME COLUMN \"name\" TO full_name",
+                "tableChanges": [{
+                    "type": "ALTER",
+                    "id": "\"shop\".\"customers\"",
+                    "table": {"primaryKeyColumnNames": ["id"], "columns": [
+                        {"name": "id", "typeName": "int8", "position": 1, "optional": false,
+                         "length": null, "scale": null, "defaultValueExpression": null}
+                    ]}
+                }]
+            }))
+            .unwrap();
+
+        assert_eq!(
+            change.tables().next(),
+            Some(&TableChange::ColumnRenamed {
+                table: TableId::new("shop", "customers"),
+                from: "name".to_owned(),
+                to: "full_name".to_owned(),
+            })
+        );
     }
 }

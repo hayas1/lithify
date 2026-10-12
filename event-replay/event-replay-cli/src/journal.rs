@@ -5,8 +5,8 @@ use chrono::{DateTime, Utc};
 
 use event_replay_core::event::SchemaChange;
 use event_replay_core::listener::{
-    ColumnAdded, ColumnDropped, ColumnRetyped, PrimaryKeyChanged, SchemaChangeListener,
-    TableCreated, TableDropped,
+    ColumnAdded, ColumnDropped, ColumnRenamed, ColumnRetyped, PrimaryKeyChanged,
+    SchemaChangeListener, TableCreated, TableDropped, TableRenamed,
 };
 
 #[derive(Debug, Default)]
@@ -76,6 +76,31 @@ impl<P> SchemaChangeListener<P> for Journal {
 
     fn visit_dropped(&mut self, _: &(), event: &TableDropped<'_>) -> Result<(), Infallible> {
         self.table(format!("dropped {}", event.table().id()));
+
+        Ok(())
+    }
+
+    fn visit_renamed(&mut self, _: &(), event: &TableRenamed<'_>) -> Result<(), Infallible> {
+        self.table(format!(
+            "renamed {} to {}",
+            event.before().id(),
+            event.after().id()
+        ));
+
+        Ok(())
+    }
+
+    fn visit_column_renamed(
+        &mut self,
+        _: &(),
+        event: &ColumnRenamed<'_>,
+    ) -> Result<(), Infallible> {
+        self.table(format!(
+            "renamed {}.{} to {}",
+            event.after().id(),
+            event.previous().name(),
+            event.column().name()
+        ));
 
         Ok(())
     }
@@ -271,5 +296,48 @@ mod tests {
             ["warehouse: the table is not there"]
         );
         assert!(!journal.complete());
+    }
+
+    #[test]
+    fn a_rename_is_reported_with_both_names() {
+        let name = ColumnModel::new("name", "varchar", ColumnType::Text, true, None);
+        let full_name = ColumnModel::new("full_name", "varchar", ColumnType::Text, true, None);
+        let clients = TableId::new("shop", "clients");
+        let entries = journal(vec![
+            change(
+                1,
+                "CREATE TABLE `customers` (`id` bigint, `name` varchar(255))",
+                vec![TableChange::Created(customers(vec![identifier(), name]))],
+            ),
+            change(
+                2,
+                "ALTER TABLE `customers` RENAME COLUMN `name` TO `full_name`, RENAME TO `clients`",
+                vec![
+                    TableChange::ColumnRenamed {
+                        table: TableId::new("shop", "customers"),
+                        from: "name".to_owned(),
+                        to: "full_name".to_owned(),
+                    },
+                    TableChange::Renamed {
+                        from: TableId::new("shop", "customers"),
+                        to: clients.clone(),
+                    },
+                    TableChange::Altered(
+                        customers(vec![identifier(), full_name]).with_id(&clients),
+                    ),
+                ],
+            ),
+        ]);
+
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.starts_with("  renamed"))
+                .collect::<Vec<_>>(),
+            [
+                "  renamed shop.customers.name to full_name",
+                "  renamed shop.customers to shop.clients",
+            ]
+        );
     }
 }
