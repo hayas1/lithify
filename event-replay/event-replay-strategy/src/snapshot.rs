@@ -4,7 +4,7 @@ use event_replay_core::artifact::{Artifact, UnbuildableArtifact};
 use event_replay_core::era::Era;
 use event_replay_core::listener::{
     ColumnAdded, ColumnDropped, ColumnRenamed, ColumnRetyped, PrimaryKeyChanged,
-    SchemaChangeListener, TableRenamed,
+    SchemaChangeListener, TableCreated, TableRenamed,
 };
 use event_replay_core::model::{ColumnModel, TableId, TableModel};
 use event_replay_core::sink::{TablePath, Warehouse};
@@ -317,6 +317,12 @@ impl<'a, L: RowChangeLog, W: Warehouse> Snapshot<'a, L, W> {
 impl<P, L: RowChangeLog, W: Warehouse> SchemaChangeListener<P> for Snapshot<'_, L, W> {
     type Context = W;
     type Error = UnbuildableArtifact;
+
+    fn table_created(&mut self, _: &W, _: &TableCreated<'_>) -> Result<(), UnbuildableArtifact> {
+        self.base = Base::Captured;
+
+        Ok(())
+    }
 
     fn era_boundary(&mut self, warehouse: &W, closed_era: &Era) -> Result<(), UnbuildableArtifact> {
         self.fold_era(warehouse, closed_era)
@@ -739,6 +745,36 @@ mod tests {
             "  FROM \"mysql_shop\".\"customers_20260919\"\n",
             "),\n",
         )));
+    }
+
+    #[test]
+    fn a_table_created_within_the_window_folds_onto_what_the_capture_read_rather_than_a_shard() {
+        let orders = TableModel::new(
+            TableId::new("shop", "orders"),
+            vec![column("id", ColumnType::Int64)],
+            vec!["id".to_owned()],
+        );
+
+        let snapshots = snapshots(
+            customers(),
+            vec![change(150, TableChange::Created(orders))],
+            || Base::Shard(TablePath::new("mysql_shop", "customers_20260919")),
+        )
+        .unwrap();
+        let statement = |table: &str| {
+            snapshots
+                .iter()
+                .find(|snapshot| snapshot.table() == &TableId::new("shop", table))
+                .unwrap()
+                .statements()
+                .unwrap()
+                .remove(1)
+                .to_string()
+        };
+
+        assert!(statement("customers").contains("  FROM \"mysql_shop\".\"customers_20260919\"\n"));
+        assert!(statement("orders").contains("  WHERE \"op\" = 'r'\n"));
+        assert!(!statement("orders").contains("customers_20260919"));
     }
 
     #[test]

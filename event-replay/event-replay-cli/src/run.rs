@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
+
 use event_replay_config::Pipeline;
 use event_replay_config::infra::{Sink, Source};
 use event_replay_core::listener::CatalogModel;
@@ -30,6 +32,7 @@ pub struct Run {
     window: Window,
     credential: Credential,
     sink: Option<String>,
+    onto: Option<DateTime<Utc>>,
 }
 
 impl Run {
@@ -38,12 +41,14 @@ impl Run {
         window: Window,
         credential: Credential,
         sink: Option<String>,
+        onto: Option<DateTime<Utc>>,
     ) -> Self {
         Self {
             directory,
             window,
             credential,
             sink,
+            onto,
         }
     }
 
@@ -111,6 +116,7 @@ impl Run {
                     source,
                     schema_changes,
                     &self.window,
+                    self.onto,
                 ))
             }
             Warehouse::BigQuery(config) => {
@@ -122,6 +128,7 @@ impl Run {
                         source,
                         schema_changes,
                         &self.window,
+                        self.onto,
                     ))
             }
         }

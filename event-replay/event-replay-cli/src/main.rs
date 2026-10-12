@@ -63,6 +63,14 @@ struct Arguments {
         help = "Write the statements a snapshot of each table would run into this directory, one file per sink, instead of reporting the schema changes"
     )]
     dry_run: Option<PathBuf>,
+    // TODO: read the window to fold onto from a history of the runs that built snapshots, once
+    // the command builds them instead of only planning them.
+    #[arg(
+        long,
+        value_name = "INSTANT",
+        help = "The instant the window before this one opened, naming the snapshots to fold onto; without it the window folds onto what the capture read"
+    )]
+    onto: Option<DateTime<Utc>>,
 }
 
 impl Arguments {
@@ -90,6 +98,7 @@ impl From<Arguments> for Run {
             window,
             Credential::new(arguments.access_key_id, arguments.secret_access_key),
             arguments.sink,
+            arguments.onto,
         )
     }
 }
@@ -158,6 +167,37 @@ mod tests {
         assert_eq!(planned.dry_run, Some(PathBuf::from("plans")));
         assert_eq!(
             arguments("2026-09-20T00:00:00Z", "2026-09-21T00:00:00Z").dry_run,
+            None
+        );
+    }
+
+    #[test]
+    fn a_run_folds_onto_the_snapshot_of_the_window_it_names() {
+        let folded = Arguments::parse_from([
+            "event-replay",
+            "mysql",
+            "--from",
+            "2026-09-20T00:00:00Z",
+            "--to",
+            "2026-09-21T00:00:00Z",
+            "--access-key-id",
+            "minioadmin",
+            "--secret-access-key",
+            "minioadmin",
+            "--onto",
+            "2026-09-19T00:00:00Z",
+        ]);
+
+        assert_eq!(
+            folded.onto,
+            Some(
+                DateTime::parse_from_rfc3339("2026-09-19T00:00:00Z")
+                    .unwrap()
+                    .to_utc()
+            )
+        );
+        assert_eq!(
+            arguments("2026-09-20T00:00:00Z", "2026-09-21T00:00:00Z").onto,
             None
         );
     }

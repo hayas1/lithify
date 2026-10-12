@@ -26,6 +26,7 @@ pub struct SnapshotPlan<'a, K> {
     source: &'a Source<Capture>,
     schema_changes: &'a TablePath,
     window: &'a Window,
+    onto: Option<DateTime<Utc>>,
 }
 
 impl<'a, K> SnapshotPlan<'a, K> {
@@ -35,6 +36,7 @@ impl<'a, K> SnapshotPlan<'a, K> {
         source: &'a Source<Capture>,
         schema_changes: &'a TablePath,
         window: &'a Window,
+        onto: Option<DateTime<Utc>>,
     ) -> Self {
         Self {
             client,
@@ -42,6 +44,14 @@ impl<'a, K> SnapshotPlan<'a, K> {
             source,
             schema_changes,
             window,
+            onto,
+        }
+    }
+
+    fn base(&self, table: &TableId) -> Base {
+        match self.onto {
+            Some(at) => Base::Shard(self.sink.replay().target(Artifact::Snapshot, table, at)),
+            None => Base::Captured,
         }
     }
 
@@ -64,7 +74,7 @@ impl<'a, K> SnapshotPlan<'a, K> {
                 table.clone(),
                 changes,
                 self.sink.replay().target(Artifact::Snapshot, table, shard),
-                Base::Captured,
+                self.base(table),
             ))
         });
         let catalog = self.client.replay::<Unreplayable, _>(
@@ -162,6 +172,7 @@ mod tests {
                 source,
                 &schema_changes,
                 &window,
+                None,
             ))
             .unwrap();
 
@@ -177,5 +188,46 @@ mod tests {
                 .contains("FROM \"mysql_shop_cdc\".\"mysql.shop.people\"")
         );
         assert_eq!(statements.len(), 2);
+    }
+
+    #[test]
+    fn a_plan_onto_an_earlier_window_folds_onto_the_snapshot_it_left() {
+        let pipeline = pipeline();
+        let source = pipeline.sources().next().unwrap();
+        let sink = pipeline
+            .sinks()
+            .find(|sink| sink.name() == "minio")
+            .unwrap();
+        let schema_changes = sink.schema_changes(source).unwrap();
+        let client = DuckDbClient::new(
+            Connection::open_in_memory().unwrap(),
+            DuckDbWarehouse::default(),
+        );
+        client.execute(&SqlString::from(CHANGE_LOGS)).unwrap();
+        let window = Window::new(
+            RecordedAt::from(1789862400000),
+            RecordedAt::from(1789948800000),
+        );
+        let onto = DateTime::parse_from_rfc3339("2026-09-19T00:00:00Z")
+            .unwrap()
+            .to_utc();
+
+        let statements = source
+            .capture()
+            .with_duckdb_change_logs(SnapshotPlan::new(
+                &client,
+                sink,
+                source,
+                &schema_changes,
+                &window,
+                Some(onto),
+            ))
+            .unwrap();
+
+        assert!(
+            statements[1]
+                .as_str()
+                .contains("  FROM \"mysql_shop\".\"people_20260919\"\n")
+        );
     }
 }
