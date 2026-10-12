@@ -111,7 +111,7 @@ mod tests {
     use crate::source::debezium::Debezium;
     use crate::source::debezium::mysql::MySql;
     use event_replay_core::model::ColumnModel;
-    use event_replay_core::position::RecordedAt;
+    use event_replay_core::position::{Coordinate, RecordedAt};
     use event_replay_core::window::Window;
 
     fn read(column_type: ColumnType) -> SqlString {
@@ -132,6 +132,17 @@ mod tests {
             "TRY_CAST('none' AS VARCHAR)"
         );
         assert_eq!(warehouse.fill(&without).unwrap(), "CAST(NULL AS VARCHAR)");
+    }
+
+    #[test]
+    fn a_coordinate_is_written_as_a_literal_or_a_number() {
+        let warehouse = DuckDbWarehouse::default();
+
+        assert_eq!(
+            Coordinate::Text("binlog.000002".to_owned()).sql(&warehouse),
+            "'binlog.000002'"
+        );
+        assert_eq!(Coordinate::Number(448).sql(&warehouse), "448");
     }
 
     #[test]

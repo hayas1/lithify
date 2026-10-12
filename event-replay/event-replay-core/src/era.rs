@@ -8,47 +8,70 @@ use crate::listener::{
     SchemaChangeListener, TableCreated, TableDropped, TableRenamed,
 };
 use crate::model::{TableId, TableModel};
-use crate::position::{Position, RecordedAt};
+use crate::position::{Coordinate, Position, RecordedAt};
 use crate::window::Window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Era {
-    table: TableModel,
-    window: Window,
+pub enum Bound<P> {
+    Time(RecordedAt),
+    Position { at: RecordedAt, position: P },
 }
 
-impl Era {
-    pub fn new(table: TableModel, window: Window) -> Self {
-        Self { table, window }
+impl<P: Position> Bound<P> {
+    pub fn coordinates(&self) -> Vec<Coordinate> {
+        match self {
+            Self::Time(at) => vec![Coordinate::Number(at.milliseconds_since_epoch())],
+            Self::Position { at, position } => [Coordinate::Number(at.milliseconds_since_epoch())]
+                .into_iter()
+                .chain(position.coordinates())
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Era<P> {
+    table: TableModel,
+    from: Bound<P>,
+    to: Bound<P>,
+}
+
+impl<P> Era<P> {
+    pub fn new(table: TableModel, from: Bound<P>, to: Bound<P>) -> Self {
+        Self { table, from, to }
     }
 
     pub fn table(&self) -> &TableModel {
         &self.table
     }
 
-    pub fn window(&self) -> &Window {
-        &self.window
+    pub fn from(&self) -> &Bound<P> {
+        &self.from
+    }
+
+    pub fn to(&self) -> &Bound<P> {
+        &self.to
     }
 }
 
-pub struct EraTracker<F, L, E> {
+pub struct EraTracker<F, L, E, P> {
     window: Window,
-    at: RecordedAt,
+    at: Bound<P>,
     open: F,
-    tables: BTreeMap<TableId, Track<L>>,
+    tables: BTreeMap<TableId, Track<L, P>>,
     error: PhantomData<fn() -> E>,
 }
 
-struct Track<L> {
+struct Track<L, P> {
     listener: L,
-    since: RecordedAt,
+    since: Bound<P>,
 }
 
-impl<L> Track<L> {
+impl<L, P: Position> Track<L, P> {
     fn open<E>(
         open: &mut impl FnMut(&TableId) -> Result<L, E>,
         table: &TableId,
-        since: RecordedAt,
+        since: Bound<P>,
     ) -> Result<Self, E> {
         Ok(Self {
             listener: open(table)?,
@@ -56,30 +79,30 @@ impl<L> Track<L> {
         })
     }
 
-    fn advance<P>(
+    fn advance(
         &mut self,
         context: &L::Context,
-        at: RecordedAt,
+        at: &Bound<P>,
         before: &TableModel,
     ) -> Result<(), L::Error>
     where
         L: SchemaChangeListener<P>,
     {
-        if self.since < at {
-            let closed_era = Era::new(before.clone(), Window::new(self.since, at));
+        if &self.since != at {
+            let closed_era = Era::new(before.clone(), self.since.clone(), at.clone());
 
             self.listener.era_boundary(context, &closed_era)?;
-            self.since = at;
+            self.since = at.clone();
         }
 
         Ok(())
     }
 
-    fn finish<P>(
+    fn finish(
         mut self,
         context: &L::Context,
         table: &TableModel,
-        to: RecordedAt,
+        to: &Bound<P>,
     ) -> Result<L, L::Error>
     where
         L: SchemaChangeListener<P>,
@@ -90,10 +113,10 @@ impl<L> Track<L> {
     }
 }
 
-impl<F, L, E> EraTracker<F, L, E> {
+impl<F, L, E, P: Position> EraTracker<F, L, E, P> {
     pub fn new(window: Window, open: F) -> Self {
         Self {
-            at: *window.from(),
+            at: Bound::Time(*window.from()),
             window,
             open,
             tables: BTreeMap::new(),
@@ -101,11 +124,7 @@ impl<F, L, E> EraTracker<F, L, E> {
         }
     }
 
-    pub fn finish<P: Position>(
-        mut self,
-        context: &L::Context,
-        catalog: &CatalogModel<P>,
-    ) -> Result<Vec<L>, E>
+    pub fn finish(mut self, context: &L::Context, catalog: &CatalogModel<P>) -> Result<Vec<L>, E>
     where
         L: SchemaChangeListener<P>,
         F: FnMut(&TableId) -> Result<L, E>,
@@ -116,15 +135,15 @@ impl<F, L, E> EraTracker<F, L, E> {
             .map(|table| {
                 let track = match self.tables.remove(table.id()) {
                     Some(track) => track,
-                    None => self.open(table.id(), *self.window.from())?,
+                    None => self.open(table.id(), Bound::Time(*self.window.from()))?,
                 };
 
-                Ok(track.finish(context, table, *self.window.to())?)
+                Ok(track.finish(context, table, &Bound::Time(*self.window.to()))?)
             })
             .collect()
     }
 
-    fn open<P>(&mut self, table: &TableId, since: RecordedAt) -> Result<Track<L>, E>
+    fn open(&mut self, table: &TableId, since: Bound<P>) -> Result<Track<L, P>, E>
     where
         L: SchemaChangeListener<P>,
         F: FnMut(&TableId) -> Result<L, E>,
@@ -133,13 +152,13 @@ impl<F, L, E> EraTracker<F, L, E> {
         Track::open(&mut self.open, table, since)
     }
 
-    fn track<P>(&mut self, table: &TableId) -> Result<&mut Track<L>, E>
+    fn track(&mut self, table: &TableId) -> Result<&mut Track<L, P>, E>
     where
         L: SchemaChangeListener<P>,
         F: FnMut(&TableId) -> Result<L, E>,
         E: From<L::Error>,
     {
-        let from = *self.window.from();
+        let from = Bound::Time(*self.window.from());
         let Self { open, tables, .. } = self;
 
         match tables.entry(table.clone()) {
@@ -154,7 +173,7 @@ impl<F, L, E> EraTracker<F, L, E> {
         }
     }
 
-    fn alter<P>(
+    fn alter(
         &mut self,
         context: &L::Context,
         before: &TableModel,
@@ -165,17 +184,18 @@ impl<F, L, E> EraTracker<F, L, E> {
         F: FnMut(&TableId) -> Result<L, E>,
         E: From<L::Error>,
     {
-        let at = self.at;
+        let at = self.at.clone();
         let track = self.track(before.id())?;
 
-        track.advance(context, at, before)?;
+        track.advance(context, &at, before)?;
 
         Ok(visit(&mut track.listener)?)
     }
 }
 
-impl<P, F, L, E> SchemaChangeListener<P> for EraTracker<F, L, E>
+impl<P, F, L, E> SchemaChangeListener<P> for EraTracker<F, L, E, P>
 where
+    P: Position,
     F: FnMut(&TableId) -> Result<L, E>,
     L: SchemaChangeListener<P>,
     E: From<L::Error>,
@@ -188,7 +208,10 @@ where
         _: &Self::Context,
         change: &SchemaChange<P>,
     ) -> Result<(), Self::Error> {
-        self.at = *change.recorded_at();
+        self.at = Bound::Position {
+            at: *change.recorded_at(),
+            position: change.position().clone(),
+        };
 
         Ok(())
     }
@@ -198,7 +221,7 @@ where
         context: &Self::Context,
         event: &TableCreated<'_>,
     ) -> Result<(), Self::Error> {
-        let mut track = self.open(event.table().id(), self.at)?;
+        let mut track = self.open(event.table().id(), self.at.clone())?;
 
         track.listener.table_created(context, event)?;
         self.tables.insert(event.table().id().clone(), track);
@@ -295,7 +318,21 @@ mod tests {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     struct Offset(u64);
 
-    impl Position for Offset {}
+    impl Position for Offset {
+        fn coordinates(&self) -> Vec<Coordinate> {
+            vec![Coordinate::Number(self.0 as i64)]
+        }
+    }
+
+    fn bound(bound: &Bound<Offset>) -> String {
+        match bound {
+            Bound::Time(at) => at.milliseconds_since_epoch().to_string(),
+            Bound::Position {
+                position: Offset(offset),
+                ..
+            } => format!("@{offset}"),
+        }
+    }
 
     #[derive(Debug, PartialEq, Eq)]
     enum Untold {
@@ -319,7 +356,7 @@ mod tests {
         type Context = ();
         type Error = Untold;
 
-        fn era_boundary(&mut self, _: &(), closed_era: &Era) -> Result<(), Untold> {
+        fn era_boundary(&mut self, _: &(), closed_era: &Era<Offset>) -> Result<(), Untold> {
             self.told.push(format!(
                 "era {:?} {}..{}",
                 closed_era
@@ -327,8 +364,8 @@ mod tests {
                     .columns()
                     .map(|column| column.name())
                     .collect::<Vec<_>>(),
-                closed_era.window().from().milliseconds_since_epoch(),
-                closed_era.window().to().milliseconds_since_epoch()
+                bound(closed_era.from()),
+                bound(closed_era.to())
             ));
 
             Ok(())
@@ -465,9 +502,35 @@ mod tests {
             [(
                 people(),
                 vec![
-                    "era [\"id\"] 10..15".to_owned(),
+                    "era [\"id\"] 10..@15".to_owned(),
                     "added name".to_owned(),
-                    "era [\"id\", \"name\"] 15..20".to_owned()
+                    "era [\"id\", \"name\"] @15..20".to_owned()
+                ]
+            )]
+        );
+    }
+
+    #[test]
+    fn a_schema_change_ends_an_era_at_its_position_rather_than_its_time() {
+        assert_eq!(
+            stories(
+                vec![change(
+                    1,
+                    vec![TableChange::Created(table(people(), &["id"]))]
+                )],
+                vec![SchemaChange::new(
+                    Offset(99),
+                    RecordedAt::from(15),
+                    "",
+                    vec![TableChange::Altered(table(people(), &["id", "name"]))]
+                )],
+            ),
+            [(
+                people(),
+                vec![
+                    "era [\"id\"] 10..@99".to_owned(),
+                    "added name".to_owned(),
+                    "era [\"id\", \"name\"] @99..20".to_owned()
                 ]
             )]
         );
@@ -492,10 +555,10 @@ mod tests {
             [(
                 people(),
                 vec![
-                    "era [\"id\"] 10..15".to_owned(),
+                    "era [\"id\"] 10..@15".to_owned(),
                     "added name".to_owned(),
                     "added born".to_owned(),
-                    "era [\"id\", \"name\", \"born\"] 15..20".to_owned()
+                    "era [\"id\", \"name\", \"born\"] @15..20".to_owned()
                 ]
             )]
         );
@@ -517,10 +580,10 @@ mod tests {
             [(
                 people(),
                 vec![
-                    "era [\"id\", \"name\"] 10..15".to_owned(),
+                    "era [\"id\", \"name\"] 10..@15".to_owned(),
                     "dropped name".to_owned(),
                     "added born".to_owned(),
-                    "era [\"id\", \"born\"] 15..20".to_owned()
+                    "era [\"id\", \"born\"] @15..20".to_owned()
                 ]
             )]
         );
@@ -553,9 +616,9 @@ mod tests {
             [(
                 people(),
                 vec![
-                    "era [\"id\", \"name\"] 10..15".to_owned(),
+                    "era [\"id\", \"name\"] 10..@15".to_owned(),
                     "renamed name to full_name".to_owned(),
-                    "era [\"id\", \"full_name\"] 15..20".to_owned()
+                    "era [\"id\", \"full_name\"] @15..20".to_owned()
                 ]
             )]
         );
@@ -583,9 +646,9 @@ mod tests {
             [(
                 people(),
                 vec![
-                    "era [\"id\"] 10..15".to_owned(),
+                    "era [\"id\"] 10..@15".to_owned(),
                     "renamed shop.people to shop.persons".to_owned(),
-                    "era [\"id\"] 15..20".to_owned()
+                    "era [\"id\"] @15..20".to_owned()
                 ]
             )]
         );
@@ -619,11 +682,11 @@ mod tests {
             [(
                 people(),
                 vec![
-                    "era [\"id\"] 10..12".to_owned(),
+                    "era [\"id\"] 10..@12".to_owned(),
                     "renamed shop.people to shop.persons".to_owned(),
-                    "era [\"id\"] 12..15".to_owned(),
+                    "era [\"id\"] @12..@15".to_owned(),
                     "renamed shop.persons to shop.pets".to_owned(),
-                    "era [\"id\"] 15..20".to_owned()
+                    "era [\"id\"] @15..20".to_owned()
                 ]
             )]
         );
@@ -643,7 +706,7 @@ mod tests {
                 pets(),
                 vec![
                     "created shop.pets".to_owned(),
-                    "era [\"id\"] 12..20".to_owned()
+                    "era [\"id\"] @12..20".to_owned()
                 ]
             )]
         );
@@ -683,7 +746,7 @@ mod tests {
                 people(),
                 vec![
                     "created shop.people".to_owned(),
-                    "era [\"id\", \"name\"] 16..20".to_owned()
+                    "era [\"id\", \"name\"] @16..20".to_owned()
                 ]
             )]
         );
@@ -707,6 +770,26 @@ mod tests {
         assert_eq!(
             tracker.finish(&(), &catalog).unwrap_err(),
             Untold::Unopened(people())
+        );
+    }
+
+    #[test]
+    fn a_bound_in_time_is_placed_by_its_instant_alone() {
+        assert_eq!(
+            Bound::<Offset>::Time(RecordedAt::from(15)).coordinates(),
+            [Coordinate::Number(15)]
+        );
+    }
+
+    #[test]
+    fn a_bound_at_a_position_is_placed_by_its_instant_then_its_position() {
+        assert_eq!(
+            Bound::Position {
+                at: RecordedAt::from(15),
+                position: Offset(99),
+            }
+            .coordinates(),
+            [Coordinate::Number(15), Coordinate::Number(99)]
         );
     }
 }

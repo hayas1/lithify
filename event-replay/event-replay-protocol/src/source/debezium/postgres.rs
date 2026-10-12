@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use sqlparser::dialect::PostgreSqlDialect;
 
 use event_replay_core::model::ColumnType;
-use event_replay_core::position::Position;
+use event_replay_core::position::{Coordinate, Position};
 use event_replay_core::source::ColumnPath;
 
 use super::Dialect;
@@ -26,7 +26,11 @@ impl PostgresPosition {
     }
 }
 
-impl Position for PostgresPosition {}
+impl Position for PostgresPosition {
+    fn coordinates(&self) -> Vec<Coordinate> {
+        vec![Coordinate::Number(self.lsn)]
+    }
+}
 
 impl From<&PostgresSource> for PostgresPosition {
     fn from(source: &PostgresSource) -> Self {
@@ -241,5 +245,13 @@ mod tests {
     fn a_statement_the_log_carried_is_not_captured() {
         assert!(!captured(json!({"lsn": 26738384i64, "snapshot": "false"})));
         assert!(!captured(json!({"lsn": 26738384i64})));
+    }
+
+    #[test]
+    fn a_position_is_placed_by_its_log_sequence_number_as_the_dialect_orders_it() {
+        let position = position(26738384);
+
+        assert_eq!(position.coordinates(), [Coordinate::Number(26738384)]);
+        assert_eq!(position.coordinates().len(), Postgres.ordering().len());
     }
 }

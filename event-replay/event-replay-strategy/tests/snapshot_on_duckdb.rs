@@ -1,7 +1,7 @@
 use duckdb::Connection;
 
 use event_replay_core::artifact::UnbuildableArtifact;
-use event_replay_core::era::{Era, EraTracker};
+use event_replay_core::era::{Bound, Era, EraTracker};
 use event_replay_core::listener::OutOfOrder;
 use event_replay_core::listener::SchemaChangeListener;
 use event_replay_core::model::{ColumnModel, ColumnType, TableId, TableModel};
@@ -50,7 +50,11 @@ fn a_snapshot_holds_each_key_as_the_change_log_last_left_it() {
     SchemaChangeListener::<MySqlPosition>::era_boundary(
         &mut snapshot,
         client.warehouse(),
-        &Era::new(people(), window),
+        &Era::new(
+            people(),
+            Bound::Time(*window.from()),
+            Bound::Time(*window.to()),
+        ),
     )
     .unwrap();
 
@@ -470,6 +474,65 @@ fn a_column_added_with_a_default_no_literal_spells_is_filled_with_null_rather_th
             "SELECT concat_ws(' ', id, coalesce(seen_at::VARCHAR, 'unknown')) FROM shop_snapshot.people ORDER BY id"
         ),
         ["1 unknown"]
+    );
+}
+
+const SIMULTANEOUS: &str = "CREATE SCHEMA ddl;
+    CREATE TABLE ddl.shop AS SELECT * FROM (VALUES
+      ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL}, 'ts_ms': 0::BIGINT,
+        'ddl': 'CREATE TABLE people (id BIGINT, name VARCHAR(64))',
+        'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
+          'table': {'primaryKeyColumnNames': ['id'], 'columns': [
+            {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
+             'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL},
+            {'name': 'name', 'typeName': 'VARCHAR', 'position': 2, 'optional': false,
+             'defaultValueExpression': NULL, 'length': 64, 'scale': NULL}]}}]}),
+      ({'source': {'file': 'binlog.000001', 'pos': 10::BIGINT, 'gtid': NULL}, 'ts_ms': 5::BIGINT,
+        'ddl': 'ALTER TABLE people ADD COLUMN email VARCHAR(64) DEFAULT ''none''',
+        'tableChanges': [{'type': 'ALTER', 'id': '\"shop\".\"people\"',
+          'table': {'primaryKeyColumnNames': ['id'], 'columns': [
+            {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
+             'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL},
+            {'name': 'name', 'typeName': 'VARCHAR', 'position': 2, 'optional': false,
+             'defaultValueExpression': NULL, 'length': 64, 'scale': NULL},
+            {'name': 'email', 'typeName': 'VARCHAR', 'position': 3, 'optional': true,
+             'defaultValueExpression': 'none', 'length': 64, 'scale': NULL}]}}]})
+    ) AS t(value);
+    CREATE SCHEMA cdc;
+    CREATE TABLE cdc.people AS SELECT * FROM (VALUES
+      ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 2::BIGINT},
+        'before': NULL::STRUCT(id BIGINT, name VARCHAR, email VARCHAR),
+        'after': {'id': 1::BIGINT, 'name': 'Alice', 'email': NULL::VARCHAR}}),
+      ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 3::BIGINT},
+        'before': NULL::STRUCT(id BIGINT, name VARCHAR, email VARCHAR),
+        'after': {'id': 2::BIGINT, 'name': 'Bob', 'email': NULL::VARCHAR}}),
+      ({'op': 'u', 'ts_ms': 5::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 8::BIGINT},
+        'before': {'id': 2::BIGINT, 'name': 'Bob', 'email': NULL::VARCHAR},
+        'after': {'id': 2::BIGINT, 'name': 'Bobby', 'email': NULL::VARCHAR}}),
+      ({'op': 'u', 'ts_ms': 5::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 12::BIGINT},
+        'before': {'id': 1::BIGINT, 'name': 'Alice', 'email': 'none'},
+        'after': {'id': 1::BIGINT, 'name': 'Alicia', 'email': 'alicia@example.com'}})
+    ) AS t(value)";
+
+#[test]
+fn changes_recorded_in_the_instant_of_a_schema_change_fall_on_its_side_their_position_puts_them() {
+    let client = DuckDbClient::new(
+        Connection::open_in_memory().unwrap(),
+        DuckDbWarehouse::default(),
+    );
+    client.execute(&SqlString::from(SIMULTANEOUS)).unwrap();
+
+    replay(
+        &client,
+        &Window::new(RecordedAt::from(0), RecordedAt::from(10)),
+    );
+
+    assert_eq!(
+        rows(
+            &client,
+            "SELECT concat_ws(' ', id, name, coalesce(email, 'null')) FROM shop_snapshot.people ORDER BY id"
+        ),
+        ["1 Alicia alicia@example.com", "2 Bobby none"]
     );
 }
 

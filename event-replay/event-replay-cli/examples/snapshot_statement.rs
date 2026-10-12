@@ -1,5 +1,5 @@
 use event_replay_core::artifact::Artifact;
-use event_replay_core::era::Era;
+use event_replay_core::era::{Bound, Era};
 use event_replay_core::listener::SchemaChangeListener;
 use event_replay_core::model::{ColumnModel, ColumnType, TableId, TableModel};
 use event_replay_core::position::RecordedAt;
@@ -59,7 +59,11 @@ fn statements<W: Warehouse>(warehouse: &W) -> String {
     SchemaChangeListener::<MySqlPosition>::era_boundary(
         &mut snapshot,
         warehouse,
-        &Era::new(customers(), window),
+        &Era::new(
+            customers(),
+            Bound::Time(*window.from()),
+            Bound::Time(*window.to()),
+        ),
     )
     .unwrap();
 

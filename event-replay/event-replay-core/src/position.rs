@@ -2,7 +2,27 @@ use std::fmt;
 
 use chrono::{DateTime, Utc};
 
-pub trait Position: PartialOrd + Clone + fmt::Debug {}
+use crate::sink::Warehouse;
+use crate::sql::SqlString;
+
+pub trait Position: PartialOrd + Clone + fmt::Debug {
+    fn coordinates(&self) -> Vec<Coordinate>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Coordinate {
+    Text(String),
+    Number(i64),
+}
+
+impl Coordinate {
+    pub fn sql<W: Warehouse>(&self, warehouse: &W) -> SqlString {
+        match self {
+            Self::Text(text) => warehouse.literal(text),
+            Self::Number(number) => SqlString::from(number.to_string()),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RecordedAt(i64);

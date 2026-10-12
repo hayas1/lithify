@@ -156,12 +156,16 @@ mod tests {
     use event_replay_core::event::TableChange;
     use event_replay_core::listener::{CatalogModel, OutOfOrder};
     use event_replay_core::model::{ColumnModel, ColumnType, TableId, TableModel};
-    use event_replay_core::position::{Position, RecordedAt};
+    use event_replay_core::position::{Coordinate, Position, RecordedAt};
 
     #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
     struct Offset(u64);
 
-    impl Position for Offset {}
+    impl Position for Offset {
+        fn coordinates(&self) -> Vec<Coordinate> {
+            vec![Coordinate::Number(self.0 as i64)]
+        }
+    }
 
     fn customers(columns: Vec<ColumnModel>) -> TableModel {
         TableModel::new(

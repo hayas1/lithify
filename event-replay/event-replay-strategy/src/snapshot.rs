@@ -7,6 +7,7 @@ use event_replay_core::listener::{
     SchemaChangeListener, TableCreated, TableRenamed,
 };
 use event_replay_core::model::{ColumnModel, TableId, TableModel};
+use event_replay_core::position::Position;
 use event_replay_core::sink::{TablePath, Warehouse};
 use event_replay_core::source::RowChangeLog;
 use event_replay_core::sql::SqlString;
@@ -121,7 +122,11 @@ impl<'a, L: RowChangeLog, W: Warehouse> Snapshot<'a, L, W> {
         UnbuildableArtifact::WithoutEra(self.table.clone())
     }
 
-    fn fold_era(&mut self, warehouse: &W, era: &Era) -> Result<(), UnbuildableArtifact> {
+    fn fold_era<P: Position>(
+        &mut self,
+        warehouse: &W,
+        era: &Era<P>,
+    ) -> Result<(), UnbuildableArtifact> {
         self.begin(warehouse, era.table())?;
 
         let step = self.relations.step();
@@ -161,7 +166,7 @@ impl<'a, L: RowChangeLog, W: Warehouse> Snapshot<'a, L, W> {
     }
 }
 
-impl<P, L: RowChangeLog, W: Warehouse> SchemaChangeListener<P> for Snapshot<'_, L, W> {
+impl<P: Position, L: RowChangeLog, W: Warehouse> SchemaChangeListener<P> for Snapshot<'_, L, W> {
     type Context = W;
     type Error = UnbuildableArtifact;
 
@@ -177,7 +182,11 @@ impl<P, L: RowChangeLog, W: Warehouse> SchemaChangeListener<P> for Snapshot<'_, 
         Ok(())
     }
 
-    fn era_boundary(&mut self, warehouse: &W, closed_era: &Era) -> Result<(), UnbuildableArtifact> {
+    fn era_boundary(
+        &mut self,
+        warehouse: &W,
+        closed_era: &Era<P>,
+    ) -> Result<(), UnbuildableArtifact> {
         self.fold_era(warehouse, closed_era)
     }
 
@@ -285,11 +294,11 @@ impl<L: RowChangeLog, W: Warehouse> Artifact for Snapshot<'_, L, W> {
 mod tests {
     use super::*;
     use event_replay_core::artifact::{Artifact, UnbuildableArtifact};
-    use event_replay_core::era::EraTracker;
+    use event_replay_core::era::{Bound, EraTracker};
     use event_replay_core::event::{SchemaChange, TableChange};
     use event_replay_core::listener::{CatalogModel, OutOfOrder};
     use event_replay_core::model::{ColumnModel, ColumnType, TableId, TableModel};
-    use event_replay_core::position::{Position, RecordedAt};
+    use event_replay_core::position::{Coordinate, Position, RecordedAt};
     use event_replay_core::sink::{TablePath, UnsupportedColumn, Warehouse};
     use event_replay_core::source::{ChangeLog, ColumnPath, RowChangeLog};
     use event_replay_core::window::Window;
@@ -297,7 +306,11 @@ mod tests {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     struct Offset(u64);
 
-    impl Position for Offset {}
+    impl Position for Offset {
+        fn coordinates(&self) -> Vec<Coordinate> {
+            vec![Coordinate::Number(self.0 as i64)]
+        }
+    }
 
     struct Log;
 
@@ -575,7 +588,7 @@ mod tests {
                 "  WHERE \"op\" = 'r'\n",
                 "  QUALIFY ROW_NUMBER() OVER (\n",
                 "    PARTITION BY COALESCE(\"after\".\"id\", \"before\".\"id\")\n",
-                "    ORDER BY \"source\".\"offset\" DESC\n",
+                "    ORDER BY \"ts_ms\" DESC, \"source\".\"offset\" DESC\n",
                 "  ) = 1\n",
                 "),\n",
                 "\"changes_1\" AS (\n",
@@ -584,7 +597,7 @@ mod tests {
                 "  WHERE \"ts_ms\" >= 100 AND \"ts_ms\" < 200\n",
                 "  QUALIFY ROW_NUMBER() OVER (\n",
                 "    PARTITION BY COALESCE(\"after\".\"id\", \"before\".\"id\")\n",
-                "    ORDER BY \"source\".\"offset\" DESC\n",
+                "    ORDER BY \"ts_ms\" DESC, \"source\".\"offset\" DESC\n",
                 "  ) = 1\n",
                 "),\n",
                 "\"era_1\" AS (\n",
@@ -692,6 +705,36 @@ mod tests {
     }
 
     #[test]
+    fn a_schema_change_splits_the_change_log_at_its_position_within_its_instant() {
+        let statement = statement(snapshots(
+            customers(),
+            vec![SchemaChange::new(
+                Offset(7),
+                RecordedAt::from(150),
+                "",
+                vec![TableChange::Altered(widened())],
+            )],
+            || Base::Captured,
+        ));
+
+        assert!(statement.contains(concat!(
+            "  WHERE \"ts_ms\" >= 100",
+            " AND (\"ts_ms\" < 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" < 7))\n"
+        )));
+        assert!(statement.contains(concat!(
+            "  WHERE (\"ts_ms\" > 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" >= 7))",
+            " AND \"ts_ms\" < 200\n"
+        )));
+    }
+
+    #[test]
+    fn the_latest_change_of_a_key_is_the_one_recorded_last_then_logged_last() {
+        let statement = statement(snapshots(customers(), vec![], || Base::Captured));
+
+        assert!(statement.contains("    ORDER BY \"ts_ms\" DESC, \"source\".\"offset\" DESC\n"));
+    }
+
+    #[test]
     fn a_column_added_within_the_window_fills_in_the_rows_folded_before_it() {
         let statement = statement(snapshots(
             customers(),
@@ -699,7 +742,7 @@ mod tests {
             || Base::Captured,
         ));
 
-        assert!(statement.contains("  WHERE \"ts_ms\" >= 100 AND \"ts_ms\" < 150\n"));
+        assert!(statement.contains("  WHERE \"ts_ms\" >= 100 AND (\"ts_ms\" < 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" < 150))\n"));
         assert!(statement.contains(concat!(
             "\"era_2\" AS (\n",
             "  SELECT\n",
@@ -709,7 +752,7 @@ mod tests {
             "  FROM \"era_1\"\n",
             "),\n",
         )));
-        assert!(statement.contains("  WHERE \"ts_ms\" >= 150 AND \"ts_ms\" < 200\n"));
+        assert!(statement.contains("  WHERE (\"ts_ms\" > 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" >= 150)) AND \"ts_ms\" < 200\n"));
         assert!(statement.contains("    CAST(\"after\".\"email\" AS TEXT) AS \"email\"\n"));
         assert!(statement.ends_with("SELECT * FROM \"era_3\""));
     }
@@ -858,10 +901,10 @@ mod tests {
         ));
 
         assert!(statement.contains(concat!(
-            "  WHERE \"ts_ms\" >= 130 AND \"ts_ms\" < 160\n",
+            "  WHERE (\"ts_ms\" > 130 OR (\"ts_ms\" = 130 AND \"source\".\"offset\" >= 130)) AND (\"ts_ms\" < 160 OR (\"ts_ms\" = 160 AND \"source\".\"offset\" < 160))\n",
             "  QUALIFY ROW_NUMBER() OVER (\n",
             "    PARTITION BY COALESCE(\"after\".\"id\", \"before\".\"id\")\n",
-            "    ORDER BY \"source\".\"offset\" DESC\n",
+            "    ORDER BY \"ts_ms\" DESC, \"source\".\"offset\" DESC\n",
             "  ) = 1\n",
             "),\n",
             "\"era_3\" AS (\n",
@@ -878,7 +921,7 @@ mod tests {
             "    \"email\" AS \"email\"\n",
             "  FROM \"era_3\"\n",
         )));
-        assert!(statement.contains("  WHERE \"ts_ms\" >= 160 AND \"ts_ms\" < 200\n"));
+        assert!(statement.contains("  WHERE (\"ts_ms\" > 160 OR (\"ts_ms\" = 160 AND \"source\".\"offset\" >= 160)) AND \"ts_ms\" < 200\n"));
         assert!(statement.ends_with("SELECT * FROM \"era_5\""));
     }
 
@@ -1092,13 +1135,13 @@ mod tests {
         ));
 
         assert!(statement.contains(concat!(
-            "  WHERE \"ts_ms\" >= 100 AND \"ts_ms\" < 150\n",
+            "  WHERE \"ts_ms\" >= 100 AND (\"ts_ms\" < 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" < 150))\n",
             "  QUALIFY ROW_NUMBER() OVER (\n",
             "    PARTITION BY COALESCE(\"after\".\"id\", \"before\".\"id\")\n",
         )));
         assert!(statement.contains("    \"id\" AS \"customer_id\",\n"));
         assert!(statement.contains(concat!(
-            "  WHERE \"ts_ms\" >= 150 AND \"ts_ms\" < 200\n",
+            "  WHERE (\"ts_ms\" > 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" >= 150)) AND \"ts_ms\" < 200\n",
             "  QUALIFY ROW_NUMBER() OVER (\n",
             "    PARTITION BY COALESCE(\"after\".\"customer_id\", \"before\".\"customer_id\")\n",
         )));
@@ -1136,13 +1179,13 @@ mod tests {
             "\"changes_1\" AS (\n",
             "  SELECT *\n",
             "  FROM \"mysql_shop_cdc\".\"mysql_shop_customers\"\n",
-            "  WHERE \"ts_ms\" >= 100 AND \"ts_ms\" < 150\n",
+            "  WHERE \"ts_ms\" >= 100 AND (\"ts_ms\" < 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" < 150))\n",
         )));
         assert!(statement.contains(concat!(
             "\"changes_2\" AS (\n",
             "  SELECT *\n",
             "  FROM \"mysql_shop_cdc\".\"mysql_shop_clients\"\n",
-            "  WHERE \"ts_ms\" >= 150 AND \"ts_ms\" < 200\n",
+            "  WHERE (\"ts_ms\" > 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" >= 150)) AND \"ts_ms\" < 200\n",
         )));
         assert!(statement.ends_with("SELECT * FROM \"era_2\""));
     }
@@ -1284,7 +1327,8 @@ mod tests {
                 &Engine,
                 &Era::new(
                     customers(),
-                    Window::new(RecordedAt::from(100), RecordedAt::from(200))
+                    Bound::Time(RecordedAt::from(100)),
+                    Bound::Time(RecordedAt::from(200))
                 ),
             )
             .unwrap_err(),

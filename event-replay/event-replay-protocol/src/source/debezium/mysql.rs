@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use sqlparser::dialect::MySqlDialect;
 
 use event_replay_core::model::ColumnType;
-use event_replay_core::position::Position;
+use event_replay_core::position::{Coordinate, Position};
 use event_replay_core::source::ColumnPath;
 
 use super::Dialect;
@@ -39,7 +39,17 @@ impl MySqlPosition {
     }
 }
 
-impl Position for MySqlPosition {}
+// TODO: order positions across the servers a connector may switch between: a binlog file and
+// offset name a place in one server alone, so a replica taking over starts them anew. Debezium
+// compares GTID sets when both sides carry them and falls back to the time of the event otherwise.
+impl Position for MySqlPosition {
+    fn coordinates(&self) -> Vec<Coordinate> {
+        vec![
+            Coordinate::Text(self.file.clone()),
+            Coordinate::Number(self.pos),
+        ]
+    }
+}
 
 impl From<&MySqlSource> for MySqlPosition {
     fn from(source: &MySqlSource) -> Self {
@@ -463,5 +473,19 @@ mod tests {
             json!({"file": "binlog.000002", "pos": 448, "snapshot": "false"})
         ));
         assert!(!captured(json!({"file": "binlog.000002", "pos": 448})));
+    }
+
+    #[test]
+    fn a_position_is_placed_by_its_binlog_file_then_offset_as_the_dialect_orders_them() {
+        let position = position("binlog.000002", 448);
+
+        assert_eq!(
+            position.coordinates(),
+            [
+                Coordinate::Text("binlog.000002".to_owned()),
+                Coordinate::Number(448)
+            ]
+        );
+        assert_eq!(position.coordinates().len(), MySql.ordering().len());
     }
 }

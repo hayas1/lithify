@@ -117,8 +117,8 @@ mod tests {
     use event_replay_core::event::{MalformedEvent, SchemaChange, TableChange};
     use event_replay_core::listener::OutOfOrder;
     use event_replay_core::model::TableId;
-    use event_replay_core::position::Position;
     use event_replay_core::position::RecordedAt;
+    use event_replay_core::position::{Coordinate, Position};
     use event_replay_core::source::{ChangeLog, ColumnPath};
 
     const CHANGE_LOG: &str = "CREATE SCHEMA mysql_shop_cdc;
@@ -305,7 +305,11 @@ mod tests {
     #[derive(Debug, Clone, PartialEq, PartialOrd)]
     struct Line(i64);
 
-    impl Position for Line {}
+    impl Position for Line {
+        fn coordinates(&self) -> Vec<Coordinate> {
+            vec![Coordinate::Number(self.0)]
+        }
+    }
 
     struct Ledger;
 

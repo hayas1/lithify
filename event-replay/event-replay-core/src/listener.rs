@@ -34,7 +34,7 @@ pub trait SchemaChangeListener<P> {
     fn era_boundary(
         &mut self,
         context: &Self::Context,
-        closed_era: &Era,
+        closed_era: &Era<P>,
     ) -> Result<(), Self::Error> {
         let _ = (context, closed_era);
 
@@ -661,12 +661,17 @@ mod tests {
     use super::*;
     use crate::event::TableChange;
     use crate::model::{ColumnType, TableId};
+    use crate::position::Coordinate;
     use crate::position::RecordedAt;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     struct Offset(u64);
 
-    impl Position for Offset {}
+    impl Position for Offset {
+        fn coordinates(&self) -> Vec<Coordinate> {
+            vec![Coordinate::Number(self.0 as i64)]
+        }
+    }
 
     #[derive(Debug, Default)]
     struct Journal {
