@@ -20,7 +20,7 @@ flowchart LR
     sink-s3["sink-s3-*"]
   end
   kafka --> sink-bigquery --> bigquery[(BigQuery)]
-  kafka --> sink-s3 --> minio[(MinIO: Parquet)] --> duckdb[(DuckDB)]
+  kafka --> sink-s3 --> rustfs[(RustFS: Parquet)] --> duckdb[(DuckDB)]
   bigquery <--> lithify
   duckdb <--> lithify
 ```

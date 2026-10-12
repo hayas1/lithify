@@ -50,12 +50,12 @@ mod tests {
 
     #[test]
     fn a_secret_is_not_printed_where_it_is_read() {
-        let secret: Secret = "minioadmin".parse().unwrap();
+        let secret: Secret = "rustfsadmin".parse().unwrap();
 
         assert_eq!(format!("{secret:?}"), "***");
         assert_eq!(
             Credential::new("key".to_owned(), secret).secret(),
-            "minioadmin"
+            "rustfsadmin"
         );
     }
 }

@@ -297,7 +297,7 @@ mod tests {
             "\"mysql_shop_cdc\".\"mysql\""
         );
         assert_eq!(
-            DuckDbWarehouse::over("mysql_shop_cdc", s3("http://minio:9000"))
+            DuckDbWarehouse::over("mysql_shop_cdc", s3("http://rustfs:9000"))
                 .change_log_ref("mysql"),
             "read_parquet('s3://lithify/mysql_shop_cdc/mysql/*.parquet', union_by_name = true)"
         );
@@ -306,7 +306,7 @@ mod tests {
     #[test]
     fn what_was_built_lives_in_the_database_even_when_the_change_log_does_not() {
         assert_eq!(
-            DuckDbWarehouse::over("mysql_shop_cdc", s3("http://minio:9000"))
+            DuckDbWarehouse::over("mysql_shop_cdc", s3("http://rustfs:9000"))
                 .table_ref(&TablePath::new("mysql_shop", "customers")),
             "\"mysql_shop\".\"customers\""
         );

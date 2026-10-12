@@ -141,9 +141,9 @@ mod tests {
             "--to",
             to,
             "--access-key-id",
-            "minioadmin",
+            "rustfsadmin",
             "--secret-access-key",
-            "minioadmin",
+            "rustfsadmin",
         ])
     }
 
@@ -157,9 +157,9 @@ mod tests {
             "--to",
             "2026-09-21T00:00:00Z",
             "--access-key-id",
-            "minioadmin",
+            "rustfsadmin",
             "--secret-access-key",
-            "minioadmin",
+            "rustfsadmin",
             "--dry-run",
             "plans",
         ]);
@@ -181,9 +181,9 @@ mod tests {
             "--to",
             "2026-09-21T00:00:00Z",
             "--access-key-id",
-            "minioadmin",
+            "rustfsadmin",
             "--secret-access-key",
-            "minioadmin",
+            "rustfsadmin",
             "--onto",
             "2026-09-19T00:00:00Z",
         ]);
@@ -230,9 +230,9 @@ mod tests {
             "--to",
             "2026-09-21T00:00:00Z",
             "--access-key-id",
-            "minioadmin",
+            "rustfsadmin",
             "--secret-access-key",
-            "minioadmin",
+            "rustfsadmin",
         ]);
 
         assert!(unreadable.is_err());

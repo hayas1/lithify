@@ -109,7 +109,7 @@ pub(crate) mod tests {
     #[test]
     fn a_table_is_scanned_from_the_files_the_sink_wrote_in_the_format_they_were_written_in() {
         assert_eq!(
-            s3("http://minio:9000").scan(&TablePath::new("mysql_shop_cdc", "mysql")),
+            s3("http://rustfs:9000").scan(&TablePath::new("mysql_shop_cdc", "mysql")),
             "read_parquet('s3://lithify/mysql_shop_cdc/mysql/*.parquet', union_by_name = true)"
         );
     }

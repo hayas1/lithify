@@ -341,7 +341,7 @@ mod tests {
         capture.debezium.dialect = "postgres"
 
         [[sink]]
-        name = "minio"
+        name = "rustfs"
         warehouse.files.bucket = "lithify"
 
         [[sink]]
@@ -363,7 +363,7 @@ mod tests {
     "#;
 
     const NAMED: &str = r#"
-        name = "minio"
+        name = "rustfs"
     "#;
 
     const ARTIFACTS: &str = r#"
@@ -451,7 +451,7 @@ mod tests {
     #[test]
     fn a_pipeline_that_captures_no_server_is_rejected() {
         let wiring = wiring(
-            "[[sink]]\nname = \"minio\"\nchange_log = \"mysql_shop_cdc\"\nwarehouse.files.bucket = \"lithify\"\nartifacts.snapshot = \"mysql_shop\"\nartifacts.history = \"mysql_shop_history\"\nartifacts.shard = \"%Y%m%d\"",
+            "[[sink]]\nname = \"rustfs\"\nchange_log = \"mysql_shop_cdc\"\nwarehouse.files.bucket = \"lithify\"\nartifacts.snapshot = \"mysql_shop\"\nartifacts.history = \"mysql_shop_history\"\nartifacts.shard = \"%Y%m%d\"",
         );
 
         assert_eq!(wiring.sources().unwrap_err(), Miswiring::WithoutSources);
@@ -468,7 +468,7 @@ mod tests {
 
     #[test]
     fn a_sink_holds_the_change_log_the_pipeline_names() {
-        assert_eq!(sinks()[0].name(), "minio");
+        assert_eq!(sinks()[0].name(), "rustfs");
         assert_eq!(sinks()[0].change_log(), "mysql_shop_cdc");
     }
 
@@ -542,7 +542,7 @@ mod tests {
 
         assert_eq!(
             wiring.sinks().unwrap_err(),
-            Miswiring::SinkWithoutChangeLog("minio".to_owned())
+            Miswiring::SinkWithoutChangeLog("rustfs".to_owned())
         );
     }
 
@@ -555,7 +555,7 @@ mod tests {
 
         assert_eq!(
             wiring.sinks().unwrap_err(),
-            Miswiring::SinkWithoutWarehouse("minio".to_owned())
+            Miswiring::SinkWithoutWarehouse("rustfs".to_owned())
         );
     }
 
@@ -568,7 +568,7 @@ mod tests {
 
         assert_eq!(
             wiring.sinks().unwrap_err(),
-            Miswiring::SinkWithoutArtifacts("minio".to_owned())
+            Miswiring::SinkWithoutArtifacts("rustfs".to_owned())
         );
     }
 
@@ -579,7 +579,7 @@ mod tests {
 
         assert_eq!(
             wiring.sinks().unwrap_err(),
-            Miswiring::SinkNamedTwice("minio".to_owned())
+            Miswiring::SinkNamedTwice("rustfs".to_owned())
         );
     }
 

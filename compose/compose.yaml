@@ -231,45 +231,45 @@ services:
         condition: service_completed_successfully
         required: false
 
-  minio:
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
-    profiles: ["minio"]
-    command: ["server", "/data", "--console-address", ":9001"]
+  rustfs:
+    image: rustfs/rustfs:1.0.1
+    profiles: ["rustfs"]
     environment:
-      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID}
-      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY}
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY_ID}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_ACCESS_KEY}
+      RUSTFS_CONSOLE_ENABLE: "true"
     ports:
       - "9000:9000"
       - "9001:9001"
     volumes:
-      - minio-data:/data
+      - rustfs-data:/data
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/health"]
       interval: 2s
       timeout: 5s
       retries: 30
 
-  minio-init:
-    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
-    profiles: ["minio"]
+  rustfs-init:
+    image: amazon/aws-cli:2.37.12
+    profiles: ["rustfs"]
     environment:
       <<: *s3-env
     entrypoint: ["/create-bucket.sh"]
     volumes:
-      - ./minio/create-bucket.sh:/create-bucket.sh:ro
+      - ./rustfs/create-bucket.sh:/create-bucket.sh:ro
     depends_on:
-      minio:
+      rustfs:
         condition: service_healthy
     restart: "no"
 
   register-s3:
     <<: *register-connectors
-    profiles: ["minio", "s3"]
+    profiles: ["rustfs", "s3"]
     command: ["sink-s3:mysql", "sink-s3:postgres"]
     depends_on:
       register-sources:
         condition: service_completed_successfully
-      minio-init:
+      rustfs-init:
         condition: service_completed_successfully
         required: false
 
@@ -309,7 +309,7 @@ services:
   #   ports:
   #     - "8181:8181"
   #   depends_on:
-  #     minio:
+  #     rustfs:
   #       condition: service_healthy
 
 networks:
@@ -325,5 +325,5 @@ volumes:
   postgres-data:
   bigquery-emulator-data:
   bigquery-proxy-certs:
-  minio-data:
+  rustfs-data:
   duckdb-data:

@@ -336,7 +336,7 @@ mod tests {
         [source.primary]
         url = "mysql://root:root@mysql:3306/shop"
 
-        [sink.minio]
+        [sink.rustfs]
 
         [sink.warehouse]
 
@@ -345,7 +345,7 @@ mod tests {
 
         [cleanup]
         source.primary.query = ["DROP TABLE IF EXISTS shop.people"]
-        sink.minio.query = ["DROP TABLE IF EXISTS mysql_shop.people"]
+        sink.rustfs.query = ["DROP TABLE IF EXISTS mysql_shop.people"]
         sink.warehouse.query = ["DROP TABLE IF EXISTS `mysql_shop.people`"]
 
         [[step]]
@@ -354,8 +354,8 @@ mod tests {
 
         [[step]]
         name = "the snapshot of the rows"
-        build = [{ snapshot = { sink = "minio", source = "primary", table = "shop.people" } }]
-        assert = [{ snapshot = { sink = "minio", source = "primary", table = "shop.people" } }]
+        build = [{ snapshot = { sink = "rustfs", source = "primary", table = "shop.people" } }]
+        assert = [{ snapshot = { sink = "rustfs", source = "primary", table = "shop.people" } }]
     "#;
 
     fn scenario() -> Scenario {
@@ -377,7 +377,7 @@ mod tests {
         );
         assert_eq!(
             scenario.sinks().map(|(name, _)| name).collect::<Vec<_>>(),
-            ["minio", "warehouse"]
+            ["rustfs", "warehouse"]
         );
     }
 
@@ -408,7 +408,7 @@ mod tests {
                 .flat_map(|(name, action)| action.queries().map(move |query| (name, query)))
                 .collect::<Vec<_>>(),
             [
-                ("minio", "DROP TABLE IF EXISTS mysql_shop.people"),
+                ("rustfs", "DROP TABLE IF EXISTS mysql_shop.people"),
                 ("warehouse", "DROP TABLE IF EXISTS `mysql_shop.people`")
             ]
         );
@@ -430,7 +430,7 @@ mod tests {
             panic!("the step builds no snapshot");
         };
 
-        assert_eq!(snapshot.sink(), "minio");
+        assert_eq!(snapshot.sink(), "rustfs");
         assert_eq!(snapshot.source(), "primary");
         assert_eq!(snapshot.table(), &TableId::new("shop", "people"));
     }
@@ -442,7 +442,7 @@ mod tests {
             panic!("the step asserts nothing of a snapshot");
         };
 
-        assert_eq!(snapshot.sink(), "minio");
+        assert_eq!(snapshot.sink(), "rustfs");
         assert_eq!(snapshot.source(), "primary");
         assert_eq!(snapshot.table(), &TableId::new("shop", "people"));
     }
@@ -463,7 +463,7 @@ mod tests {
     #[test]
     fn building_in_a_sink_the_scenario_does_not_connect_is_rejected() {
         let written = SCENARIO.replace(
-            "build = [{ snapshot = { sink = \"minio\"",
+            "build = [{ snapshot = { sink = \"rustfs\"",
             "build = [{ snapshot = { sink = \"lake\"",
         );
 
@@ -476,8 +476,8 @@ mod tests {
     #[test]
     fn building_from_a_source_the_scenario_does_not_connect_is_rejected() {
         let written = SCENARIO.replace(
-            "sink = \"minio\", source = \"primary\", table = \"shop.people\" } }]\n        assert",
-            "sink = \"minio\", source = \"replica\", table = \"shop.people\" } }]\n        assert",
+            "sink = \"rustfs\", source = \"primary\", table = \"shop.people\" } }]\n        assert",
+            "sink = \"rustfs\", source = \"replica\", table = \"shop.people\" } }]\n        assert",
         );
 
         assert!(matches!(
@@ -489,7 +489,7 @@ mod tests {
     #[test]
     fn asserting_on_a_sink_the_scenario_does_not_connect_is_rejected() {
         let written = SCENARIO.replace(
-            "assert = [{ snapshot = { sink = \"minio\"",
+            "assert = [{ snapshot = { sink = \"rustfs\"",
             "assert = [{ snapshot = { sink = \"lake\"",
         );
 
@@ -502,8 +502,8 @@ mod tests {
     #[test]
     fn a_table_that_names_no_schema_is_rejected() {
         let written = SCENARIO.replace(
-            "{ sink = \"minio\", source = \"primary\", table = \"shop.people\" }",
-            "{ sink = \"minio\", source = \"primary\", table = \"people\" }",
+            "{ sink = \"rustfs\", source = \"primary\", table = \"shop.people\" }",
+            "{ sink = \"rustfs\", source = \"primary\", table = \"people\" }",
         );
 
         assert!(matches!(

@@ -149,7 +149,7 @@ mod tests {
         let source = pipeline.sources().next().unwrap();
         let sink = pipeline
             .sinks()
-            .find(|sink| sink.name() == "minio")
+            .find(|sink| sink.name() == "rustfs")
             .unwrap();
         let client = DuckDbClient::new(
             Connection::open_in_memory().unwrap(),
@@ -189,7 +189,7 @@ mod tests {
         let source = pipeline.sources().next().unwrap();
         let sink = pipeline
             .sinks()
-            .find(|sink| sink.name() == "minio")
+            .find(|sink| sink.name() == "rustfs")
             .unwrap();
         let client = DuckDbClient::new(
             Connection::open_in_memory().unwrap(),

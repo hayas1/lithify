@@ -1,6 +1,6 @@
 # Local CDC stack
 
-A local stack to run lithify against: MySQL / PostgreSQL changes are captured by Debezium, published to Kafka, and sunk into BigQuery (or its emulator) and S3 (or MinIO) as a raw change log.
+A local stack to run lithify against: MySQL / PostgreSQL changes are captured by Debezium, published to Kafka, and sunk into BigQuery (or its emulator) and S3 (or RustFS) as a raw change log.
 
 ## Services
 
@@ -12,7 +12,7 @@ A local stack to run lithify against: MySQL / PostgreSQL changes are captured by
 | mysql | - | `mysql:3306` (root/root) | 3306 |
 | postgres | - | `postgres:5432` (postgres/postgres) | 5432 |
 | bigquery-emulator | `bigquery-emulator` | `http://bigquery-emulator:9050` (REST), `:9060` (gRPC) | 9050, 9060 |
-| minio | `minio` | `http://minio:9000`, console `:9001` (minioadmin/minioadmin) | 9000, 9001 |
+| rustfs | `rustfs` | `http://rustfs:9000`, console `:9001` (rustfsadmin/rustfsadmin) | 9000, 9001 |
 | duckdb | `cli` | run on demand | - |
 
 Both source databases have a `shop` schema with `customers`, `orders` and `order_items` (`01-shop.sql`), and the Debezium user plus CDC settings (`02-debezium.sql`), see `compose/mysql/initdb.d` and `compose/postgres/initdb.d`.
@@ -31,7 +31,7 @@ docker compose up -d --build
 `compose/e2e_test.sh` waits for the connectors, changes both source databases, and asserts that the change log reaches BigQuery and DuckDB. `.github/workflows/test.yml` runs it, `compose/connect/register_test.sh`, `scripts/install-clients_test.sh` and the emulator patch's own tests on every push.
 
 `compose/.env` holds every default. Override any of them with shell environment variables, which take precedence over `.env`.
-`COMPOSE_PROFILES` selects the sinks: `bigquery-emulator` or `bigquery`, and `minio` or `s3`.
+`COMPOSE_PROFILES` selects the sinks: `bigquery-emulator` or `bigquery`, and `rustfs` or `s3`.
 The `register-*` one-shot services register the connectors in `compose/connect/connectors` once Kafka Connect is healthy.
 There is one sink connector per source database and sink, named `sink-<sink>-<source>`. Each is registered from the template `compose/connect/connectors/sink-<sink>.json`: `register.sh sink-bigquery:mysql` replaces `@SOURCE@` with `MYSQL`, so it subscribes to `CDC_MYSQL_TOPICS_REGEX` and writes to `BIGQUERY_MYSQL_DATASET` (`sink-s3:mysql` writes under `S3_MYSQL_PREFIX`).
 
@@ -56,7 +56,7 @@ Sinks commit every 10 seconds, so a change shows up there with that much delay.
 
 ## Local clients
 
-`scripts/install-clients.sh` installs `mysql`, `psql`, `duckdb` and `bq`, skipping the ones already on PATH. Pass `-y` to install without asking, which is what an automated setup such as a devcontainer `postCreateCommand` wants. `scripts/install-clients_test.sh` tests the script.
+`scripts/install-clients.sh` installs `mysql`, `psql`, `duckdb` and `bq`, skipping the ones already on PATH. Pass `-y` to install without asking, which is what an automated setup such as a devcontainer `postCreateCommand` wants. Name some of them to install those alone, as CI does with `libduckdb` for the Rust workspace. `scripts/install-clients_test.sh` tests the script.
 
 From a shell on `devcontainer-network` the services are reachable by name (the last one runs in `compose/`):
 
@@ -67,7 +67,7 @@ PGPASSWORD=postgres psql -h postgres -U postgres shop -c "UPDATE shop.customers 
 bq --api=http://bigquery-emulator:9050 --project_id=local-project query --use_legacy_sql=false \
   "SELECT op, after.name, _kafka.offset FROM mysql_shop_cdc.mysql_shop_customers ORDER BY _kafka.offset"
 
-S3_ENDPOINT=http://minio:9000 S3_REGION=us-east-1 S3_BUCKET=lithify S3_ACCESS_KEY_ID=minioadmin S3_SECRET_ACCESS_KEY=minioadmin \
+S3_ENDPOINT=http://rustfs:9000 S3_REGION=us-east-1 S3_BUCKET=lithify S3_ACCESS_KEY_ID=rustfsadmin S3_SECRET_ACCESS_KEY=rustfsadmin \
   duckdb -init duckdb/cdc.sql -c "SELECT op, after.name, _kafka.offset FROM cdc_events('mysql_shop_cdc', 'mysql.shop.customers')"
 ```
 
@@ -103,7 +103,7 @@ The emulator's `_PARTITIONTIME` is the query time rather than a stored value, an
 ## Real BigQuery
 
 ```sh
-export COMPOSE_PROFILES=bigquery,minio
+export COMPOSE_PROFILES=bigquery,rustfs
 export BIGQUERY_PROJECT=<project>
 export BIGQUERY_MYSQL_DATASET=<existing dataset>
 export BIGQUERY_POSTGRES_DATASET=<existing dataset>
@@ -111,8 +111,8 @@ export GCP_CREDENTIALS_FILE=~/.config/gcloud/application_default_credentials.jso
 cd compose && docker compose up -d --build
 ```
 
-Real S3 works the same way with the `s3` profile instead of `minio` and the `S3_*` variables.
+Real S3 works the same way with the `s3` profile instead of `rustfs` and the `S3_*` variables.
 
 ## Deferred
 
-Iceberg (Iceberg Kafka Connect sink + REST catalog on MinIO) and Snowflake (Snowpipe Streaming) are prepared but commented out in `compose/connect/Dockerfile` and `compose/compose.yaml`. `compose/connect/connectors/sink-snowflake.json` is untested.
+Iceberg (Iceberg Kafka Connect sink + REST catalog on RustFS) and Snowflake (Snowpipe Streaming) are prepared but commented out in `compose/connect/Dockerfile` and `compose/compose.yaml`. `compose/connect/connectors/sink-snowflake.json` is untested.

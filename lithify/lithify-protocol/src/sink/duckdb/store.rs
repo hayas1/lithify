@@ -42,7 +42,7 @@ mod tests {
     use crate::sink::duckdb::config::tests::s3;
 
     fn store() -> ObjectStore {
-        ObjectStore::open(&s3("http://minio:9000"), "minioadmin", "minioadmin")
+        ObjectStore::open(&s3("http://rustfs:9000"), "rustfsadmin", "rustfsadmin")
     }
 
     #[test]
@@ -51,7 +51,7 @@ mod tests {
             store()
                 .secret()
                 .as_str()
-                .contains("ENDPOINT 'minio:9000', USE_SSL false")
+                .contains("ENDPOINT 'rustfs:9000', USE_SSL false")
         );
     }
 
@@ -71,7 +71,7 @@ mod tests {
     fn object_storage_is_reached_with_the_credential_it_was_given() {
         let secret = store().secret().to_string();
 
-        assert!(secret.contains("KEY_ID 'minioadmin', SECRET 'minioadmin'"));
-        assert!(secret.contains("REGION 'us-east-1', ENDPOINT 'minio:9000', USE_SSL false"));
+        assert!(secret.contains("KEY_ID 'rustfsadmin', SECRET 'rustfsadmin'"));
+        assert!(secret.contains("REGION 'us-east-1', ENDPOINT 'rustfs:9000', USE_SSL false"));
     }
 }

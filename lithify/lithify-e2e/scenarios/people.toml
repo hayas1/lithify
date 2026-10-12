@@ -4,7 +4,7 @@ path = "../../../compose/lithify/mysql"
 [source.primary]
 url = "mysql://root:root@mysql:3306/shop"
 
-[sink.minio]
+[sink.rustfs]
 
 [setup]
 source.primary.query = [
@@ -15,7 +15,7 @@ source.primary.query = [
 source.primary.query = [
     "DROP TABLE IF EXISTS shop.people",
 ]
-sink.minio.query = [
+sink.rustfs.query = [
     "DROP TABLE IF EXISTS mysql_shop.people",
 ]
 
@@ -25,10 +25,10 @@ source.primary.query = [
     "INSERT INTO shop.people VALUES (1, 'Alice', '1990-01-01'), (2, 'Bob', NULL), (3, 'Carol', '1985-06-15')",
 ]
 build = [
-    { snapshot = { sink = "minio", source = "primary", table = "shop.people" } },
+    { snapshot = { sink = "rustfs", source = "primary", table = "shop.people" } },
 ]
 assert = [
-    { snapshot = { sink = "minio", source = "primary", table = "shop.people" } },
+    { snapshot = { sink = "rustfs", source = "primary", table = "shop.people" } },
 ]
 
 [[step]]
@@ -41,8 +41,8 @@ source.primary.query = [
 [[step]]
 name = "the snapshot after the changes"
 build = [
-    { snapshot = { sink = "minio", source = "primary", table = "shop.people" } },
+    { snapshot = { sink = "rustfs", source = "primary", table = "shop.people" } },
 ]
 assert = [
-    { snapshot = { sink = "minio", source = "primary", table = "shop.people" } },
+    { snapshot = { sink = "rustfs", source = "primary", table = "shop.people" } },
 ]
