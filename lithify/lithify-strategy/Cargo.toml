@@ -13,5 +13,6 @@ chrono = { workspace = true }
 lithify-core = { workspace = true }
 
 [dev-dependencies]
+ulid = { workspace = true }
 duckdb = { workspace = true }
 lithify-protocol = { workspace = true, features = ["duckdb"] }

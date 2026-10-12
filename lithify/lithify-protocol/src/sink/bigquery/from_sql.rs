@@ -1,6 +1,8 @@
 use google_cloud_bigquery::error::RowError;
 use google_cloud_bigquery::query::{FromSql, Row};
 
+use lithify_core::build_log::BuildLogRow;
+
 use crate::source::debezium::DebeziumDdl;
 
 impl<S: FromSql> TryFrom<Row> for DebeziumDdl<S> {
@@ -13,6 +15,31 @@ impl<S: FromSql> TryFrom<Row> for DebeziumDdl<S> {
             ddl: row.try_get("ddl")?,
             table_changes: row.try_get("tableChanges")?,
         })
+    }
+}
+
+pub(crate) struct BigQueryBuildLogRow(pub(crate) BuildLogRow);
+
+impl TryFrom<Row> for BigQueryBuildLogRow {
+    type Error = RowError;
+
+    fn try_from(row: Row) -> Result<Self, Self::Error> {
+        Ok(Self(BuildLogRow {
+            run_id: row.try_get("run_id")?,
+            artifact: row.try_get("artifact")?,
+            schedule: row.try_get("schedule")?,
+            source: row.try_get("source")?,
+            capture: row.try_get("capture")?,
+            table_id: row.try_get("table_id")?,
+            base: row.try_get("base")?,
+            target: row.try_get("target")?,
+            window_from: row.try_get("window_from")?,
+            window_to: row.try_get("window_to")?,
+            status: row.try_get("status")?,
+            finished_at: row.try_get("finished_at")?,
+            error: row.try_get("error")?,
+            version: row.try_get("version")?,
+        }))
     }
 }
 

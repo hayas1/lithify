@@ -4,9 +4,6 @@ use std::process::ExitCode;
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 
-use lithify_core::position::RecordedAt;
-use lithify_core::window::Window;
-
 use lithify_cli::credential::{Credential, Secret};
 use lithify_cli::journal::Journal;
 use lithify_cli::run::Run;
@@ -45,18 +42,6 @@ struct RunArguments {
     directory: PathBuf,
     #[arg(
         long,
-        value_name = "INSTANT",
-        help = "The instant the window opens, as RFC 3339"
-    )]
-    from: DateTime<Utc>,
-    #[arg(
-        long,
-        value_name = "INSTANT",
-        help = "The instant the window closes, as RFC 3339"
-    )]
-    to: DateTime<Utc>,
-    #[arg(
-        long,
         env = "S3_ACCESS_KEY_ID",
         hide_env_values = true,
         value_name = "KEY",
@@ -80,24 +65,18 @@ struct RunArguments {
     #[arg(
         long,
         value_name = "DIRECTORY",
-        help = "Write the statements a snapshot of each table would run into this directory, one file per sink, instead of running them"
+        help = "Write the statements each window would run into this directory, one file per sink and window, instead of running them"
     )]
     dry_run: Option<PathBuf>,
-    // TODO: read the window to fold onto from a history of the runs that built snapshots, once
-    // the command builds them instead of only planning them.
     #[arg(
         long,
         value_name = "INSTANT",
-        help = "The instant the window before this one opened, naming the snapshots to fold onto; without it the window folds onto what the capture read"
+        help = "The instant the window before the first one to build opened, naming the snapshots to fold onto instead of the ones the build log recorded"
     )]
     onto: Option<DateTime<Utc>>,
 }
 
 impl RunArguments {
-    fn window(&self) -> Window {
-        Window::new(RecordedAt::from(self.from), RecordedAt::from(self.to))
-    }
-
     fn execute(self) -> ExitCode {
         match self.journal() {
             Ok(journal) => {
@@ -131,14 +110,12 @@ impl RunArguments {
 
 impl From<RunArguments> for Run {
     fn from(arguments: RunArguments) -> Self {
-        let window = arguments.window();
-
         Self::new(
             arguments.directory,
-            window,
             Credential::new(arguments.access_key_id, arguments.secret_access_key),
             arguments.sink,
             arguments.onto,
+            Utc::now(),
         )
     }
 }
@@ -155,15 +132,11 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
 
-    fn run_arguments(from: &str, to: &str, extra: &[&str]) -> RunArguments {
+    fn run_arguments(extra: &[&str]) -> RunArguments {
         let required = [
             "lithify",
             "run",
             "mysql",
-            "--from",
-            from,
-            "--to",
-            to,
             "--access-key-id",
             "rustfsadmin",
             "--secret-access-key",
@@ -177,26 +150,15 @@ mod tests {
 
     #[test]
     fn a_dry_run_names_the_directory_the_plans_are_written_into() {
-        let planned = run_arguments(
-            "2026-09-20T00:00:00Z",
-            "2026-09-21T00:00:00Z",
-            &["--dry-run", "plans"],
-        );
+        let planned = run_arguments(&["--dry-run", "plans"]);
 
         assert_eq!(planned.dry_run, Some(PathBuf::from("plans")));
-        assert_eq!(
-            run_arguments("2026-09-20T00:00:00Z", "2026-09-21T00:00:00Z", &[]).dry_run,
-            None
-        );
+        assert_eq!(run_arguments(&[]).dry_run, None);
     }
 
     #[test]
     fn a_run_folds_onto_the_snapshot_of_the_window_it_names() {
-        let folded = run_arguments(
-            "2026-09-20T00:00:00Z",
-            "2026-09-21T00:00:00Z",
-            &["--onto", "2026-09-19T00:00:00Z"],
-        );
+        let folded = run_arguments(&["--onto", "2026-09-19T00:00:00Z"]);
 
         assert_eq!(
             folded.onto,
@@ -206,63 +168,31 @@ mod tests {
                     .to_utc()
             )
         );
-        assert_eq!(
-            run_arguments("2026-09-20T00:00:00Z", "2026-09-21T00:00:00Z", &[]).onto,
-            None
-        );
+        assert_eq!(run_arguments(&[]).onto, None);
     }
 
     #[test]
-    fn a_run_reads_the_window_it_is_given() {
-        let window = run_arguments("2026-09-20T00:00:00Z", "2026-09-21T00:00:00Z", &[]).window();
-
-        assert_eq!(window.from(), &RecordedAt::from(1789862400000));
-        assert_eq!(window.to(), &RecordedAt::from(1789948800000));
-    }
-
-    #[test]
-    fn a_run_reads_a_window_given_in_another_zone_as_the_instant_it_names() {
-        let window = run_arguments(
-            "2026-09-20T09:00:00+09:00",
-            "2026-09-21T09:00:00+09:00",
-            &[],
-        )
-        .window();
-
-        assert_eq!(
-            window,
-            run_arguments("2026-09-20T00:00:00Z", "2026-09-21T00:00:00Z", &[]).window()
-        );
-    }
-
-    #[test]
-    fn a_window_that_is_not_an_instant_is_rejected() {
-        let unreadable = Arguments::try_parse_from([
+    fn a_run_is_given_no_window_to_build() {
+        let windowed = Arguments::try_parse_from([
             "lithify",
             "run",
             "mysql",
             "--from",
-            "yesterday afternoon",
-            "--to",
-            "2026-09-21T00:00:00Z",
+            "2026-09-20T00:00:00Z",
             "--access-key-id",
             "rustfsadmin",
             "--secret-access-key",
             "rustfsadmin",
         ]);
 
-        assert!(unreadable.is_err());
+        assert!(windowed.is_err());
     }
 
     #[test]
-    fn a_window_given_without_naming_what_to_do_with_it_is_rejected() {
+    fn a_pipeline_given_without_naming_what_to_do_with_it_is_rejected() {
         let unnamed = Arguments::try_parse_from([
             "lithify",
             "mysql",
-            "--from",
-            "2026-09-20T00:00:00Z",
-            "--to",
-            "2026-09-21T00:00:00Z",
             "--access-key-id",
             "rustfsadmin",
             "--secret-access-key",

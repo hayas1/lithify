@@ -7,6 +7,7 @@ use google_cloud_bigquery::query::Row;
 use google_cloud_gax::client_builder;
 use tokio::runtime::Runtime;
 
+use lithify_core::build_log::{BuildLog, Latest, UnreadableBuildLog};
 use lithify_core::event::MalformedEvent;
 use lithify_core::sink::{Warehouse, WarehouseClient};
 use lithify_core::source::{
@@ -17,6 +18,7 @@ use lithify_core::window::Window;
 
 use crate::sink::bigquery::BigQueryWarehouse;
 use crate::sink::bigquery::config::{Config, Credentials};
+use crate::sink::bigquery::from_sql::BigQueryBuildLogRow;
 
 pub trait BigQueryChangeLogsFn {
     type Output;
@@ -95,20 +97,17 @@ impl WarehouseClient for BigQueryClient {
         })
     }
 
-    fn next_run_id(&self, namespace: &str) -> Result<i64, Self::Error> {
-        let numbered: Vec<RunId> = self.records(&self.warehouse.select_next_run_id(namespace))?;
-
-        Ok(numbered.first().map_or(1, |run_id| run_id.0))
-    }
-}
-
-struct RunId(i64);
-
-impl TryFrom<Row> for RunId {
-    type Error = RowError;
-
-    fn try_from(row: Row) -> Result<Self, Self::Error> {
-        Ok(Self(row.try_get("run_id")?))
+    fn latest_build_logs(
+        &self,
+        namespace: &str,
+        latest: &Latest,
+    ) -> Result<Vec<BuildLog>, Self::Error> {
+        self.records::<BigQueryBuildLogRow>(
+            &self.warehouse.select_latest_build_logs(namespace, latest),
+        )?
+        .into_iter()
+        .map(|row| BuildLog::try_from(row.0).map_err(Unqueryable::Misrecorded))
+        .collect()
     }
 }
 
@@ -161,6 +160,7 @@ pub enum Unqueryable {
     Unanswered(QueryError),
     Unreadable(RowError),
     Malformed(MalformedEvent),
+    Misrecorded(UnreadableBuildLog),
 }
 
 impl Display for Unqueryable {
@@ -171,6 +171,7 @@ impl Display for Unqueryable {
             Self::Unanswered(cause) => write!(formatter, "{cause}"),
             Self::Unreadable(cause) => write!(formatter, "{cause}"),
             Self::Malformed(cause) => write!(formatter, "{cause}"),
+            Self::Misrecorded(cause) => write!(formatter, "{cause}"),
         }
     }
 }

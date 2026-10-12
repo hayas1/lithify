@@ -85,6 +85,10 @@ impl Warehouse for DuckDbWarehouse {
         }
     }
 
+    fn unix_millis(&self, expression: &SqlString) -> SqlString {
+        SqlString::from(format!("epoch_ms({expression})"))
+    }
+
     fn timestamp_millis(&self, milliseconds: i64) -> SqlString {
         SqlString::from(format!(
             "(TIMESTAMPTZ '1970-01-01 00:00:00+00' + INTERVAL ({milliseconds}) MILLISECOND)"

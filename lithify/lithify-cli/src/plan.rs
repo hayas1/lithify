@@ -1,4 +1,5 @@
-use chrono::{DateTime, Utc};
+use std::collections::BTreeMap;
+
 use duckdb::types::FromSql;
 use google_cloud_bigquery::error::RowError;
 use google_cloud_bigquery::query::Row;
@@ -7,7 +8,6 @@ use lithify_config::infra::Sink;
 use lithify_core::artifact::{Artifact, UnbuildableArtifact};
 use lithify_core::era::EraTracker;
 use lithify_core::model::TableId;
-use lithify_core::position::RecordedAt;
 use lithify_core::sink::TablePath;
 use lithify_core::sink::WarehouseClient;
 use lithify_core::source::{ChangeLogs, SchemaChangeLog, SchemaChangeStream};
@@ -24,12 +24,37 @@ use crate::unrunnable::Unrunnable;
 type BuilderOf<'b, C, K> =
     SnapshotBuilder<'b, <C as ChangeLogs>::Row, <K as WarehouseClient>::Warehouse>;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Base {
+    Recorded(BTreeMap<TableId, TablePath>),
+    Shard(Window),
+}
+
+impl Default for Base {
+    fn default() -> Self {
+        Self::Recorded(BTreeMap::new())
+    }
+}
+
+impl Base {
+    fn of(
+        &self,
+        snapshot: &Snapshot,
+        table: &TableId,
+    ) -> Result<Option<TablePath>, UnbuildableArtifact> {
+        match self {
+            Self::Recorded(targets) => Ok(targets.get(table).cloned()),
+            Self::Shard(window) => snapshot.target(table, window).map(Some),
+        }
+    }
+}
+
 pub struct SnapshotPlan<'a, K, S> {
     client: &'a K,
     sink: &'a Sink<Warehouse>,
     window: &'a Window,
-    onto: Option<DateTime<Utc>>,
-    settlement: S,
+    base: &'a Base,
+    settlement: &'a S,
 }
 
 impl<'a, K, S: Settlement> SnapshotPlan<'a, K, S> {
@@ -37,31 +62,16 @@ impl<'a, K, S: Settlement> SnapshotPlan<'a, K, S> {
         client: &'a K,
         sink: &'a Sink<Warehouse>,
         window: &'a Window,
-        onto: Option<DateTime<Utc>>,
-        settlement: S,
+        base: &'a Base,
+        settlement: &'a S,
     ) -> Self {
         Self {
             client,
             sink,
             window,
-            onto,
+            base,
             settlement,
         }
-    }
-
-    fn base(
-        &self,
-        snapshot: &Snapshot,
-        table: &TableId,
-    ) -> Result<Option<TablePath>, UnbuildableArtifact> {
-        self.onto
-            .map(|onto| {
-                snapshot.target(
-                    table,
-                    &Window::new(RecordedAt::from(onto), *self.window.from()),
-                )
-            })
-            .transpose()
     }
 
     fn settle<C>(self, logs: C) -> Result<S::Output, Unrunnable>
@@ -94,7 +104,7 @@ impl<'a, K, S: Settlement> SnapshotPlan<'a, K, S> {
                 logs.row_changes(),
                 table.clone(),
                 window,
-                self.base(snapshot, table)?,
+                self.base.of(snapshot, table)?,
             )
         });
         let catalog = self.client.replay::<Unrunnable, _>(
@@ -133,7 +143,7 @@ impl<S: Settlement> BigQueryChangeLogsFn for SnapshotPlan<'_, BigQueryClient, S>
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::path::Path;
 
     use duckdb::Connection;
@@ -144,13 +154,14 @@ mod tests {
     use lithify_protocol::DuckDbWarehouse;
     use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbClient};
 
+    use chrono::DateTime;
+
     use lithify_core::sql::SqlString;
 
     use super::*;
     use crate::pipeline::Capture;
     use crate::settlement::{Build, DryRun};
-    use lithify_core::build_log::BuildLog;
-    use lithify_core::sink::Warehouse as _;
+    use lithify_core::build_log::{BuildLog, Latest};
 
     const CHANGE_LOGS: &str = "CREATE SCHEMA mysql_shop_cdc;
         CREATE TABLE mysql_shop_cdc.mysql AS SELECT * FROM (VALUES
@@ -162,7 +173,7 @@ mod tests {
                  'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]})
         ) AS t(value)";
 
-    fn pipeline() -> Pipeline<Capture, Warehouse> {
+    pub(crate) fn pipeline() -> Pipeline<Capture, Warehouse> {
         Pipeline::open(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compose/lithify/mysql"))
             .unwrap()
     }
@@ -189,7 +200,13 @@ mod tests {
             .capture()
             .with_duckdb_change_logs(
                 source.topic_prefix().unwrap(),
-                SnapshotPlan::new(&client, sink, &window, None, DryRun),
+                SnapshotPlan::new(
+                    &client,
+                    sink,
+                    &window,
+                    &Base::default(),
+                    &DryRun::new(Path::new("plans"), "rustfs"),
+                ),
             )
             .unwrap();
 
@@ -232,7 +249,13 @@ mod tests {
             .capture()
             .with_duckdb_change_logs(
                 source.topic_prefix().unwrap(),
-                SnapshotPlan::new(&client, sink, &window, Some(onto), DryRun),
+                SnapshotPlan::new(
+                    &client,
+                    sink,
+                    &window,
+                    &Base::Shard(Window::new(RecordedAt::from(onto), *window.from())),
+                    &DryRun::new(Path::new("plans"), "rustfs"),
+                ),
             )
             .unwrap();
 
@@ -243,7 +266,50 @@ mod tests {
         );
     }
 
-    const BUILT_CHANGE_LOGS: &str = "CREATE SCHEMA mysql_shop_cdc;
+    #[test]
+    fn a_plan_folds_each_table_onto_the_shard_the_build_log_recorded_for_it() {
+        let pipeline = pipeline();
+        let source = pipeline.sources().next().unwrap();
+        let sink = pipeline
+            .sinks()
+            .find(|sink| sink.name() == "rustfs")
+            .unwrap();
+        let client = DuckDbClient::new(
+            Connection::open_in_memory().unwrap(),
+            DuckDbWarehouse::new(sink.change_log()),
+        );
+        client.execute(&SqlString::from(CHANGE_LOGS)).unwrap();
+        let window = Window::new(
+            RecordedAt::from(1789862400000),
+            RecordedAt::from(1789948800000),
+        );
+        let recorded = Base::Recorded(BTreeMap::from([(
+            TableId::new("shop", "people"),
+            TablePath::new("mysql_shop", "people_recorded"),
+        )]));
+
+        let statements = source
+            .capture()
+            .with_duckdb_change_logs(
+                source.topic_prefix().unwrap(),
+                SnapshotPlan::new(
+                    &client,
+                    sink,
+                    &window,
+                    &recorded,
+                    &DryRun::new(Path::new("plans"), "rustfs"),
+                ),
+            )
+            .unwrap();
+
+        assert!(
+            statements[1]
+                .as_str()
+                .contains("  FROM \"mysql_shop\".\"people_recorded\"\n")
+        );
+    }
+
+    pub(crate) const BUILT_CHANGE_LOGS: &str = "CREATE SCHEMA mysql_shop_cdc;
         CREATE TABLE mysql_shop_cdc.mysql AS SELECT * FROM (VALUES
           ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL}, 'ts_ms': 0::BIGINT,
             'ddl': 'CREATE TABLE people (id BIGINT)',
@@ -267,7 +333,7 @@ mod tests {
             'before': NULL::STRUCT(id BIGINT), 'after': {'id': 2::BIGINT}})
         ) AS t(value)";
 
-    fn rows(client: &DuckDbClient, query: &str) -> Vec<(String, String)> {
+    pub(crate) fn rows(client: &DuckDbClient, query: &str) -> Vec<(String, String)> {
         client
             .connection()
             .prepare(query)
@@ -312,8 +378,8 @@ mod tests {
                     client,
                     sink,
                     &window,
-                    None,
-                    Build::new(sink, source).unwrap(),
+                    &Base::default(),
+                    &Build::new(sink, source).unwrap(),
                 ),
             )
             .unwrap()
@@ -358,11 +424,11 @@ mod tests {
         assert_eq!(
             rows(
                 &client,
-                "SELECT DISTINCT capture, schedule || ' ' || artifact || ' ' || source || ' ' || run_id FROM mysql_shop._lithify_log"
+                "SELECT DISTINCT capture, schedule || ' ' || artifact || ' ' || source FROM mysql_shop._lithify_log"
             ),
             [(
                 r#"{"debezium":{"dialect":"mysql"}}"#.to_owned(),
-                "daily snapshot primary 1".to_owned()
+                "daily snapshot primary".to_owned()
             )]
         );
     }
@@ -372,22 +438,23 @@ mod tests {
         let (pipeline, client) = built();
         let snapshot = "SELECT id::VARCHAR, 'kept' FROM mysql_shop.people_20260920 ORDER BY id";
 
-        build(&pipeline, &client);
-        let once = rows(&client, snapshot);
-        build(&pipeline, &client);
+        let once = build(&pipeline, &client);
+        let built_once = rows(&client, snapshot);
+        let twice = build(&pipeline, &client);
 
-        assert_eq!(rows(&client, snapshot), once);
+        assert_eq!(rows(&client, snapshot), built_once);
+        assert_ne!(once[0].run_id(), twice[0].run_id());
+        let latest = client
+            .latest_build_logs("mysql_shop", &Latest::Attempted)
+            .unwrap();
         assert_eq!(
-            rows(
-                &client,
-                &format!(
-                    "SELECT table_id, run_id::VARCHAR FROM ({})",
-                    client.warehouse().select_latest_build_logs("mysql_shop")
-                )
-            ),
+            latest
+                .iter()
+                .map(|log| (log.origin().to_string(), log.run_id()))
+                .collect::<Vec<_>>(),
             [
-                ("shop.people".to_owned(), "2".to_owned()),
-                ("shop.pets".to_owned(), "2".to_owned()),
+                ("shop.people".to_owned(), twice[0].run_id()),
+                ("shop.pets".to_owned(), twice[0].run_id()),
             ]
         );
         assert_eq!(

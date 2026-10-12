@@ -99,6 +99,10 @@ impl Warehouse for BigQueryWarehouse {
         }
     }
 
+    fn unix_millis(&self, expression: &SqlString) -> SqlString {
+        SqlString::from(format!("UNIX_MILLIS({expression})"))
+    }
+
     fn timestamp_millis(&self, milliseconds: i64) -> SqlString {
         SqlString::from(format!("TIMESTAMP_MILLIS({milliseconds})"))
     }
@@ -135,11 +139,12 @@ mod tests {
     use crate::source::debezium::Debezium;
     use crate::source::debezium::mysql::MySql;
 
-    use lithify_core::build_log::{BuildLog, Outcome, Run, Status};
+    use lithify_core::build_log::{BuildLog, Latest, Outcome, Run, Status};
     use lithify_core::model::{ColumnType, TableId};
     use lithify_core::position::RecordedAt;
     use lithify_core::sink::{TablePath, UnsupportedColumn, Warehouse};
     use lithify_core::window::Window;
+    use ulid::Ulid;
 
     fn bigquery() -> BigQueryWarehouse {
         BigQueryWarehouse::new("local-project", "mysql_shop_cdc")
@@ -168,14 +173,14 @@ mod tests {
     fn a_build_log_is_created_with_the_types_bigquery_has_for_its_columns() {
         assert_eq!(
             bigquery().create_build_log("mysql_shop").unwrap(),
-            "CREATE TABLE IF NOT EXISTS `local-project`.`mysql_shop`.`_lithify_log` (`run_id` INT64, `artifact` STRING, `schedule` STRING, `source` STRING, `capture` STRING, `table_id` STRING, `base` STRING, `target` STRING, `window_from` TIMESTAMP, `window_to` TIMESTAMP, `status` STRING, `finished_at` TIMESTAMP, `error` STRING, `version` STRING)"
+            "CREATE TABLE IF NOT EXISTS `local-project`.`mysql_shop`.`_lithify_log` (`id` INT64, `run_id` STRING, `artifact` STRING, `schedule` STRING, `source` STRING, `capture` STRING, `table_id` STRING, `base` STRING, `target` STRING, `window_from` TIMESTAMP, `window_to` TIMESTAMP, `status` STRING, `finished_at` TIMESTAMP, `error` STRING, `version` STRING)"
         );
     }
 
     #[test]
-    fn a_build_log_is_appended_with_its_instants_in_milliseconds() {
+    fn a_build_log_is_appended_under_the_next_id_with_its_instants_in_milliseconds() {
         let log = BuildLog::new(
-            &Run::new(1, "snapshot", "daily", "primary", "{}", "0.1.0"),
+            &Run::new(Ulid::nil(), "snapshot", "daily", "primary", "{}", "0.1.0"),
             TableId::new("shop", "customers"),
             Some(TablePath::new("mysql_shop", "customers_20260919")),
             TablePath::new("mysql_shop", "customers_20260920"),
@@ -191,15 +196,15 @@ mod tests {
 
         assert_eq!(
             bigquery().append_build_log(&log),
-            "INSERT INTO `local-project`.`mysql_shop`.`_lithify_log` (`run_id`, `artifact`, `schedule`, `source`, `capture`, `table_id`, `base`, `target`, `window_from`, `window_to`, `status`, `finished_at`, `error`, `version`) VALUES (1, 'snapshot', 'daily', 'primary', '{}', 'shop.customers', 'mysql_shop.customers_20260919', 'mysql_shop.customers_20260920', TIMESTAMP_MILLIS(1789862400000), TIMESTAMP_MILLIS(1789948800000), 'succeeded', TIMESTAMP_MILLIS(1789949000000), NULL, '0.1.0')"
+            "INSERT INTO `local-project`.`mysql_shop`.`_lithify_log` (`id`, `run_id`, `artifact`, `schedule`, `source`, `capture`, `table_id`, `base`, `target`, `window_from`, `window_to`, `status`, `finished_at`, `error`, `version`)\nSELECT COALESCE(MAX(`id`), 0) + 1, '00000000000000000000000000', 'snapshot', 'daily', 'primary', '{}', 'shop.customers', 'mysql_shop.customers_20260919', 'mysql_shop.customers_20260920', TIMESTAMP_MILLIS(1789862400000), TIMESTAMP_MILLIS(1789948800000), 'succeeded', TIMESTAMP_MILLIS(1789949000000), NULL, '0.1.0'\nFROM `local-project`.`mysql_shop`.`_lithify_log`"
         );
     }
 
     #[test]
-    fn a_build_log_is_read_by_the_latest_record_of_each_table() {
+    fn a_build_log_is_read_by_the_latest_success_of_each_table_with_its_instants_in_milliseconds() {
         assert_eq!(
-            bigquery().select_latest_build_logs("mysql_shop"),
-            "SELECT *\nFROM `local-project`.`mysql_shop`.`_lithify_log`\nWHERE TRUE\nQUALIFY ROW_NUMBER() OVER (PARTITION BY `artifact`, `schedule`, `table_id` ORDER BY `finished_at` DESC, `run_id` DESC) = 1\nORDER BY `artifact`, `schedule`, `table_id`"
+            bigquery().select_latest_build_logs("mysql_shop", &Latest::Succeeded),
+            "SELECT `run_id`, `artifact`, `schedule`, `source`, `capture`, `table_id`, `base`, `target`, UNIX_MILLIS(`window_from`) AS `window_from`, UNIX_MILLIS(`window_to`) AS `window_to`, `status`, UNIX_MILLIS(`finished_at`) AS `finished_at`, `error`, `version`\nFROM `local-project`.`mysql_shop`.`_lithify_log`\nWHERE `status` = 'succeeded'\nQUALIFY ROW_NUMBER() OVER (PARTITION BY `artifact`, `schedule`, `table_id` ORDER BY `id` DESC) = 1\nORDER BY `artifact`, `schedule`, `table_id`"
         );
     }
 

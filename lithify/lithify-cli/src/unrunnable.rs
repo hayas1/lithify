@@ -16,6 +16,7 @@ pub enum Unrunnable {
     Unwritable(std::io::Error),
     Unserializable(serde_json::Error),
     UnknownSink(String),
+    CaptureChanged { logged: String, configured: String },
     WithoutSource,
 }
 
@@ -33,6 +34,10 @@ impl Display for Unrunnable {
                 write!(formatter, "nothing in this pipeline is sunk into {name}")
             }
             Self::WithoutSource => write!(formatter, "this pipeline captures no server"),
+            Self::CaptureChanged { logged, configured } => write!(
+                formatter,
+                "the build log was captured as {logged} but the pipeline is captured as {configured} now"
+            ),
         }
     }
 }
@@ -47,7 +52,7 @@ impl std::error::Error for Unrunnable {
             Self::Unbuildable(cause) => Some(cause),
             Self::Unwritable(cause) => Some(cause),
             Self::Unserializable(cause) => Some(cause),
-            Self::UnknownSink(_) | Self::WithoutSource => None,
+            Self::UnknownSink(_) | Self::WithoutSource | Self::CaptureChanged { .. } => None,
         }
     }
 }

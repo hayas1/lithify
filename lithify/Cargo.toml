@@ -38,6 +38,7 @@ serde_json = "1.0.151"
 sqlparser = "0.63"
 tokio = { version = "1", features = ["rt"] }
 tracing = "0.1"
+ulid = "3"
 tracing-subscriber = "0.3"
 toml = "0.9"
 wkt = { package = "google-cloud-wkt", version = "1.7" }

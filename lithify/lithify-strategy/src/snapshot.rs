@@ -410,6 +410,10 @@ mod tests {
             SqlString::from(milliseconds.to_string())
         }
 
+        fn unix_millis(&self, expression: &SqlString) -> SqlString {
+            expression.clone()
+        }
+
         fn change_log_namespace(&self) -> &str {
             "mysql_shop_cdc"
         }
@@ -464,6 +468,10 @@ mod tests {
 
         fn timestamp_millis(&self, milliseconds: i64) -> SqlString {
             SqlString::from(milliseconds.to_string())
+        }
+
+        fn unix_millis(&self, expression: &SqlString) -> SqlString {
+            expression.clone()
         }
 
         fn identifier(&self, name: &str) -> SqlString {
@@ -1479,7 +1487,14 @@ mod tests {
     fn a_snapshot_is_logged_with_the_shard_it_folds_onto_and_the_one_it_builds() {
         let window = window();
         let base = TablePath::new("mysql_shop", "customers_20260919");
-        let run = Run::new(2, "snapshot", "daily", "primary", "{}", "0.1.0");
+        let run = Run::new(
+            ulid::Ulid::nil(),
+            "snapshot",
+            "daily",
+            "primary",
+            "{}",
+            "0.1.0",
+        );
         let finished_at = DateTime::from_timestamp_millis(1789949000000).unwrap();
         let builder = shop()
             .builder::<Log, Engine>(
@@ -1505,7 +1520,14 @@ mod tests {
 
     #[test]
     fn a_table_renamed_within_the_window_is_logged_under_its_first_name_and_built_under_its_last() {
-        let run = Run::new(2, "snapshot", "daily", "primary", "{}", "0.1.0");
+        let run = Run::new(
+            ulid::Ulid::nil(),
+            "snapshot",
+            "daily",
+            "primary",
+            "{}",
+            "0.1.0",
+        );
         let outcome = Outcome::new(
             Status::Succeeded,
             DateTime::from_timestamp_millis(1789949000000).unwrap(),

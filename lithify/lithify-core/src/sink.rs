@@ -1,7 +1,7 @@
 use std::fmt;
 
 use crate::artifact::{ArtifactBuilder, UnbuildableArtifact};
-use crate::build_log::BuildLog;
+use crate::build_log::{BuildLog, Latest};
 use crate::model::{ColumnModel, ColumnType};
 use crate::source::{ColumnPath, SchemaChangeLog};
 use crate::sql::SqlString;
@@ -132,9 +132,11 @@ pub trait Warehouse {
         )
     }
 
+    fn unix_millis(&self, expression: &SqlString) -> SqlString;
+
     fn create_build_log(&self, namespace: &str) -> Result<SqlString, UnsupportedColumn> {
-        let columns = BuildLog::COLUMNS
-            .iter()
+        let columns = std::iter::once(&(BuildLog::ID, ColumnType::Int64))
+            .chain(BuildLog::COLUMNS.iter())
             .map(|(name, column_type)| {
                 Ok(format!(
                     "{} {}",
@@ -152,38 +154,44 @@ pub trait Warehouse {
     }
 
     fn append_build_log(&self, log: &BuildLog) -> SqlString {
+        let id = self.identifier(BuildLog::ID);
         let columns = BuildLog::COLUMNS
             .iter()
             .map(|(name, _)| self.identifier(name))
             .collect::<Vec<_>>();
+        let table = self.table_ref(&BuildLog::path(log.namespace()));
 
         SqlString::from(format!(
-            "INSERT INTO {} ({}) VALUES ({})",
-            self.table_ref(&BuildLog::path(log.namespace())),
+            "INSERT INTO {table} ({id}, {})\nSELECT COALESCE(MAX({id}), 0) + 1, {}\nFROM {table}",
             columns.join(", "),
             log.cells(self).join(", ")
         ))
     }
 
-    fn select_latest_build_logs(&self, namespace: &str) -> SqlString {
-        let latest = ["artifact", "schedule", "table_id"]
+    fn select_latest_build_logs(&self, namespace: &str, latest: &Latest) -> SqlString {
+        let columns = BuildLog::COLUMNS
+            .iter()
+            .map(|(name, column_type)| {
+                let column = self.identifier(name);
+
+                match column_type {
+                    ColumnType::ZonedTimestamp => {
+                        format!("{} AS {column}", self.unix_millis(&column))
+                    }
+                    _ => column.to_string(),
+                }
+            })
+            .collect::<Vec<_>>();
+        let partition = ["artifact", "schedule", "table_id"]
             .map(|name| self.identifier(name))
             .join(", ");
 
         SqlString::from(format!(
-            "SELECT *\nFROM {}\nWHERE TRUE\nQUALIFY ROW_NUMBER() OVER (PARTITION BY {latest} ORDER BY {} DESC, {} DESC) = 1\nORDER BY {latest}",
+            "SELECT {}\nFROM {}\nWHERE {}\nQUALIFY ROW_NUMBER() OVER (PARTITION BY {partition} ORDER BY {} DESC) = 1\nORDER BY {partition}",
+            columns.join(", "),
             self.table_ref(&BuildLog::path(namespace)),
-            self.identifier("finished_at"),
-            self.identifier("run_id"),
-        ))
-    }
-
-    fn select_next_run_id(&self, namespace: &str) -> SqlString {
-        let run_id = self.identifier("run_id");
-
-        SqlString::from(format!(
-            "SELECT COALESCE(MAX({run_id}), 0) + 1 AS {run_id} FROM {}",
-            self.table_ref(&BuildLog::path(namespace)),
+            latest.condition(self),
+            self.identifier(BuildLog::ID),
         ))
     }
 
@@ -220,7 +228,11 @@ pub trait WarehouseClient {
     // instead of being spelled out as SQL by every artifact.
     fn execute(&self, statement: &SqlString) -> Result<(), Self::Error>;
 
-    fn next_run_id(&self, namespace: &str) -> Result<i64, Self::Error>;
+    fn latest_build_logs(
+        &self,
+        namespace: &str,
+        latest: &Latest,
+    ) -> Result<Vec<BuildLog>, Self::Error>;
 
     fn create_build_log<E>(&self, namespace: &str) -> Result<(), E>
     where
@@ -270,6 +282,10 @@ mod tests {
 
         fn timestamp_millis(&self, milliseconds: i64) -> SqlString {
             SqlString::from(milliseconds.to_string())
+        }
+
+        fn unix_millis(&self, expression: &SqlString) -> SqlString {
+            expression.clone()
         }
 
         fn change_log_namespace(&self) -> &str {
@@ -324,8 +340,8 @@ mod tests {
             Ok(())
         }
 
-        fn next_run_id(&self, _: &str) -> Result<i64, Self::Error> {
-            Ok(1)
+        fn latest_build_logs(&self, _: &str, _: &Latest) -> Result<Vec<BuildLog>, Self::Error> {
+            Ok(vec![])
         }
     }
 

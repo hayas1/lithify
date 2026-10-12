@@ -1,31 +1,55 @@
-use chrono::Utc;
+use std::path::{Path, PathBuf};
 
+use chrono::Utc;
+use ulid::Ulid;
+
+use lithify_config::ArtifactKind;
 use lithify_config::infra::{Sink, Source};
-use lithify_config::{ArtifactKind, Schedule};
 use lithify_core::artifact::ArtifactBuilder;
 use lithify_core::build_log::{BuildLog, Outcome, Run, Status};
 use lithify_core::sink::WarehouseClient;
 use lithify_core::sql::SqlString;
+use lithify_core::window::Window;
 
+use crate::journal::Journal;
 use crate::pipeline::{Capture, Warehouse};
 use crate::unrunnable::Unrunnable;
 
 pub trait Settlement {
     type Output;
 
-    fn settle<K, B>(self, client: &K, builders: &[B]) -> Result<Self::Output, Unrunnable>
+    fn settle<K, B>(&self, client: &K, builders: &[B]) -> Result<Self::Output, Unrunnable>
     where
         K: WarehouseClient,
         Unrunnable: From<K::Error>,
         B: ArtifactBuilder;
+
+    fn report(
+        &self,
+        window: &Window,
+        output: Self::Output,
+        journal: &mut Journal,
+    ) -> Result<bool, Unrunnable>;
 }
 
-pub struct DryRun;
+pub struct DryRun {
+    into: PathBuf,
+    sink: String,
+}
+
+impl DryRun {
+    pub fn new(into: &Path, sink: &str) -> Self {
+        Self {
+            into: into.to_owned(),
+            sink: sink.to_owned(),
+        }
+    }
+}
 
 impl Settlement for DryRun {
     type Output = Vec<SqlString>;
 
-    fn settle<K, B>(self, _: &K, builders: &[B]) -> Result<Self::Output, Unrunnable>
+    fn settle<K, B>(&self, _: &K, builders: &[B]) -> Result<Self::Output, Unrunnable>
     where
         K: WarehouseClient,
         Unrunnable: From<K::Error>,
@@ -37,13 +61,41 @@ impl Settlement for DryRun {
             .collect::<Result<Vec<_>, _>>()?
             .concat())
     }
+
+    fn report(
+        &self,
+        window: &Window,
+        output: Self::Output,
+        journal: &mut Journal,
+    ) -> Result<bool, Unrunnable> {
+        let path = self.into.join(format!(
+            "{}_{}.sql",
+            self.sink,
+            window.from().milliseconds_since_epoch()
+        ));
+
+        std::fs::create_dir_all(&self.into)?;
+        std::fs::write(
+            &path,
+            output
+                .iter()
+                .map(|statement| format!("{statement};\n"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )?;
+        journal.note(&format!(
+            "wrote {} statements to {}",
+            output.len(),
+            path.display()
+        ));
+
+        Ok(true)
+    }
 }
 
 pub struct Build {
     namespace: String,
-    schedule: Schedule,
-    source: String,
-    capture: String,
+    run: Run,
 }
 
 impl Build {
@@ -52,21 +104,15 @@ impl Build {
 
         Ok(Self {
             namespace: artifacts.namespace(ArtifactKind::Snapshot).to_owned(),
-            schedule: artifacts.schedule(),
-            source: source.name().to_owned(),
-            capture: serde_json::to_string(source.capture())?,
+            run: Run::new(
+                Ulid::generate(),
+                &ArtifactKind::Snapshot.to_string(),
+                &artifacts.schedule().to_string(),
+                source.name(),
+                &source.capture().to_json()?,
+                env!("CARGO_PKG_VERSION"),
+            ),
         })
-    }
-
-    fn run<K: WarehouseClient>(&self, client: &K) -> Result<Run, K::Error> {
-        Ok(Run::new(
-            client.next_run_id(&self.namespace)?,
-            &ArtifactKind::Snapshot.to_string(),
-            &self.schedule.to_string(),
-            &self.source,
-            &self.capture,
-            env!("CARGO_PKG_VERSION"),
-        ))
     }
 
     fn outcome<K>(client: &K, builder: &impl ArtifactBuilder) -> Outcome
@@ -86,23 +132,35 @@ impl Build {
 impl Settlement for Build {
     type Output = Vec<BuildLog>;
 
-    fn settle<K, B>(self, client: &K, builders: &[B]) -> Result<Self::Output, Unrunnable>
+    fn settle<K, B>(&self, client: &K, builders: &[B]) -> Result<Self::Output, Unrunnable>
     where
         K: WarehouseClient,
         Unrunnable: From<K::Error>,
         B: ArtifactBuilder,
     {
         client.create_build_log::<Unrunnable>(&self.namespace)?;
-        let run = self.run(client)?;
 
         builders
             .iter()
             .map(|builder| {
-                let log = builder.build_log(&run, Self::outcome(client, builder));
+                let log = builder.build_log(&self.run, Self::outcome(client, builder));
                 client.append_build_log(&log)?;
 
                 Ok(log)
             })
             .collect()
+    }
+
+    fn report(
+        &self,
+        _: &Window,
+        output: Self::Output,
+        journal: &mut Journal,
+    ) -> Result<bool, Unrunnable> {
+        for log in &output {
+            journal.built(log);
+        }
+
+        Ok(output.iter().all(|log| !log.status().failed()))
     }
 }

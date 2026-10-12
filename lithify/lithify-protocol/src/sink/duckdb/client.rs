@@ -1,6 +1,7 @@
 use duckdb::types::{FromSql, Type};
 use duckdb::{Connection, Error, Statement};
 
+use lithify_core::build_log::{BuildLog, BuildLogRow, Latest};
 use lithify_core::sink::{Warehouse, WarehouseClient};
 use lithify_core::source::{
     ChangeLogs, SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed,
@@ -54,12 +55,41 @@ impl WarehouseClient for DuckDbClient {
         self.connection.execute_batch(statement.as_str())
     }
 
-    fn next_run_id(&self, namespace: &str) -> Result<i64, Self::Error> {
-        self.connection.query_row(
-            self.warehouse.select_next_run_id(namespace).as_str(),
-            [],
-            |row| row.get(0),
-        )
+    fn latest_build_logs(
+        &self,
+        namespace: &str,
+        latest: &Latest,
+    ) -> Result<Vec<BuildLog>, Self::Error> {
+        self.connection
+            .prepare(
+                self.warehouse
+                    .select_latest_build_logs(namespace, latest)
+                    .as_str(),
+            )?
+            .query_map([], |row| {
+                Ok(BuildLogRow {
+                    run_id: row.get("run_id")?,
+                    artifact: row.get("artifact")?,
+                    schedule: row.get("schedule")?,
+                    source: row.get("source")?,
+                    capture: row.get("capture")?,
+                    table_id: row.get("table_id")?,
+                    base: row.get("base")?,
+                    target: row.get("target")?,
+                    window_from: row.get("window_from")?,
+                    window_to: row.get("window_to")?,
+                    status: row.get("status")?,
+                    finished_at: row.get("finished_at")?,
+                    error: row.get("error")?,
+                    version: row.get("version")?,
+                })
+            })?
+            .map(|row| {
+                BuildLog::try_from(row?).map_err(|unreadable| {
+                    Error::FromSqlConversionFailure(0, Type::Any, Box::new(unreadable))
+                })
+            })
+            .collect()
     }
 }
 
@@ -122,7 +152,7 @@ mod tests {
     use crate::source::debezium::mysql::MySql;
     use chrono::DateTime;
     use lithify_core::artifact::UnbuildableArtifact;
-    use lithify_core::build_log::{BuildLog, Outcome, Run, Status};
+    use lithify_core::build_log::{Outcome, Run, Status};
     use lithify_core::event::{MalformedEvent, SchemaChange, TableChange};
     use lithify_core::listener::OutOfOrder;
     use lithify_core::model::TableId;
@@ -130,6 +160,7 @@ mod tests {
     use lithify_core::position::{Coordinate, Position};
     use lithify_core::sink::TablePath;
     use lithify_core::source::{ChangeLog, ColumnPath};
+    use ulid::Ulid;
 
     const CHANGE_LOG: &str = "CREATE SCHEMA mysql_shop_cdc;
         CREATE TABLE mysql_shop_cdc.mysql AS
@@ -291,10 +322,13 @@ mod tests {
         assert_eq!(id, 1);
     }
 
-    fn logged(table: &str, run_id: i64, status: Status, finished_at: i64) -> BuildLog {
+    const W1: (i64, i64) = (1789862400000, 1789948800000);
+    const W2: (i64, i64) = (1789948800000, 1790035200000);
+
+    fn logged(table: &str, (from, to): (i64, i64), status: Status, finished_at: u64) -> BuildLog {
         BuildLog::new(
             &Run::new(
-                run_id,
+                Ulid::from_parts(finished_at, 0),
                 "snapshot",
                 "daily",
                 "primary",
@@ -302,12 +336,12 @@ mod tests {
                 "0.1.0",
             ),
             TableId::new("shop", table),
-            None,
-            TablePath::new("mysql_shop", &format!("{table}_20260920")),
-            window(1789862400000, 1789948800000),
+            Some(TablePath::new("mysql_shop", &format!("{table}_base"))),
+            TablePath::new("mysql_shop", &format!("{table}_{from}")),
+            window(from, to),
             Outcome::new(
                 status,
-                DateTime::from_timestamp_millis(finished_at).unwrap(),
+                DateTime::from_timestamp_millis(finished_at as i64).unwrap(),
             ),
         )
     }
@@ -325,22 +359,8 @@ mod tests {
         client
     }
 
-    fn latest(client: &DuckDbClient) -> Vec<(String, String, Option<String>)> {
-        client
-            .connection()
-            .prepare(
-                client
-                    .warehouse()
-                    .select_latest_build_logs("mysql_shop")
-                    .as_str(),
-            )
-            .unwrap()
-            .query_map([], |row| {
-                Ok((row.get("table_id")?, row.get("status")?, row.get("error")?))
-            })
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap()
+    fn latest(client: &DuckDbClient, latest: Latest) -> Vec<BuildLog> {
+        client.latest_build_logs("mysql_shop", &latest).unwrap()
     }
 
     #[derive(Debug)]
@@ -358,78 +378,65 @@ mod tests {
         }
     }
 
-    fn next_run_id(client: &DuckDbClient) -> i64 {
-        client.next_run_id("mysql_shop").unwrap()
+    fn history() -> Vec<BuildLog> {
+        vec![
+            logged(
+                "customers",
+                W1,
+                Status::Failed("no era".to_owned()),
+                1789949000000,
+            ),
+            logged("orders", W1, Status::Succeeded, 1789949100000),
+            logged("customers", W1, Status::Succeeded, 1789949200000),
+            logged("customers", W2, Status::Succeeded, 1790035300000),
+            logged(
+                "orders",
+                W2,
+                Status::Failed("it's gone".to_owned()),
+                1790035400000,
+            ),
+        ]
     }
 
     #[test]
     fn a_build_log_is_created_once_however_often_it_is_asked_for() {
-        let client = logging(&[logged("customers", 1, Status::Succeeded, 1789949000000)]);
+        let client = logging(&history()[..1]);
 
         client.create_build_log::<Logged>("mysql_shop").unwrap();
 
-        assert_eq!(latest(&client).len(), 1);
+        assert_eq!(latest(&client, Latest::Attempted).len(), 1);
     }
 
     #[test]
-    fn a_build_log_is_read_by_the_latest_record_of_each_table() {
-        let client = logging(&[
-            logged(
-                "customers",
-                1,
-                Status::Failed("no era".to_owned()),
-                1789949000000,
-            ),
-            logged("orders", 1, Status::Succeeded, 1789949100000),
-            logged("customers", 2, Status::Succeeded, 1789949200000),
-            logged(
-                "orders",
-                2,
-                Status::Failed("it's gone".to_owned()),
-                1789949300000,
-            ),
-        ]);
+    fn a_build_log_reads_back_the_latest_record_of_each_table_as_it_was_written() {
+        let history = history();
 
         assert_eq!(
-            latest(&client),
-            [
-                ("shop.customers".to_owned(), "succeeded".to_owned(), None),
-                (
-                    "shop.orders".to_owned(),
-                    "failed".to_owned(),
-                    Some("it's gone".to_owned())
-                ),
-            ]
+            latest(&logging(&history), Latest::Attempted),
+            [history[3].clone(), history[4].clone()]
         );
     }
 
     #[test]
-    fn a_build_log_keeps_the_instants_it_was_given() {
-        let client = logging(&[logged("customers", 1, Status::Succeeded, 1789949000123)]);
+    fn a_build_log_reads_the_latest_success_of_each_table() {
+        let history = history();
 
-        let instants: (i64, i64, i64) = client
-            .connection()
-            .query_row(
-                "SELECT epoch_ms(window_from), epoch_ms(window_to), epoch_ms(finished_at) FROM mysql_shop._lithify_log",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .unwrap();
-
-        assert_eq!(instants, (1789862400000, 1789948800000, 1789949000123));
+        assert_eq!(
+            latest(&logging(&history), Latest::Succeeded),
+            [history[3].clone(), history[1].clone()]
+        );
     }
 
     #[test]
-    fn a_run_is_numbered_after_the_last_one_the_build_log_holds() {
-        assert_eq!(next_run_id(&logging(&[])), 1);
+    fn a_build_log_reads_the_latest_success_of_each_table_closing_at_an_instant() {
+        let history = history();
+
         assert_eq!(
-            next_run_id(&logging(&[logged(
-                "customers",
-                3,
-                Status::Succeeded,
-                1789949000000
-            )])),
-            4
+            latest(
+                &logging(&history),
+                Latest::SucceededUntil(RecordedAt::from(W1.1))
+            ),
+            [history[2].clone(), history[1].clone()]
         );
     }
 

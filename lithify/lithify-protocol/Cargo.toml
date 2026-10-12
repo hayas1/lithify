@@ -32,3 +32,4 @@ duckdb = ["dep:duckdb"]
 
 [dev-dependencies]
 chrono = { workspace = true }
+ulid = { workspace = true }
