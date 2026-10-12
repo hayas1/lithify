@@ -163,8 +163,14 @@ impl<P, L: RowChangeLog, W: Warehouse> SchemaChangeListener<P> for Snapshot<'_, 
     type Context = W;
     type Error = UnbuildableArtifact;
 
-    fn table_created(&mut self, _: &W, _: &TableCreated<'_>) -> Result<(), UnbuildableArtifact> {
-        self.base = Base::Captured;
+    fn table_created(
+        &mut self,
+        _: &W,
+        event: &TableCreated<'_>,
+    ) -> Result<(), UnbuildableArtifact> {
+        if event.origin().is_logged_from_start() {
+            self.base = Base::Captured;
+        }
 
         Ok(())
     }
@@ -615,6 +621,42 @@ mod tests {
             "  FROM \"mysql_shop\".\"customers_20260919\"\n",
             "),\n",
         )));
+    }
+
+    #[test]
+    fn a_table_first_seen_altered_within_the_window_still_folds_onto_its_shard() {
+        let orders = TableModel::new(
+            TableId::new("shop", "orders"),
+            vec![column("id", ColumnType::Int64)],
+            vec!["id".to_owned()],
+        );
+
+        let snapshots = snapshots(
+            customers(),
+            vec![change(150, TableChange::Altered(orders))],
+            || Base::Shard(TablePath::new("mysql_shop", "orders_20260919")),
+        )
+        .unwrap();
+        let orders = snapshots
+            .iter()
+            .find(|snapshot| snapshot.table() == &TableId::new("shop", "orders"))
+            .unwrap()
+            .statements()
+            .unwrap()
+            .remove(1)
+            .to_string();
+
+        assert!(orders.contains("  FROM \"mysql_shop\".\"orders_20260919\"\n"));
+    }
+
+    #[test]
+    fn a_table_renamed_within_the_window_folds_onto_the_shard_of_its_first_name() {
+        let statement = statement(Ok(renamed_to_clients(|| {
+            Base::Shard(TablePath::new("mysql_shop", "customers_20260919"))
+        })));
+
+        assert!(statement.contains("  FROM \"mysql_shop\".\"customers_20260919\"\n"));
+        assert!(statement.contains("  FROM \"mysql_shop_cdc\".\"mysql_shop_clients\"\n"));
     }
 
     #[test]

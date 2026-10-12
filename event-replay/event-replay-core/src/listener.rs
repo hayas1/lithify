@@ -145,6 +145,13 @@ impl fmt::Display for Origin {
 }
 
 impl Origin {
+    pub fn is_logged_from_start(&self) -> bool {
+        match self {
+            Self::Created | Self::Captured => true,
+            Self::Discovered => false,
+        }
+    }
+
     fn of<P>(change: &SchemaChange<P>) -> Self {
         match change.is_captured() {
             true => Self::Captured,
@@ -1946,5 +1953,12 @@ mod tests {
             )]),
             [(clients(), Origin::Discovered)]
         );
+    }
+
+    #[test]
+    fn a_table_created_or_captured_is_logged_from_its_start_but_one_discovered_is_not() {
+        assert!(Origin::Created.is_logged_from_start());
+        assert!(Origin::Captured.is_logged_from_start());
+        assert!(!Origin::Discovered.is_logged_from_start());
     }
 }
