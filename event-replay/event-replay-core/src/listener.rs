@@ -548,8 +548,16 @@ impl<P: Position> CatalogModel<P> {
         id: &TableId,
         listener: &mut L,
     ) -> Result<(), L::Error> {
-        if let Some(table) = self.tables.get(id) {
-            TableEvent::TableDropped(TableDropped { table }).accept(context, listener)?;
+        match self.tables.get(id) {
+            Some(table) => {
+                TableEvent::TableDropped(TableDropped { table }).accept(context, listener)?
+            }
+            None => tracing::warn!(
+                table = %id,
+                statement = change.statement(),
+                "a statement dropped a table the catalog never saw, so the schema changes read \
+                 may begin after the table was created"
+            ),
         }
         self.release(change, id);
 
@@ -565,6 +573,14 @@ impl<P: Position> CatalogModel<P> {
         listener: &mut L,
     ) -> Result<(), L::Error> {
         let Some(before) = self.tables.get(from).cloned() else {
+            tracing::warn!(
+                table = %from,
+                to = %to,
+                statement = change.statement(),
+                "a statement renamed a table the catalog never saw, so the table it was renamed \
+                 to appears as discovered"
+            );
+
             return Ok(());
         };
         let after = before.with_id(to);
@@ -590,9 +606,26 @@ impl<P: Position> CatalogModel<P> {
         listener: &mut L,
     ) -> Result<(), L::Error> {
         let Some(before) = self.tables.get(table).cloned() else {
+            tracing::warn!(
+                table = %table,
+                column = from,
+                to,
+                statement = change.statement(),
+                "a statement renamed a column of a table the catalog never saw"
+            );
+
             return Ok(());
         };
         let (Some(previous), None) = (before.column(from), before.column(to)) else {
+            tracing::warn!(
+                table = %table,
+                column = from,
+                to,
+                statement = change.statement(),
+                "a statement renamed a column the table never had, or onto a name it already \
+                 holds, so the rename steps through as the alteration that follows it"
+            );
+
             return Ok(());
         };
         let after = before.with_column_renamed(from, to);
@@ -1983,5 +2016,65 @@ mod tests {
                 .unwrap_err(),
             OutOfOrder { table: customers() }
         );
+    }
+
+    fn orders() -> TableId {
+        TableId::new("shop", "orders")
+    }
+
+    #[test]
+    fn a_drop_of_a_table_the_catalog_knows_warns_of_nothing() {
+        assert_eq!(warned(vec![TableChange::Dropped(customers())]), "");
+    }
+
+    #[test]
+    fn a_drop_of_a_table_the_catalog_never_saw_warns_of_it() {
+        let warning = warned(vec![TableChange::Dropped(orders())]);
+
+        assert!(warning.contains("WARN"));
+        assert!(warning.contains("table=shop.orders"));
+    }
+
+    #[test]
+    fn a_rename_of_a_table_the_catalog_never_saw_warns_of_it() {
+        let warning = warned(vec![TableChange::Renamed {
+            from: orders(),
+            to: clients(),
+        }]);
+
+        assert!(warning.contains("WARN"));
+        assert!(warning.contains("table=shop.orders"));
+        assert!(warning.contains("to=shop.clients"));
+    }
+
+    #[test]
+    fn a_rename_of_a_column_the_table_never_had_warns_of_it() {
+        let warning = warned(vec![renaming("nickname", "alias")]);
+
+        assert!(warning.contains("WARN"));
+        assert!(warning.contains("table=shop.customers"));
+        assert!(warning.contains("column=\"nickname\""));
+    }
+
+    #[test]
+    fn a_rename_of_a_column_onto_a_name_the_table_holds_warns_of_it() {
+        let warning = warned(vec![renaming("name", "id")]);
+
+        assert!(warning.contains("WARN"));
+        assert!(warning.contains("column=\"name\""));
+        assert!(warning.contains("to=\"id\""));
+    }
+
+    #[test]
+    fn a_rename_of_a_column_of_a_table_the_catalog_never_saw_warns_of_it() {
+        let warning = warned(vec![TableChange::ColumnRenamed {
+            table: orders(),
+            from: "note".to_owned(),
+            to: "remark".to_owned(),
+        }]);
+
+        assert!(warning.contains("WARN"));
+        assert!(warning.contains("table=shop.orders"));
+        assert!(warning.contains("column=\"note\""));
     }
 }
