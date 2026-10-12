@@ -42,7 +42,7 @@ fn statements<W: Warehouse>(warehouse: &W) -> String {
         },
     );
 
-    SchemaChangeListener::<MySqlPosition>::visit_era(
+    SchemaChangeListener::<MySqlPosition>::era_boundary(
         &mut snapshot,
         warehouse,
         &Era::new(customers(), window),

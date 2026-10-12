@@ -53,7 +53,7 @@ fn a_snapshot_holds_each_key_as_the_change_log_last_left_it() {
         TablePath::new("shop_snapshot", "people"),
         Base::Captured,
     );
-    SchemaChangeListener::<MySqlPosition>::visit_era(
+    SchemaChangeListener::<MySqlPosition>::era_boundary(
         &mut snapshot,
         client.warehouse(),
         &Era::new(people(), window),

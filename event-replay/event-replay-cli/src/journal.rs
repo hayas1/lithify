@@ -63,7 +63,7 @@ impl<P> SchemaChangeListener<P> for Journal {
         Ok(())
     }
 
-    fn visit_created(&mut self, _: &(), event: &TableCreated<'_>) -> Result<(), Infallible> {
+    fn table_created(&mut self, _: &(), event: &TableCreated<'_>) -> Result<(), Infallible> {
         self.table(format!(
             "created {} ({} columns, key {:?})",
             event.table().id(),
@@ -74,13 +74,13 @@ impl<P> SchemaChangeListener<P> for Journal {
         Ok(())
     }
 
-    fn visit_dropped(&mut self, _: &(), event: &TableDropped<'_>) -> Result<(), Infallible> {
+    fn table_dropped(&mut self, _: &(), event: &TableDropped<'_>) -> Result<(), Infallible> {
         self.table(format!("dropped {}", event.table().id()));
 
         Ok(())
     }
 
-    fn visit_renamed(&mut self, _: &(), event: &TableRenamed<'_>) -> Result<(), Infallible> {
+    fn table_renamed(&mut self, _: &(), event: &TableRenamed<'_>) -> Result<(), Infallible> {
         self.table(format!(
             "renamed {} to {}",
             event.before().id(),
@@ -90,11 +90,7 @@ impl<P> SchemaChangeListener<P> for Journal {
         Ok(())
     }
 
-    fn visit_column_renamed(
-        &mut self,
-        _: &(),
-        event: &ColumnRenamed<'_>,
-    ) -> Result<(), Infallible> {
+    fn column_renamed(&mut self, _: &(), event: &ColumnRenamed<'_>) -> Result<(), Infallible> {
         self.table(format!(
             "renamed {}.{} to {}",
             event.after().id(),
@@ -105,7 +101,7 @@ impl<P> SchemaChangeListener<P> for Journal {
         Ok(())
     }
 
-    fn visit_column_added(&mut self, _: &(), event: &ColumnAdded<'_>) -> Result<(), Infallible> {
+    fn column_added(&mut self, _: &(), event: &ColumnAdded<'_>) -> Result<(), Infallible> {
         self.table(format!(
             "added {}.{}",
             event.after().id(),
@@ -115,11 +111,7 @@ impl<P> SchemaChangeListener<P> for Journal {
         Ok(())
     }
 
-    fn visit_column_dropped(
-        &mut self,
-        _: &(),
-        event: &ColumnDropped<'_>,
-    ) -> Result<(), Infallible> {
+    fn column_dropped(&mut self, _: &(), event: &ColumnDropped<'_>) -> Result<(), Infallible> {
         self.table(format!(
             "dropped {}.{}",
             event.before().id(),
@@ -129,11 +121,7 @@ impl<P> SchemaChangeListener<P> for Journal {
         Ok(())
     }
 
-    fn visit_column_retyped(
-        &mut self,
-        _: &(),
-        event: &ColumnRetyped<'_>,
-    ) -> Result<(), Infallible> {
+    fn column_retyped(&mut self, _: &(), event: &ColumnRetyped<'_>) -> Result<(), Infallible> {
         self.table(format!(
             "retyped {}.{} {} -> {}",
             event.after().id(),
@@ -145,7 +133,7 @@ impl<P> SchemaChangeListener<P> for Journal {
         Ok(())
     }
 
-    fn visit_primary_key_changed(
+    fn primary_key_changed(
         &mut self,
         _: &(),
         event: &PrimaryKeyChanged<'_>,

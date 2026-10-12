@@ -66,9 +66,9 @@ impl<L> Track<L> {
         L: SchemaChangeListener<P>,
     {
         if self.since < at {
-            let era = Era::new(before.clone(), Window::new(self.since, at));
+            let closed_era = Era::new(before.clone(), Window::new(self.since, at));
 
-            self.listener.visit_era(context, &era)?;
+            self.listener.era_boundary(context, &closed_era)?;
             self.since = at;
         }
 
@@ -193,90 +193,90 @@ where
         Ok(())
     }
 
-    fn visit_created(
+    fn table_created(
         &mut self,
         context: &Self::Context,
         event: &TableCreated<'_>,
     ) -> Result<(), Self::Error> {
         let mut track = self.open(event.table().id(), self.at)?;
 
-        track.listener.visit_created(context, event)?;
+        track.listener.table_created(context, event)?;
         self.tables.insert(event.table().id().clone(), track);
 
         Ok(())
     }
 
-    fn visit_dropped(
+    fn table_dropped(
         &mut self,
         context: &Self::Context,
         event: &TableDropped<'_>,
     ) -> Result<(), Self::Error> {
         match self.tables.remove(event.table().id()) {
-            Some(mut track) => Ok(track.listener.visit_dropped(context, event)?),
+            Some(mut track) => Ok(track.listener.table_dropped(context, event)?),
             None => Ok(()),
         }
     }
 
-    fn visit_renamed(
+    fn table_renamed(
         &mut self,
         context: &Self::Context,
         event: &TableRenamed<'_>,
     ) -> Result<(), Self::Error> {
         self.alter(context, event.before(), |listener| {
-            listener.visit_renamed(context, event)
+            listener.table_renamed(context, event)
         })?;
         self.follow(event.before().id(), event.after().id());
 
         Ok(())
     }
 
-    fn visit_column_renamed(
+    fn column_renamed(
         &mut self,
         context: &Self::Context,
         event: &ColumnRenamed<'_>,
     ) -> Result<(), Self::Error> {
         self.alter(context, event.before(), |listener| {
-            listener.visit_column_renamed(context, event)
+            listener.column_renamed(context, event)
         })
     }
 
-    fn visit_column_added(
+    fn column_added(
         &mut self,
         context: &Self::Context,
         event: &ColumnAdded<'_>,
     ) -> Result<(), Self::Error> {
         self.alter(context, event.before(), |listener| {
-            listener.visit_column_added(context, event)
+            listener.column_added(context, event)
         })
     }
 
-    fn visit_column_dropped(
+    fn column_dropped(
         &mut self,
         context: &Self::Context,
         event: &ColumnDropped<'_>,
     ) -> Result<(), Self::Error> {
         self.alter(context, event.before(), |listener| {
-            listener.visit_column_dropped(context, event)
+            listener.column_dropped(context, event)
         })
     }
 
-    fn visit_column_retyped(
+    fn column_retyped(
         &mut self,
         context: &Self::Context,
         event: &ColumnRetyped<'_>,
     ) -> Result<(), Self::Error> {
         self.alter(context, event.before(), |listener| {
-            listener.visit_column_retyped(context, event)
+            listener.column_retyped(context, event)
         })
     }
 
-    fn visit_primary_key_changed(
+    fn primary_key_changed(
         &mut self,
         context: &Self::Context,
         event: &PrimaryKeyChanged<'_>,
     ) -> Result<(), Self::Error> {
         self.alter(context, event.before(), |listener| {
-            listener.visit_primary_key_changed(context, event)
+            listener.primary_key_changed(context, event)
         })
     }
 }
@@ -319,33 +319,34 @@ mod tests {
         type Context = ();
         type Error = Untold;
 
-        fn visit_era(&mut self, _: &(), era: &Era) -> Result<(), Untold> {
+        fn era_boundary(&mut self, _: &(), closed_era: &Era) -> Result<(), Untold> {
             self.told.push(format!(
                 "era {:?} {}..{}",
-                era.table()
+                closed_era
+                    .table()
                     .columns()
                     .map(|column| column.name())
                     .collect::<Vec<_>>(),
-                era.window().from().milliseconds_since_epoch(),
-                era.window().to().milliseconds_since_epoch()
+                closed_era.window().from().milliseconds_since_epoch(),
+                closed_era.window().to().milliseconds_since_epoch()
             ));
 
             Ok(())
         }
 
-        fn visit_created(&mut self, _: &(), event: &TableCreated<'_>) -> Result<(), Untold> {
+        fn table_created(&mut self, _: &(), event: &TableCreated<'_>) -> Result<(), Untold> {
             self.told.push(format!("created {}", event.table().id()));
 
             Ok(())
         }
 
-        fn visit_dropped(&mut self, _: &(), event: &TableDropped<'_>) -> Result<(), Untold> {
+        fn table_dropped(&mut self, _: &(), event: &TableDropped<'_>) -> Result<(), Untold> {
             self.told.push(format!("dropped {}", event.table().id()));
 
             Ok(())
         }
 
-        fn visit_renamed(&mut self, _: &(), event: &TableRenamed<'_>) -> Result<(), Untold> {
+        fn table_renamed(&mut self, _: &(), event: &TableRenamed<'_>) -> Result<(), Untold> {
             self.told.push(format!(
                 "renamed {} to {}",
                 event.before().id(),
@@ -355,11 +356,7 @@ mod tests {
             Ok(())
         }
 
-        fn visit_column_renamed(
-            &mut self,
-            _: &(),
-            event: &ColumnRenamed<'_>,
-        ) -> Result<(), Untold> {
+        fn column_renamed(&mut self, _: &(), event: &ColumnRenamed<'_>) -> Result<(), Untold> {
             self.told.push(format!(
                 "renamed {} to {}",
                 event.previous().name(),
@@ -369,17 +366,13 @@ mod tests {
             Ok(())
         }
 
-        fn visit_column_added(&mut self, _: &(), event: &ColumnAdded<'_>) -> Result<(), Untold> {
+        fn column_added(&mut self, _: &(), event: &ColumnAdded<'_>) -> Result<(), Untold> {
             self.told.push(format!("added {}", event.column().name()));
 
             Ok(())
         }
 
-        fn visit_column_dropped(
-            &mut self,
-            _: &(),
-            event: &ColumnDropped<'_>,
-        ) -> Result<(), Untold> {
+        fn column_dropped(&mut self, _: &(), event: &ColumnDropped<'_>) -> Result<(), Untold> {
             self.told.push(format!("dropped {}", event.column().name()));
 
             Ok(())

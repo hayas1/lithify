@@ -318,8 +318,8 @@ impl<P, L: RowChangeLog, W: Warehouse> SchemaChangeListener<P> for Snapshot<'_, 
     type Context = W;
     type Error = UnbuildableArtifact;
 
-    fn visit_era(&mut self, warehouse: &W, era: &Era) -> Result<(), UnbuildableArtifact> {
-        self.fold_era(warehouse, era)
+    fn era_boundary(&mut self, warehouse: &W, closed_era: &Era) -> Result<(), UnbuildableArtifact> {
+        self.fold_era(warehouse, closed_era)
     }
 
     // TODO: follow a renamed table by reading each era from the sink table of the name the table
@@ -327,7 +327,7 @@ impl<P, L: RowChangeLog, W: Warehouse> SchemaChangeListener<P> for Snapshot<'_, 
     // is handed one sink table when it opens; it needs a way to name the sink table of the id the
     // rename leads to, and the target has to be named after one of the names. Until then a rename
     // fails the snapshot rather than losing the rows changed before it.
-    fn visit_renamed(
+    fn table_renamed(
         &mut self,
         _: &W,
         event: &TableRenamed<'_>,
@@ -335,7 +335,7 @@ impl<P, L: RowChangeLog, W: Warehouse> SchemaChangeListener<P> for Snapshot<'_, 
         Err(UnbuildableArtifact::Renamed(event.before().id().clone()))
     }
 
-    fn visit_column_renamed(
+    fn column_renamed(
         &mut self,
         warehouse: &W,
         event: &ColumnRenamed<'_>,
@@ -353,7 +353,7 @@ impl<P, L: RowChangeLog, W: Warehouse> SchemaChangeListener<P> for Snapshot<'_, 
         })
     }
 
-    fn visit_column_added(
+    fn column_added(
         &mut self,
         warehouse: &W,
         event: &ColumnAdded<'_>,
@@ -370,7 +370,7 @@ impl<P, L: RowChangeLog, W: Warehouse> SchemaChangeListener<P> for Snapshot<'_, 
         })
     }
 
-    fn visit_column_dropped(
+    fn column_dropped(
         &mut self,
         warehouse: &W,
         event: &ColumnDropped<'_>,
@@ -380,7 +380,7 @@ impl<P, L: RowChangeLog, W: Warehouse> SchemaChangeListener<P> for Snapshot<'_, 
         self.carry(warehouse, event.after(), |_, name| Ok(name.clone()))
     }
 
-    fn visit_column_retyped(
+    fn column_retyped(
         &mut self,
         warehouse: &W,
         event: &ColumnRetyped<'_>,
@@ -400,7 +400,7 @@ impl<P, L: RowChangeLog, W: Warehouse> SchemaChangeListener<P> for Snapshot<'_, 
         })
     }
 
-    fn visit_primary_key_changed(
+    fn primary_key_changed(
         &mut self,
         _: &W,
         event: &PrimaryKeyChanged<'_>,

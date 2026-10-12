@@ -31,13 +31,17 @@ pub trait SchemaChangeListener<P> {
         Ok(())
     }
 
-    fn visit_era(&mut self, context: &Self::Context, era: &Era) -> Result<(), Self::Error> {
-        let _ = (context, era);
+    fn era_boundary(
+        &mut self,
+        context: &Self::Context,
+        closed_era: &Era,
+    ) -> Result<(), Self::Error> {
+        let _ = (context, closed_era);
 
         Ok(())
     }
 
-    fn visit_created(
+    fn table_created(
         &mut self,
         context: &Self::Context,
         event: &TableCreated<'_>,
@@ -47,7 +51,7 @@ pub trait SchemaChangeListener<P> {
         Ok(())
     }
 
-    fn visit_dropped(
+    fn table_dropped(
         &mut self,
         context: &Self::Context,
         event: &TableDropped<'_>,
@@ -57,7 +61,7 @@ pub trait SchemaChangeListener<P> {
         Ok(())
     }
 
-    fn visit_renamed(
+    fn table_renamed(
         &mut self,
         context: &Self::Context,
         event: &TableRenamed<'_>,
@@ -67,7 +71,7 @@ pub trait SchemaChangeListener<P> {
         Ok(())
     }
 
-    fn visit_column_renamed(
+    fn column_renamed(
         &mut self,
         context: &Self::Context,
         event: &ColumnRenamed<'_>,
@@ -77,7 +81,7 @@ pub trait SchemaChangeListener<P> {
         Ok(())
     }
 
-    fn visit_column_added(
+    fn column_added(
         &mut self,
         context: &Self::Context,
         event: &ColumnAdded<'_>,
@@ -87,7 +91,7 @@ pub trait SchemaChangeListener<P> {
         Ok(())
     }
 
-    fn visit_column_dropped(
+    fn column_dropped(
         &mut self,
         context: &Self::Context,
         event: &ColumnDropped<'_>,
@@ -97,7 +101,7 @@ pub trait SchemaChangeListener<P> {
         Ok(())
     }
 
-    fn visit_column_retyped(
+    fn column_retyped(
         &mut self,
         context: &Self::Context,
         event: &ColumnRetyped<'_>,
@@ -107,7 +111,7 @@ pub trait SchemaChangeListener<P> {
         Ok(())
     }
 
-    fn visit_primary_key_changed(
+    fn primary_key_changed(
         &mut self,
         context: &Self::Context,
         event: &PrimaryKeyChanged<'_>,
@@ -123,6 +127,15 @@ impl<P> SchemaChangeListener<P> for () {
     type Error = Infallible;
 }
 
+// TODO: tell whether the table was created at the source or only appeared to the catalog: taken
+// by the snapshot a connector takes when it starts (Debezium marks its source with `snapshot`), or
+// altered while the catalog never saw it (CatalogModel::alter falls back to create). Prefer an
+// origin carried by this event, as client-go hands OnAdd whether the object came in the initial
+// list; turn to an event of its own that defaults to table_created, as Debezium reads a snapshot
+// row with op 'r' apart from 'c', only if listeners come to handle the origins apart. Avoid an
+// alteration with no table before it, which every alteration listener would have to handle and
+// which has nothing to step from. Carrying the snapshot mark needs the source of every dialect
+// and every warehouse decoding of it to bring the field down to TableChange::Created.
 pub struct TableCreated<'a> {
     table: &'a TableModel,
 }
@@ -264,9 +277,9 @@ impl<'a> PrimaryKeyChanged<'a> {
 }
 
 pub enum TableEvent<'a> {
-    Created(TableCreated<'a>),
-    Dropped(TableDropped<'a>),
-    Renamed(TableRenamed<'a>),
+    TableCreated(TableCreated<'a>),
+    TableDropped(TableDropped<'a>),
+    TableRenamed(TableRenamed<'a>),
     ColumnRenamed(ColumnRenamed<'a>),
     ColumnAdded(ColumnAdded<'a>),
     ColumnDropped(ColumnDropped<'a>),
@@ -281,14 +294,14 @@ impl TableEvent<'_> {
         listener: &mut L,
     ) -> Result<(), L::Error> {
         match self {
-            Self::Created(event) => listener.visit_created(context, event),
-            Self::Dropped(event) => listener.visit_dropped(context, event),
-            Self::Renamed(event) => listener.visit_renamed(context, event),
-            Self::ColumnRenamed(event) => listener.visit_column_renamed(context, event),
-            Self::ColumnAdded(event) => listener.visit_column_added(context, event),
-            Self::ColumnDropped(event) => listener.visit_column_dropped(context, event),
-            Self::ColumnRetyped(event) => listener.visit_column_retyped(context, event),
-            Self::PrimaryKeyChanged(event) => listener.visit_primary_key_changed(context, event),
+            Self::TableCreated(event) => listener.table_created(context, event),
+            Self::TableDropped(event) => listener.table_dropped(context, event),
+            Self::TableRenamed(event) => listener.table_renamed(context, event),
+            Self::ColumnRenamed(event) => listener.column_renamed(context, event),
+            Self::ColumnAdded(event) => listener.column_added(context, event),
+            Self::ColumnDropped(event) => listener.column_dropped(context, event),
+            Self::ColumnRetyped(event) => listener.column_retyped(context, event),
+            Self::PrimaryKeyChanged(event) => listener.primary_key_changed(context, event),
         }
     }
 }
@@ -462,7 +475,7 @@ impl<P: Position> CatalogModel<P> {
         table: &TableModel,
         listener: &mut L,
     ) -> Result<(), L::Error> {
-        TableEvent::Created(TableCreated { table }).accept(context, listener)?;
+        TableEvent::TableCreated(TableCreated { table }).accept(context, listener)?;
         self.remember(change, table);
 
         Ok(())
@@ -476,7 +489,7 @@ impl<P: Position> CatalogModel<P> {
         listener: &mut L,
     ) -> Result<(), L::Error> {
         if let Some(table) = self.tables.get(id) {
-            TableEvent::Dropped(TableDropped { table }).accept(context, listener)?;
+            TableEvent::TableDropped(TableDropped { table }).accept(context, listener)?;
         }
         self.release(change, id);
 
@@ -496,7 +509,7 @@ impl<P: Position> CatalogModel<P> {
         };
         let after = before.with_id(to);
 
-        TableEvent::Renamed(TableRenamed {
+        TableEvent::TableRenamed(TableRenamed {
             before: &before,
             after: &after,
         })
@@ -630,7 +643,7 @@ mod tests {
             Ok(())
         }
 
-        fn visit_created(&mut self, _: &(), event: &TableCreated<'_>) -> Result<(), Infallible> {
+        fn table_created(&mut self, _: &(), event: &TableCreated<'_>) -> Result<(), Infallible> {
             self.entries.push(format!("table {}", event.table().id()));
 
             Ok(())
@@ -641,23 +654,19 @@ mod tests {
         type Context = ();
         type Error = Infallible;
 
-        fn visit_created(&mut self, _: &(), event: &TableCreated<'_>) -> Result<(), Infallible> {
+        fn table_created(&mut self, _: &(), event: &TableCreated<'_>) -> Result<(), Infallible> {
             self.entries.push(format!("created {}", event.table().id()));
 
             Ok(())
         }
 
-        fn visit_dropped(&mut self, _: &(), event: &TableDropped<'_>) -> Result<(), Infallible> {
+        fn table_dropped(&mut self, _: &(), event: &TableDropped<'_>) -> Result<(), Infallible> {
             self.entries.push(format!("dropped {}", event.table().id()));
 
             Ok(())
         }
 
-        fn visit_column_added(
-            &mut self,
-            _: &(),
-            event: &ColumnAdded<'_>,
-        ) -> Result<(), Infallible> {
+        fn column_added(&mut self, _: &(), event: &ColumnAdded<'_>) -> Result<(), Infallible> {
             self.entries.push(format!(
                 "added {}.{}",
                 event.after().id(),
@@ -667,11 +676,7 @@ mod tests {
             Ok(())
         }
 
-        fn visit_column_dropped(
-            &mut self,
-            _: &(),
-            event: &ColumnDropped<'_>,
-        ) -> Result<(), Infallible> {
+        fn column_dropped(&mut self, _: &(), event: &ColumnDropped<'_>) -> Result<(), Infallible> {
             self.entries.push(format!(
                 "dropped {}.{}",
                 event.before().id(),
@@ -681,11 +686,7 @@ mod tests {
             Ok(())
         }
 
-        fn visit_column_retyped(
-            &mut self,
-            _: &(),
-            event: &ColumnRetyped<'_>,
-        ) -> Result<(), Infallible> {
+        fn column_retyped(&mut self, _: &(), event: &ColumnRetyped<'_>) -> Result<(), Infallible> {
             self.entries.push(format!(
                 "retyped {}.{} {} -> {}",
                 event.after().id(),
@@ -697,7 +698,7 @@ mod tests {
             Ok(())
         }
 
-        fn visit_primary_key_changed(
+        fn primary_key_changed(
             &mut self,
             _: &(),
             event: &PrimaryKeyChanged<'_>,
@@ -1006,7 +1007,7 @@ mod tests {
         type Context = ();
         type Error = Infallible;
 
-        fn visit_renamed(&mut self, _: &(), event: &TableRenamed<'_>) -> Result<(), Infallible> {
+        fn table_renamed(&mut self, _: &(), event: &TableRenamed<'_>) -> Result<(), Infallible> {
             self.take(
                 format!("renamed {} to {}", event.before().id(), event.after().id()),
                 event.before(),
@@ -1016,11 +1017,7 @@ mod tests {
             Ok(())
         }
 
-        fn visit_column_renamed(
-            &mut self,
-            _: &(),
-            event: &ColumnRenamed<'_>,
-        ) -> Result<(), Infallible> {
+        fn column_renamed(&mut self, _: &(), event: &ColumnRenamed<'_>) -> Result<(), Infallible> {
             self.take(
                 format!(
                     "renamed {} to {}",
@@ -1034,11 +1031,7 @@ mod tests {
             Ok(())
         }
 
-        fn visit_column_added(
-            &mut self,
-            _: &(),
-            event: &ColumnAdded<'_>,
-        ) -> Result<(), Infallible> {
+        fn column_added(&mut self, _: &(), event: &ColumnAdded<'_>) -> Result<(), Infallible> {
             self.take(
                 format!("added {}", event.column().name()),
                 event.before(),
@@ -1048,11 +1041,7 @@ mod tests {
             Ok(())
         }
 
-        fn visit_column_dropped(
-            &mut self,
-            _: &(),
-            event: &ColumnDropped<'_>,
-        ) -> Result<(), Infallible> {
+        fn column_dropped(&mut self, _: &(), event: &ColumnDropped<'_>) -> Result<(), Infallible> {
             self.take(
                 format!("dropped {}", event.column().name()),
                 event.before(),
@@ -1062,11 +1051,7 @@ mod tests {
             Ok(())
         }
 
-        fn visit_column_retyped(
-            &mut self,
-            _: &(),
-            event: &ColumnRetyped<'_>,
-        ) -> Result<(), Infallible> {
+        fn column_retyped(&mut self, _: &(), event: &ColumnRetyped<'_>) -> Result<(), Infallible> {
             self.take(
                 format!("retyped {}", event.column().name()),
                 event.before(),
@@ -1076,7 +1061,7 @@ mod tests {
             Ok(())
         }
 
-        fn visit_primary_key_changed(
+        fn primary_key_changed(
             &mut self,
             _: &(),
             event: &PrimaryKeyChanged<'_>,
@@ -1392,26 +1377,18 @@ mod tests {
         type Context = ();
         type Error = Halted;
 
-        fn visit_column_added(&mut self, _: &(), event: &ColumnAdded<'_>) -> Result<(), Halted> {
+        fn column_added(&mut self, _: &(), event: &ColumnAdded<'_>) -> Result<(), Halted> {
             Err(Halted::Refused(event.column().name().to_owned()))
         }
 
-        fn visit_column_dropped(
-            &mut self,
-            _: &(),
-            event: &ColumnDropped<'_>,
-        ) -> Result<(), Halted> {
+        fn column_dropped(&mut self, _: &(), event: &ColumnDropped<'_>) -> Result<(), Halted> {
             self.announced
                 .push(format!("dropped {}", event.column().name()));
 
             Ok(())
         }
 
-        fn visit_column_retyped(
-            &mut self,
-            _: &(),
-            event: &ColumnRetyped<'_>,
-        ) -> Result<(), Halted> {
+        fn column_retyped(&mut self, _: &(), event: &ColumnRetyped<'_>) -> Result<(), Halted> {
             self.announced
                 .push(format!("retyped {}", event.column().name()));
 
@@ -1456,7 +1433,7 @@ mod tests {
         TableId::new("shop", "clients")
     }
 
-    fn column_renamed(from: &str, to: &str) -> TableChange {
+    fn renaming(from: &str, to: &str) -> TableChange {
         TableChange::ColumnRenamed {
             table: customers(),
             from: from.to_owned(),
@@ -1491,7 +1468,7 @@ mod tests {
         let (steps, catalog) = statement_steps(
             before.clone(),
             vec![
-                column_renamed("name", "full_name"),
+                renaming("name", "full_name"),
                 TableChange::Altered(after.clone()),
             ],
         );
@@ -1514,10 +1491,7 @@ mod tests {
 
         let (steps, _) = statement_steps(
             before,
-            vec![
-                column_renamed("name", "full_name"),
-                TableChange::Altered(after),
-            ],
+            vec![renaming("name", "full_name"), TableChange::Altered(after)],
         );
 
         assert_eq!(
@@ -1550,10 +1524,7 @@ mod tests {
 
         let (steps, _) = statement_steps(
             before,
-            vec![
-                column_renamed("name", "full_name"),
-                TableChange::Altered(after),
-            ],
+            vec![renaming("name", "full_name"), TableChange::Altered(after)],
         );
 
         assert_eq!(
@@ -1572,10 +1543,7 @@ mod tests {
 
         let (steps, _) = statement_steps(
             before,
-            vec![
-                column_renamed("id", "customer_id"),
-                TableChange::Altered(after),
-            ],
+            vec![renaming("id", "customer_id"), TableChange::Altered(after)],
         );
 
         assert_eq!(steps.announcements(), ["renamed id to customer_id"]);
@@ -1589,8 +1557,8 @@ mod tests {
         let (steps, _) = statement_steps(
             before,
             vec![
-                column_renamed("name", "full_name"),
-                column_renamed("full_name", "nickname"),
+                renaming("name", "full_name"),
+                renaming("full_name", "nickname"),
                 TableChange::Altered(after),
             ],
         );
@@ -1608,10 +1576,7 @@ mod tests {
 
         let (steps, _) = statement_steps(
             before,
-            vec![
-                column_renamed("nickname", "alias"),
-                TableChange::Altered(after),
-            ],
+            vec![renaming("nickname", "alias"), TableChange::Altered(after)],
         );
 
         assert!(steps.taken.is_empty());
@@ -1749,8 +1714,7 @@ mod tests {
     fn a_rename_of_a_column_onto_a_name_the_table_holds_announces_nothing() {
         let before = table(vec![identifier(), name(), email()], &["id"]);
 
-        let (steps, catalog) =
-            statement_steps(before.clone(), vec![column_renamed("name", "email")]);
+        let (steps, catalog) = statement_steps(before.clone(), vec![renaming("name", "email")]);
 
         assert!(steps.taken.is_empty());
         assert_eq!(catalog.table(&customers()), Some(&before));
@@ -1760,10 +1724,7 @@ mod tests {
     fn a_rename_of_a_column_of_a_table_the_catalog_never_saw_announces_nothing() {
         let mut catalog = CatalogModel::default();
 
-        let entries = accept(
-            &mut catalog,
-            change(1, vec![column_renamed("name", "full_name")]),
-        );
+        let entries = accept(&mut catalog, change(1, vec![renaming("name", "full_name")]));
 
         assert!(entries.is_empty());
         assert_eq!(catalog.table(&customers()), None);
