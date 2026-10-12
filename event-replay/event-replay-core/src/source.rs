@@ -69,6 +69,10 @@ pub trait ChangeLogs {
     fn row_changes(&self) -> &Self::Row;
 }
 
+// The log stays a parameter of the trait rather than of its methods: each warehouse decodes the
+// records of a log its own way (DuckDB with FromSql, BigQuery with TryFrom<Row>), a bound a method
+// could not take on per warehouse, and naming the row instead would need a higher-ranked bound
+// over the lifetime of a DuckDB row.
 pub trait SchemaChangeStream<L: SchemaChangeLog> {
     type Error: std::error::Error;
     type Changes<'a>: SchemaChanges<L, Error = Self::Error>
