@@ -1,5 +1,7 @@
 use std::fmt::Display;
 
+use lithify_core::build_log::BuildLog;
+
 #[derive(Debug, Default)]
 pub struct Journal {
     entries: Vec<String>,
@@ -24,6 +26,11 @@ impl Journal {
         self.entries.push(format!("{name}: {cause}"));
     }
 
+    pub fn built(&mut self, log: &BuildLog) {
+        self.failed |= log.status().failed();
+        self.entries.push(format!("  {log}"));
+    }
+
     pub fn complete(&self) -> bool {
         !self.failed
     }
@@ -31,6 +38,14 @@ impl Journal {
 
 #[cfg(test)]
 mod tests {
+    use chrono::DateTime;
+
+    use lithify_core::build_log::{Outcome, Run, Status};
+    use lithify_core::model::TableId;
+    use lithify_core::position::RecordedAt;
+    use lithify_core::sink::TablePath;
+    use lithify_core::window::Window;
+
     use super::*;
 
     #[test]
@@ -65,6 +80,49 @@ mod tests {
         assert_eq!(
             journal.entries().collect::<Vec<_>>(),
             ["warehouse: the table is not there"]
+        );
+        assert!(!journal.complete());
+    }
+
+    fn logged(status: Status) -> BuildLog {
+        BuildLog::new(
+            &Run::new(1, "snapshot", "daily", "primary", "{}", "0.1.0"),
+            TableId::new("shop", "people"),
+            None,
+            TablePath::new("mysql_shop", "people_20260920"),
+            Window::new(
+                RecordedAt::from(1789862400000),
+                RecordedAt::from(1789948800000),
+            ),
+            Outcome::new(
+                status,
+                DateTime::from_timestamp_millis(1789949000000).unwrap(),
+            ),
+        )
+    }
+
+    #[test]
+    fn a_table_built_is_reported_by_where_it_was_built() {
+        let mut journal = Journal::default();
+
+        journal.built(&logged(Status::Succeeded));
+
+        assert_eq!(
+            journal.entries().collect::<Vec<_>>(),
+            ["  built shop.people into mysql_shop.people_20260920"]
+        );
+        assert!(journal.complete());
+    }
+
+    #[test]
+    fn a_table_that_failed_to_build_is_reported_with_why_and_leaves_the_run_incomplete() {
+        let mut journal = Journal::default();
+
+        journal.built(&logged(Status::Failed("no era".to_owned())));
+
+        assert_eq!(
+            journal.entries().collect::<Vec<_>>(),
+            ["  failed to build shop.people into mysql_shop.people_20260920: no era"]
         );
         assert!(!journal.complete());
     }

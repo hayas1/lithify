@@ -53,6 +53,14 @@ impl WarehouseClient for DuckDbClient {
     fn execute(&self, statement: &SqlString) -> Result<(), Self::Error> {
         self.connection.execute_batch(statement.as_str())
     }
+
+    fn next_run_id(&self, namespace: &str) -> Result<i64, Self::Error> {
+        self.connection.query_row(
+            self.warehouse.select_next_run_id(namespace).as_str(),
+            [],
+            |row| row.get(0),
+        )
+    }
 }
 
 pub struct DuckDbSchemaChanges<'a, L> {
@@ -113,6 +121,7 @@ mod tests {
     use crate::source::debezium::Debezium;
     use crate::source::debezium::mysql::MySql;
     use chrono::DateTime;
+    use lithify_core::artifact::UnbuildableArtifact;
     use lithify_core::build_log::{BuildLog, Outcome, Run, Status};
     use lithify_core::event::{MalformedEvent, SchemaChange, TableChange};
     use lithify_core::listener::OutOfOrder;
@@ -308,16 +317,9 @@ mod tests {
             Connection::open_in_memory().unwrap(),
             DuckDbWarehouse::new("mysql_shop_cdc"),
         );
-        let warehouse = client.warehouse();
-
-        client
-            .execute(&warehouse.create_namespace("mysql_shop"))
-            .unwrap();
-        client
-            .execute(&warehouse.create_build_log("mysql_shop").unwrap())
-            .unwrap();
+        client.create_build_log::<Logged>("mysql_shop").unwrap();
         for log in logs {
-            client.execute(&warehouse.append_build_log(log)).unwrap();
+            client.append_build_log(log).unwrap();
         }
 
         client
@@ -341,15 +343,32 @@ mod tests {
             .unwrap()
     }
 
+    #[derive(Debug)]
+    struct Logged;
+
+    impl From<Error> for Logged {
+        fn from(_: Error) -> Self {
+            Self
+        }
+    }
+
+    impl From<UnbuildableArtifact> for Logged {
+        fn from(_: UnbuildableArtifact) -> Self {
+            Self
+        }
+    }
+
     fn next_run_id(client: &DuckDbClient) -> i64 {
-        client
-            .connection()
-            .query_row(
-                client.warehouse().select_next_run_id("mysql_shop").as_str(),
-                [],
-                |row| row.get(0),
-            )
-            .unwrap()
+        client.next_run_id("mysql_shop").unwrap()
+    }
+
+    #[test]
+    fn a_build_log_is_created_once_however_often_it_is_asked_for() {
+        let client = logging(&[logged("customers", 1, Status::Succeeded, 1789949000000)]);
+
+        client.create_build_log::<Logged>("mysql_shop").unwrap();
+
+        assert_eq!(latest(&client).len(), 1);
     }
 
     #[test]

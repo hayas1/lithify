@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use lithify_core::sink;
 use lithify_core::source::CdcFormat;
@@ -6,7 +6,7 @@ use lithify_protocol::sink::bigquery::client::{BigQueryCapture, BigQueryChangeLo
 use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbChangeLogsFn};
 use lithify_protocol::{BigQueryWarehouse, DebeziumFormat, DuckDbWarehouse};
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "lowercase")]
 pub enum Capture {
     Debezium(<DebeziumFormat as CdcFormat>::Config),

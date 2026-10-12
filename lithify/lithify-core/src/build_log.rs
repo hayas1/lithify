@@ -53,6 +53,13 @@ impl Display for Status {
 }
 
 impl Status {
+    pub fn failed(&self) -> bool {
+        match self {
+            Self::Succeeded => false,
+            Self::Failed(_) => true,
+        }
+    }
+
     fn error<W: Warehouse + ?Sized>(&self, warehouse: &W) -> SqlString {
         match self {
             Self::Succeeded => SqlString::from("NULL"),
@@ -126,6 +133,10 @@ impl BuildLog {
         TablePath::new(namespace, "_lithify_log")
     }
 
+    pub fn status(&self) -> &Status {
+        &self.outcome.status
+    }
+
     pub fn namespace(&self) -> &str {
         self.target.namespace()
     }
@@ -150,5 +161,18 @@ impl BuildLog {
             self.outcome.status.error(warehouse),
             warehouse.literal(&self.run.version),
         ]
+    }
+}
+
+impl Display for BuildLog {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match &self.outcome.status {
+            Status::Succeeded => write!(formatter, "built {} into {}", self.origin, self.target),
+            Status::Failed(error) => write!(
+                formatter,
+                "failed to build {} into {}: {error}",
+                self.origin, self.target
+            ),
+        }
     }
 }

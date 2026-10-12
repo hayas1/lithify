@@ -94,6 +94,22 @@ impl WarehouseClient for BigQueryClient {
             Ok(())
         })
     }
+
+    fn next_run_id(&self, namespace: &str) -> Result<i64, Self::Error> {
+        let numbered: Vec<RunId> = self.records(&self.warehouse.select_next_run_id(namespace))?;
+
+        Ok(numbered.first().map_or(1, |run_id| run_id.0))
+    }
+}
+
+struct RunId(i64);
+
+impl TryFrom<Row> for RunId {
+    type Error = RowError;
+
+    fn try_from(row: Row) -> Result<Self, Self::Error> {
+        Ok(Self(row.try_get("run_id")?))
+    }
 }
 
 pub struct BigQuerySchemaChanges<'a, L: SchemaChangeLog> {

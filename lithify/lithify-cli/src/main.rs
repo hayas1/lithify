@@ -124,7 +124,7 @@ impl RunArguments {
 
         match dry_run {
             Some(into) => run.plan(&into),
-            None => todo!("run the statements a plan holds against the warehouse"),
+            None => run.build(),
         }
     }
 }

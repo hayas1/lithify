@@ -9,6 +9,15 @@ pub enum ArtifactKind {
     History,
 }
 
+impl Display for ArtifactKind {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Snapshot => formatter.write_str("snapshot"),
+            Self::History => formatter.write_str("history"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Schedule {
@@ -27,6 +36,12 @@ impl Display for Schedule {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_artifact_is_named_as_the_pipeline_writes_it() {
+        assert_eq!(ArtifactKind::Snapshot.to_string(), "snapshot");
+        assert_eq!(ArtifactKind::History.to_string(), "history");
+    }
 
     #[test]
     fn a_schedule_is_named_as_the_pipeline_writes_it() {

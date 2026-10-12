@@ -14,6 +14,7 @@ pub enum Unrunnable {
     OutOfOrder(OutOfOrder),
     Unbuildable(UnbuildableArtifact),
     Unwritable(std::io::Error),
+    Unserializable(serde_json::Error),
     UnknownSink(String),
     WithoutSource,
 }
@@ -27,6 +28,7 @@ impl Display for Unrunnable {
             Self::OutOfOrder(cause) => write!(formatter, "{cause}"),
             Self::Unbuildable(cause) => write!(formatter, "{cause}"),
             Self::Unwritable(cause) => write!(formatter, "{cause}"),
+            Self::Unserializable(cause) => write!(formatter, "{cause}"),
             Self::UnknownSink(name) => {
                 write!(formatter, "nothing in this pipeline is sunk into {name}")
             }
@@ -44,6 +46,7 @@ impl std::error::Error for Unrunnable {
             Self::OutOfOrder(cause) => Some(cause),
             Self::Unbuildable(cause) => Some(cause),
             Self::Unwritable(cause) => Some(cause),
+            Self::Unserializable(cause) => Some(cause),
             Self::UnknownSink(_) | Self::WithoutSource => None,
         }
     }
@@ -82,6 +85,12 @@ impl From<UnbuildableArtifact> for Unrunnable {
 impl From<std::io::Error> for Unrunnable {
     fn from(cause: std::io::Error) -> Self {
         Self::Unwritable(cause)
+    }
+}
+
+impl From<serde_json::Error> for Unrunnable {
+    fn from(cause: serde_json::Error) -> Self {
+        Self::Unserializable(cause)
     }
 }
 

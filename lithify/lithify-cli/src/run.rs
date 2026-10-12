@@ -9,13 +9,14 @@ use lithify_core::window::Window;
 use lithify_protocol::sink::bigquery;
 use lithify_protocol::sink::bigquery::client::{BigQueryCapture, BigQueryClient};
 use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbClient};
-use lithify_protocol::sink::duckdb::config::Store;
+use lithify_protocol::sink::duckdb::config::Config;
 use lithify_protocol::sink::duckdb::store::ObjectStore;
 
 use crate::credential::Credential;
 use crate::journal::Journal;
 use crate::pipeline::{Capture, Warehouse};
 use crate::plan::SnapshotPlan;
+use crate::settlement::{Build, DryRun, Settlement};
 use crate::unrunnable::Unrunnable;
 
 pub struct Run {
@@ -45,9 +46,21 @@ impl Run {
 
     pub fn plan(&self, into: &Path) -> Result<Journal, Unrunnable> {
         self.each_sink(|sink, source, topic_prefix, journal| {
-            let statements = self.plan_statements(sink, source, topic_prefix)?;
+            let statements = self.settle(sink, source, topic_prefix, DryRun)?;
 
             Self::write_plan(into, sink, &statements, journal)
+        })
+    }
+
+    pub fn build(&self) -> Result<Journal, Unrunnable> {
+        self.each_sink(|sink, source, topic_prefix, journal| {
+            let settlement = Build::new(sink, source)?;
+
+            for log in self.settle(sink, source, topic_prefix, settlement)? {
+                journal.built(&log);
+            }
+
+            Ok(())
         })
     }
 
@@ -90,20 +103,33 @@ impl Run {
         Ok(journal)
     }
 
-    fn plan_statements(
+    fn settle<S: Settlement>(
         &self,
         sink: &Sink<Warehouse>,
         source: &Source<Capture>,
         topic_prefix: &str,
-    ) -> Result<Vec<SqlString>, Unrunnable> {
+        settlement: S,
+    ) -> Result<S::Output, Unrunnable> {
         match sink.warehouse() {
-            Warehouse::DuckDb(store) => source.capture().with_duckdb_change_logs(
+            Warehouse::DuckDb(config) => source.capture().with_duckdb_change_logs(
                 topic_prefix,
-                SnapshotPlan::new(&self.duckdb(sink, store)?, sink, &self.window, self.onto),
+                SnapshotPlan::new(
+                    &self.duckdb(sink, config)?,
+                    sink,
+                    &self.window,
+                    self.onto,
+                    settlement,
+                ),
             ),
             Warehouse::BigQuery(config) => source.capture().with_bigquery_change_logs(
                 topic_prefix,
-                SnapshotPlan::new(&self.bigquery(sink, config)?, sink, &self.window, self.onto),
+                SnapshotPlan::new(
+                    &self.bigquery(sink, config)?,
+                    sink,
+                    &self.window,
+                    self.onto,
+                    settlement,
+                ),
             ),
         }
     }
@@ -134,9 +160,9 @@ impl Run {
         Ok(())
     }
 
-    fn duckdb(&self, sink: &Sink<Warehouse>, store: &Store) -> Result<DuckDbClient, Unrunnable> {
+    fn duckdb(&self, sink: &Sink<Warehouse>, config: &Config) -> Result<DuckDbClient, Unrunnable> {
         Ok(
-            ObjectStore::open(store, self.credential.key_id(), self.credential.secret())
+            ObjectStore::open(config, self.credential.key_id(), self.credential.secret())
                 .client(sink.change_log())?,
         )
     }

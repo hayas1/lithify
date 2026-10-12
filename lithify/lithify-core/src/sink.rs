@@ -179,9 +179,10 @@ pub trait Warehouse {
     }
 
     fn select_next_run_id(&self, namespace: &str) -> SqlString {
+        let run_id = self.identifier("run_id");
+
         SqlString::from(format!(
-            "SELECT COALESCE(MAX({}), 0) + 1 FROM {}",
-            self.identifier("run_id"),
+            "SELECT COALESCE(MAX({run_id}), 0) + 1 AS {run_id} FROM {}",
             self.table_ref(&BuildLog::path(namespace)),
         ))
     }
@@ -218,6 +219,28 @@ pub trait WarehouseClient {
     // execute any statement, so that what a warehouse builds is named in this trait
     // instead of being spelled out as SQL by every artifact.
     fn execute(&self, statement: &SqlString) -> Result<(), Self::Error>;
+
+    fn next_run_id(&self, namespace: &str) -> Result<i64, Self::Error>;
+
+    fn create_build_log<E>(&self, namespace: &str) -> Result<(), E>
+    where
+        E: From<Self::Error> + From<UnbuildableArtifact>,
+    {
+        let warehouse = self.warehouse();
+
+        self.execute(&warehouse.create_namespace(namespace))?;
+        self.execute(
+            &warehouse
+                .create_build_log(namespace)
+                .map_err(UnbuildableArtifact::from)?,
+        )?;
+
+        Ok(())
+    }
+
+    fn append_build_log(&self, log: &BuildLog) -> Result<(), Self::Error> {
+        self.execute(&self.warehouse().append_build_log(log))
+    }
 
     fn build<E>(&self, builder: &impl ArtifactBuilder) -> Result<(), E>
     where
@@ -299,6 +322,10 @@ mod tests {
             self.executed.borrow_mut().push(statement.to_string());
 
             Ok(())
+        }
+
+        fn next_run_id(&self, _: &str) -> Result<i64, Self::Error> {
+            Ok(1)
         }
     }
 

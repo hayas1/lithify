@@ -61,8 +61,8 @@ The change log only replays if the source and sink connectors write it the way a
 
 | Support | Why | Status | Target |
 | --- | --- | --- | --- |
-| Execute artifacts | Only writing planned statements (`lithify run --dry-run`) is possible from the command line | Partial: dry run only | |
-| Record runs as a table | Which window was built when, by which version, with what outcome, so the next run, a backfill and an audit read the same record | Not started | |
+| Execute artifacts | `lithify run` builds the snapshots of a window, and `--dry-run` writes their statements instead | Available | |
+| Record runs as a table | Which window was built when, by which version, with what outcome, so the next run, a backfill and an audit read the same record | Partial: written to `_lithify_log`, not yet read | |
 | Resume from the last built window | A daily run picks its window from what was built rather than from the clock, and a missed day is caught up | Not started | |
 | Backfill a range | Rebuild a range of windows in order, each on top of the one before it | Not started | |
 | Wait for the change log to be complete | A window is built only once the sinks have written everything up to its end | Not started | |

@@ -26,6 +26,7 @@ lithify-protocol = { workspace = true, features = ["bigquery", "duckdb"] }
 lithify-strategy = { workspace = true }
 google-cloud-bigquery = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]

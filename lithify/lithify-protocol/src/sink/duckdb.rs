@@ -33,7 +33,7 @@ impl DuckDbWarehouse {
 }
 
 impl Warehouse for DuckDbWarehouse {
-    type Config = config::Store;
+    type Config = config::Config;
 
     fn identifier(&self, name: &str) -> SqlString {
         SqlString::from(format!("\"{name}\""))
