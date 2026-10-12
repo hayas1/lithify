@@ -370,8 +370,8 @@ impl<'a> Alteration<'a> {
     }
 
     fn warn_of_unread_rename<P>(alterations: &[Self], table: &TableId, change: &SchemaChange<P>) {
-        let dropped: Vec<&str> = alterations.iter().filter_map(Self::dropped).collect();
-        let added: Vec<&str> = alterations.iter().filter_map(Self::added).collect();
+        let dropped: Vec<&str> = alterations.iter().filter_map(Self::as_dropped).collect();
+        let added: Vec<&str> = alterations.iter().filter_map(Self::as_added).collect();
 
         if !dropped.is_empty() && !added.is_empty() {
             tracing::warn!(
@@ -386,14 +386,14 @@ impl<'a> Alteration<'a> {
         }
     }
 
-    fn dropped(&self) -> Option<&str> {
+    fn as_dropped(&self) -> Option<&str> {
         match self {
             Self::Dropped(column) => Some(column.name()),
             _ => None,
         }
     }
 
-    fn added(&self) -> Option<&str> {
+    fn as_added(&self) -> Option<&str> {
         match self {
             Self::Added(column) => Some(column.name()),
             _ => None,
@@ -1792,9 +1792,9 @@ mod tests {
     }
 
     #[derive(Clone, Default)]
-    struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    struct Traces(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
-    impl std::io::Write for Captured {
+    impl std::io::Write for Traces {
         fn write(&mut self, written: &[u8]) -> std::io::Result<usize> {
             self.0.lock().unwrap().extend_from_slice(written);
 
@@ -1806,7 +1806,7 @@ mod tests {
         }
     }
 
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Traces {
         type Writer = Self;
 
         fn make_writer(&'a self) -> Self::Writer {
@@ -1815,9 +1815,9 @@ mod tests {
     }
 
     fn warned(tables: Vec<TableChange>) -> String {
-        let captured = Captured::default();
+        let traces = Traces::default();
         let subscriber = tracing_subscriber::fmt()
-            .with_writer(captured.clone())
+            .with_writer(traces.clone())
             .with_ansi(false)
             .without_time()
             .finish();
@@ -1848,7 +1848,7 @@ mod tests {
                 .unwrap();
         });
 
-        String::from_utf8(captured.0.lock().unwrap().clone()).unwrap()
+        String::from_utf8(traces.0.lock().unwrap().clone()).unwrap()
     }
 
     #[test]

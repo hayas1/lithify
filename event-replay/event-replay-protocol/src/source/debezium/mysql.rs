@@ -447,7 +447,13 @@ mod tests {
             json!({"file": "binlog.000002", "pos": 448, "snapshot": "true"})
         ));
         assert!(captured(
+            json!({"file": "binlog.000002", "pos": 448, "snapshot": "first"})
+        ));
+        assert!(captured(
             json!({"file": "binlog.000002", "pos": 448, "snapshot": "last"})
+        ));
+        assert!(captured(
+            json!({"file": "binlog.000002", "pos": 448, "snapshot": "incremental"})
         ));
     }
 

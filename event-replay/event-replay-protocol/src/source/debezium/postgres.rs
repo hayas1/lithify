@@ -220,22 +220,26 @@ mod tests {
         );
     }
 
+    fn captured(source: Value) -> bool {
+        Debezium::new(Postgres)
+            .schema_change_json(json!({
+                "source": source,
+                "ts_ms": 1789800000000i64,
+                "ddl": "",
+                "tableChanges": []
+            }))
+            .unwrap()
+            .is_captured()
+    }
+
     #[test]
     fn a_statement_the_snapshot_of_the_connector_took_is_captured() {
-        let change = |source: Value| {
-            Debezium::new(Postgres)
-                .schema_change_json(json!({
-                    "source": source,
-                    "ts_ms": 1789800000000i64,
-                    "ddl": "",
-                    "tableChanges": []
-                }))
-                .unwrap()
-                .is_captured()
-        };
+        assert!(captured(json!({"lsn": 26738384i64, "snapshot": "true"})));
+    }
 
-        assert!(change(json!({"lsn": 26738384i64, "snapshot": "true"})));
-        assert!(!change(json!({"lsn": 26738384i64, "snapshot": "false"})));
-        assert!(!change(json!({"lsn": 26738384i64})));
+    #[test]
+    fn a_statement_the_log_carried_is_not_captured() {
+        assert!(!captured(json!({"lsn": 26738384i64, "snapshot": "false"})));
+        assert!(!captured(json!({"lsn": 26738384i64})));
     }
 }
