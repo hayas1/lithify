@@ -14,6 +14,8 @@ pub struct MySqlSource {
     pub file: String,
     pub pos: i64,
     pub gtid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -59,6 +61,10 @@ impl Dialect for MySql {
 
     fn position(&self, source: &Self::Source) -> Self::Position {
         MySqlPosition::from(source)
+    }
+
+    fn snapshot<'a>(&self, source: &'a Self::Source) -> Option<&'a str> {
+        source.snapshot.as_deref()
     }
 
     fn syntax(&self) -> Self::Syntax {
@@ -421,5 +427,35 @@ mod tests {
                 "altered shop.probe2"
             ]
         );
+    }
+
+    fn captured(source: Value) -> bool {
+        Debezium::new(MySql)
+            .schema_change_json(json!({
+                "source": source,
+                "ts_ms": 1789800000000i64,
+                "ddl": "CREATE TABLE `customers` (`id` bigint)",
+                "tableChanges": []
+            }))
+            .unwrap()
+            .is_captured()
+    }
+
+    #[test]
+    fn a_statement_the_snapshot_of_the_connector_took_is_captured() {
+        assert!(captured(
+            json!({"file": "binlog.000002", "pos": 448, "snapshot": "true"})
+        ));
+        assert!(captured(
+            json!({"file": "binlog.000002", "pos": 448, "snapshot": "last"})
+        ));
+    }
+
+    #[test]
+    fn a_statement_the_binlog_carried_is_not_captured() {
+        assert!(!captured(
+            json!({"file": "binlog.000002", "pos": 448, "snapshot": "false"})
+        ));
+        assert!(!captured(json!({"file": "binlog.000002", "pos": 448})));
     }
 }

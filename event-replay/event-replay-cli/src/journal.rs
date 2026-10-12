@@ -65,7 +65,8 @@ impl<P> SchemaChangeListener<P> for Journal {
 
     fn table_created(&mut self, _: &(), event: &TableCreated<'_>) -> Result<(), Infallible> {
         self.table(format!(
-            "created {} ({} columns, key {:?})",
+            "{} {} ({} columns, key {:?})",
+            event.origin(),
             event.table().id(),
             event.table().columns().count(),
             event.table().primary_key().collect::<Vec<_>>()
@@ -325,6 +326,38 @@ mod tests {
             [
                 "  renamed shop.customers.name to full_name",
                 "  renamed shop.customers to shop.clients",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_table_is_reported_as_it_appeared_to_the_catalog() {
+        let entries = journal(vec![
+            change(
+                1,
+                "CREATE TABLE `customers` (`id` bigint)",
+                vec![TableChange::Created(customers(vec![identifier()]))],
+            )
+            .captured(),
+            change(
+                2,
+                "ALTER TABLE `orders` ADD COLUMN `note` text",
+                vec![TableChange::Altered(TableModel::new(
+                    TableId::new("shop", "orders"),
+                    vec![identifier()],
+                    vec!["id".to_owned()],
+                ))],
+            ),
+        ]);
+
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.starts_with("  "))
+                .collect::<Vec<_>>(),
+            [
+                "  captured shop.customers (1 columns, key [\"id\"])",
+                "  discovered shop.orders (1 columns, key [\"id\"])",
             ]
         );
     }

@@ -11,6 +11,8 @@ use super::Dialect;
 #[cfg_attr(feature = "bigquery", derive(google_cloud_bigquery::query::FromSql))]
 pub struct PostgresSource {
     pub lsn: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -42,6 +44,10 @@ impl Dialect for Postgres {
 
     fn position(&self, source: &Self::Source) -> Self::Position {
         PostgresPosition::from(source)
+    }
+
+    fn snapshot<'a>(&self, source: &'a Self::Source) -> Option<&'a str> {
+        source.snapshot.as_deref()
     }
 
     fn syntax(&self) -> Self::Syntax {
@@ -88,7 +94,7 @@ mod tests {
     use super::*;
     use event_replay_core::event::{MalformedEvent, TableChange};
     use event_replay_core::model::{ColumnType, TableId};
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     fn position(lsn: i64) -> PostgresPosition {
         Postgres.position(&serde_json::from_value(json!({"lsn": lsn})).unwrap())
@@ -212,5 +218,24 @@ mod tests {
                 to: "full_name".to_owned(),
             })
         );
+    }
+
+    #[test]
+    fn a_statement_the_snapshot_of_the_connector_took_is_captured() {
+        let change = |source: Value| {
+            Debezium::new(Postgres)
+                .schema_change_json(json!({
+                    "source": source,
+                    "ts_ms": 1789800000000i64,
+                    "ddl": "",
+                    "tableChanges": []
+                }))
+                .unwrap()
+                .is_captured()
+        };
+
+        assert!(change(json!({"lsn": 26738384i64, "snapshot": "true"})));
+        assert!(!change(json!({"lsn": 26738384i64, "snapshot": "false"})));
+        assert!(!change(json!({"lsn": 26738384i64})));
     }
 }

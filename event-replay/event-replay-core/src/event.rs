@@ -43,6 +43,7 @@ pub struct SchemaChange<P> {
     recorded_at: RecordedAt,
     statement: String,
     tables: Vec<TableChange>,
+    captured: bool,
 }
 
 impl<P> SchemaChange<P> {
@@ -73,7 +74,19 @@ impl<P> SchemaChange<P> {
             recorded_at,
             statement: statement.to_owned(),
             tables,
+            captured: false,
         }
+    }
+
+    pub fn captured(self) -> Self {
+        Self {
+            captured: true,
+            ..self
+        }
+    }
+
+    pub fn is_captured(&self) -> bool {
+        self.captured
     }
 }
 
@@ -95,3 +108,16 @@ impl fmt::Display for MalformedEvent {
 }
 
 impl std::error::Error for MalformedEvent {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_schema_change_is_taken_at_the_source_unless_marked_captured() {
+        let change = SchemaChange::new(1, RecordedAt::from(1), "", Vec::new());
+
+        assert!(!change.is_captured());
+        assert!(change.captured().is_captured());
+    }
+}

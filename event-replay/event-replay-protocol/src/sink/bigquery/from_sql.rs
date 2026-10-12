@@ -29,7 +29,8 @@ mod tests {
         let source = MySqlSource::from_sql(json!({
             "file": "binlog.000002",
             "pos": "448",
-            "gtid": null
+            "gtid": null,
+            "snapshot": "false"
         }))
         .unwrap();
 
@@ -39,8 +40,21 @@ mod tests {
     }
 
     #[test]
+    fn a_source_carries_the_snapshot_mark_the_sink_wrote() {
+        let source = MySqlSource::from_sql(json!({
+            "file": "binlog.000002",
+            "pos": "448",
+            "gtid": null,
+            "snapshot": "last"
+        }))
+        .unwrap();
+
+        assert_eq!(source.snapshot.as_deref(), Some("last"));
+    }
+
+    #[test]
     fn a_position_the_warehouse_wrote_as_a_number_is_read_as_one() {
-        let source = PostgresSource::from_sql(json!({"lsn": 26738384})).unwrap();
+        let source = PostgresSource::from_sql(json!({"lsn": 26738384, "snapshot": null})).unwrap();
 
         assert_eq!(source.lsn, 26738384);
     }

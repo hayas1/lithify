@@ -127,22 +127,44 @@ impl<P> SchemaChangeListener<P> for () {
     type Error = Infallible;
 }
 
-// TODO: tell whether the table was created at the source or only appeared to the catalog: taken
-// by the snapshot a connector takes when it starts (Debezium marks its source with `snapshot`), or
-// altered while the catalog never saw it (CatalogModel::alter falls back to create). Prefer an
-// origin carried by this event, as client-go hands OnAdd whether the object came in the initial
-// list; turn to an event of its own that defaults to table_created, as Debezium reads a snapshot
-// row with op 'r' apart from 'c', only if listeners come to handle the origins apart. Avoid an
-// alteration with no table before it, which every alteration listener would have to handle and
-// which has nothing to step from. Carrying the snapshot mark needs the source of every dialect
-// and every warehouse decoding of it to bring the field down to TableChange::Created.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    Created,
+    Captured,
+    Discovered,
+}
+
+impl fmt::Display for Origin {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Created => formatter.write_str("created"),
+            Self::Captured => formatter.write_str("captured"),
+            Self::Discovered => formatter.write_str("discovered"),
+        }
+    }
+}
+
+impl Origin {
+    fn of<P>(change: &SchemaChange<P>) -> Self {
+        match change.is_captured() {
+            true => Self::Captured,
+            false => Self::Created,
+        }
+    }
+}
+
 pub struct TableCreated<'a> {
     table: &'a TableModel,
+    origin: Origin,
 }
 
 impl<'a> TableCreated<'a> {
     pub fn table(&self) -> &'a TableModel {
         self.table
+    }
+
+    pub fn origin(&self) -> Origin {
+        self.origin
     }
 }
 
@@ -470,7 +492,9 @@ impl<P: Position> CatalogModel<P> {
 
         for table in change.tables() {
             match table {
-                TableChange::Created(table) => self.create(context, change, table, listener)?,
+                TableChange::Created(table) => {
+                    self.create(context, change, table, Origin::of(change), listener)?
+                }
                 TableChange::Renamed { from, to } => {
                     self.rename(context, change, from, to, listener)?
                 }
@@ -501,9 +525,10 @@ impl<P: Position> CatalogModel<P> {
         context: &L::Context,
         change: &SchemaChange<P>,
         table: &TableModel,
+        origin: Origin,
         listener: &mut L,
     ) -> Result<(), L::Error> {
-        TableEvent::TableCreated(TableCreated { table }).accept(context, listener)?;
+        TableEvent::TableCreated(TableCreated { table, origin }).accept(context, listener)?;
         self.remember(change, table);
 
         Ok(())
@@ -585,7 +610,7 @@ impl<P: Position> CatalogModel<P> {
         listener: &mut L,
     ) -> Result<(), L::Error> {
         let Some(before) = self.tables.get(after.id()).cloned() else {
-            return self.create(context, change, after, listener);
+            return self.create(context, change, after, Origin::Discovered, listener);
         };
         let alterations = Alteration::between(&before, after);
         Alteration::warn_of_unread_rename(&alterations, after.id(), change);
@@ -1853,6 +1878,73 @@ mod tests {
                 TableChange::Altered(table(vec![identifier(), full_name()], &["id"])),
             ]),
             ""
+        );
+    }
+
+    #[derive(Debug, Default)]
+    struct Origins {
+        told: Vec<(TableId, Origin)>,
+    }
+
+    impl SchemaChangeListener<Offset> for Origins {
+        type Context = ();
+        type Error = Infallible;
+
+        fn table_created(&mut self, _: &(), event: &TableCreated<'_>) -> Result<(), Infallible> {
+            self.told.push((event.table().id().clone(), event.origin()));
+
+            Ok(())
+        }
+    }
+
+    fn origins(changes: Vec<SchemaChange<Offset>>) -> Vec<(TableId, Origin)> {
+        let mut catalog = CatalogModel::default();
+        let mut origins = Origins::default();
+
+        for change in &changes {
+            catalog
+                .accept::<OutOfOrder, _>(&(), change, &mut origins)
+                .unwrap();
+        }
+
+        origins.told
+    }
+
+    #[test]
+    fn a_table_created_at_the_source_is_announced_as_created() {
+        assert_eq!(origins(vec![created(1)]), [(customers(), Origin::Created)]);
+    }
+
+    #[test]
+    fn a_table_the_snapshot_of_a_connector_took_is_announced_as_captured() {
+        assert_eq!(
+            origins(vec![created(1).captured()]),
+            [(customers(), Origin::Captured)]
+        );
+    }
+
+    #[test]
+    fn a_table_first_seen_altered_is_announced_as_discovered() {
+        assert_eq!(
+            origins(vec![altered(1, vec![identifier()], &["id"])]),
+            [(customers(), Origin::Discovered)]
+        );
+    }
+
+    #[test]
+    fn a_table_first_seen_renamed_onto_is_announced_as_discovered() {
+        assert_eq!(
+            origins(vec![change(
+                1,
+                vec![
+                    TableChange::Renamed {
+                        from: customers(),
+                        to: clients(),
+                    },
+                    TableChange::Altered(table(vec![identifier()], &["id"]).with_id(&clients())),
+                ]
+            )]),
+            [(clients(), Origin::Discovered)]
         );
     }
 }

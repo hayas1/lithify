@@ -79,6 +79,17 @@ fn member<T: FromSql>(structure: &StructArray, row: usize, name: &str) -> FromSq
     T::column_result(element(column, row)?)
 }
 
+fn member_or_none<T: FromSql>(
+    structure: &StructArray,
+    row: usize,
+    name: &str,
+) -> FromSqlResult<Option<T>> {
+    match structure.column_by_name(name) {
+        Some(column) => Option::<T>::column_result(element(column, row)?),
+        None => Ok(None),
+    }
+}
+
 // TODO: members belongs on T rather than here: a list would be read by FromSql
 // for Vec<T>, which the orphan rule forbids us to write and duckdb does not
 // provide. Delete it once duckdb reads a LIST into a typed collection.
@@ -122,6 +133,7 @@ impl FromSql for MySqlSource {
             file: member(source, row, "file")?,
             pos: member(source, row, "pos")?,
             gtid: member(source, row, "gtid")?,
+            snapshot: member_or_none(source, row, "snapshot")?,
         })
     }
 }
@@ -132,6 +144,7 @@ impl FromSql for PostgresSource {
 
         Ok(Self {
             lsn: member(source, row, "lsn")?,
+            snapshot: member_or_none(source, row, "snapshot")?,
         })
     }
 }
@@ -249,6 +262,26 @@ mod tests {
             Some("0.00")
         );
         assert!(table.columns[1].optional);
+    }
+
+    #[test]
+    fn a_statement_carries_the_snapshot_mark_of_its_source() {
+        let statement = statement(
+            "SELECT {
+               'source': {'file': 'binlog.000002', 'pos': 198, 'gtid': NULL, 'snapshot': 'true'},
+               'ts_ms': 1789800000000::BIGINT,
+               'ddl': 'CREATE TABLE `customers` (`id` bigint)',
+               'tableChanges': []::STRUCT(type VARCHAR)[]
+             }",
+        )
+        .unwrap();
+
+        assert_eq!(statement.source.snapshot.as_deref(), Some("true"));
+    }
+
+    #[test]
+    fn a_statement_whose_source_carries_no_snapshot_mark_is_read_without_one() {
+        assert_eq!(statement(CUSTOMERS).unwrap().source.snapshot, None);
     }
 
     #[test]

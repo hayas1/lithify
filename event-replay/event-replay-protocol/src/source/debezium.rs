@@ -30,6 +30,8 @@ pub trait Dialect {
 
     fn position(&self, source: &Self::Source) -> Self::Position;
 
+    fn snapshot<'a>(&self, source: &'a Self::Source) -> Option<&'a str>;
+
     fn column_type(&self, type_name: &str, length: Option<u32>, scale: Option<u32>) -> ColumnType;
 
     fn ordering(&self) -> Vec<ColumnPath>;
@@ -118,6 +120,12 @@ impl<D: Dialect> Debezium<D> {
 
     pub fn dialect(&self) -> &D {
         &self.dialect
+    }
+
+    fn captured(&self, source: &D::Source) -> bool {
+        self.dialect
+            .snapshot(source)
+            .is_some_and(|mark| mark != "false")
     }
 
     fn ordered(&self) -> Vec<ColumnPath> {
@@ -236,12 +244,17 @@ impl<D: Dialect> SchemaChangeLog for Debezium<D> {
             .unwrap_or_default();
         let tables = renamed.into_iter().chain(altered).collect();
 
-        Ok(SchemaChange::new(
+        let change = SchemaChange::new(
             self.dialect.position(&statement.source),
             RecordedAt::from(statement.ts_ms),
             &statement.ddl,
             tables,
-        ))
+        );
+
+        match self.captured(&statement.source) {
+            true => Ok(change.captured()),
+            false => Ok(change),
+        }
     }
 }
 
