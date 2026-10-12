@@ -79,6 +79,17 @@ assert_installed() {
     echo "ok: ${what}"
 }
 
+assert_not_installed() {
+    what="$1"
+    pattern="$2"
+    if grep -q "${pattern}" "${workdir}/log"; then
+        echo "FAIL: ${what} ran ${pattern}:" >&2
+        cat "${workdir}/log" >&2
+        exit 1
+    fi
+    echo "ok: ${what}"
+}
+
 assert_exit_code() {
     what="$1"
     expected="$2"
@@ -123,7 +134,18 @@ only_missing_library
 echo n | install_clients > /dev/null
 assert_nothing_installed "a declined library is not installed"
 
+stub_missing mysql psql duckdb bq
+stub_linked
+install_clients -y libduckdb < /dev/null > /dev/null
+assert_installed "a named library is installed" "sudo install .*libduckdb\.so /usr/local/lib"
+assert_not_installed "a client left unnamed is not installed" "default-mysql-client"
+assert_not_installed "another client left unnamed is not installed" "duckdb_cli-linux-"
+
 only_missing
+
+status=0
+install_clients -y nothing-such > /dev/null 2>&1 || status=$?
+assert_exit_code "an unknown client is rejected" 2 "${status}"
 
 status=0
 install_clients --nope > /dev/null 2>&1 || status=$?

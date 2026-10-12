@@ -3,13 +3,16 @@ set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 assume_yes=false
+clients="mysql psql duckdb bq libduckdb"
+named=""
 
 usage() {
     cat <<USAGE
-Usage: install-clients.sh [-y] [-h]
+Usage: install-clients.sh [-y] [-h] [client...]
 
 Installs the command line clients for the stack: mysql, psql, duckdb and bq,
-and libduckdb, which the Rust workspace links against.
+and libduckdb, which the Rust workspace links against. Name some of them to
+install those alone.
 Clients that are already on PATH and libraries the linker already finds are
 left alone.
 
@@ -25,12 +28,28 @@ for argument in "$@"; do
             usage
             exit 0
             ;;
-        *)
+        -*)
             usage >&2
             exit 2
             ;;
+        *)
+            case " ${clients} " in
+                *" ${argument} "*) named="${named} ${argument}" ;;
+                *)
+                    usage >&2
+                    exit 2
+                    ;;
+            esac
+            ;;
     esac
 done
+
+requested() {
+    case " ${named:-${clients}} " in
+        *" $1 "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
 confirmed() {
     if ${assume_yes}; then
@@ -130,8 +149,8 @@ install_bq() {
     apt_install google-cloud-cli
 }
 
-install_missing_command mysql install_mysql
-install_missing_command psql install_psql
-install_missing_command duckdb install_duckdb
-install_missing_command bq install_bq
-install_missing_library libduckdb install_libduckdb
+if requested mysql; then install_missing_command mysql install_mysql; fi
+if requested psql; then install_missing_command psql install_psql; fi
+if requested duckdb; then install_missing_command duckdb install_duckdb; fi
+if requested bq; then install_missing_command bq install_bq; fi
+if requested libduckdb; then install_missing_library libduckdb install_libduckdb; fi
