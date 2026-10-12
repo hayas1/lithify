@@ -8,7 +8,6 @@ use crate::sql::SqlString;
 pub enum UnbuildableArtifact {
     WithoutPrimaryKey(TableId),
     PrimaryKeyChanged(TableId),
-    Renamed(TableId),
     WithoutEra(TableId),
     WithoutChangeLog(TableId),
     UnsupportedColumn(UnsupportedColumn),
@@ -24,12 +23,6 @@ impl fmt::Display for UnbuildableArtifact {
                 write!(
                     formatter,
                     "{table} changed its primary key within the window"
-                )
-            }
-            Self::Renamed(table) => {
-                write!(
-                    formatter,
-                    "{table} was renamed within the window, which no snapshot follows yet"
                 )
             }
             Self::WithoutChangeLog(table) => {

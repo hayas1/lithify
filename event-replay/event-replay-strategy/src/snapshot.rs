@@ -346,17 +346,16 @@ impl<P, L: RowChangeLog, W: Warehouse> SchemaChangeListener<P> for Snapshot<'_, 
         self.fold_era(warehouse, closed_era)
     }
 
-    // TODO: follow a renamed table by reading each era from the sink table of the name the table
-    // had in it. The sink names its tables after the table id (Sink::row_changes), yet a snapshot
-    // is handed one sink table when it opens; it needs a way to name the sink table of the id the
-    // rename leads to, and the target has to be named after one of the names. Until then a rename
-    // fails the snapshot rather than losing the rows changed before it.
     fn table_renamed(
         &mut self,
-        _: &W,
+        warehouse: &W,
         event: &TableRenamed<'_>,
     ) -> Result<(), UnbuildableArtifact> {
-        Err(UnbuildableArtifact::Renamed(event.before().id().clone()))
+        self.begin(warehouse, event.before())?;
+        self.table = event.after().id().clone();
+        self.folding = Some(self.folding(warehouse));
+
+        Ok(())
     }
 
     fn column_renamed(
@@ -1219,33 +1218,99 @@ mod tests {
         )));
     }
 
-    #[test]
-    fn a_table_renamed_within_the_window_cannot_be_snapshotted_yet() {
+    fn renamed_to_clients(base: impl Fn() -> Base) -> Vec<Snapshot<'static, Log, Engine>> {
         let clients = TableId::new("shop", "clients");
-        let moved = customers().with_id(&clients);
 
-        assert_eq!(
-            snapshots(
-                customers(),
-                vec![changes(
-                    150,
-                    vec![
-                        TableChange::Renamed {
-                            from: TableId::new("shop", "customers"),
-                            to: clients,
-                        },
-                        TableChange::Altered(moved),
-                    ],
-                )],
-                || Base::Captured
-            )
-            .map(drop)
-            .unwrap_err(),
-            Untold::Unbuildable(UnbuildableArtifact::Renamed(TableId::new(
-                "shop",
-                "customers"
-            )))
+        snapshots(
+            customers(),
+            vec![changes(
+                150,
+                vec![
+                    TableChange::Renamed {
+                        from: TableId::new("shop", "customers"),
+                        to: clients.clone(),
+                    },
+                    TableChange::Altered(customers().with_id(&clients)),
+                ],
+            )],
+            base,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_table_renamed_within_the_window_reads_each_era_from_the_change_log_of_its_name() {
+        let statement = statement(Ok(renamed_to_clients(|| Base::Captured)));
+
+        assert!(statement.contains(concat!(
+            "\"changes_1\" AS (\n",
+            "  SELECT *\n",
+            "  FROM \"mysql_shop_cdc\".\"mysql_shop_customers\"\n",
+            "  WHERE \"ts_ms\" >= 100 AND \"ts_ms\" < 150\n",
+        )));
+        assert!(statement.contains(concat!(
+            "\"changes_2\" AS (\n",
+            "  SELECT *\n",
+            "  FROM \"mysql_shop_cdc\".\"mysql_shop_clients\"\n",
+            "  WHERE \"ts_ms\" >= 150 AND \"ts_ms\" < 200\n",
+        )));
+        assert!(statement.ends_with("SELECT * FROM \"era_2\""));
+    }
+
+    #[test]
+    fn a_table_renamed_within_the_window_starts_from_what_the_capture_read_under_its_first_name() {
+        let statement = statement(Ok(renamed_to_clients(|| Base::Captured)));
+
+        assert!(statement.contains(concat!(
+            "  FROM \"mysql_shop_cdc\".\"mysql_shop_customers\"\n",
+            "  WHERE \"op\" = 'r'\n",
+        )));
+    }
+
+    #[test]
+    fn a_table_renamed_within_the_window_is_snapshotted_under_its_last_name() {
+        let snapshots = renamed_to_clients(|| Base::Captured);
+        let statements = snapshots[0].statements().unwrap();
+
+        assert_eq!(snapshots[0].table(), &TableId::new("shop", "clients"));
+        assert!(
+            statements[1]
+                .as_str()
+                .starts_with("CREATE OR REPLACE TABLE \"mysql_shop\".\"clients_20260920\" AS\n")
         );
+    }
+
+    #[test]
+    fn a_table_renamed_and_altered_by_one_statement_carries_its_rows_under_its_new_name() {
+        let clients = TableId::new("shop", "clients");
+        let widened = customers_with(
+            vec![
+                column("id", ColumnType::Int64),
+                column("name", ColumnType::Text),
+                column("email", ColumnType::Text),
+            ],
+            &["id"],
+        )
+        .with_id(&clients);
+
+        let statement = statement(snapshots(
+            customers(),
+            vec![changes(
+                150,
+                vec![
+                    TableChange::Renamed {
+                        from: TableId::new("shop", "customers"),
+                        to: clients,
+                    },
+                    TableChange::Altered(widened),
+                ],
+            )],
+            || Base::Captured,
+        ));
+
+        assert!(statement.contains("    CAST(NULL AS TEXT) AS \"email\"\n  FROM \"era_1\"\n"));
+        assert!(statement.contains("  FROM \"mysql_shop_cdc\".\"mysql_shop_clients\"\n"));
+        assert!(statement.ends_with("SELECT * FROM \"era_3\""));
     }
 
     #[test]

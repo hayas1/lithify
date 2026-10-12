@@ -366,6 +366,68 @@ fn a_column_renamed_within_the_window_keeps_the_values_of_the_rows_last_changed_
     );
 }
 
+const MOVED: &str = "CREATE SCHEMA ddl;
+    CREATE TABLE ddl.shop AS SELECT * FROM (VALUES
+      ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL}, 'ts_ms': 0::BIGINT,
+        'ddl': 'CREATE TABLE people (id BIGINT, name VARCHAR(64))',
+        'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
+          'table': {'primaryKeyColumnNames': ['id'], 'columns': [
+            {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
+             'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL},
+            {'name': 'name', 'typeName': 'VARCHAR', 'position': 2, 'optional': false,
+             'defaultValueExpression': NULL, 'length': 64, 'scale': NULL}]}}]}),
+      ({'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL}, 'ts_ms': 5::BIGINT,
+        'ddl': 'RENAME TABLE people TO persons',
+        'tableChanges': [{'type': 'ALTER', 'id': '\"shop\".\"persons\"',
+          'table': {'primaryKeyColumnNames': ['id'], 'columns': [
+            {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
+             'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL},
+            {'name': 'name', 'typeName': 'VARCHAR', 'position': 2, 'optional': false,
+             'defaultValueExpression': NULL, 'length': 64, 'scale': NULL}]}}]})
+    ) AS t(value);
+    CREATE SCHEMA cdc;
+    CREATE TABLE cdc.people AS SELECT * FROM (VALUES
+      ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 2::BIGINT},
+        'before': NULL::STRUCT(id BIGINT, name VARCHAR), 'after': {'id': 1::BIGINT, 'name': 'Alice'}}),
+      ({'op': 'c', 'ts_ms': 2::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 3::BIGINT},
+        'before': NULL::STRUCT(id BIGINT, name VARCHAR), 'after': {'id': 2::BIGINT, 'name': 'Bob'}})
+    ) AS t(value);
+    CREATE TABLE cdc.persons AS SELECT * FROM (VALUES
+      ({'op': 'u', 'ts_ms': 6::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 5::BIGINT},
+        'before': {'id': 1::BIGINT, 'name': 'Alice'}, 'after': {'id': 1::BIGINT, 'name': 'Alicia'}}),
+      ({'op': 'c', 'ts_ms': 7::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 6::BIGINT},
+        'before': NULL::STRUCT(id BIGINT, name VARCHAR), 'after': {'id': 3::BIGINT, 'name': 'Carol'}})
+    ) AS t(value)";
+
+#[test]
+fn a_table_renamed_within_the_window_is_snapshotted_under_its_new_name_with_every_row() {
+    let client = DuckDbClient::new(
+        Connection::open_in_memory().unwrap(),
+        DuckDbWarehouse::default(),
+    );
+    client.execute(&SqlString::from(MOVED)).unwrap();
+
+    replay(
+        &client,
+        &Window::new(RecordedAt::from(0), RecordedAt::from(10)),
+    );
+
+    assert_eq!(
+        rows(
+            &client,
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = 'shop_snapshot' ORDER BY table_name"
+        ),
+        ["persons"]
+    );
+    assert_eq!(
+        rows(
+            &client,
+            "SELECT concat_ws(' ', id, name) FROM shop_snapshot.persons ORDER BY id"
+        ),
+        ["1 Alicia", "2 Bob", "3 Carol"]
+    );
+}
+
 struct Shelves;
 
 impl Placement for Shelves {
