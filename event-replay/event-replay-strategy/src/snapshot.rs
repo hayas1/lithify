@@ -11,6 +11,12 @@ use event_replay_core::sink::{TablePath, Warehouse};
 use event_replay_core::source::RowChangeLog;
 use event_replay_core::sql::SqlString;
 
+use query::ChangeLogQuery;
+use relations::Relations;
+
+mod query;
+mod relations;
+
 pub trait Placement {
     fn change_log(&self, table: &TableId) -> Option<TablePath>;
 
@@ -30,30 +36,23 @@ impl Base {
         table: &TableModel,
     ) -> Result<SqlString, UnbuildableArtifact> {
         match self {
-            Self::Shard(shard) => Ok(SqlString::from(format!(
-                "  SELECT\n{}\n  FROM {}",
-                Snapshot::<L, W>::columns(warehouse, table, "    "),
-                warehouse.table_ref(shard),
-            ))),
-            Self::Captured => Ok(SqlString::from(format!(
-                "  SELECT\n{}\n  FROM {}\n  WHERE {} = 'r'\n{}",
-                snapshot.reads(warehouse, table, "    ")?,
-                snapshot.change_log(warehouse, table.id())?,
-                warehouse.path(&snapshot.log.operation()),
-                snapshot.latest(warehouse, table),
-            ))),
+            Self::Shard(shard) => Ok(ChangeLogQuery::<L>::shard(warehouse, shard, table)),
+            Self::Captured => snapshot.query.captured(
+                warehouse,
+                &snapshot.change_log(warehouse, table.id())?,
+                table,
+            ),
         }
     }
 }
 
 pub struct Snapshot<'a, L, W> {
-    log: &'a L,
+    query: ChangeLogQuery<'a, L>,
     placement: &'a dyn Placement,
     table: TableId,
     base: Base,
     folding: Option<Folding>,
-    relations: Vec<(SqlString, SqlString)>,
-    steps: usize,
+    relations: Relations,
     warehouse: PhantomData<fn(&W)>,
 }
 
@@ -65,13 +64,12 @@ struct Folding {
 impl<'a, L: RowChangeLog, W: Warehouse> Snapshot<'a, L, W> {
     pub fn new(log: &'a L, placement: &'a dyn Placement, table: TableId, base: Base) -> Self {
         Self {
-            log,
+            query: ChangeLogQuery::new(log),
             placement,
             table,
             base,
             folding: None,
-            relations: Vec::new(),
-            steps: 0,
+            relations: Relations::default(),
             warehouse: PhantomData,
         }
     }
@@ -90,7 +88,7 @@ impl<'a, L: RowChangeLog, W: Warehouse> Snapshot<'a, L, W> {
 
         let base = self.base.select(warehouse, self, table)?;
 
-        self.relations.push((warehouse.identifier("base"), base));
+        self.relations.push(warehouse.identifier("base"), base);
         self.folding = Some(self.folding(warehouse));
 
         Ok(())
@@ -114,8 +112,8 @@ impl<'a, L: RowChangeLog, W: Warehouse> Snapshot<'a, L, W> {
 
     fn previous(&self) -> Result<SqlString, UnbuildableArtifact> {
         self.relations
-            .last()
-            .map(|(name, _)| name.clone())
+            .previous()
+            .cloned()
             .ok_or_else(|| self.without_era())
     }
 
@@ -125,16 +123,22 @@ impl<'a, L: RowChangeLog, W: Warehouse> Snapshot<'a, L, W> {
 
     fn fold_era(&mut self, warehouse: &W, era: &Era) -> Result<(), UnbuildableArtifact> {
         self.begin(warehouse, era.table())?;
-        self.steps += 1;
 
+        let step = self.relations.step();
         let previous = self.previous()?;
-        let changes = warehouse.identifier(&format!("changes_{}", self.steps));
-        let folded = warehouse.identifier(&format!("era_{}", self.steps));
-        let fold = self.fold(warehouse, era.table(), &previous, &changes)?;
+        let changes = warehouse.identifier(&format!("changes_{step}"));
+        let fold = self
+            .query
+            .fold(warehouse, era.table(), &previous, &changes)?;
+        let read = self.query.changes(
+            warehouse,
+            &self.change_log(warehouse, era.table().id())?,
+            era,
+        );
 
+        self.relations.push(changes, read);
         self.relations
-            .push((changes, self.changes(warehouse, era)?));
-        self.relations.push((folded, fold));
+            .push(warehouse.identifier(&format!("era_{step}")), fold);
 
         Ok(())
     }
@@ -145,191 +149,13 @@ impl<'a, L: RowChangeLog, W: Warehouse> Snapshot<'a, L, W> {
         next: &TableModel,
         carried: impl Fn(&ColumnModel, &SqlString) -> Result<SqlString, UnbuildableArtifact>,
     ) -> Result<(), UnbuildableArtifact> {
-        self.steps += 1;
+        let step = self.relations.step();
+        let carry = ChangeLogQuery::<L>::carry(warehouse, next, &self.previous()?, carried)?;
 
-        let previous = self.previous()?;
-        let columns: Vec<String> = next
-            .columns()
-            .map(|column| {
-                let name = warehouse.identifier(column.name());
-
-                Ok(format!("    {} AS {name}", carried(column, &name)?))
-            })
-            .collect::<Result<_, UnbuildableArtifact>>()?;
-
-        self.relations.push((
-            warehouse.identifier(&format!("era_{}", self.steps)),
-            SqlString::from(format!(
-                "  SELECT\n{}\n  FROM {previous}",
-                columns.join(",\n")
-            )),
-        ));
+        self.relations
+            .push(warehouse.identifier(&format!("era_{step}")), carry);
 
         Ok(())
-    }
-
-    fn fill(warehouse: &W, column: &ColumnModel) -> Result<SqlString, UnbuildableArtifact> {
-        match column.default_value() {
-            Some(default) => {
-                Ok(warehouse.cast_or_null(&warehouse.literal(default), column.column_type())?)
-            }
-            None => Ok(SqlString::from(format!(
-                "CAST(NULL AS {})",
-                warehouse.column_type(column.column_type())?
-            ))),
-        }
-    }
-
-    fn with(folding: &Folding, relations: &[(SqlString, SqlString)]) -> SqlString {
-        let ctes: Vec<String> = relations
-            .iter()
-            .map(|(name, select)| format!("{name} AS (\n{select}\n)"))
-            .collect();
-        let last = relations
-            .last()
-            .map(|(name, _)| name.as_str())
-            .unwrap_or_default();
-
-        SqlString::from(format!(
-            "CREATE OR REPLACE TABLE {} AS\nWITH {}\nSELECT * FROM {last}",
-            folding.target,
-            ctes.join(",\n"),
-        ))
-    }
-
-    fn changes(&self, warehouse: &W, era: &Era) -> Result<SqlString, UnbuildableArtifact> {
-        let recorded_at = warehouse.path(&self.log.recorded_at());
-
-        Ok(SqlString::from(format!(
-            "  SELECT *\n  FROM {}\n  WHERE {recorded_at} >= {} AND {recorded_at} < {}\n{}",
-            self.change_log(warehouse, era.table().id())?,
-            era.window().from().milliseconds_since_epoch(),
-            era.window().to().milliseconds_since_epoch(),
-            self.latest(warehouse, era.table()),
-        )))
-    }
-
-    fn fold(
-        &self,
-        warehouse: &W,
-        table: &TableModel,
-        previous: &SqlString,
-        changes: &SqlString,
-    ) -> Result<SqlString, UnbuildableArtifact> {
-        Ok(SqlString::from(format!(
-            concat!(
-                "  SELECT\n{}\n  FROM {previous}\n",
-                "  WHERE NOT EXISTS (\n    SELECT 1\n    FROM {changes}\n{}\n  )\n",
-                "  UNION ALL\n",
-                "  SELECT\n{}\n  FROM {changes}\n  WHERE {} <> 'd'"
-            ),
-            Self::columns(warehouse, table, "    "),
-            self.matched(warehouse, table, previous, changes),
-            self.reads(warehouse, table, "    ")?,
-            warehouse.path(&self.log.operation()),
-            previous = previous,
-            changes = changes,
-        )))
-    }
-
-    fn matched(
-        &self,
-        warehouse: &W,
-        table: &TableModel,
-        previous: &SqlString,
-        changes: &SqlString,
-    ) -> SqlString {
-        let matched = table
-            .primary_key()
-            .map(|column| warehouse.identifier(column))
-            .enumerate()
-            .map(|(at, column)| {
-                let matched = format!(
-                    "{} = {previous}.{column}",
-                    self.keyed(warehouse, Some(changes), &column)
-                );
-
-                match at {
-                    0 => format!("    WHERE {matched}"),
-                    _ => format!("      AND {matched}"),
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        SqlString::from(matched)
-    }
-
-    fn latest(&self, warehouse: &W, table: &TableModel) -> SqlString {
-        let partition: Vec<String> = table
-            .primary_key()
-            .map(|column| {
-                self.keyed(warehouse, None, &warehouse.identifier(column))
-                    .to_string()
-            })
-            .collect();
-        let ordering: Vec<String> = self
-            .log
-            .ordering()
-            .iter()
-            .map(|path| format!("{} DESC", warehouse.path(path)))
-            .collect();
-
-        SqlString::from(format!(
-            concat!(
-                "  QUALIFY ROW_NUMBER() OVER (\n",
-                "    PARTITION BY {}\n",
-                "    ORDER BY {}\n",
-                "  ) = 1"
-            ),
-            partition.join(", "),
-            ordering.join(", "),
-        ))
-    }
-
-    fn keyed(&self, warehouse: &W, within: Option<&SqlString>, column: &SqlString) -> SqlString {
-        let within = within
-            .map(|relation| format!("{relation}."))
-            .unwrap_or_default();
-
-        SqlString::from(format!(
-            "COALESCE({within}{}.{column}, {within}{}.{column})",
-            warehouse.path(&self.log.after()),
-            warehouse.path(&self.log.before()),
-        ))
-    }
-
-    fn columns(warehouse: &W, table: &TableModel, indent: &str) -> SqlString {
-        SqlString::from(
-            table
-                .columns()
-                .map(|column| format!("{indent}{}", warehouse.identifier(column.name())))
-                .collect::<Vec<_>>()
-                .join(",\n"),
-        )
-    }
-
-    fn reads(
-        &self,
-        warehouse: &W,
-        table: &TableModel,
-        indent: &str,
-    ) -> Result<SqlString, UnbuildableArtifact> {
-        let after = warehouse.path(&self.log.after());
-        let columns: Vec<String> = table
-            .columns()
-            .map(|column| {
-                let name = warehouse.identifier(column.name());
-                let read = warehouse.read(
-                    &SqlString::from(format!("{after}.{name}")),
-                    column.column_type(),
-                )?;
-
-                Ok(format!("{indent}{read} AS {name}"))
-            })
-            .collect::<Result<_, UnbuildableArtifact>>()?;
-
-        Ok(SqlString::from(columns.join(",\n")))
     }
 }
 
@@ -388,7 +214,7 @@ impl<P, L: RowChangeLog, W: Warehouse> SchemaChangeListener<P> for Snapshot<'_, 
 
         self.carry(warehouse, event.after(), |column, name| {
             match column.name() == added.name() {
-                true => Self::fill(warehouse, column),
+                true => ChangeLogQuery::<L>::fill(warehouse, column),
                 false => Ok(name.clone()),
             }
         })
@@ -440,7 +266,7 @@ impl<L: RowChangeLog, W: Warehouse> Artifact for Snapshot<'_, L, W> {
         match &self.folding {
             Some(folding) => Ok(vec![
                 folding.namespace.clone(),
-                Self::with(folding, &self.relations),
+                self.relations.statement(&folding.target),
             ]),
             None => Err(self.without_era()),
         }
