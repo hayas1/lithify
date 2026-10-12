@@ -10,7 +10,7 @@ use lithify_core::window::Window;
 use lithify_cli::credential::{Credential, Secret};
 use lithify_cli::journal::Journal;
 use lithify_cli::run::Run;
-use lithify_cli::unreplayable::Unreplayable;
+use lithify_cli::unrunnable::Unrunnable;
 
 #[derive(Parser)]
 #[command(
@@ -78,7 +78,7 @@ impl Arguments {
         Window::new(RecordedAt::from(self.from), RecordedAt::from(self.to))
     }
 
-    fn journal(mut self) -> Result<Journal, Unreplayable> {
+    fn journal(mut self) -> Result<Journal, Unrunnable> {
         let dry_run = self.dry_run.take();
         let run = Run::from(self);
 
@@ -120,8 +120,8 @@ fn main() -> ExitCode {
                 false => ExitCode::FAILURE,
             }
         }
-        Err(unreplayable) => {
-            eprintln!("{unreplayable}");
+        Err(unrunnable) => {
+            eprintln!("{unrunnable}");
 
             ExitCode::FAILURE
         }

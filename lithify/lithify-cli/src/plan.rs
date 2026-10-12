@@ -19,7 +19,7 @@ use lithify_strategy::snapshot::Snapshot;
 
 use crate::artifacts::Artifacts;
 use crate::pipeline::Warehouse;
-use crate::unreplayable::Unreplayable;
+use crate::unrunnable::Unrunnable;
 
 pub struct SnapshotPlan<'a, K> {
     client: &'a K,
@@ -58,11 +58,11 @@ impl<'a, K> SnapshotPlan<'a, K> {
             .transpose()
     }
 
-    fn statements<C>(&self, logs: C) -> Result<Vec<SqlString>, Unreplayable>
+    fn statements<C>(&self, logs: C) -> Result<Vec<SqlString>, Unrunnable>
     where
         C: ChangeLogs,
         K: SchemaChangeStream<C::Schema> + WarehouseClient,
-        <K as SchemaChangeStream<C::Schema>>::Error: Into<Unreplayable>,
+        <K as SchemaChangeStream<C::Schema>>::Error: Into<Unrunnable>,
     {
         let snapshot = self.sink.snapshot();
         let mut tracker = EraTracker::new(self.window.clone(), |table: &TableId| {
@@ -73,7 +73,7 @@ impl<'a, K> SnapshotPlan<'a, K> {
                 self.base(&snapshot, table)?,
             ))
         });
-        let catalog = self.client.replay::<Unreplayable, _>(
+        let catalog = self.client.replay::<Unrunnable, _>(
             self.client.warehouse(),
             logs.schema_changes(),
             self.window,
@@ -90,7 +90,7 @@ impl<'a, K> SnapshotPlan<'a, K> {
 }
 
 impl DuckDbChangeLogsFn for SnapshotPlan<'_, DuckDbClient> {
-    type Output = Result<Vec<SqlString>, Unreplayable>;
+    type Output = Result<Vec<SqlString>, Unrunnable>;
 
     fn call_duckdb<C>(self, logs: C) -> Self::Output
     where
@@ -102,7 +102,7 @@ impl DuckDbChangeLogsFn for SnapshotPlan<'_, DuckDbClient> {
 }
 
 impl BigQueryChangeLogsFn for SnapshotPlan<'_, BigQueryClient> {
-    type Output = Result<Vec<SqlString>, Unreplayable>;
+    type Output = Result<Vec<SqlString>, Unrunnable>;
 
     fn call_bigquery<C>(self, logs: C) -> Self::Output
     where

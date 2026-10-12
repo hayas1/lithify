@@ -1,6 +1,6 @@
 [workspace.package]
 version = "0.1.0"
-description = "Replay what a database changed into the snapshots and histories of a warehouse"
+description = "Settle the change log of a database into the snapshots and histories of a warehouse"
 authors = ["hayas1 <h4ystack@gmail.com>"]
 edition = "2024"
 repository = "https://github.com/hayas1/lithify"

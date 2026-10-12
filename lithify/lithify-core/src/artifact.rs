@@ -21,7 +21,10 @@ impl fmt::Display for UnbuildableArtifact {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::WithoutPrimaryKey(table) => {
-                write!(formatter, "{table} has no primary key to replay by")
+                write!(
+                    formatter,
+                    "{table} has no primary key to fold its changes by"
+                )
             }
             Self::PrimaryKeyChanged(table) => {
                 write!(

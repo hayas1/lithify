@@ -22,7 +22,7 @@ use crate::credential::Credential;
 use crate::journal::Journal;
 use crate::pipeline::{Capture, Warehouse};
 use crate::plan::SnapshotPlan;
-use crate::unreplayable::Unreplayable;
+use crate::unrunnable::Unrunnable;
 
 pub struct Run {
     directory: PathBuf,
@@ -49,13 +49,13 @@ impl Run {
         }
     }
 
-    pub fn report(&self) -> Result<Journal, Unreplayable> {
+    pub fn report(&self) -> Result<Journal, Unrunnable> {
         self.each_sink(|sink, source, topic_prefix, journal| {
             self.read(sink, source, topic_prefix, journal)
         })
     }
 
-    pub fn plan(&self, into: &Path) -> Result<Journal, Unreplayable> {
+    pub fn plan(&self, into: &Path) -> Result<Journal, Unrunnable> {
         self.each_sink(|sink, source, topic_prefix, journal| {
             let statements = self.plan_statements(sink, source, topic_prefix)?;
 
@@ -70,11 +70,11 @@ impl Run {
             &Source<Capture>,
             &str,
             &mut Journal,
-        ) -> Result<(), Unreplayable>,
-    ) -> Result<Journal, Unreplayable> {
+        ) -> Result<(), Unrunnable>,
+    ) -> Result<Journal, Unrunnable> {
         let pipeline: Pipeline<Capture, Warehouse> = Pipeline::open(&self.directory)?;
         let mut sources = pipeline.sources();
-        let source = sources.next().ok_or(Unreplayable::WithoutSource)?;
+        let source = sources.next().ok_or(Unrunnable::WithoutSource)?;
 
         if sources.next().is_some() {
             todo!("order the change log across the boundary between connection eras");
@@ -94,8 +94,8 @@ impl Run {
                 continue;
             };
 
-            if let Err(unreplayable) = act(sink, source, topic_prefix, &mut journal) {
-                journal.failed(sink.name(), &unreplayable);
+            if let Err(unrunnable) = act(sink, source, topic_prefix, &mut journal) {
+                journal.failed(sink.name(), &unrunnable);
             }
         }
 
@@ -107,7 +107,7 @@ impl Run {
         sink: &Sink<Warehouse>,
         source: &Source<Capture>,
         topic_prefix: &str,
-    ) -> Result<Vec<SqlString>, Unreplayable> {
+    ) -> Result<Vec<SqlString>, Unrunnable> {
         match sink.warehouse() {
             Warehouse::DuckDb(store) => source.capture().with_duckdb_change_logs(
                 topic_prefix,
@@ -125,7 +125,7 @@ impl Run {
         sink: &Sink<Warehouse>,
         statements: &[SqlString],
         journal: &mut Journal,
-    ) -> Result<(), Unreplayable> {
+    ) -> Result<(), Unrunnable> {
         let path = into.join(format!("{}.sql", sink.name()));
 
         std::fs::create_dir_all(into)?;
@@ -146,7 +146,7 @@ impl Run {
         Ok(())
     }
 
-    fn duckdb(&self, sink: &Sink<Warehouse>, store: &Store) -> Result<DuckDbClient, Unreplayable> {
+    fn duckdb(&self, sink: &Sink<Warehouse>, store: &Store) -> Result<DuckDbClient, Unrunnable> {
         Ok(
             ObjectStore::open(store, self.credential.key_id(), self.credential.secret())
                 .client(sink.change_log())?,
@@ -157,7 +157,7 @@ impl Run {
         &self,
         sink: &Sink<Warehouse>,
         config: &bigquery::config::Config,
-    ) -> Result<BigQueryClient, Unreplayable> {
+    ) -> Result<BigQueryClient, Unrunnable> {
         Ok(BigQueryClient::open(config, sink.change_log())?)
     }
 
@@ -167,7 +167,7 @@ impl Run {
         source: &Source<Capture>,
         topic_prefix: &str,
         journal: &mut Journal,
-    ) -> Result<(), Unreplayable> {
+    ) -> Result<(), Unrunnable> {
         match sink.warehouse() {
             Warehouse::DuckDb(store) => {
                 self.read_duckdb(&self.duckdb(sink, store)?, topic_prefix, source, journal)
@@ -184,7 +184,7 @@ impl Run {
         topic_prefix: &str,
         source: &Source<Capture>,
         journal: &mut Journal,
-    ) -> Result<(), Unreplayable> {
+    ) -> Result<(), Unrunnable> {
         source
             .capture()
             .with_duckdb_change_logs(topic_prefix, Catalog::new(client, &self.window, journal))
@@ -196,7 +196,7 @@ impl Run {
         topic_prefix: &str,
         source: &Source<Capture>,
         journal: &mut Journal,
-    ) -> Result<(), Unreplayable> {
+    ) -> Result<(), Unrunnable> {
         source
             .capture()
             .with_bigquery_change_logs(topic_prefix, Catalog::new(client, &self.window, journal))
@@ -205,7 +205,7 @@ impl Run {
     fn sinks<'a>(
         &self,
         pipeline: &'a Pipeline<Capture, Warehouse>,
-    ) -> Result<Vec<&'a Sink<Warehouse>>, Unreplayable> {
+    ) -> Result<Vec<&'a Sink<Warehouse>>, Unrunnable> {
         let sinks: Vec<_> = pipeline
             .sinks()
             .filter(|sink| match &self.sink {
@@ -215,7 +215,7 @@ impl Run {
             .collect();
 
         match (sinks.is_empty(), &self.sink) {
-            (true, Some(named)) => Err(Unreplayable::UnknownSink(named.clone())),
+            (true, Some(named)) => Err(Unrunnable::UnknownSink(named.clone())),
             _ => Ok(sinks),
         }
     }
@@ -238,14 +238,14 @@ impl<'a, C> Catalog<'a, C> {
 }
 
 impl DuckDbChangeLogsFn for Catalog<'_, DuckDbClient> {
-    type Output = Result<(), Unreplayable>;
+    type Output = Result<(), Unrunnable>;
 
     fn call_duckdb<C>(self, logs: C) -> Self::Output
     where
         C: ChangeLogs,
         <C::Schema as SchemaChangeLog>::Record: duckdb::types::FromSql,
     {
-        self.reader.catalog::<Unreplayable, Journal>(
+        self.reader.catalog::<Unrunnable, Journal>(
             &(),
             logs.schema_changes(),
             self.window,
@@ -256,14 +256,14 @@ impl DuckDbChangeLogsFn for Catalog<'_, DuckDbClient> {
 }
 
 impl BigQueryChangeLogsFn for Catalog<'_, BigQueryClient> {
-    type Output = Result<(), Unreplayable>;
+    type Output = Result<(), Unrunnable>;
 
     fn call_bigquery<C>(self, logs: C) -> Self::Output
     where
         C: ChangeLogs,
         <C::Schema as SchemaChangeLog>::Record: TryFrom<Row, Error = RowError>,
     {
-        self.reader.catalog::<Unreplayable, Journal>(
+        self.reader.catalog::<Unrunnable, Journal>(
             &(),
             logs.schema_changes(),
             self.window,

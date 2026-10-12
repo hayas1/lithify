@@ -1,5 +1,5 @@
-use lithify_config::infra::Sink;
 use lithify_config::ArtifactKind;
+use lithify_config::infra::Sink;
 use lithify_strategy::snapshot::Snapshot;
 
 use crate::pipeline::Warehouse;
@@ -10,9 +10,12 @@ pub trait Artifacts {
 
 impl Artifacts for Sink<Warehouse> {
     fn snapshot(&self) -> Snapshot {
-        let replay = self.replay();
+        let artifacts = self.artifacts();
 
-        Snapshot::new(replay.namespace(ArtifactKind::Snapshot), replay.shard())
+        Snapshot::new(
+            artifacts.namespace(ArtifactKind::Snapshot),
+            artifacts.shard(),
+        )
     }
 }
 

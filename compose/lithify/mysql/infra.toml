@@ -1,9 +1,9 @@
 [default]
 source.capture.debezium.dialect = "mysql"
 sink.change_log = "mysql_shop_cdc"
-sink.replay.snapshot = "mysql_shop"
-sink.replay.history = "mysql_shop_history"
-sink.replay.shard = "%Y%m%d"
+sink.artifacts.snapshot = "mysql_shop"
+sink.artifacts.history = "mysql_shop_history"
+sink.artifacts.shard = "%Y%m%d"
 
 [[source]]
 name = "primary"

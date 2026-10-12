@@ -1030,7 +1030,7 @@ mod tests {
     }
 
     #[test]
-    fn a_table_whose_primary_key_changed_within_the_window_cannot_be_replayed() {
+    fn a_table_whose_primary_key_changed_within_the_window_cannot_be_snapshotted() {
         let rekeyed = customers_with(
             vec![
                 column("id", ColumnType::Int64),
@@ -1090,7 +1090,7 @@ mod tests {
     }
 
     #[test]
-    fn a_key_changed_after_columns_by_one_statement_still_cannot_be_replayed() {
+    fn a_key_changed_after_columns_by_one_statement_still_cannot_be_snapshotted() {
         let rekeyed = customers_with(
             vec![
                 column("id", ColumnType::Int64),
@@ -1353,7 +1353,7 @@ mod tests {
     }
 
     #[test]
-    fn a_table_without_a_primary_key_cannot_be_replayed() {
+    fn a_table_without_a_primary_key_cannot_be_snapshotted() {
         let keyless = customers_with(vec![column("id", ColumnType::Int64)], &[]);
 
         assert_eq!(

@@ -154,7 +154,7 @@ struct WiredSink<W> {
     name: Option<String>,
     change_log: Option<String>,
     warehouse: Option<W>,
-    replay: Option<ReplayTargets>,
+    artifacts: Option<ArtifactTargets>,
 }
 
 impl<W> Default for WiredSink<W> {
@@ -163,7 +163,7 @@ impl<W> Default for WiredSink<W> {
             name: None,
             change_log: None,
             warehouse: None,
-            replay: None,
+            artifacts: None,
         }
     }
 }
@@ -180,9 +180,9 @@ impl<W: Clone> WiredSink<W> {
             warehouse: wired
                 .warehouse
                 .ok_or_else(|| Miswiring::SinkWithoutWarehouse(name.clone()))?,
-            replay: wired
-                .replay
-                .ok_or_else(|| Miswiring::SinkWithoutReplay(name.clone()))?,
+            artifacts: wired
+                .artifacts
+                .ok_or_else(|| Miswiring::SinkWithoutArtifacts(name.clone()))?,
             name,
         })
     }
@@ -200,7 +200,7 @@ pub enum Miswiring {
     SinkWithoutName(usize),
     SinkWithoutChangeLog(String),
     SinkWithoutWarehouse(String),
-    SinkWithoutReplay(String),
+    SinkWithoutArtifacts(String),
     SinkNamedTwice(String),
 }
 
@@ -225,7 +225,7 @@ impl Display for Miswiring {
                 write!(formatter, "{name} holds no change log")
             }
             Self::SinkWithoutWarehouse(name) => write!(formatter, "{name} names no warehouse"),
-            Self::SinkWithoutReplay(name) => write!(formatter, "{name} builds nothing"),
+            Self::SinkWithoutArtifacts(name) => write!(formatter, "{name} builds nothing"),
             Self::SinkNamedTwice(name) => write!(formatter, "{name} is sunk into twice"),
         }
     }
@@ -262,7 +262,7 @@ pub struct Sink<W> {
     name: String,
     change_log: String,
     warehouse: W,
-    replay: ReplayTargets,
+    artifacts: ArtifactTargets,
 }
 
 impl<W> Sink<W> {
@@ -278,20 +278,20 @@ impl<W> Sink<W> {
         &self.warehouse
     }
 
-    pub fn replay(&self) -> &ReplayTargets {
-        &self.replay
+    pub fn artifacts(&self) -> &ArtifactTargets {
+        &self.artifacts
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ReplayTargets {
+pub struct ArtifactTargets {
     snapshot: String,
     history: String,
     shard: String,
 }
 
-impl ReplayTargets {
+impl ArtifactTargets {
     pub fn namespace(&self, kind: ArtifactKind) -> &str {
         match kind {
             ArtifactKind::Snapshot => &self.snapshot,
@@ -325,9 +325,9 @@ mod tests {
         [default]
         source.capture.debezium.dialect = "mysql"
         sink.change_log = "mysql_shop_cdc"
-        sink.replay.snapshot = "mysql_shop"
-        sink.replay.history = "mysql_shop_history"
-        sink.replay.shard = "%Y%m%d"
+        sink.artifacts.snapshot = "mysql_shop"
+        sink.artifacts.history = "mysql_shop_history"
+        sink.artifacts.shard = "%Y%m%d"
 
         [[source]]
         name = "primary"
@@ -366,10 +366,10 @@ mod tests {
         name = "minio"
     "#;
 
-    const REPLAY: &str = r#"
-        replay.snapshot = "mysql_shop"
-        replay.history = "mysql_shop_history"
-        replay.shard = "%Y%m%d"
+    const ARTIFACTS: &str = r#"
+        artifacts.snapshot = "mysql_shop"
+        artifacts.history = "mysql_shop_history"
+        artifacts.shard = "%Y%m%d"
     "#;
 
     fn wiring(written: &str) -> Wiring<Captured, Sunk> {
@@ -451,7 +451,7 @@ mod tests {
     #[test]
     fn a_pipeline_that_captures_no_server_is_rejected() {
         let wiring = wiring(
-            "[[sink]]\nname = \"minio\"\nchange_log = \"mysql_shop_cdc\"\nwarehouse.files.bucket = \"lithify\"\nreplay.snapshot = \"mysql_shop\"\nreplay.history = \"mysql_shop_history\"\nreplay.shard = \"%Y%m%d\"",
+            "[[sink]]\nname = \"minio\"\nchange_log = \"mysql_shop_cdc\"\nwarehouse.files.bucket = \"lithify\"\nartifacts.snapshot = \"mysql_shop\"\nartifacts.history = \"mysql_shop_history\"\nartifacts.shard = \"%Y%m%d\"",
         );
 
         assert_eq!(wiring.sources().unwrap_err(), Miswiring::WithoutSources);
@@ -490,21 +490,21 @@ mod tests {
 
     #[test]
     fn a_sink_builds_each_artifact_in_the_namespace_the_pipeline_names() {
-        let replay = sinks()[1].replay().clone();
+        let artifacts = sinks()[1].artifacts().clone();
 
-        assert_eq!(replay.namespace(ArtifactKind::Snapshot), "mysql_shop");
+        assert_eq!(artifacts.namespace(ArtifactKind::Snapshot), "mysql_shop");
         assert_eq!(
-            replay.namespace(ArtifactKind::History),
+            artifacts.namespace(ArtifactKind::History),
             "mysql_shop_history"
         );
-        assert_eq!(replay.shard(), "%Y%m%d");
+        assert_eq!(artifacts.shard(), "%Y%m%d");
     }
 
     #[test]
     fn a_source_that_says_since_when_nowhere_is_rejected() {
         let wiring = wired(
             "[[source]]\nname = \"primary\"\ncapture.debezium.dialect = \"mysql\"",
-            &format!("change_log = \"mysql_shop_cdc\"\n{WAREHOUSE}{REPLAY}"),
+            &format!("change_log = \"mysql_shop_cdc\"\n{WAREHOUSE}{ARTIFACTS}"),
         );
 
         assert_eq!(
@@ -517,7 +517,7 @@ mod tests {
     fn a_source_captured_in_no_named_way_is_rejected() {
         let wiring = wired(
             "[[source]]\nname = \"primary\"\nsince = \"1970-01-01T00:00:00Z\"",
-            &format!("change_log = \"mysql_shop_cdc\"\n{WAREHOUSE}{REPLAY}"),
+            &format!("change_log = \"mysql_shop_cdc\"\n{WAREHOUSE}{ARTIFACTS}"),
         );
 
         assert_eq!(
@@ -538,7 +538,7 @@ mod tests {
 
     #[test]
     fn a_sink_holding_no_change_log_anywhere_is_rejected() {
-        let wiring = wired(SERVER, &format!("{WAREHOUSE}{REPLAY}"));
+        let wiring = wired(SERVER, &format!("{WAREHOUSE}{ARTIFACTS}"));
 
         assert_eq!(
             wiring.sinks().unwrap_err(),
@@ -550,7 +550,7 @@ mod tests {
     fn a_sink_into_no_warehouse_anywhere_is_rejected() {
         let wiring = wired(
             SERVER,
-            &format!("change_log = \"mysql_shop_cdc\"\n{REPLAY}"),
+            &format!("change_log = \"mysql_shop_cdc\"\n{ARTIFACTS}"),
         );
 
         assert_eq!(
@@ -568,13 +568,13 @@ mod tests {
 
         assert_eq!(
             wiring.sinks().unwrap_err(),
-            Miswiring::SinkWithoutReplay("minio".to_owned())
+            Miswiring::SinkWithoutArtifacts("minio".to_owned())
         );
     }
 
     #[test]
     fn a_sink_named_twice_is_rejected() {
-        let sink = format!("{NAMED}change_log = \"mysql_shop_cdc\"\n{WAREHOUSE}{REPLAY}");
+        let sink = format!("{NAMED}change_log = \"mysql_shop_cdc\"\n{WAREHOUSE}{ARTIFACTS}");
         let wiring = wiring(&format!("{SERVER}\n[[sink]]\n{sink}\n[[sink]]\n{sink}"));
 
         assert_eq!(
@@ -586,7 +586,7 @@ mod tests {
     #[test]
     fn a_sink_without_a_name_is_rejected() {
         let wiring = wiring(&format!(
-            "{SERVER}\n[[sink]]\nchange_log = \"mysql_shop_cdc\"\n{WAREHOUSE}{REPLAY}"
+            "{SERVER}\n[[sink]]\nchange_log = \"mysql_shop_cdc\"\n{WAREHOUSE}{ARTIFACTS}"
         ));
 
         assert_eq!(wiring.sinks().unwrap_err(), Miswiring::SinkWithoutName(0));

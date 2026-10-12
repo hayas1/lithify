@@ -252,8 +252,8 @@ mod tests {
 
         fn create(&self) -> Result<Vec<SqlString>, UnbuildableArtifact> {
             Ok(vec![
-                Engine.create_namespace("replay"),
-                SqlString::from("CREATE TABLE replay.people (id BIGINT)"),
+                Engine.create_namespace("shop"),
+                SqlString::from("CREATE TABLE shop.people (id BIGINT)"),
             ])
         }
     }
@@ -281,14 +281,14 @@ mod tests {
         let client = Recorder::default();
 
         client
-            .build::<Unbuilt>(&Namespaced(TableId::new("replay", "people")))
+            .build::<Unbuilt>(&Namespaced(TableId::new("shop", "people")))
             .unwrap();
 
         assert_eq!(
             client.executed.into_inner(),
             [
-                "CREATE SCHEMA IF NOT EXISTS \"replay\"",
-                "CREATE TABLE replay.people (id BIGINT)"
+                "CREATE SCHEMA IF NOT EXISTS \"shop\"",
+                "CREATE TABLE shop.people (id BIGINT)"
             ]
         );
     }

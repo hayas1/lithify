@@ -7,7 +7,7 @@ use lithify_core::listener::OutOfOrder;
 use lithify_protocol::sink::bigquery::client::Unqueryable;
 
 #[derive(Debug)]
-pub enum Unreplayable {
+pub enum Unrunnable {
     Configuration(Unreadable),
     Unqueryable(duckdb::Error),
     Unanswerable(Unqueryable),
@@ -18,7 +18,7 @@ pub enum Unreplayable {
     WithoutSource,
 }
 
-impl Display for Unreplayable {
+impl Display for Unrunnable {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Configuration(cause) => write!(formatter, "{cause}"),
@@ -35,7 +35,7 @@ impl Display for Unreplayable {
     }
 }
 
-impl std::error::Error for Unreplayable {
+impl std::error::Error for Unrunnable {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Configuration(cause) => Some(cause),
@@ -49,43 +49,43 @@ impl std::error::Error for Unreplayable {
     }
 }
 
-impl From<Unreadable> for Unreplayable {
+impl From<Unreadable> for Unrunnable {
     fn from(cause: Unreadable) -> Self {
         Self::Configuration(cause)
     }
 }
 
-impl From<duckdb::Error> for Unreplayable {
+impl From<duckdb::Error> for Unrunnable {
     fn from(cause: duckdb::Error) -> Self {
         Self::Unqueryable(cause)
     }
 }
 
-impl From<Unqueryable> for Unreplayable {
+impl From<Unqueryable> for Unrunnable {
     fn from(cause: Unqueryable) -> Self {
         Self::Unanswerable(cause)
     }
 }
 
-impl From<OutOfOrder> for Unreplayable {
+impl From<OutOfOrder> for Unrunnable {
     fn from(cause: OutOfOrder) -> Self {
         Self::OutOfOrder(cause)
     }
 }
 
-impl From<UnbuildableArtifact> for Unreplayable {
+impl From<UnbuildableArtifact> for Unrunnable {
     fn from(cause: UnbuildableArtifact) -> Self {
         Self::Unbuildable(cause)
     }
 }
 
-impl From<std::io::Error> for Unreplayable {
+impl From<std::io::Error> for Unrunnable {
     fn from(cause: std::io::Error) -> Self {
         Self::Unwritable(cause)
     }
 }
 
-impl From<Infallible> for Unreplayable {
+impl From<Infallible> for Unrunnable {
     fn from(never: Infallible) -> Self {
         match never {}
     }

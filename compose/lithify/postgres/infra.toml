@@ -1,9 +1,9 @@
 [default]
 source.capture.debezium.dialect = "postgres"
 sink.change_log = "postgres_shop_cdc"
-sink.replay.snapshot = "postgres_shop"
-sink.replay.history = "postgres_shop_history"
-sink.replay.shard = "%Y%m%d"
+sink.artifacts.snapshot = "postgres_shop"
+sink.artifacts.history = "postgres_shop_history"
+sink.artifacts.shard = "%Y%m%d"
 
 [[source]]
 name = "primary"

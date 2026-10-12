@@ -116,7 +116,7 @@ fn rows(client: &DuckDbClient, query: &str) -> Vec<String> {
         .unwrap()
 }
 
-fn replay(client: &DuckDbClient, window: &Window) {
+fn build_snapshots(client: &DuckDbClient, window: &Window) {
     let log = Debezium::under("value", "mysql", MySql);
     let artifact = Snapshot::new("shop_snapshot", "%Y%m%d");
     let mut tracker = EraTracker::new(window.clone(), |table: &TableId| {
@@ -140,7 +140,7 @@ fn a_replay_of_the_schema_changes_builds_a_snapshot_of_every_table_left_standing
     client.execute(&SqlString::from(SCHEMA_CHANGES)).unwrap();
     let window = Window::new(RecordedAt::from(0), RecordedAt::from(10));
 
-    replay(&client, &window);
+    build_snapshots(&client, &window);
 
     assert_eq!(
         rows(
@@ -175,7 +175,7 @@ fn a_table_created_before_the_window_is_snapshotted_too() {
     client.execute(&SqlString::from(SCHEMA_CHANGES)).unwrap();
     let window = Window::new(RecordedAt::from(1), RecordedAt::from(10));
 
-    replay(&client, &window);
+    build_snapshots(&client, &window);
 
     assert_eq!(
         rows(
@@ -228,7 +228,7 @@ fn a_column_added_within_the_window_is_filled_in_for_the_rows_last_changed_befor
     );
     client.execute(&SqlString::from(WIDENED)).unwrap();
 
-    replay(
+    build_snapshots(
         &client,
         &Window::new(RecordedAt::from(0), RecordedAt::from(10)),
     );
@@ -288,7 +288,7 @@ fn columns_one_statement_dropped_and_added_reshape_the_rows_last_changed_before_
     );
     client.execute(&SqlString::from(RESHAPED)).unwrap();
 
-    replay(
+    build_snapshots(
         &client,
         &Window::new(RecordedAt::from(0), RecordedAt::from(10)),
     );
@@ -349,7 +349,7 @@ fn a_column_renamed_within_the_window_keeps_the_values_of_the_rows_last_changed_
     );
     client.execute(&SqlString::from(RENAMED)).unwrap();
 
-    replay(
+    build_snapshots(
         &client,
         &Window::new(RecordedAt::from(0), RecordedAt::from(10)),
     );
@@ -411,7 +411,7 @@ fn a_table_renamed_within_the_window_is_snapshotted_under_its_new_name_with_ever
     );
     client.execute(&SqlString::from(MOVED)).unwrap();
 
-    replay(
+    build_snapshots(
         &client,
         &Window::new(RecordedAt::from(0), RecordedAt::from(10)),
     );
@@ -463,7 +463,7 @@ fn a_column_added_with_a_default_no_literal_spells_is_filled_with_null_rather_th
     );
     client.execute(&SqlString::from(STAMPED)).unwrap();
 
-    replay(
+    build_snapshots(
         &client,
         &Window::new(RecordedAt::from(0), RecordedAt::from(10)),
     );
@@ -522,7 +522,7 @@ fn changes_recorded_in_the_instant_of_a_schema_change_fall_on_its_side_their_pos
     );
     client.execute(&SqlString::from(SIMULTANEOUS)).unwrap();
 
-    replay(
+    build_snapshots(
         &client,
         &Window::new(RecordedAt::from(0), RecordedAt::from(10)),
     );
