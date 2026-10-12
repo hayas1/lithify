@@ -7,7 +7,6 @@ use event_replay_core::listener::{
     SchemaChangeListener, TableCreated, TableRenamed,
 };
 use event_replay_core::model::{ColumnModel, TableId, TableModel};
-use event_replay_core::position::Position;
 use event_replay_core::sink::{TablePath, Warehouse};
 use event_replay_core::source::RowChangeLog;
 use event_replay_core::sql::SqlString;
@@ -122,10 +121,10 @@ impl<'a, L: RowChangeLog, W: Warehouse> Snapshot<'a, L, W> {
         UnbuildableArtifact::WithoutEra(self.table.clone())
     }
 
-    fn fold_era<P: Position>(
+    fn fold_era(
         &mut self,
         warehouse: &W,
-        era: &Era<P>,
+        era: &Era<L::Position>,
     ) -> Result<(), UnbuildableArtifact> {
         self.begin(warehouse, era.table())?;
 
@@ -166,7 +165,7 @@ impl<'a, L: RowChangeLog, W: Warehouse> Snapshot<'a, L, W> {
     }
 }
 
-impl<P: Position, L: RowChangeLog, W: Warehouse> SchemaChangeListener<P> for Snapshot<'_, L, W> {
+impl<L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Position> for Snapshot<'_, L, W> {
     type Context = W;
     type Error = UnbuildableArtifact;
 
@@ -185,7 +184,7 @@ impl<P: Position, L: RowChangeLog, W: Warehouse> SchemaChangeListener<P> for Sna
     fn era_boundary(
         &mut self,
         warehouse: &W,
-        closed_era: &Era<P>,
+        closed_era: &Era<L::Position>,
     ) -> Result<(), UnbuildableArtifact> {
         self.fold_era(warehouse, closed_era)
     }
@@ -306,11 +305,7 @@ mod tests {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     struct Offset(u64);
 
-    impl Position for Offset {
-        fn coordinates(&self) -> Vec<Coordinate> {
-            vec![Coordinate::Number(self.0 as i64)]
-        }
-    }
+    impl Position for Offset {}
 
     struct Log;
 
@@ -327,6 +322,10 @@ mod tests {
 
         fn ordering(&self) -> Vec<ColumnPath> {
             vec![ColumnPath::from("source.offset")]
+        }
+
+        fn coordinates(&self, position: &Offset) -> Vec<Coordinate> {
+            vec![Coordinate::Number(position.0 as i64)]
         }
     }
 
@@ -702,6 +701,28 @@ mod tests {
         assert!(statement("customers").contains("  FROM \"mysql_shop\".\"customers_20260919\"\n"));
         assert!(statement("orders").contains("  WHERE \"op\" = 'r'\n"));
         assert!(!statement("orders").contains("customers_20260919"));
+    }
+
+    #[test]
+    fn a_bound_in_time_is_placed_on_the_instant_the_log_records() {
+        assert_eq!(
+            Log.placed(&Bound::<Offset>::Time(RecordedAt::from(150))),
+            [(ColumnPath::from("ts_ms"), Coordinate::Number(150))]
+        );
+    }
+
+    #[test]
+    fn a_bound_at_a_position_is_placed_on_the_instant_then_the_columns_the_log_orders_by() {
+        assert_eq!(
+            Log.placed(&Bound::Position {
+                at: RecordedAt::from(150),
+                position: Offset(7),
+            }),
+            [
+                (ColumnPath::from("ts_ms"), Coordinate::Number(150)),
+                (ColumnPath::from("source.offset"), Coordinate::Number(7))
+            ]
+        );
     }
 
     #[test]

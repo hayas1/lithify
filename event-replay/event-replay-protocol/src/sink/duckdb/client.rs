@@ -305,11 +305,7 @@ mod tests {
     #[derive(Debug, Clone, PartialEq, PartialOrd)]
     struct Line(i64);
 
-    impl Position for Line {
-        fn coordinates(&self) -> Vec<Coordinate> {
-            vec![Coordinate::Number(self.0)]
-        }
-    }
+    impl Position for Line {}
 
     struct Ledger;
 
@@ -326,6 +322,10 @@ mod tests {
 
         fn ordering(&self) -> Vec<ColumnPath> {
             vec![ColumnPath::from("line")]
+        }
+
+        fn coordinates(&self, position: &Line) -> Vec<Coordinate> {
+            vec![Coordinate::Number(position.0)]
         }
     }
 

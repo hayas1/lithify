@@ -259,7 +259,8 @@ mod tests {
         );
     }
     #[test]
-    fn the_schema_changes_of_a_window_are_read_from_the_envelope_in_source_order() {
+    fn the_schema_changes_of_a_window_are_read_from_the_envelope_in_the_order_they_were_recorded_then_logged()
+     {
         let log = Debezium::under("value", MySql);
         let window = Window::new(RecordedAt::from(0), RecordedAt::from(10));
 
@@ -273,7 +274,7 @@ mod tests {
                 "SELECT \"value\"\n",
                 "FROM \"mysql_shop_cdc\".\"mysql\"\n",
                 "WHERE \"value\".\"ts_ms\" >= 0 AND \"value\".\"ts_ms\" < 10\n",
-                "ORDER BY \"value\".\"source\".\"file\", \"value\".\"source\".\"pos\"",
+                "ORDER BY \"value\".\"ts_ms\", \"value\".\"source\".\"file\", \"value\".\"source\".\"pos\"",
             )
         );
     }

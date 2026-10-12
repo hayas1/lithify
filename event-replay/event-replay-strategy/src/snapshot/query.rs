@@ -1,9 +1,9 @@
 use event_replay_core::artifact::UnbuildableArtifact;
-use event_replay_core::era::{Bound, Era};
+use event_replay_core::era::Era;
 use event_replay_core::model::{ColumnModel, TableModel};
-use event_replay_core::position::Position;
+use event_replay_core::position::Coordinate;
 use event_replay_core::sink::{TablePath, Warehouse};
-use event_replay_core::source::RowChangeLog;
+use event_replay_core::source::{ColumnPath, RowChangeLog};
 use event_replay_core::sql::SqlString;
 
 pub(super) struct ChangeLogQuery<'a, L> {
@@ -42,70 +42,26 @@ impl<'a, L: RowChangeLog> ChangeLogQuery<'a, L> {
         ))
     }
 
-    pub(super) fn changes<W: Warehouse, P: Position>(
+    pub(super) fn changes<W: Warehouse>(
         &self,
         warehouse: &W,
         change_log: &SqlString,
-        era: &Era<P>,
+        era: &Era<L::Position>,
     ) -> SqlString {
         SqlString::from(format!(
             "  SELECT *\n  FROM {change_log}\n  WHERE {} AND {}\n{}",
-            self.compared(warehouse, era.from(), ">", ">="),
-            self.compared(warehouse, era.to(), "<", "<"),
+            Edge::Since.condition(warehouse, &self.log.placed(era.from())),
+            Edge::Until.condition(warehouse, &self.log.placed(era.to())),
             self.latest(warehouse, era.table()),
         ))
     }
 
-    fn ordering<W: Warehouse>(&self, warehouse: &W) -> Vec<SqlString> {
-        std::iter::once(self.log.recorded_at())
-            .chain(self.log.ordering())
-            .map(|path| warehouse.path(&path))
+    fn sequence<W: Warehouse>(&self, warehouse: &W) -> Vec<SqlString> {
+        self.log
+            .sequence()
+            .iter()
+            .map(|path| warehouse.path(path))
             .collect()
-    }
-
-    fn compared<W: Warehouse, P: Position>(
-        &self,
-        warehouse: &W,
-        bound: &Bound<P>,
-        before_last: &str,
-        last: &str,
-    ) -> SqlString {
-        let placed: Vec<(SqlString, SqlString)> = self
-            .ordering(warehouse)
-            .into_iter()
-            .zip(
-                bound
-                    .coordinates()
-                    .iter()
-                    .map(|coordinate| coordinate.sql(warehouse)),
-            )
-            .collect();
-        let terms: Vec<String> = (0..placed.len())
-            .map(|at| {
-                let compared = match at + 1 == placed.len() {
-                    true => last,
-                    false => before_last,
-                };
-
-                placed[..at]
-                    .iter()
-                    .map(|(column, value)| format!("{column} = {value}"))
-                    .chain([format!("{} {compared} {}", placed[at].0, placed[at].1)])
-                    .collect::<Vec<_>>()
-                    .join(" AND ")
-            })
-            .collect();
-
-        match terms.as_slice() {
-            [term] => SqlString::from(term.clone()),
-            [first, rest @ ..] => SqlString::from(format!(
-                "({first}{})",
-                rest.iter()
-                    .map(|term| format!(" OR ({term})"))
-                    .collect::<String>()
-            )),
-            [] => SqlString::from("TRUE"),
-        }
     }
 
     pub(super) fn fold<W: Warehouse>(
@@ -190,7 +146,7 @@ impl<'a, L: RowChangeLog> ChangeLogQuery<'a, L> {
             })
             .collect();
         let ordering: Vec<String> = self
-            .ordering(warehouse)
+            .sequence(warehouse)
             .iter()
             .map(|column| format!("{column} DESC"))
             .collect();
@@ -255,5 +211,68 @@ impl<'a, L: RowChangeLog> ChangeLogQuery<'a, L> {
             .collect::<Result<_, UnbuildableArtifact>>()?;
 
         Ok(SqlString::from(columns.join(",\n")))
+    }
+}
+
+enum Edge {
+    Since,
+    Until,
+}
+
+impl Edge {
+    fn before_last(&self) -> &str {
+        match self {
+            Self::Since => ">",
+            Self::Until => "<",
+        }
+    }
+
+    fn last(&self) -> &str {
+        match self {
+            Self::Since => ">=",
+            Self::Until => "<",
+        }
+    }
+
+    fn condition<W: Warehouse>(
+        &self,
+        warehouse: &W,
+        placed: &[(ColumnPath, Coordinate)],
+    ) -> SqlString {
+        let placed: Vec<(SqlString, SqlString)> = placed
+            .iter()
+            .map(|(path, coordinate)| (warehouse.path(path), coordinate.sql(warehouse)))
+            .collect();
+        let Some((last, leading)) = placed.split_last() else {
+            return SqlString::from("TRUE");
+        };
+        let terms: Vec<String> = (0..leading.len())
+            .map(|at| Self::term(&leading[..at], &leading[at], self.before_last()))
+            .chain([Self::term(leading, last, self.last())])
+            .collect();
+
+        match terms.split_first() {
+            Some((first, [])) => SqlString::from(first.clone()),
+            Some((first, rest)) => SqlString::from(format!(
+                "({first}{})",
+                rest.iter()
+                    .map(|term| format!(" OR ({term})"))
+                    .collect::<String>()
+            )),
+            None => SqlString::from("TRUE"),
+        }
+    }
+
+    fn term(
+        equal: &[(SqlString, SqlString)],
+        (column, value): &(SqlString, SqlString),
+        compared: &str,
+    ) -> String {
+        equal
+            .iter()
+            .map(|(column, value)| format!("{column} = {value}"))
+            .chain([format!("{column} {compared} {value}")])
+            .collect::<Vec<_>>()
+            .join(" AND ")
     }
 }

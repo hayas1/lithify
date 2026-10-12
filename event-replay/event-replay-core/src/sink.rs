@@ -135,7 +135,7 @@ pub trait Warehouse {
             .unwrap_or_else(|| SqlString::from("*"));
         let recorded_at = self.path(&log.recorded_at());
         let ordering = log
-            .ordering()
+            .sequence()
             .iter()
             .map(|path| self.path(path).to_string())
             .collect::<Vec<_>>()

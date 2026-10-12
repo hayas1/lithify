@@ -5,9 +5,7 @@ use chrono::{DateTime, Utc};
 use crate::sink::Warehouse;
 use crate::sql::SqlString;
 
-pub trait Position: PartialOrd + Clone + fmt::Debug {
-    fn coordinates(&self) -> Vec<Coordinate>;
-}
+pub trait Position: PartialOrd + Clone + fmt::Debug {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Coordinate {
@@ -30,6 +28,12 @@ pub struct RecordedAt(i64);
 impl RecordedAt {
     pub fn milliseconds_since_epoch(&self) -> i64 {
         self.0
+    }
+}
+
+impl From<RecordedAt> for Coordinate {
+    fn from(recorded_at: RecordedAt) -> Self {
+        Self::Number(recorded_at.0)
     }
 }
 

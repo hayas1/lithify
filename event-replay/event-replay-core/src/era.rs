@@ -8,7 +8,7 @@ use crate::listener::{
     SchemaChangeListener, TableCreated, TableDropped, TableRenamed,
 };
 use crate::model::{TableId, TableModel};
-use crate::position::{Coordinate, Position, RecordedAt};
+use crate::position::{Position, RecordedAt};
 use crate::window::Window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,14 +17,17 @@ pub enum Bound<P> {
     Position { at: RecordedAt, position: P },
 }
 
-impl<P: Position> Bound<P> {
-    pub fn coordinates(&self) -> Vec<Coordinate> {
+impl<P> Bound<P> {
+    pub fn instant(&self) -> RecordedAt {
         match self {
-            Self::Time(at) => vec![Coordinate::Number(at.milliseconds_since_epoch())],
-            Self::Position { at, position } => [Coordinate::Number(at.milliseconds_since_epoch())]
-                .into_iter()
-                .chain(position.coordinates())
-                .collect(),
+            Self::Time(at) | Self::Position { at, .. } => *at,
+        }
+    }
+
+    pub fn as_position(&self) -> Option<&P> {
+        match self {
+            Self::Time(_) => None,
+            Self::Position { position, .. } => Some(position),
         }
     }
 }
@@ -318,19 +321,15 @@ mod tests {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     struct Offset(u64);
 
-    impl Position for Offset {
-        fn coordinates(&self) -> Vec<Coordinate> {
-            vec![Coordinate::Number(self.0 as i64)]
-        }
-    }
+    impl Position for Offset {}
 
     fn bound(bound: &Bound<Offset>) -> String {
         match bound {
             Bound::Time(at) => at.milliseconds_since_epoch().to_string(),
             Bound::Position {
+                at,
                 position: Offset(offset),
-                ..
-            } => format!("@{offset}"),
+            } => format!("{}@{offset}", at.milliseconds_since_epoch()),
         }
     }
 
@@ -502,16 +501,16 @@ mod tests {
             [(
                 people(),
                 vec![
-                    "era [\"id\"] 10..@15".to_owned(),
+                    "era [\"id\"] 10..15@15".to_owned(),
                     "added name".to_owned(),
-                    "era [\"id\", \"name\"] @15..20".to_owned()
+                    "era [\"id\", \"name\"] 15@15..20".to_owned()
                 ]
             )]
         );
     }
 
     #[test]
-    fn a_schema_change_ends_an_era_at_its_position_rather_than_its_time() {
+    fn a_schema_change_ends_an_era_after_its_instant_at_its_position() {
         assert_eq!(
             stories(
                 vec![change(
@@ -528,9 +527,9 @@ mod tests {
             [(
                 people(),
                 vec![
-                    "era [\"id\"] 10..@99".to_owned(),
+                    "era [\"id\"] 10..15@99".to_owned(),
                     "added name".to_owned(),
-                    "era [\"id\", \"name\"] @99..20".to_owned()
+                    "era [\"id\", \"name\"] 15@99..20".to_owned()
                 ]
             )]
         );
@@ -555,10 +554,10 @@ mod tests {
             [(
                 people(),
                 vec![
-                    "era [\"id\"] 10..@15".to_owned(),
+                    "era [\"id\"] 10..15@15".to_owned(),
                     "added name".to_owned(),
                     "added born".to_owned(),
-                    "era [\"id\", \"name\", \"born\"] @15..20".to_owned()
+                    "era [\"id\", \"name\", \"born\"] 15@15..20".to_owned()
                 ]
             )]
         );
@@ -580,10 +579,10 @@ mod tests {
             [(
                 people(),
                 vec![
-                    "era [\"id\", \"name\"] 10..@15".to_owned(),
+                    "era [\"id\", \"name\"] 10..15@15".to_owned(),
                     "dropped name".to_owned(),
                     "added born".to_owned(),
-                    "era [\"id\", \"born\"] @15..20".to_owned()
+                    "era [\"id\", \"born\"] 15@15..20".to_owned()
                 ]
             )]
         );
@@ -616,9 +615,9 @@ mod tests {
             [(
                 people(),
                 vec![
-                    "era [\"id\", \"name\"] 10..@15".to_owned(),
+                    "era [\"id\", \"name\"] 10..15@15".to_owned(),
                     "renamed name to full_name".to_owned(),
-                    "era [\"id\", \"full_name\"] @15..20".to_owned()
+                    "era [\"id\", \"full_name\"] 15@15..20".to_owned()
                 ]
             )]
         );
@@ -646,9 +645,9 @@ mod tests {
             [(
                 people(),
                 vec![
-                    "era [\"id\"] 10..@15".to_owned(),
+                    "era [\"id\"] 10..15@15".to_owned(),
                     "renamed shop.people to shop.persons".to_owned(),
-                    "era [\"id\"] @15..20".to_owned()
+                    "era [\"id\"] 15@15..20".to_owned()
                 ]
             )]
         );
@@ -682,11 +681,11 @@ mod tests {
             [(
                 people(),
                 vec![
-                    "era [\"id\"] 10..@12".to_owned(),
+                    "era [\"id\"] 10..12@12".to_owned(),
                     "renamed shop.people to shop.persons".to_owned(),
-                    "era [\"id\"] @12..@15".to_owned(),
+                    "era [\"id\"] 12@12..15@15".to_owned(),
                     "renamed shop.persons to shop.pets".to_owned(),
-                    "era [\"id\"] @15..20".to_owned()
+                    "era [\"id\"] 15@15..20".to_owned()
                 ]
             )]
         );
@@ -706,7 +705,7 @@ mod tests {
                 pets(),
                 vec![
                     "created shop.pets".to_owned(),
-                    "era [\"id\"] @12..20".to_owned()
+                    "era [\"id\"] 12@12..20".to_owned()
                 ]
             )]
         );
@@ -746,7 +745,7 @@ mod tests {
                 people(),
                 vec![
                     "created shop.people".to_owned(),
-                    "era [\"id\", \"name\"] @16..20".to_owned()
+                    "era [\"id\", \"name\"] 16@16..20".to_owned()
                 ]
             )]
         );
@@ -774,22 +773,45 @@ mod tests {
     }
 
     #[test]
-    fn a_bound_in_time_is_placed_by_its_instant_alone() {
-        assert_eq!(
-            Bound::<Offset>::Time(RecordedAt::from(15)).coordinates(),
-            [Coordinate::Number(15)]
-        );
+    fn a_bound_in_time_has_an_instant_and_no_position() {
+        let bound = Bound::<Offset>::Time(RecordedAt::from(15));
+
+        assert_eq!(bound.instant(), RecordedAt::from(15));
+        assert_eq!(bound.as_position(), None);
     }
 
     #[test]
-    fn a_bound_at_a_position_is_placed_by_its_instant_then_its_position() {
+    fn a_bound_at_a_position_has_the_instant_it_was_recorded_at_and_its_position() {
+        let bound = Bound::Position {
+            at: RecordedAt::from(15),
+            position: Offset(99),
+        };
+
+        assert_eq!(bound.instant(), RecordedAt::from(15));
+        assert_eq!(bound.as_position(), Some(&Offset(99)));
+    }
+
+    #[test]
+    fn a_schema_change_at_the_opening_of_the_window_ends_an_era_holding_nothing_before_it() {
         assert_eq!(
-            Bound::Position {
-                at: RecordedAt::from(15),
-                position: Offset(99),
-            }
-            .coordinates(),
-            [Coordinate::Number(15), Coordinate::Number(99)]
+            stories(
+                vec![change(
+                    1,
+                    vec![TableChange::Created(table(people(), &["id"]))]
+                )],
+                vec![change(
+                    10,
+                    vec![TableChange::Altered(table(people(), &["id", "name"]))]
+                )],
+            ),
+            [(
+                people(),
+                vec![
+                    "era [\"id\"] 10..10@10".to_owned(),
+                    "added name".to_owned(),
+                    "era [\"id\", \"name\"] 10@10..20".to_owned()
+                ]
+            )]
         );
     }
 }

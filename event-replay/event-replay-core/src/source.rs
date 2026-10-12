@@ -1,9 +1,10 @@
 use std::fmt;
 
+use crate::era::Bound;
 use crate::event::{MalformedEvent, SchemaChange};
 use crate::listener::{CatalogModel, OutOfOrder, SchemaChangeListener};
 use crate::model::{TableId, TableModel};
-use crate::position::{Position, RecordedAt};
+use crate::position::{Coordinate, Position, RecordedAt};
 use crate::sink::TablePath;
 use crate::window::Window;
 
@@ -40,6 +41,26 @@ pub trait ChangeLog {
     fn recorded_at(&self) -> ColumnPath;
 
     fn ordering(&self) -> Vec<ColumnPath>;
+
+    fn coordinates(&self, position: &Self::Position) -> Vec<Coordinate>;
+
+    fn sequence(&self) -> Vec<ColumnPath> {
+        std::iter::once(self.recorded_at())
+            .chain(self.ordering())
+            .collect()
+    }
+
+    fn placed(&self, bound: &Bound<Self::Position>) -> Vec<(ColumnPath, Coordinate)> {
+        let positional = bound
+            .as_position()
+            .map(|position| self.ordering().into_iter().zip(self.coordinates(position)))
+            .into_iter()
+            .flatten();
+
+        std::iter::once((self.recorded_at(), Coordinate::from(bound.instant())))
+            .chain(positional)
+            .collect()
+    }
 }
 
 pub trait SchemaChangeLog: ChangeLog {

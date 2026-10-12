@@ -26,11 +26,7 @@ impl PostgresPosition {
     }
 }
 
-impl Position for PostgresPosition {
-    fn coordinates(&self) -> Vec<Coordinate> {
-        vec![Coordinate::Number(self.lsn)]
-    }
-}
+impl Position for PostgresPosition {}
 
 impl From<&PostgresSource> for PostgresPosition {
     fn from(source: &PostgresSource) -> Self {
@@ -60,6 +56,10 @@ impl Dialect for Postgres {
 
     fn ordering(&self) -> Vec<ColumnPath> {
         vec![ColumnPath::from("source.lsn")]
+    }
+
+    fn coordinates(&self, position: &Self::Position) -> Vec<Coordinate> {
+        vec![Coordinate::Number(position.lsn)]
     }
 
     fn column_type(&self, type_name: &str, length: Option<u32>, scale: Option<u32>) -> ColumnType {
@@ -251,7 +251,13 @@ mod tests {
     fn a_position_is_placed_by_its_log_sequence_number_as_the_dialect_orders_it() {
         let position = position(26738384);
 
-        assert_eq!(position.coordinates(), [Coordinate::Number(26738384)]);
-        assert_eq!(position.coordinates().len(), Postgres.ordering().len());
+        assert_eq!(
+            Postgres.coordinates(&position),
+            [Coordinate::Number(26738384)]
+        );
+        assert_eq!(
+            Postgres.coordinates(&position).len(),
+            Postgres.ordering().len()
+        );
     }
 }

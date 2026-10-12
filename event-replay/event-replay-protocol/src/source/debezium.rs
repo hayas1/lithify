@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use event_replay_core::event::{MalformedEvent, SchemaChange, TableChange};
 use event_replay_core::model::{ColumnModel, ColumnType, TableId, TableModel};
-use event_replay_core::position::{Position, RecordedAt};
+use event_replay_core::position::{Coordinate, Position, RecordedAt};
 use event_replay_core::source::{
     CdcFormat, ChangeLog, ChangeLogs, ColumnPath, RowChangeLog, SchemaChangeLog,
 };
@@ -35,6 +35,8 @@ pub trait Dialect {
     fn column_type(&self, type_name: &str, length: Option<u32>, scale: Option<u32>) -> ColumnType;
 
     fn ordering(&self) -> Vec<ColumnPath>;
+
+    fn coordinates(&self, position: &Self::Position) -> Vec<Coordinate>;
 
     fn syntax(&self) -> Self::Syntax;
 
@@ -209,6 +211,10 @@ impl<D: Dialect> ChangeLog for Debezium<D> {
 
     fn ordering(&self) -> Vec<ColumnPath> {
         self.ordered()
+    }
+
+    fn coordinates(&self, position: &Self::Position) -> Vec<Coordinate> {
+        self.dialect.coordinates(position)
     }
 }
 

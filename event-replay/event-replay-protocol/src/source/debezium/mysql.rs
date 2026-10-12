@@ -42,14 +42,9 @@ impl MySqlPosition {
 // TODO: order positions across the servers a connector may switch between: a binlog file and
 // offset name a place in one server alone, so a replica taking over starts them anew. Debezium
 // compares GTID sets when both sides carry them and falls back to the time of the event otherwise.
-impl Position for MySqlPosition {
-    fn coordinates(&self) -> Vec<Coordinate> {
-        vec![
-            Coordinate::Text(self.file.clone()),
-            Coordinate::Number(self.pos),
-        ]
-    }
-}
+// Within one server it also reads the number a binlog file ends with, which text comparison
+// misorders once the files outgrow their zero padding.
+impl Position for MySqlPosition {}
 
 impl From<&MySqlSource> for MySqlPosition {
     fn from(source: &MySqlSource) -> Self {
@@ -85,6 +80,13 @@ impl Dialect for MySql {
         vec![
             ColumnPath::from("source.file"),
             ColumnPath::from("source.pos"),
+        ]
+    }
+
+    fn coordinates(&self, position: &Self::Position) -> Vec<Coordinate> {
+        vec![
+            Coordinate::Text(position.file.clone()),
+            Coordinate::Number(position.pos),
         ]
     }
 
@@ -480,12 +482,12 @@ mod tests {
         let position = position("binlog.000002", 448);
 
         assert_eq!(
-            position.coordinates(),
+            MySql.coordinates(&position),
             [
                 Coordinate::Text("binlog.000002".to_owned()),
                 Coordinate::Number(448)
             ]
         );
-        assert_eq!(position.coordinates().len(), MySql.ordering().len());
+        assert_eq!(MySql.coordinates(&position).len(), MySql.ordering().len());
     }
 }

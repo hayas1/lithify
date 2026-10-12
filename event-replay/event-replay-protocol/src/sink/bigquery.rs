@@ -242,7 +242,7 @@ mod tests {
     }
 
     #[test]
-    fn the_schema_changes_of_a_window_are_read_whole_in_source_order() {
+    fn the_schema_changes_of_a_window_are_read_whole_in_the_order_they_were_recorded_then_logged() {
         let log = Debezium::new(MySql);
         let window = Window::new(RecordedAt::from(0), RecordedAt::from(10));
 
@@ -256,7 +256,7 @@ mod tests {
                 "SELECT *\n",
                 "FROM `local-project`.`mysql_shop_cdc`.`mysql`\n",
                 "WHERE `ts_ms` >= 0 AND `ts_ms` < 10\n",
-                "ORDER BY `source`.`file`, `source`.`pos`",
+                "ORDER BY `ts_ms`, `source`.`file`, `source`.`pos`",
             )
         );
     }

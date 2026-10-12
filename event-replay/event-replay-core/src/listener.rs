@@ -661,17 +661,12 @@ mod tests {
     use super::*;
     use crate::event::TableChange;
     use crate::model::{ColumnType, TableId};
-    use crate::position::Coordinate;
     use crate::position::RecordedAt;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     struct Offset(u64);
 
-    impl Position for Offset {
-        fn coordinates(&self) -> Vec<Coordinate> {
-            vec![Coordinate::Number(self.0 as i64)]
-        }
-    }
+    impl Position for Offset {}
 
     #[derive(Debug, Default)]
     struct Journal {
