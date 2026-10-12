@@ -1,6 +1,7 @@
 use std::fmt;
 
 use crate::artifact::{ArtifactBuilder, UnbuildableArtifact};
+use crate::build_log::BuildLog;
 use crate::model::{ColumnModel, ColumnType};
 use crate::source::{ColumnPath, SchemaChangeLog};
 use crate::sql::SqlString;
@@ -113,6 +114,8 @@ pub trait Warehouse {
         SqlString::from(format!("'{}'", text.replace('\'', "''")))
     }
 
+    fn timestamp_millis(&self, milliseconds: i64) -> SqlString;
+
     fn create_namespace(&self, namespace: &str) -> SqlString {
         SqlString::from(format!(
             "CREATE SCHEMA IF NOT EXISTS {}",
@@ -127,6 +130,60 @@ pub trait Warehouse {
                 .collect::<Vec<_>>()
                 .join("."),
         )
+    }
+
+    fn create_build_log(&self, namespace: &str) -> Result<SqlString, UnsupportedColumn> {
+        let columns = BuildLog::COLUMNS
+            .iter()
+            .map(|(name, column_type)| {
+                Ok(format!(
+                    "{} {}",
+                    self.identifier(name),
+                    self.column_type(column_type)?
+                ))
+            })
+            .collect::<Result<Vec<_>, UnsupportedColumn>>()?;
+
+        Ok(SqlString::from(format!(
+            "CREATE TABLE IF NOT EXISTS {} ({})",
+            self.table_ref(&BuildLog::path(namespace)),
+            columns.join(", ")
+        )))
+    }
+
+    fn append_build_log(&self, log: &BuildLog) -> SqlString {
+        let columns = BuildLog::COLUMNS
+            .iter()
+            .map(|(name, _)| self.identifier(name))
+            .collect::<Vec<_>>();
+
+        SqlString::from(format!(
+            "INSERT INTO {} ({}) VALUES ({})",
+            self.table_ref(&BuildLog::path(log.namespace())),
+            columns.join(", "),
+            log.cells(self).join(", ")
+        ))
+    }
+
+    fn select_latest_build_logs(&self, namespace: &str) -> SqlString {
+        let latest = ["artifact", "schedule", "table_id"]
+            .map(|name| self.identifier(name))
+            .join(", ");
+
+        SqlString::from(format!(
+            "SELECT *\nFROM {}\nWHERE TRUE\nQUALIFY ROW_NUMBER() OVER (PARTITION BY {latest} ORDER BY {} DESC, {} DESC) = 1\nORDER BY {latest}",
+            self.table_ref(&BuildLog::path(namespace)),
+            self.identifier("finished_at"),
+            self.identifier("run_id"),
+        ))
+    }
+
+    fn select_next_run_id(&self, namespace: &str) -> SqlString {
+        SqlString::from(format!(
+            "SELECT COALESCE(MAX({}), 0) + 1 FROM {}",
+            self.identifier("run_id"),
+            self.table_ref(&BuildLog::path(namespace)),
+        ))
     }
 
     fn select_schema_changes(&self, log: &impl SchemaChangeLog, window: &Window) -> SqlString {
@@ -179,12 +236,18 @@ mod tests {
     use std::cell::RefCell;
 
     use super::*;
+    use crate::build_log::{Outcome, Run};
     use crate::model::TableId;
+    use crate::position::RecordedAt;
 
     struct Engine;
 
     impl Warehouse for Engine {
         type Config = ();
+
+        fn timestamp_millis(&self, milliseconds: i64) -> SqlString {
+            SqlString::from(milliseconds.to_string())
+        }
 
         fn change_log_namespace(&self) -> &str {
             "cdc"
@@ -255,6 +318,17 @@ mod tests {
                 Engine.create_namespace("shop"),
                 SqlString::from("CREATE TABLE shop.people (id BIGINT)"),
             ])
+        }
+
+        fn build_log(&self, run: &Run, outcome: Outcome) -> BuildLog {
+            BuildLog::new(
+                run,
+                self.0.clone(),
+                None,
+                TablePath::new("shop", "people"),
+                Window::until(RecordedAt::from(1)),
+                outcome,
+            )
         }
     }
 

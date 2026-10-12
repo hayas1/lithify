@@ -112,11 +112,14 @@ mod tests {
     use super::*;
     use crate::source::debezium::Debezium;
     use crate::source::debezium::mysql::MySql;
+    use chrono::DateTime;
+    use lithify_core::build_log::{BuildLog, Outcome, Run, Status};
     use lithify_core::event::{MalformedEvent, SchemaChange, TableChange};
     use lithify_core::listener::OutOfOrder;
     use lithify_core::model::TableId;
     use lithify_core::position::RecordedAt;
     use lithify_core::position::{Coordinate, Position};
+    use lithify_core::sink::TablePath;
     use lithify_core::source::{ChangeLog, ColumnPath};
 
     const CHANGE_LOG: &str = "CREATE SCHEMA mysql_shop_cdc;
@@ -277,6 +280,138 @@ mod tests {
             .query_row("SELECT id FROM people", [], |row| row.get(0))
             .unwrap();
         assert_eq!(id, 1);
+    }
+
+    fn logged(table: &str, run_id: i64, status: Status, finished_at: i64) -> BuildLog {
+        BuildLog::new(
+            &Run::new(
+                run_id,
+                "snapshot",
+                "daily",
+                "primary",
+                r#"{"debezium":{"dialect":"mysql"}}"#,
+                "0.1.0",
+            ),
+            TableId::new("shop", table),
+            None,
+            TablePath::new("mysql_shop", &format!("{table}_20260920")),
+            window(1789862400000, 1789948800000),
+            Outcome::new(
+                status,
+                DateTime::from_timestamp_millis(finished_at).unwrap(),
+            ),
+        )
+    }
+
+    fn logging(logs: &[BuildLog]) -> DuckDbClient {
+        let client = DuckDbClient::new(
+            Connection::open_in_memory().unwrap(),
+            DuckDbWarehouse::new("mysql_shop_cdc"),
+        );
+        let warehouse = client.warehouse();
+
+        client
+            .execute(&warehouse.create_namespace("mysql_shop"))
+            .unwrap();
+        client
+            .execute(&warehouse.create_build_log("mysql_shop").unwrap())
+            .unwrap();
+        for log in logs {
+            client.execute(&warehouse.append_build_log(log)).unwrap();
+        }
+
+        client
+    }
+
+    fn latest(client: &DuckDbClient) -> Vec<(String, String, Option<String>)> {
+        client
+            .connection()
+            .prepare(
+                client
+                    .warehouse()
+                    .select_latest_build_logs("mysql_shop")
+                    .as_str(),
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get("table_id")?, row.get("status")?, row.get("error")?))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    fn next_run_id(client: &DuckDbClient) -> i64 {
+        client
+            .connection()
+            .query_row(
+                client.warehouse().select_next_run_id("mysql_shop").as_str(),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn a_build_log_is_read_by_the_latest_record_of_each_table() {
+        let client = logging(&[
+            logged(
+                "customers",
+                1,
+                Status::Failed("no era".to_owned()),
+                1789949000000,
+            ),
+            logged("orders", 1, Status::Succeeded, 1789949100000),
+            logged("customers", 2, Status::Succeeded, 1789949200000),
+            logged(
+                "orders",
+                2,
+                Status::Failed("it's gone".to_owned()),
+                1789949300000,
+            ),
+        ]);
+
+        assert_eq!(
+            latest(&client),
+            [
+                ("shop.customers".to_owned(), "succeeded".to_owned(), None),
+                (
+                    "shop.orders".to_owned(),
+                    "failed".to_owned(),
+                    Some("it's gone".to_owned())
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_build_log_keeps_the_instants_it_was_given() {
+        let client = logging(&[logged("customers", 1, Status::Succeeded, 1789949000123)]);
+
+        let instants: (i64, i64, i64) = client
+            .connection()
+            .query_row(
+                "SELECT epoch_ms(window_from), epoch_ms(window_to), epoch_ms(finished_at) FROM mysql_shop._lithify_log",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+
+        assert_eq!(instants, (1789862400000, 1789948800000, 1789949000123));
+    }
+
+    #[test]
+    fn a_run_is_numbered_after_the_last_one_the_build_log_holds() {
+        assert_eq!(next_run_id(&logging(&[])), 1);
+        assert_eq!(
+            next_run_id(&logging(&[logged(
+                "customers",
+                3,
+                Status::Succeeded,
+                1789949000000
+            )])),
+            4
+        );
     }
 
     #[test]

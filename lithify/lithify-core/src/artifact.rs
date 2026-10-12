@@ -1,5 +1,6 @@
 use std::fmt;
 
+use crate::build_log::{BuildLog, Outcome, Run};
 use crate::listener::SchemaChangeListener;
 use crate::model::TableId;
 use crate::position::RecordedAt;
@@ -67,7 +68,7 @@ pub trait Artifact {
         table: TableId,
         window: &'a Window,
         base: Option<TablePath>,
-    ) -> Self::Builder<'a, L, W>;
+    ) -> Result<Self::Builder<'a, L, W>, UnbuildableArtifact>;
 }
 
 pub trait ArtifactBuilder {
@@ -76,4 +77,6 @@ pub trait ArtifactBuilder {
     fn select(&self) -> Result<SqlString, UnbuildableArtifact>;
 
     fn create(&self) -> Result<Vec<SqlString>, UnbuildableArtifact>;
+
+    fn build_log(&self, run: &Run, outcome: Outcome) -> BuildLog;
 }

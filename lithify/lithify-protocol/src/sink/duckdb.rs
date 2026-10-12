@@ -85,6 +85,12 @@ impl Warehouse for DuckDbWarehouse {
         }
     }
 
+    fn timestamp_millis(&self, milliseconds: i64) -> SqlString {
+        SqlString::from(format!(
+            "(TIMESTAMPTZ '1970-01-01 00:00:00+00' + INTERVAL ({milliseconds}) MILLISECOND)"
+        ))
+    }
+
     fn cast_or_null(
         &self,
         expression: &SqlString,

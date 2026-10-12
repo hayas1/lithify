@@ -47,8 +47,9 @@ fn a_snapshot_holds_each_key_as_the_change_log_last_left_it() {
     let log = Debezium::under("value", "mysql", MySql);
     let window = Window::new(RecordedAt::from(0), RecordedAt::from(10));
     let artifact = Snapshot::new("shop_snapshot", "%Y%m%d");
-    let mut snapshot =
-        artifact.builder::<_, DuckDbWarehouse>(&log, people().id().clone(), &window, None);
+    let mut snapshot = artifact
+        .builder::<_, DuckDbWarehouse>(&log, people().id().clone(), &window, None)
+        .unwrap();
     SchemaChangeListener::<MySqlPosition>::era_boundary(
         &mut snapshot,
         client.warehouse(),
@@ -120,7 +121,12 @@ fn build_snapshots(client: &DuckDbClient, window: &Window) {
     let log = Debezium::under("value", "mysql", MySql);
     let artifact = Snapshot::new("shop_snapshot", "%Y%m%d");
     let mut tracker = EraTracker::new(window.clone(), |table: &TableId| {
-        Ok::<_, Unbuilt>(artifact.builder::<_, DuckDbWarehouse>(&log, table.clone(), window, None))
+        Ok::<_, Unbuilt>(artifact.builder::<_, DuckDbWarehouse>(
+            &log,
+            table.clone(),
+            window,
+            None,
+        )?)
     });
     let catalog = client
         .replay::<Unbuilt, _>(client.warehouse(), &log, window, &mut tracker)

@@ -66,12 +66,12 @@ impl<'a, K> SnapshotPlan<'a, K> {
     {
         let snapshot = self.sink.snapshot();
         let mut tracker = EraTracker::new(self.window.clone(), |table: &TableId| {
-            Ok::<_, UnbuildableArtifact>(snapshot.builder::<_, K::Warehouse>(
+            snapshot.builder::<_, K::Warehouse>(
                 logs.row_changes(),
                 table.clone(),
                 self.window,
                 self.base(&snapshot, table)?,
-            ))
+            )
         });
         let catalog = self.client.replay::<Unrunnable, _>(
             self.client.warehouse(),
