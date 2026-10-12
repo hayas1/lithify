@@ -144,7 +144,7 @@ pub trait Warehouse {
 
         SqlString::from(format!(
             "SELECT {envelope}\nFROM {}\nWHERE {recorded_at} >= {} AND {recorded_at} < {}\nORDER BY {ordering}",
-            self.change_log_ref(&log.topic()),
+            self.change_log_ref(&log.ddl_topic()),
             window.from().milliseconds_since_epoch(),
             window.to().milliseconds_since_epoch(),
         ))

@@ -20,7 +20,8 @@ pub trait DuckDbChangeLogsFn {
 }
 
 pub trait DuckDbCapture {
-    fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(&self, prefix: &str, f: F) -> F::Output;
+    fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(&self, topic_prefix: &str, f: F)
+    -> F::Output;
 }
 
 pub struct DuckDbClient {
@@ -324,7 +325,7 @@ mod tests {
     impl SchemaChangeLog for Ledger {
         type Record = String;
 
-        fn topic(&self) -> String {
+        fn ddl_topic(&self) -> String {
             "statements".to_owned()
         }
 

@@ -15,6 +15,8 @@ use crate::source::debezium::postgres::Postgres;
 #[serde(deny_unknown_fields)]
 pub struct Config {
     dialect: Dialect,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ddl_topic: Option<String>,
 }
 
 impl Config {
@@ -24,11 +26,29 @@ impl Config {
     const BIGQUERY_ENVELOPE: Option<&str> = None;
 
     pub fn of(dialect: Dialect) -> Self {
-        Self { dialect }
+        Self {
+            dialect,
+            ddl_topic: None,
+        }
     }
 
     pub fn dialect(&self) -> Dialect {
         self.dialect
+    }
+
+    #[cfg(any(feature = "bigquery", feature = "duckdb"))]
+    fn debezium<D: super::Dialect>(
+        &self,
+        envelope: Option<&str>,
+        topic_prefix: &str,
+        dialect: D,
+    ) -> Debezium<D> {
+        let log = Debezium::within(envelope, topic_prefix, dialect);
+
+        match &self.ddl_topic {
+            Some(ddl_topic) => log.with_ddl_topic(ddl_topic),
+            None => log,
+        }
     }
 }
 
@@ -41,17 +61,25 @@ pub enum Dialect {
 
 #[cfg(feature = "duckdb")]
 impl DuckDbCapture for Config {
-    fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(&self, prefix: &str, f: F) -> F::Output {
+    fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(
+        &self,
+        topic_prefix: &str,
+        f: F,
+    ) -> F::Output {
         self.dialect
-            .with_duckdb_change_logs(Self::DUCKDB_ENVELOPE, prefix, f)
+            .with_duckdb_change_logs(self, Self::DUCKDB_ENVELOPE, topic_prefix, f)
     }
 }
 
 #[cfg(feature = "bigquery")]
 impl BigQueryCapture for Config {
-    fn with_bigquery_change_logs<F: BigQueryChangeLogsFn>(&self, prefix: &str, f: F) -> F::Output {
+    fn with_bigquery_change_logs<F: BigQueryChangeLogsFn>(
+        &self,
+        topic_prefix: &str,
+        f: F,
+    ) -> F::Output {
         self.dialect
-            .with_bigquery_change_logs(Self::BIGQUERY_ENVELOPE, prefix, f)
+            .with_bigquery_change_logs(self, Self::BIGQUERY_ENVELOPE, topic_prefix, f)
     }
 }
 
@@ -59,26 +87,28 @@ impl Dialect {
     #[cfg(feature = "duckdb")]
     fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(
         self,
+        config: &Config,
         envelope: Option<&str>,
-        prefix: &str,
+        topic_prefix: &str,
         f: F,
     ) -> F::Output {
         match self {
-            Self::MySql => f.call_duckdb(Debezium::within(envelope, prefix, MySql)),
-            Self::Postgres => f.call_duckdb(Debezium::within(envelope, prefix, Postgres)),
+            Self::MySql => f.call_duckdb(config.debezium(envelope, topic_prefix, MySql)),
+            Self::Postgres => f.call_duckdb(config.debezium(envelope, topic_prefix, Postgres)),
         }
     }
 
     #[cfg(feature = "bigquery")]
     fn with_bigquery_change_logs<F: BigQueryChangeLogsFn>(
         self,
+        config: &Config,
         envelope: Option<&str>,
-        prefix: &str,
+        topic_prefix: &str,
         f: F,
     ) -> F::Output {
         match self {
-            Self::MySql => f.call_bigquery(Debezium::within(envelope, prefix, MySql)),
-            Self::Postgres => f.call_bigquery(Debezium::within(envelope, prefix, Postgres)),
+            Self::MySql => f.call_bigquery(config.debezium(envelope, topic_prefix, MySql)),
+            Self::Postgres => f.call_bigquery(config.debezium(envelope, topic_prefix, Postgres)),
         }
     }
 }
@@ -96,10 +126,39 @@ mod tests {
     fn probe<C: ChangeLogs>(logs: C) -> Probed {
         (
             std::any::type_name::<C>(),
-            logs.schema_changes().topic(),
+            logs.schema_changes().ddl_topic(),
             logs.schema_changes().envelope(),
             logs.row_changes().envelope(),
         )
+    }
+
+    #[cfg(feature = "duckdb")]
+    #[test]
+    fn a_source_names_the_topic_its_schema_changes_land_on_apart_from_its_prefix() {
+        struct DdlTopic;
+
+        impl DuckDbChangeLogsFn for DdlTopic {
+            type Output = String;
+
+            fn call_duckdb<C>(self, logs: C) -> Self::Output
+            where
+                C: ChangeLogs,
+                <C::Schema as SchemaChangeLog>::Record: duckdb::types::FromSql,
+            {
+                logs.schema_changes().ddl_topic()
+            }
+        }
+
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "dialect": "mysql",
+            "ddl_topic": "mysql.schema-changes"
+        }))
+        .unwrap();
+
+        assert_eq!(
+            config.with_duckdb_change_logs("mysql", DdlTopic),
+            "mysql.schema-changes"
+        );
     }
 
     #[test]

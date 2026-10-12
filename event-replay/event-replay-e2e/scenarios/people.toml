@@ -3,7 +3,6 @@ path = "../../../compose/event-replay/mysql"
 
 [source.primary]
 url = "mysql://root:root@mysql:3306/shop"
-prefix = "mysql"
 
 [sink.minio]
 

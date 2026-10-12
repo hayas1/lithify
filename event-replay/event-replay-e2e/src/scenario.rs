@@ -94,16 +94,11 @@ struct PipelineLocation {
 #[serde(deny_unknown_fields)]
 pub struct SourceConnection {
     url: String,
-    prefix: String,
 }
 
 impl SourceConnection {
     pub fn url(&self) -> &str {
         &self.url
-    }
-
-    pub fn change_log(&self, table: &TableId) -> String {
-        format!("{}.{}.{}", self.prefix, table.schema(), table.table())
     }
 }
 
@@ -340,7 +335,6 @@ mod tests {
 
         [source.primary]
         url = "mysql://root:root@mysql:3306/shop"
-        prefix = "mysql"
 
         [sink.minio]
 
@@ -391,15 +385,11 @@ mod tests {
     }
 
     #[test]
-    fn a_table_lands_in_the_change_log_of_the_topic_its_source_writes() {
+    fn a_source_is_reached_at_the_url_the_scenario_names() {
         let scenario = scenario();
         let (_, primary) = scenario.sources().next().unwrap();
 
         assert_eq!(primary.url(), "mysql://root:root@mysql:3306/shop");
-        assert_eq!(
-            primary.change_log(&TableId::new("shop", "people")),
-            "mysql.shop.people"
-        );
     }
 
     #[test]

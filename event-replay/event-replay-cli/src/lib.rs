@@ -1,3 +1,4 @@
+pub mod artifacts;
 pub mod credential;
 pub mod journal;
 pub mod pipeline;

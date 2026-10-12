@@ -95,23 +95,32 @@ pub struct DdlColumn {
 pub struct Debezium<D> {
     dialect: D,
     envelope: Option<ColumnPath>,
-    prefix: String,
+    topic_prefix: String,
+    ddl_topic: String,
 }
 
 impl<D: Dialect> Debezium<D> {
-    pub fn new(prefix: &str, dialect: D) -> Self {
-        Self::within(None, prefix, dialect)
+    pub fn new(topic_prefix: &str, dialect: D) -> Self {
+        Self::within(None, topic_prefix, dialect)
     }
 
-    pub fn under(column: &str, prefix: &str, dialect: D) -> Self {
-        Self::within(Some(column), prefix, dialect)
+    pub fn under(column: &str, topic_prefix: &str, dialect: D) -> Self {
+        Self::within(Some(column), topic_prefix, dialect)
     }
 
-    pub fn within(envelope: Option<&str>, prefix: &str, dialect: D) -> Self {
+    pub fn within(envelope: Option<&str>, topic_prefix: &str, dialect: D) -> Self {
         Self {
             dialect,
             envelope: envelope.map(ColumnPath::from),
-            prefix: prefix.to_owned(),
+            topic_prefix: topic_prefix.to_owned(),
+            ddl_topic: topic_prefix.to_owned(),
+        }
+    }
+
+    pub fn with_ddl_topic(self, ddl_topic: &str) -> Self {
+        Self {
+            ddl_topic: ddl_topic.to_owned(),
+            ..self
         }
     }
 
@@ -237,8 +246,8 @@ impl<D: Dialect> ChangeLogs for Debezium<D> {
 impl<D: Dialect> SchemaChangeLog for Debezium<D> {
     type Record = DebeziumDdl<D::Source>;
 
-    fn topic(&self) -> String {
-        self.prefix.clone()
+    fn ddl_topic(&self) -> String {
+        self.ddl_topic.clone()
     }
 
     fn schema_change(
@@ -271,8 +280,8 @@ impl<D: Dialect> SchemaChangeLog for Debezium<D> {
 }
 
 impl<D: Dialect> RowChangeLog for Debezium<D> {
-    fn topic(&self, table: &TableId) -> String {
-        format!("{}.{}.{}", self.prefix, table.schema(), table.table())
+    fn dml_topic(&self, table: &TableId) -> String {
+        format!("{}.{}.{}", self.topic_prefix, table.schema(), table.table())
     }
 
     fn operation(&self) -> ColumnPath {
@@ -366,19 +375,24 @@ mod tests {
     #[test]
     fn the_row_changes_of_a_table_land_on_the_topic_named_after_the_prefix_and_the_table() {
         assert_eq!(
-            RowChangeLog::topic(
-                &Debezium::new("mysql", MySql),
-                &TableId::new("shop", "customers")
-            ),
+            Debezium::new("mysql", MySql).dml_topic(&TableId::new("shop", "customers")),
             "mysql.shop.customers"
         );
     }
 
     #[test]
     fn the_schema_changes_land_on_the_topic_named_after_the_prefix_alone() {
+        assert_eq!(Debezium::new("mysql", MySql).ddl_topic(), "mysql");
+    }
+
+    #[test]
+    fn the_schema_changes_land_on_a_topic_of_their_own_when_one_is_named() {
+        let log = Debezium::new("mysql", MySql).with_ddl_topic("mysql.schema-changes");
+
+        assert_eq!(log.ddl_topic(), "mysql.schema-changes");
         assert_eq!(
-            SchemaChangeLog::topic(&Debezium::new("mysql", MySql)),
-            "mysql"
+            log.dml_topic(&TableId::new("shop", "customers")),
+            "mysql.shop.customers"
         );
     }
 }

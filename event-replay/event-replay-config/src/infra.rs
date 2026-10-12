@@ -113,7 +113,7 @@ struct WiredSource<C> {
     name: Option<String>,
     since: Option<DateTime<Utc>>,
     capture: Option<C>,
-    schema_changes: Option<String>,
+    topic_prefix: Option<String>,
 }
 
 impl<C> Default for WiredSource<C> {
@@ -122,7 +122,7 @@ impl<C> Default for WiredSource<C> {
             name: None,
             since: None,
             capture: None,
-            schema_changes: None,
+            topic_prefix: None,
         }
     }
 }
@@ -140,7 +140,7 @@ impl<C: Clone> WiredSource<C> {
                 .capture
                 .ok_or_else(|| Miswiring::SourceWithoutCapture(name.clone()))?,
             name,
-            schema_changes: wired.schema_changes,
+            topic_prefix: wired.topic_prefix,
         })
     }
 }
@@ -236,7 +236,7 @@ pub struct Source<C> {
     name: String,
     since: DateTime<Utc>,
     capture: C,
-    schema_changes: Option<String>,
+    topic_prefix: Option<String>,
 }
 
 impl<C> Source<C> {
@@ -252,8 +252,8 @@ impl<C> Source<C> {
         RecordedAt::from(self.since.timestamp_millis())
     }
 
-    pub fn schema_changes(&self) -> Option<&str> {
-        self.schema_changes.as_deref()
+    pub fn topic_prefix(&self) -> Option<&str> {
+        self.topic_prefix.as_deref()
     }
 }
 
@@ -332,7 +332,7 @@ mod tests {
         [[source]]
         name = "primary"
         since = "1970-01-01T00:00:00Z"
-        schema_changes = "mysql"
+        topic_prefix = "mysql"
 
         [[source]]
         name = "replica"
@@ -483,9 +483,9 @@ mod tests {
     }
 
     #[test]
-    fn a_source_says_the_topic_its_schema_changes_land_on_unless_it_captures_none() {
-        assert_eq!(sources()[0].schema_changes(), Some("mysql"));
-        assert_eq!(sources()[1].schema_changes(), None);
+    fn a_source_says_the_topic_prefix_of_its_connector_unless_it_captures_none() {
+        assert_eq!(sources()[0].topic_prefix(), Some("mysql"));
+        assert_eq!(sources()[1].topic_prefix(), None);
     }
 
     #[test]

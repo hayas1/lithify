@@ -3,7 +3,6 @@ use duckdb::types::FromSql;
 use google_cloud_bigquery::error::RowError;
 use google_cloud_bigquery::query::Row;
 
-use event_replay_config::ArtifactKind;
 use event_replay_config::infra::Sink;
 use event_replay_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
 use event_replay_core::era::EraTracker;
@@ -18,6 +17,7 @@ use event_replay_protocol::sink::bigquery::client::{BigQueryChangeLogsFn, BigQue
 use event_replay_protocol::sink::duckdb::client::{DuckDbChangeLogsFn, DuckDbClient};
 use event_replay_strategy::snapshot::Snapshot;
 
+use crate::artifacts::Artifacts;
 use crate::pipeline::Warehouse;
 use crate::unreplayable::Unreplayable;
 
@@ -64,8 +64,7 @@ impl<'a, K> SnapshotPlan<'a, K> {
         K: SchemaChangeStream<C::Schema> + WarehouseClient,
         <K as SchemaChangeStream<C::Schema>>::Error: Into<Unreplayable>,
     {
-        let replay = self.sink.replay();
-        let snapshot = Snapshot::new(replay.namespace(ArtifactKind::Snapshot), replay.shard());
+        let snapshot = self.sink.snapshot();
         let mut tracker = EraTracker::new(self.window.clone(), |table: &TableId| {
             Ok::<_, UnbuildableArtifact>(snapshot.builder::<_, K::Warehouse>(
                 logs.row_changes(),
@@ -167,7 +166,7 @@ mod tests {
         let statements = source
             .capture()
             .with_duckdb_change_logs(
-                source.schema_changes().unwrap(),
+                source.topic_prefix().unwrap(),
                 SnapshotPlan::new(&client, sink, &window, None),
             )
             .unwrap();
@@ -210,7 +209,7 @@ mod tests {
         let statements = source
             .capture()
             .with_duckdb_change_logs(
-                source.schema_changes().unwrap(),
+                source.topic_prefix().unwrap(),
                 SnapshotPlan::new(&client, sink, &window, Some(onto)),
             )
             .unwrap();

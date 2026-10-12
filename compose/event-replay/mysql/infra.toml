@@ -8,7 +8,7 @@ sink.replay.shard = "%Y%m%d"
 [[source]]
 name = "primary"
 since = "1970-01-01T00:00:00Z"
-schema_changes = "mysql"
+topic_prefix = "mysql"
 
 [[sink]]
 name = "warehouse"

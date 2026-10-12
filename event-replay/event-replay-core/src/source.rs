@@ -65,7 +65,7 @@ pub trait ChangeLog {
 pub trait SchemaChangeLog: ChangeLog {
     type Record;
 
-    fn topic(&self) -> String;
+    fn ddl_topic(&self) -> String;
 
     fn schema_change(
         &self,
@@ -74,7 +74,7 @@ pub trait SchemaChangeLog: ChangeLog {
 }
 
 pub trait RowChangeLog: ChangeLog {
-    fn topic(&self, table: &TableId) -> String;
+    fn dml_topic(&self, table: &TableId) -> String;
 
     fn operation(&self) -> ColumnPath;
 

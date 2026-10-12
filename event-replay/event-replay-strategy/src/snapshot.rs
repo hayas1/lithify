@@ -364,7 +364,7 @@ mod tests {
     }
 
     impl RowChangeLog for Log {
-        fn topic(&self, table: &TableId) -> String {
+        fn dml_topic(&self, table: &TableId) -> String {
             format!("mysql_{}_{}", table.schema(), table.table())
         }
 

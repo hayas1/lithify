@@ -13,17 +13,25 @@ pub enum Capture {
 }
 
 impl DuckDbCapture for Capture {
-    fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(&self, prefix: &str, f: F) -> F::Output {
+    fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(
+        &self,
+        topic_prefix: &str,
+        f: F,
+    ) -> F::Output {
         match self {
-            Self::Debezium(debezium) => debezium.with_duckdb_change_logs(prefix, f),
+            Self::Debezium(debezium) => debezium.with_duckdb_change_logs(topic_prefix, f),
         }
     }
 }
 
 impl BigQueryCapture for Capture {
-    fn with_bigquery_change_logs<F: BigQueryChangeLogsFn>(&self, prefix: &str, f: F) -> F::Output {
+    fn with_bigquery_change_logs<F: BigQueryChangeLogsFn>(
+        &self,
+        topic_prefix: &str,
+        f: F,
+    ) -> F::Output {
         match self {
-            Self::Debezium(debezium) => debezium.with_bigquery_change_logs(prefix, f),
+            Self::Debezium(debezium) => debezium.with_bigquery_change_logs(topic_prefix, f),
         }
     }
 }

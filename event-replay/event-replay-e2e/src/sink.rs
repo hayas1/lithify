@@ -30,7 +30,7 @@ pub trait Sink {
     fn landed(
         &mut self,
         capture: &Capture,
-        prefix: &str,
+        topic_prefix: &str,
         table: &TableId,
         at: RecordedAt,
     ) -> Result<u64, Unbuildable>;
@@ -38,7 +38,7 @@ pub trait Sink {
     fn model(
         &mut self,
         capture: &Capture,
-        prefix: &str,
+        topic_prefix: &str,
         table: &TableId,
         at: RecordedAt,
     ) -> Result<TableModel, Unbuildable>;
@@ -46,7 +46,7 @@ pub trait Sink {
     fn snapshot(
         &mut self,
         capture: &Capture,
-        prefix: &str,
+        topic_prefix: &str,
         table: &TableId,
         artifact: &Snapshot,
         window: &Window,
@@ -133,11 +133,11 @@ impl Sink for DuckDb {
     fn landed(
         &mut self,
         capture: &Capture,
-        prefix: &str,
+        topic_prefix: &str,
         table: &TableId,
         at: RecordedAt,
     ) -> Result<u64, Unbuildable> {
-        let (topic, recorded_at) = capture.with_duckdb_change_logs(prefix, Landing { table });
+        let (topic, recorded_at) = capture.with_duckdb_change_logs(topic_prefix, Landing { table });
 
         let warehouse = self.client.warehouse();
         let landed = self.client.connection().query_row(
@@ -161,12 +161,12 @@ impl Sink for DuckDb {
     fn model(
         &mut self,
         capture: &Capture,
-        prefix: &str,
+        topic_prefix: &str,
         table: &TableId,
         at: RecordedAt,
     ) -> Result<TableModel, Unbuildable> {
         let read = capture.with_duckdb_change_logs(
-            prefix,
+            topic_prefix,
             Catalog {
                 client: &self.client,
                 table,
@@ -180,13 +180,13 @@ impl Sink for DuckDb {
     fn snapshot(
         &mut self,
         capture: &Capture,
-        prefix: &str,
+        topic_prefix: &str,
         table: &TableId,
         artifact: &Snapshot,
         window: &Window,
     ) -> Result<(), Unbuildable> {
         capture.with_duckdb_change_logs(
-            prefix,
+            topic_prefix,
             SnapshotBuild {
                 client: &self.client,
                 table,
@@ -248,7 +248,7 @@ impl DuckDbChangeLogsFn for Landing<'_> {
         <C::Schema as SchemaChangeLog>::Record: FromSql,
     {
         (
-            logs.row_changes().topic(self.table),
+            logs.row_changes().dml_topic(self.table),
             logs.row_changes().recorded_at(),
         )
     }

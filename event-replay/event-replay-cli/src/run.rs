@@ -52,12 +52,14 @@ impl Run {
     }
 
     pub fn report(&self) -> Result<Journal, Unreplayable> {
-        self.each_sink(|sink, source, prefix, journal| self.read(sink, source, prefix, journal))
+        self.each_sink(|sink, source, topic_prefix, journal| {
+            self.read(sink, source, topic_prefix, journal)
+        })
     }
 
     pub fn plan(&self, into: &Path) -> Result<Journal, Unreplayable> {
-        self.each_sink(|sink, source, prefix, journal| {
-            let statements = self.plan_statements(sink, source, prefix)?;
+        self.each_sink(|sink, source, topic_prefix, journal| {
+            let statements = self.plan_statements(sink, source, topic_prefix)?;
 
             Self::write_plan(into, sink, &statements, journal)
         })
@@ -85,13 +87,16 @@ impl Run {
         for sink in self.sinks(&pipeline)? {
             journal.sink(sink.name());
 
-            let Some(prefix) = source.schema_changes() else {
-                journal.note(&format!("{} lands no schema changes", source.name()));
+            let Some(topic_prefix) = source.topic_prefix() else {
+                journal.note(&format!(
+                    "{} names no topic prefix to read its change logs by",
+                    source.name()
+                ));
 
                 continue;
             };
 
-            if let Err(unreplayable) = act(sink, source, prefix, &mut journal) {
+            if let Err(unreplayable) = act(sink, source, topic_prefix, &mut journal) {
                 journal.failed(sink.name(), &unreplayable);
             }
         }
@@ -103,15 +108,15 @@ impl Run {
         &self,
         sink: &Sink<Warehouse>,
         source: &Source<Capture>,
-        prefix: &str,
+        topic_prefix: &str,
     ) -> Result<Vec<SqlString>, Unreplayable> {
         match sink.warehouse() {
             Warehouse::DuckDb(store) => source.capture().with_duckdb_change_logs(
-                prefix,
+                topic_prefix,
                 SnapshotPlan::new(&self.duckdb(sink, store)?, sink, &self.window, self.onto),
             ),
             Warehouse::BigQuery(config) => source.capture().with_bigquery_change_logs(
-                prefix,
+                topic_prefix,
                 SnapshotPlan::new(&self.bigquery(sink, config)?, sink, &self.window, self.onto),
             ),
         }
@@ -162,15 +167,15 @@ impl Run {
         &self,
         sink: &Sink<Warehouse>,
         source: &Source<Capture>,
-        prefix: &str,
+        topic_prefix: &str,
         journal: &mut Journal,
     ) -> Result<(), Unreplayable> {
         match sink.warehouse() {
             Warehouse::DuckDb(store) => {
-                self.read_duckdb(&self.duckdb(sink, store)?, prefix, source, journal)
+                self.read_duckdb(&self.duckdb(sink, store)?, topic_prefix, source, journal)
             }
             Warehouse::BigQuery(config) => {
-                self.read_bigquery(&self.bigquery(sink, config)?, prefix, source, journal)
+                self.read_bigquery(&self.bigquery(sink, config)?, topic_prefix, source, journal)
             }
         }
     }
@@ -178,25 +183,25 @@ impl Run {
     fn read_duckdb(
         &self,
         client: &DuckDbClient,
-        prefix: &str,
+        topic_prefix: &str,
         source: &Source<Capture>,
         journal: &mut Journal,
     ) -> Result<(), Unreplayable> {
         source
             .capture()
-            .with_duckdb_change_logs(prefix, Catalog::new(client, &self.window, journal))
+            .with_duckdb_change_logs(topic_prefix, Catalog::new(client, &self.window, journal))
     }
 
     fn read_bigquery(
         &self,
         client: &BigQueryClient,
-        prefix: &str,
+        topic_prefix: &str,
         source: &Source<Capture>,
         journal: &mut Journal,
     ) -> Result<(), Unreplayable> {
         source
             .capture()
-            .with_bigquery_change_logs(prefix, Catalog::new(client, &self.window, journal))
+            .with_bigquery_change_logs(topic_prefix, Catalog::new(client, &self.window, journal))
     }
 
     fn sinks<'a>(

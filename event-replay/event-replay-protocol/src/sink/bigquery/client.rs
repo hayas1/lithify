@@ -28,7 +28,11 @@ pub trait BigQueryChangeLogsFn {
 }
 
 pub trait BigQueryCapture {
-    fn with_bigquery_change_logs<F: BigQueryChangeLogsFn>(&self, prefix: &str, f: F) -> F::Output;
+    fn with_bigquery_change_logs<F: BigQueryChangeLogsFn>(
+        &self,
+        topic_prefix: &str,
+        f: F,
+    ) -> F::Output;
 }
 
 pub struct BigQueryClient {
