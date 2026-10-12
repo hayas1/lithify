@@ -95,6 +95,9 @@ impl From<Arguments> for Run {
 }
 
 fn main() -> ExitCode {
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .init();
     let arguments = Arguments::parse();
 
     match arguments.journal() {

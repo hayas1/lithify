@@ -317,9 +317,6 @@ enum Alteration<'a> {
 }
 
 impl<'a> Alteration<'a> {
-    // TODO: warn, once the crate traces, when one alteration both drops and adds columns. It may be
-    // a rename the dialect could not read, which steps through as a drop and an addition and loses
-    // the values the column held; the warning should guide how to carry them over by hand.
     fn between(before: &'a TableModel, after: &'a TableModel) -> Vec<Self> {
         let dropped = before
             .columns()
@@ -341,6 +338,37 @@ impl<'a> Alteration<'a> {
             .then(|| Self::Rekeyed(after.primary_key().collect()));
 
         dropped.chain(retyped).chain(added).chain(rekeyed).collect()
+    }
+
+    fn warn_of_unread_rename<P>(alterations: &[Self], table: &TableId, change: &SchemaChange<P>) {
+        let dropped: Vec<&str> = alterations.iter().filter_map(Self::dropped).collect();
+        let added: Vec<&str> = alterations.iter().filter_map(Self::added).collect();
+
+        if !dropped.is_empty() && !added.is_empty() {
+            tracing::warn!(
+                table = %table,
+                ?dropped,
+                ?added,
+                statement = change.statement(),
+                "one statement dropped and added columns; if it renamed a column the dialect could \
+                 not read, the values of the dropped column are lost to the added one, so carry \
+                 them over by hand from the snapshot taken before the statement"
+            );
+        }
+    }
+
+    fn dropped(&self) -> Option<&str> {
+        match self {
+            Self::Dropped(column) => Some(column.name()),
+            _ => None,
+        }
+    }
+
+    fn added(&self) -> Option<&str> {
+        match self {
+            Self::Added(column) => Some(column.name()),
+            _ => None,
+        }
     }
 
     fn apply(&self, shape: &TableModel) -> TableModel {
@@ -560,6 +588,7 @@ impl<P: Position> CatalogModel<P> {
             return self.create(context, change, after, listener);
         };
         let alterations = Alteration::between(&before, after);
+        Alteration::warn_of_unread_rename(&alterations, after.id(), change);
         let last = alterations.len().saturating_sub(1);
         let mut shape = before.clone();
 
@@ -1728,5 +1757,102 @@ mod tests {
 
         assert!(entries.is_empty());
         assert_eq!(catalog.table(&customers()), None);
+    }
+
+    #[derive(Clone, Default)]
+    struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, written: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(written);
+
+            Ok(written.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn warned(tables: Vec<TableChange>) -> String {
+        let captured = Captured::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(captured.clone())
+            .with_ansi(false)
+            .without_time()
+            .finish();
+        let mut catalog = CatalogModel::default();
+        accept(
+            &mut catalog,
+            change(
+                1,
+                vec![TableChange::Created(table(
+                    vec![identifier(), name()],
+                    &["id"],
+                ))],
+            ),
+        );
+
+        tracing::subscriber::with_default(subscriber, || {
+            catalog
+                .accept::<OutOfOrder, _>(
+                    &(),
+                    &SchemaChange::new(
+                        Offset(2),
+                        RecordedAt::from(2),
+                        "ALTER TABLE customers DROP name, ADD full_name VARCHAR(64)",
+                        tables,
+                    ),
+                    &mut (),
+                )
+                .unwrap();
+        });
+
+        String::from_utf8(captured.0.lock().unwrap().clone()).unwrap()
+    }
+
+    #[test]
+    fn an_alteration_that_drops_and_adds_columns_warns_of_a_rename_it_may_hide() {
+        let warning = warned(vec![TableChange::Altered(table(
+            vec![identifier(), full_name()],
+            &["id"],
+        ))]);
+
+        assert!(warning.contains("WARN"));
+        assert!(warning.contains("table=shop.customers"));
+        assert!(warning.contains("dropped=[\"name\"]"));
+        assert!(warning.contains("added=[\"full_name\"]"));
+        assert!(warning.contains("ALTER TABLE customers DROP name, ADD full_name VARCHAR(64)"));
+        assert!(warning.contains("by hand"));
+    }
+
+    #[test]
+    fn an_alteration_that_only_adds_columns_warns_of_nothing() {
+        assert_eq!(
+            warned(vec![TableChange::Altered(table(
+                vec![identifier(), name(), email()],
+                &["id"],
+            ))]),
+            ""
+        );
+    }
+
+    #[test]
+    fn an_alteration_whose_rename_was_read_warns_of_nothing() {
+        assert_eq!(
+            warned(vec![
+                renaming("name", "full_name"),
+                TableChange::Altered(table(vec![identifier(), full_name()], &["id"])),
+            ]),
+            ""
+        );
     }
 }
