@@ -154,14 +154,15 @@ pub(crate) mod tests {
     use lithify_protocol::DuckDbWarehouse;
     use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbClient};
 
-    use chrono::DateTime;
+    use chrono::{DateTime, Utc};
+    use ulid::Ulid;
 
     use lithify_core::sql::SqlString;
 
     use super::*;
     use crate::pipeline::Capture;
     use crate::settlement::{Build, DryRun};
-    use lithify_core::build_log::{BuildLog, Latest};
+    use lithify_core::build_log::{BuildLog, Latest, Outcome, Run, Status};
 
     const CHANGE_LOGS: &str = "CREATE SCHEMA mysql_shop_cdc;
         CREATE TABLE mysql_shop_cdc.mysql AS SELECT * FROM (VALUES
@@ -308,6 +309,69 @@ pub(crate) mod tests {
                 .contains("  FROM \"mysql_shop\".\"people_recorded\"\n")
         );
     }
+
+    pub(crate) const CAPTURE: &str = r#"{"debezium":{"dialect":"mysql"}}"#;
+
+    pub(crate) fn at(rfc3339: &str) -> DateTime<Utc> {
+        rfc3339.parse().unwrap()
+    }
+
+    pub(crate) fn built_before(table: &str, capture: &str) -> BuildLog {
+        BuildLog::new(
+            &Run::new(
+                Ulid::from_parts(1, 0),
+                "snapshot",
+                "daily",
+                "primary",
+                capture,
+                "0.1.0",
+            ),
+            TableId::new("shop", table),
+            None,
+            TablePath::new("mysql_shop", &format!("{table}_20260919")),
+            Window::new(
+                RecordedAt::from(at("2026-09-19T00:00:00Z")),
+                RecordedAt::from(at("2026-09-20T00:00:00Z")),
+            ),
+            Outcome::new(Status::Succeeded, at("2026-09-20T00:10:00Z")),
+        )
+    }
+
+    pub(crate) fn logged(change_logs: &str, before: &[BuildLog]) -> DuckDbClient {
+        let client = DuckDbClient::new(
+            Connection::open_in_memory().unwrap(),
+            DuckDbWarehouse::new("mysql_shop_cdc"),
+        );
+        client.execute(&SqlString::from(change_logs)).unwrap();
+        client
+            .execute(&SqlString::from(
+                "CREATE SCHEMA mysql_shop;
+                 CREATE TABLE mysql_shop.people_20260919 AS SELECT 7::BIGINT AS id;
+                 CREATE TABLE mysql_shop.pets_20260919 AS SELECT 7::BIGINT AS id",
+            ))
+            .unwrap();
+        client.create_build_log::<Unrunnable>("mysql_shop").unwrap();
+        for log in before {
+            client.append_build_log(log).unwrap();
+        }
+
+        client
+    }
+
+    pub(crate) const PEOPLE: &str = "CREATE SCHEMA mysql_shop_cdc;
+        CREATE TABLE mysql_shop_cdc.mysql AS SELECT * FROM (VALUES
+          ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL}, 'ts_ms': 0::BIGINT,
+            'ddl': 'CREATE TABLE people (id BIGINT)',
+            'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
+              'table': {'primaryKeyColumnNames': ['id'], 'columns': [
+                {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
+                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]})
+        ) AS t(value);
+        CREATE TABLE mysql_shop_cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
+          ({'op': 'c', 'ts_ms': 1789948800001::BIGINT,
+            'source': {'file': 'binlog.000001', 'pos': 3::BIGINT, 'gtid': NULL},
+            'before': NULL::STRUCT(id BIGINT), 'after': {'id': 8::BIGINT}})
+        ) AS t(value)";
 
     pub(crate) const BUILT_CHANGE_LOGS: &str = "CREATE SCHEMA mysql_shop_cdc;
         CREATE TABLE mysql_shop_cdc.mysql AS SELECT * FROM (VALUES

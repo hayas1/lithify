@@ -11,8 +11,8 @@ use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbClient};
 use lithify_protocol::sink::duckdb::config::Config;
 use lithify_protocol::sink::duckdb::store::ObjectStore;
 
-use crate::catch_up::CatchUp;
 use crate::check::Expectation;
+use crate::course::Course;
 use crate::credential::Credential;
 use crate::journal::Journal;
 use crate::pipeline::{Capture, Warehouse};
@@ -24,7 +24,6 @@ pub struct Run {
     directory: PathBuf,
     credential: Credential,
     sink: Option<String>,
-    onto: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
 }
 
@@ -33,21 +32,20 @@ impl Run {
         directory: PathBuf,
         credential: Credential,
         sink: Option<String>,
-        onto: Option<DateTime<Utc>>,
         now: DateTime<Utc>,
     ) -> Self {
         Self {
             directory,
             credential,
             sink,
-            onto,
             now,
         }
     }
 
-    pub fn plan(&self, into: &Path) -> Result<Journal, Unrunnable> {
+    pub fn plan(&self, course: &Course, into: &Path) -> Result<Journal, Unrunnable> {
         self.each_sink(|sink, source, topic_prefix, journal| {
             self.settle(
+                course,
                 sink,
                 source,
                 topic_prefix,
@@ -57,9 +55,10 @@ impl Run {
         })
     }
 
-    pub fn build(&self) -> Result<Journal, Unrunnable> {
+    pub fn build(&self, course: &Course) -> Result<Journal, Unrunnable> {
         self.each_sink(|sink, source, topic_prefix, journal| {
             self.settle(
+                course,
                 sink,
                 source,
                 topic_prefix,
@@ -136,34 +135,41 @@ impl Run {
 
     fn settle<S: Settlement>(
         &self,
+        course: &Course,
         sink: &Sink<Warehouse>,
         source: &Source<Capture>,
         topic_prefix: &str,
         settlement: &S,
         journal: &mut Journal,
     ) -> Result<(), Unrunnable> {
-        let catch_up = CatchUp::new(sink, source, self.onto, self.now);
-
         match sink.warehouse() {
             Warehouse::DuckDb(config) => {
                 let client = self.duckdb(sink, config)?;
 
-                catch_up.settle(&client, settlement, journal, |window, base| {
-                    source.capture().with_duckdb_change_logs(
-                        topic_prefix,
-                        SnapshotPlan::new(&client, sink, window, base, settlement),
-                    )
-                })
+                course.itinerary(sink, source, self.now, &client)?.settle(
+                    settlement,
+                    journal,
+                    |window, base| {
+                        source.capture().with_duckdb_change_logs(
+                            topic_prefix,
+                            SnapshotPlan::new(&client, sink, window, base, settlement),
+                        )
+                    },
+                )
             }
             Warehouse::BigQuery(config) => {
                 let client = self.bigquery(sink, config)?;
 
-                catch_up.settle(&client, settlement, journal, |window, base| {
-                    source.capture().with_bigquery_change_logs(
-                        topic_prefix,
-                        SnapshotPlan::new(&client, sink, window, base, settlement),
-                    )
-                })
+                course.itinerary(sink, source, self.now, &client)?.settle(
+                    settlement,
+                    journal,
+                    |window, base| {
+                        source.capture().with_bigquery_change_logs(
+                            topic_prefix,
+                            SnapshotPlan::new(&client, sink, window, base, settlement),
+                        )
+                    },
+                )
             }
         }
     }
