@@ -31,6 +31,15 @@ impl RecordedAt {
     }
 }
 
+impl fmt::Display for RecordedAt {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match DateTime::<Utc>::try_from(*self) {
+            Ok(at) => formatter.write_str(&at.to_rfc3339()),
+            Err(_) => write!(formatter, "{}", self.0),
+        }
+    }
+}
+
 impl From<RecordedAt> for Coordinate {
     fn from(recorded_at: RecordedAt) -> Self {
         Self::Number(recorded_at.0)
@@ -89,6 +98,15 @@ mod tests {
             DateTime::try_from(recorded_at).unwrap(),
             at("2026-09-20T00:00:00Z")
         );
+    }
+
+    #[test]
+    fn a_recorded_instant_reads_as_the_instant_it_was_or_else_as_its_milliseconds() {
+        assert_eq!(
+            RecordedAt::from(1789862400000).to_string(),
+            "2026-09-20T00:00:00+00:00"
+        );
+        assert_eq!(RecordedAt::from(i64::MAX).to_string(), i64::MAX.to_string());
     }
 
     #[test]

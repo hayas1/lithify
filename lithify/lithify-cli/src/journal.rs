@@ -1,10 +1,9 @@
 use std::fmt::Display;
 
-use chrono::{DateTime, Utc};
-
 use lithify_core::build_log::BuildLog;
-use lithify_core::position::RecordedAt;
 use lithify_core::window::Window;
+
+use crate::check::Discrepancy;
 
 #[derive(Debug, Default)]
 pub struct Journal {
@@ -31,11 +30,8 @@ impl Journal {
     }
 
     pub fn window(&mut self, window: &Window) {
-        self.entries.push(format!(
-            "window {} .. {}",
-            Self::instant(*window.from()),
-            Self::instant(*window.to())
-        ));
+        self.entries
+            .push(format!("window {} .. {}", window.from(), window.to()));
     }
 
     pub fn built(&mut self, log: &BuildLog) {
@@ -43,22 +39,23 @@ impl Journal {
         self.entries.push(format!("  {log}"));
     }
 
-    pub fn complete(&self) -> bool {
-        !self.failed
+    pub fn discrepancy(&mut self, discrepancy: &Discrepancy) {
+        self.failed = true;
+        self.entries.push(format!("  {discrepancy}"));
     }
 
-    fn instant(at: RecordedAt) -> String {
-        match DateTime::<Utc>::try_from(at) {
-            Ok(at) => at.to_rfc3339(),
-            Err(at) => at.milliseconds_since_epoch().to_string(),
-        }
+    pub fn complete(&self) -> bool {
+        !self.failed
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use chrono::DateTime;
+
     use lithify_core::build_log::{Outcome, Run, Status};
     use lithify_core::model::TableId;
+    use lithify_core::position::RecordedAt;
     use lithify_core::sink::TablePath;
 
     use super::*;
@@ -136,6 +133,21 @@ mod tests {
             journal.entries().collect::<Vec<_>>(),
             ["window 2026-09-20T00:00:00+00:00 .. 2026-09-21T00:00:00+00:00"]
         );
+    }
+
+    #[test]
+    fn a_discrepancy_is_reported_as_it_reads_and_leaves_the_check_incomplete() {
+        let mut journal = Journal::default();
+
+        journal.discrepancy(&Discrepancy::NeverBuilt {
+            since: RecordedAt::from(1789862400000),
+        });
+
+        assert_eq!(
+            journal.entries().collect::<Vec<_>>(),
+            ["  nothing is built since 2026-09-20T00:00:00+00:00"]
+        );
+        assert!(!journal.complete());
     }
 
     #[test]

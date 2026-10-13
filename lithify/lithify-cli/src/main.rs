@@ -21,20 +21,45 @@ struct Arguments {
 
 #[derive(Subcommand)]
 enum Command {
-    #[command(about = "Build the snapshots a window of a pipeline's change log settles into")]
+    #[command(
+        about = "Build every window of a pipeline's change log that closed since it was last built"
+    )]
     Run(RunArguments),
+    #[command(
+        about = "List what should have been built by now but was not, and fail if anything is listed"
+    )]
+    Check(CheckArguments),
 }
 
 impl Command {
     fn execute(self) -> ExitCode {
-        match self {
-            Self::Run(arguments) => arguments.execute(),
+        let journal = match self {
+            Self::Run(arguments) => arguments.journal(),
+            Self::Check(arguments) => arguments.journal(),
+        };
+
+        match journal {
+            Ok(journal) => {
+                for entry in journal.entries() {
+                    println!("{entry}");
+                }
+
+                match journal.complete() {
+                    true => ExitCode::SUCCESS,
+                    false => ExitCode::FAILURE,
+                }
+            }
+            Err(unrunnable) => {
+                eprintln!("{unrunnable}");
+
+                ExitCode::FAILURE
+            }
         }
     }
 }
 
 #[derive(clap::Args)]
-struct RunArguments {
+struct PipelineArguments {
     #[arg(
         value_name = "DIRECTORY",
         help = "The directory holding the infra.toml and table.toml of one pipeline"
@@ -62,6 +87,24 @@ struct RunArguments {
         help = "The sink to read, out of the ones the pipeline is sunk into"
     )]
     sink: Option<String>,
+}
+
+impl PipelineArguments {
+    fn run(self, onto: Option<DateTime<Utc>>) -> Run {
+        Run::new(
+            self.directory,
+            Credential::new(self.access_key_id, self.secret_access_key),
+            self.sink,
+            onto,
+            Utc::now(),
+        )
+    }
+}
+
+#[derive(clap::Args)]
+struct RunArguments {
+    #[command(flatten)]
+    pipeline: PipelineArguments,
     #[arg(
         long,
         value_name = "DIRECTORY",
@@ -77,46 +120,25 @@ struct RunArguments {
 }
 
 impl RunArguments {
-    fn execute(self) -> ExitCode {
-        match self.journal() {
-            Ok(journal) => {
-                for entry in journal.entries() {
-                    println!("{entry}");
-                }
+    fn journal(self) -> Result<Journal, Unrunnable> {
+        let run = self.pipeline.run(self.onto);
 
-                match journal.complete() {
-                    true => ExitCode::SUCCESS,
-                    false => ExitCode::FAILURE,
-                }
-            }
-            Err(unrunnable) => {
-                eprintln!("{unrunnable}");
-
-                ExitCode::FAILURE
-            }
-        }
-    }
-
-    fn journal(mut self) -> Result<Journal, Unrunnable> {
-        let dry_run = self.dry_run.take();
-        let run = Run::from(self);
-
-        match dry_run {
+        match self.dry_run {
             Some(into) => run.plan(&into),
             None => run.build(),
         }
     }
 }
 
-impl From<RunArguments> for Run {
-    fn from(arguments: RunArguments) -> Self {
-        Self::new(
-            arguments.directory,
-            Credential::new(arguments.access_key_id, arguments.secret_access_key),
-            arguments.sink,
-            arguments.onto,
-            Utc::now(),
-        )
+#[derive(clap::Args)]
+struct CheckArguments {
+    #[command(flatten)]
+    pipeline: PipelineArguments,
+}
+
+impl CheckArguments {
+    fn journal(self) -> Result<Journal, Unrunnable> {
+        self.pipeline.run(None).check()
     }
 }
 
@@ -145,6 +167,7 @@ mod tests {
 
         match Arguments::parse_from(required.iter().chain(extra)).command {
             Command::Run(arguments) => arguments,
+            Command::Check(_) => unreachable!("run was named"),
         }
     }
 
@@ -186,6 +209,27 @@ mod tests {
         ]);
 
         assert!(windowed.is_err());
+    }
+
+    #[test]
+    fn a_check_reads_the_pipeline_a_run_would() {
+        let checked = Arguments::parse_from([
+            "lithify",
+            "check",
+            "mysql",
+            "--access-key-id",
+            "rustfsadmin",
+            "--secret-access-key",
+            "rustfsadmin",
+            "--sink",
+            "rustfs",
+        ]);
+
+        let Command::Check(arguments) = checked.command else {
+            panic!("check was named");
+        };
+        assert_eq!(arguments.pipeline.directory, PathBuf::from("mysql"));
+        assert_eq!(arguments.pipeline.sink.as_deref(), Some("rustfs"));
     }
 
     #[test]

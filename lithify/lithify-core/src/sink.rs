@@ -134,6 +134,8 @@ pub trait Warehouse {
 
     fn unix_millis(&self, expression: &SqlString) -> SqlString;
 
+    fn select_existence(&self, table: &TablePath) -> SqlString;
+
     fn create_build_log(&self, namespace: &str) -> Result<SqlString, UnsupportedColumn> {
         let columns = std::iter::once(&(BuildLog::ID, ColumnType::Int64))
             .chain(BuildLog::COLUMNS.iter())
@@ -250,6 +252,8 @@ pub trait WarehouseClient {
         Ok(())
     }
 
+    fn exists(&self, table: &TablePath) -> Result<bool, Self::Error>;
+
     fn append_build_log(&self, log: &BuildLog) -> Result<(), Self::Error> {
         self.execute(&self.warehouse().append_build_log(log))
     }
@@ -286,6 +290,10 @@ mod tests {
 
         fn unix_millis(&self, expression: &SqlString) -> SqlString {
             expression.clone()
+        }
+
+        fn select_existence(&self, table: &TablePath) -> SqlString {
+            SqlString::from(format!("SELECT COUNT(*) FROM {table}"))
         }
 
         fn change_log_namespace(&self) -> &str {
@@ -342,6 +350,10 @@ mod tests {
 
         fn latest_build_logs(&self, _: &str, _: &Latest) -> Result<Vec<BuildLog>, Self::Error> {
             Ok(vec![])
+        }
+
+        fn exists(&self, _: &TablePath) -> Result<bool, Self::Error> {
+            Ok(false)
         }
     }
 

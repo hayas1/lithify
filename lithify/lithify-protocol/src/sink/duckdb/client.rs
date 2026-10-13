@@ -2,7 +2,7 @@ use duckdb::types::{FromSql, Type};
 use duckdb::{Connection, Error, Statement};
 
 use lithify_core::build_log::{BuildLog, BuildLogRow, Latest};
-use lithify_core::sink::{Warehouse, WarehouseClient};
+use lithify_core::sink::{TablePath, Warehouse, WarehouseClient};
 use lithify_core::source::{
     ChangeLogs, SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed,
 };
@@ -53,6 +53,16 @@ impl WarehouseClient for DuckDbClient {
 
     fn execute(&self, statement: &SqlString) -> Result<(), Self::Error> {
         self.connection.execute_batch(statement.as_str())
+    }
+
+    fn exists(&self, table: &TablePath) -> Result<bool, Self::Error> {
+        let count: i64 = self.connection.query_row(
+            self.warehouse.select_existence(table).as_str(),
+            [],
+            |row| row.get(0),
+        )?;
+
+        Ok(count > 0)
     }
 
     fn latest_build_logs(
@@ -437,6 +447,27 @@ mod tests {
                 Latest::SucceededUntil(RecordedAt::from(W1.1))
             ),
             [history[2].clone(), history[1].clone()]
+        );
+    }
+
+    #[test]
+    fn a_client_tells_whether_a_table_stands_in_its_warehouse() {
+        let client = logging(&[]);
+
+        assert!(
+            client
+                .exists(&TablePath::new("mysql_shop", "_lithify_log"))
+                .unwrap()
+        );
+        assert!(
+            !client
+                .exists(&TablePath::new("mysql_shop", "people_20260920"))
+                .unwrap()
+        );
+        assert!(
+            !client
+                .exists(&TablePath::new("elsewhere", "_lithify_log"))
+                .unwrap()
         );
     }
 

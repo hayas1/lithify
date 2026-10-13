@@ -2,8 +2,9 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 
-use lithify_config::Pipeline;
 use lithify_config::infra::{Sink, Source};
+use lithify_config::{ArtifactKind, Pipeline};
+use lithify_core::position::RecordedAt;
 use lithify_protocol::sink::bigquery;
 use lithify_protocol::sink::bigquery::client::{BigQueryCapture, BigQueryClient};
 use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbClient};
@@ -11,6 +12,7 @@ use lithify_protocol::sink::duckdb::config::Config;
 use lithify_protocol::sink::duckdb::store::ObjectStore;
 
 use crate::catch_up::CatchUp;
+use crate::check::Expectation;
 use crate::credential::Credential;
 use crate::journal::Journal;
 use crate::pipeline::{Capture, Warehouse};
@@ -64,6 +66,32 @@ impl Run {
                 &Build::new(sink, source)?,
                 journal,
             )
+        })
+    }
+
+    pub fn check(&self) -> Result<Journal, Unrunnable> {
+        self.each_sink(|sink, source, _, journal| {
+            let expectation = Expectation::new(
+                sink.artifacts().schedule(),
+                source.since(),
+                &source.capture().to_json()?,
+                RecordedAt::from(self.now),
+            );
+            let namespace = sink.artifacts().namespace(ArtifactKind::Snapshot);
+            let discrepancies = match sink.warehouse() {
+                Warehouse::DuckDb(config) => {
+                    expectation.read(&self.duckdb(sink, config)?, namespace)?
+                }
+                Warehouse::BigQuery(config) => {
+                    expectation.read(&self.bigquery(sink, config)?, namespace)?
+                }
+            };
+
+            for discrepancy in &discrepancies {
+                journal.discrepancy(discrepancy);
+            }
+
+            Ok(())
         })
     }
 

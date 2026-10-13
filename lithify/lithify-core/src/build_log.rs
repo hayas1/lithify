@@ -56,16 +56,13 @@ impl Display for Status {
 
 impl Status {
     pub fn failed(&self) -> bool {
-        match self {
-            Self::Succeeded => false,
-            Self::Failed(_) => true,
-        }
+        self.error().is_some()
     }
 
-    fn error<W: Warehouse + ?Sized>(&self, warehouse: &W) -> SqlString {
+    pub fn error(&self) -> Option<&str> {
         match self {
-            Self::Succeeded => SqlString::from("NULL"),
-            Self::Failed(error) => warehouse.literal(error),
+            Self::Succeeded => None,
+            Self::Failed(error) => Some(error),
         }
     }
 }
@@ -182,7 +179,10 @@ impl BuildLog {
             warehouse.timestamp_millis(self.window.to().milliseconds_since_epoch()),
             warehouse.literal(&self.outcome.status.to_string()),
             warehouse.timestamp_millis(self.outcome.finished_at.timestamp_millis()),
-            self.outcome.status.error(warehouse),
+            self.outcome
+                .status
+                .error()
+                .map_or_else(|| SqlString::from("NULL"), |error| warehouse.literal(error)),
             warehouse.literal(&self.run.version),
         ]
     }

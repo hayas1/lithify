@@ -18,6 +18,16 @@ impl<S: FromSql> TryFrom<Row> for DebeziumDdl<S> {
     }
 }
 
+pub(crate) struct BigQueryCount(pub(crate) i64);
+
+impl TryFrom<Row> for BigQueryCount {
+    type Error = RowError;
+
+    fn try_from(row: Row) -> Result<Self, Self::Error> {
+        Ok(Self(row.try_get("count")?))
+    }
+}
+
 pub(crate) struct BigQueryBuildLogRow(pub(crate) BuildLogRow);
 
 impl TryFrom<Row> for BigQueryBuildLogRow {

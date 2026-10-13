@@ -9,7 +9,7 @@ use tokio::runtime::Runtime;
 
 use lithify_core::build_log::{BuildLog, Latest, UnreadableBuildLog};
 use lithify_core::event::MalformedEvent;
-use lithify_core::sink::{Warehouse, WarehouseClient};
+use lithify_core::sink::{TablePath, Warehouse, WarehouseClient};
 use lithify_core::source::{
     ChangeLogs, SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed,
 };
@@ -18,7 +18,7 @@ use lithify_core::window::Window;
 
 use crate::sink::bigquery::BigQueryWarehouse;
 use crate::sink::bigquery::config::{Config, Credentials};
-use crate::sink::bigquery::from_sql::BigQueryBuildLogRow;
+use crate::sink::bigquery::from_sql::{BigQueryBuildLogRow, BigQueryCount};
 
 pub trait BigQueryChangeLogsFn {
     type Output;
@@ -95,6 +95,12 @@ impl WarehouseClient for BigQueryClient {
 
             Ok(())
         })
+    }
+
+    fn exists(&self, table: &TablePath) -> Result<bool, Self::Error> {
+        let counted: Vec<BigQueryCount> = self.records(&self.warehouse.select_existence(table))?;
+
+        Ok(counted.iter().any(|count| count.0 > 0))
     }
 
     fn latest_build_logs(

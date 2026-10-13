@@ -103,6 +103,16 @@ impl Warehouse for BigQueryWarehouse {
         SqlString::from(format!("UNIX_MILLIS({expression})"))
     }
 
+    fn select_existence(&self, table: &TablePath) -> SqlString {
+        SqlString::from(format!(
+            "SELECT COUNT(*) AS {} FROM {}.{}.INFORMATION_SCHEMA.TABLES WHERE table_name = {}",
+            self.identifier("count"),
+            self.identifier(&self.project),
+            self.identifier(table.namespace()),
+            self.literal(table.name())
+        ))
+    }
+
     fn timestamp_millis(&self, milliseconds: i64) -> SqlString {
         SqlString::from(format!("TIMESTAMP_MILLIS({milliseconds})"))
     }
@@ -205,6 +215,14 @@ mod tests {
         assert_eq!(
             bigquery().select_latest_build_logs("mysql_shop", &Latest::Succeeded),
             "SELECT `run_id`, `artifact`, `schedule`, `source`, `capture`, `table_id`, `base`, `target`, UNIX_MILLIS(`window_from`) AS `window_from`, UNIX_MILLIS(`window_to`) AS `window_to`, `status`, UNIX_MILLIS(`finished_at`) AS `finished_at`, `error`, `version`\nFROM `local-project`.`mysql_shop`.`_lithify_log`\nWHERE `status` = 'succeeded'\nQUALIFY ROW_NUMBER() OVER (PARTITION BY `artifact`, `schedule`, `table_id` ORDER BY `id` DESC) = 1\nORDER BY `artifact`, `schedule`, `table_id`"
+        );
+    }
+
+    #[test]
+    fn a_table_is_looked_up_among_the_tables_of_its_dataset() {
+        assert_eq!(
+            bigquery().select_existence(&TablePath::new("mysql_shop", "people_20260920")),
+            "SELECT COUNT(*) AS `count` FROM `local-project`.`mysql_shop`.INFORMATION_SCHEMA.TABLES WHERE table_name = 'people_20260920'"
         );
     }
 

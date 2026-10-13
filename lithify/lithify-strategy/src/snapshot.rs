@@ -414,6 +414,10 @@ mod tests {
             expression.clone()
         }
 
+        fn select_existence(&self, table: &TablePath) -> SqlString {
+            SqlString::from(format!("SELECT COUNT(*) FROM {table}"))
+        }
+
         fn change_log_namespace(&self) -> &str {
             "mysql_shop_cdc"
         }
@@ -472,6 +476,10 @@ mod tests {
 
         fn unix_millis(&self, expression: &SqlString) -> SqlString {
             expression.clone()
+        }
+
+        fn select_existence(&self, table: &TablePath) -> SqlString {
+            SqlString::from(format!("SELECT COUNT(*) FROM {table}"))
         }
 
         fn identifier(&self, name: &str) -> SqlString {

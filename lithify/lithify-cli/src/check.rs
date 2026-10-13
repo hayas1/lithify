@@ -1,0 +1,428 @@
+use std::collections::BTreeSet;
+use std::fmt::{self, Display, Formatter};
+
+use lithify_config::Schedule;
+use lithify_core::build_log::{BuildLog, Latest};
+use lithify_core::model::TableId;
+use lithify_core::position::RecordedAt;
+use lithify_core::sink::{TablePath, WarehouseClient};
+use lithify_core::window::Window;
+
+use crate::unrunnable::Unrunnable;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Discrepancy {
+    NeverBuilt {
+        since: RecordedAt,
+    },
+    Overdue {
+        table: TableId,
+        built_until: RecordedAt,
+        due_until: RecordedAt,
+    },
+    Failed {
+        table: TableId,
+        window: Window,
+        error: String,
+    },
+    Missing {
+        table: TableId,
+        target: TablePath,
+    },
+    CaptureChanged {
+        logged: String,
+        configured: String,
+    },
+}
+
+impl Display for Discrepancy {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NeverBuilt { since } => write!(formatter, "nothing is built since {since}"),
+            Self::Overdue {
+                table,
+                built_until,
+                due_until,
+            } => write!(
+                formatter,
+                "{table} is built until {built_until} but due until {due_until}"
+            ),
+            Self::Failed {
+                table,
+                window,
+                error,
+            } => write!(
+                formatter,
+                "{table} failed to build the window from {} to {}: {error}",
+                window.from(),
+                window.to()
+            ),
+            Self::Missing { table, target } => write!(
+                formatter,
+                "{table} is logged as built into {target} but {target} is not there"
+            ),
+            Self::CaptureChanged { logged, configured } => write!(
+                formatter,
+                "the last run captured as {logged} but the pipeline is captured as {configured} now"
+            ),
+        }
+    }
+}
+
+pub struct Expectation {
+    schedule: Schedule,
+    since: RecordedAt,
+    capture: String,
+    now: RecordedAt,
+}
+
+impl Expectation {
+    pub fn new(schedule: Schedule, since: RecordedAt, capture: &str, now: RecordedAt) -> Self {
+        Self {
+            schedule,
+            since,
+            capture: capture.to_owned(),
+            now,
+        }
+    }
+
+    pub fn read<K>(&self, client: &K, namespace: &str) -> Result<Vec<Discrepancy>, Unrunnable>
+    where
+        K: WarehouseClient,
+        Unrunnable: From<K::Error>,
+    {
+        if !client.exists(&BuildLog::path(namespace))? {
+            return Ok(self.discrepancies(&[], &[], &BTreeSet::new()));
+        }
+
+        let latest = client.latest_build_logs(namespace, &Latest::Attempted)?;
+        let succeeded = client.latest_build_logs(namespace, &Latest::Succeeded)?;
+        let mut present = BTreeSet::new();
+        for built in &succeeded {
+            if client.exists(built.target())? {
+                present.insert(built.target().clone());
+            }
+        }
+
+        Ok(self.discrepancies(&latest, &succeeded, &present))
+    }
+
+    // TODO: expect the tables the catalog holds at the end of the last closed window rather than
+    // the ones the last run built, once a plan can be narrowed to some of the tables it replays.
+    pub fn discrepancies(
+        &self,
+        latest: &[BuildLog],
+        succeeded: &[BuildLog],
+        present: &BTreeSet<TablePath>,
+    ) -> Vec<Discrepancy> {
+        let Some(last_run) = latest.iter().map(BuildLog::run_id).max() else {
+            return match self.due_until(self.since) {
+                Some(_) => vec![Discrepancy::NeverBuilt { since: self.since }],
+                None => vec![],
+            };
+        };
+
+        let built_last = latest.iter().filter(|log| log.run_id() == last_run);
+
+        self.capture_changed(built_last.clone())
+            .into_iter()
+            .chain(built_last.flat_map(|log| {
+                let built = succeeded
+                    .iter()
+                    .find(|built| built.origin() == log.origin());
+
+                self.missing_from(built, present).into_iter().chain(
+                    self.failed(log)
+                        .or_else(|| self.overdue(log.origin(), built)),
+                )
+            }))
+            .collect()
+    }
+
+    fn due_until(&self, built_until: RecordedAt) -> Option<RecordedAt> {
+        self.schedule
+            .windows(built_until, self.now)
+            .last()
+            .map(|window| *window.to())
+    }
+
+    fn capture_changed<'b>(
+        &self,
+        mut built_last: impl Iterator<Item = &'b BuildLog>,
+    ) -> Option<Discrepancy> {
+        built_last
+            .find(|log| log.capture() != self.capture)
+            .map(|log| Discrepancy::CaptureChanged {
+                logged: log.capture().to_owned(),
+                configured: self.capture.clone(),
+            })
+    }
+
+    fn missing_from(
+        &self,
+        built: Option<&BuildLog>,
+        present: &BTreeSet<TablePath>,
+    ) -> Option<Discrepancy> {
+        built.and_then(|built| self.missing(built, present))
+    }
+
+    fn failed(&self, log: &BuildLog) -> Option<Discrepancy> {
+        log.status().error().map(|error| Discrepancy::Failed {
+            table: log.origin().clone(),
+            window: log.window().clone(),
+            error: error.to_owned(),
+        })
+    }
+
+    fn missing(&self, built: &BuildLog, present: &BTreeSet<TablePath>) -> Option<Discrepancy> {
+        (!present.contains(built.target())).then(|| Discrepancy::Missing {
+            table: built.origin().clone(),
+            target: built.target().clone(),
+        })
+    }
+
+    fn overdue(&self, table: &TableId, built: Option<&BuildLog>) -> Option<Discrepancy> {
+        let built_until = built.map_or(self.since, |built| *built.window().to());
+
+        self.due_until(built_until)
+            .map(|due_until| Discrepancy::Overdue {
+                table: table.clone(),
+                built_until,
+                due_until,
+            })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ulid::Ulid;
+
+    use chrono::{DateTime, Utc};
+
+    use duckdb::Connection;
+
+    use lithify_core::build_log::{Outcome, Run, Status};
+    use lithify_core::sql::SqlString;
+    use lithify_protocol::DuckDbWarehouse;
+    use lithify_protocol::sink::duckdb::client::DuckDbClient;
+
+    use super::*;
+
+    fn at(rfc3339: &str) -> RecordedAt {
+        RecordedAt::from(rfc3339.parse::<DateTime<Utc>>().unwrap())
+    }
+
+    fn day(date: &str) -> Window {
+        let from = at(&format!("{date}T00:00:00Z"));
+
+        Window::new(
+            from,
+            RecordedAt::from(from.milliseconds_since_epoch() + 86_400_000),
+        )
+    }
+
+    fn logged(run: u64, table: &str, window: Window, status: Status) -> BuildLog {
+        BuildLog::new(
+            &Run::new(
+                Ulid::from_parts(run, 0),
+                "snapshot",
+                "daily",
+                "primary",
+                "{}",
+                "0.1.0",
+            ),
+            TableId::new("shop", table),
+            None,
+            TablePath::new(
+                "mysql_shop",
+                &format!("{table}_{}", window.from().milliseconds_since_epoch()),
+            ),
+            window,
+            Outcome::new(status, DateTime::from_timestamp_millis(0).unwrap()),
+        )
+    }
+
+    fn expected(now: &str) -> Expectation {
+        Expectation::new(Schedule::Daily, at("2026-09-19T00:00:00Z"), "{}", at(now))
+    }
+
+    fn present(logs: &[BuildLog]) -> BTreeSet<TablePath> {
+        logs.iter().map(|log| log.target().clone()).collect()
+    }
+
+    #[test]
+    fn a_pipeline_built_up_to_the_last_closed_window_holds_no_discrepancy() {
+        let people = logged(2, "people", day("2026-09-20"), Status::Succeeded);
+        let built = [people];
+
+        assert_eq!(
+            expected("2026-09-21T05:00:00Z").discrepancies(&built, &built, &present(&built)),
+            []
+        );
+    }
+
+    #[test]
+    fn a_pipeline_never_built_is_due_once_a_window_has_closed() {
+        assert_eq!(
+            expected("2026-09-21T05:00:00Z").discrepancies(&[], &[], &BTreeSet::new()),
+            [Discrepancy::NeverBuilt {
+                since: at("2026-09-19T00:00:00Z")
+            }]
+        );
+        assert_eq!(
+            expected("2026-09-19T05:00:00Z").discrepancies(&[], &[], &BTreeSet::new()),
+            []
+        );
+    }
+
+    #[test]
+    fn a_table_built_short_of_the_last_closed_window_is_overdue() {
+        let people = logged(2, "people", day("2026-09-19"), Status::Succeeded);
+        let built = [people];
+
+        assert_eq!(
+            expected("2026-09-21T05:00:00Z").discrepancies(&built, &built, &present(&built)),
+            [Discrepancy::Overdue {
+                table: TableId::new("shop", "people"),
+                built_until: at("2026-09-20T00:00:00Z"),
+                due_until: at("2026-09-21T00:00:00Z"),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_table_whose_last_build_failed_is_reported_as_failed_rather_than_overdue() {
+        let before = logged(1, "people", day("2026-09-19"), Status::Succeeded);
+        let failed = logged(
+            2,
+            "people",
+            day("2026-09-20"),
+            Status::Failed("no era".to_owned()),
+        );
+
+        assert_eq!(
+            expected("2026-09-21T05:00:00Z").discrepancies(
+                std::slice::from_ref(&failed),
+                std::slice::from_ref(&before),
+                &present(std::slice::from_ref(&before))
+            ),
+            [Discrepancy::Failed {
+                table: TableId::new("shop", "people"),
+                window: day("2026-09-20"),
+                error: "no era".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_pipeline_whose_capture_changed_since_its_last_run_is_reported_as_such() {
+        let people = logged(2, "people", day("2026-09-20"), Status::Succeeded);
+        let built = [people];
+
+        assert_eq!(
+            Expectation::new(
+                Schedule::Daily,
+                at("2026-09-19T00:00:00Z"),
+                r#"{"debezium":{"dialect":"postgres"}}"#,
+                at("2026-09-21T05:00:00Z")
+            )
+            .discrepancies(&built, &built, &present(&built)),
+            [Discrepancy::CaptureChanged {
+                logged: "{}".to_owned(),
+                configured: r#"{"debezium":{"dialect":"postgres"}}"#.to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_table_logged_as_built_whose_target_is_gone_is_missing() {
+        let people = logged(2, "people", day("2026-09-20"), Status::Succeeded);
+        let built = [people.clone()];
+
+        assert_eq!(
+            expected("2026-09-21T05:00:00Z").discrepancies(&built, &built, &BTreeSet::new()),
+            [Discrepancy::Missing {
+                table: TableId::new("shop", "people"),
+                target: people.target().clone(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_table_the_last_run_did_not_build_is_expected_no_longer() {
+        let gone = logged(1, "gone", day("2026-09-19"), Status::Succeeded);
+        let people = logged(2, "people", day("2026-09-20"), Status::Succeeded);
+        let built = [gone, people];
+
+        assert_eq!(
+            expected("2026-09-21T05:00:00Z").discrepancies(&built, &built, &present(&built)),
+            []
+        );
+    }
+
+    #[test]
+    fn a_discrepancy_reads_as_what_went_wrong_with_which_table() {
+        assert_eq!(
+            Discrepancy::Overdue {
+                table: TableId::new("shop", "people"),
+                built_until: at("2026-09-20T00:00:00Z"),
+                due_until: at("2026-09-21T00:00:00Z"),
+            }
+            .to_string(),
+            "shop.people is built until 2026-09-20T00:00:00+00:00 but due until 2026-09-21T00:00:00+00:00"
+        );
+    }
+
+    fn logging(logs: &[BuildLog]) -> DuckDbClient {
+        let client = DuckDbClient::new(
+            Connection::open_in_memory().unwrap(),
+            DuckDbWarehouse::new("mysql_shop_cdc"),
+        );
+        client.create_build_log::<Unrunnable>("mysql_shop").unwrap();
+        for log in logs {
+            client.append_build_log(log).unwrap();
+        }
+
+        client
+    }
+
+    #[test]
+    fn a_warehouse_is_checked_against_the_tables_it_holds() {
+        let people = logged(2, "people", day("2026-09-20"), Status::Succeeded);
+        let pets = logged(2, "pets", day("2026-09-20"), Status::Succeeded);
+        let client = logging(&[people.clone(), pets.clone()]);
+        client
+            .execute(&SqlString::from(format!(
+                "CREATE TABLE \"mysql_shop\".\"{}\" AS SELECT 1 AS id",
+                people.target().name()
+            )))
+            .unwrap();
+
+        assert_eq!(
+            expected("2026-09-21T05:00:00Z")
+                .read(&client, "mysql_shop")
+                .unwrap(),
+            [Discrepancy::Missing {
+                table: TableId::new("shop", "pets"),
+                target: pets.target().clone(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_warehouse_holding_no_build_log_was_never_built() {
+        let client = DuckDbClient::new(
+            Connection::open_in_memory().unwrap(),
+            DuckDbWarehouse::new("mysql_shop_cdc"),
+        );
+
+        assert_eq!(
+            expected("2026-09-21T05:00:00Z")
+                .read(&client, "mysql_shop")
+                .unwrap(),
+            [Discrepancy::NeverBuilt {
+                since: at("2026-09-19T00:00:00Z")
+            }]
+        );
+    }
+}
