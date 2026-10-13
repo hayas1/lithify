@@ -146,6 +146,10 @@ impl BuildLog {
         &self.origin
     }
 
+    pub fn base(&self) -> Option<&TablePath> {
+        self.base.as_ref()
+    }
+
     pub fn target(&self) -> &TablePath {
         &self.target
     }

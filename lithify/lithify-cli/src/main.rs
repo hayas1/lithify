@@ -1,3 +1,5 @@
+#[cfg(feature = "serve")]
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -11,6 +13,10 @@ use lithify_cli::plan::Tables;
 use lithify_cli::run::Run;
 use lithify_cli::unrunnable::Unrunnable;
 use lithify_core::model::TableId;
+#[cfg(feature = "serve")]
+use lithify_ui::overview::SinkOverview;
+#[cfg(feature = "serve")]
+use lithify_ui::server::{Board, Survey};
 
 #[derive(Parser)]
 #[command(
@@ -36,6 +42,11 @@ enum Command {
         about = "List what should have been built by now but was not, and fail if anything is listed"
     )]
     Check(CheckArguments),
+    #[cfg(feature = "serve")]
+    #[command(
+        about = "Serve the pages listing what was built, and assembling the builds to rebuild it with"
+    )]
+    Serve(ServeArguments),
 }
 
 impl Command {
@@ -44,6 +55,8 @@ impl Command {
             Self::CatchUp(arguments) => arguments.journal(),
             Self::Build(arguments) => arguments.journal(),
             Self::Check(arguments) => arguments.journal(),
+            #[cfg(feature = "serve")]
+            Self::Serve(arguments) => arguments.journal(),
         };
 
         match journal {
@@ -98,13 +111,47 @@ struct PipelineArguments {
 }
 
 impl PipelineArguments {
-    fn run(self) -> Run {
+    fn run(&self) -> Run {
         Run::new(
-            self.directory,
-            Credential::new(self.access_key_id, self.secret_access_key),
-            self.sink,
+            self.directory.clone(),
+            Credential::new(self.access_key_id.clone(), self.secret_access_key.clone()),
+            self.sink.clone(),
             Utc::now(),
         )
+    }
+}
+
+#[cfg(feature = "serve")]
+impl Survey for PipelineArguments {
+    fn directory(&self) -> String {
+        self.directory.display().to_string()
+    }
+
+    fn sinks(&self) -> Result<Vec<String>, String> {
+        self.run()
+            .sinks()
+            .map_err(|unrunnable| unrunnable.to_string())
+    }
+
+    fn inspect(&self) -> Result<Vec<SinkOverview>, String> {
+        Ok(self
+            .run()
+            .inspect()
+            .map_err(|unrunnable| unrunnable.to_string())?
+            .into_iter()
+            .map(|(sink, inspection)| {
+                SinkOverview::new(
+                    &sink,
+                    inspection.schedule(),
+                    inspection.latest().to_vec(),
+                    inspection
+                        .discrepancies()
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect(),
+                )
+            })
+            .collect())
     }
 }
 
@@ -172,6 +219,29 @@ struct CheckArguments {
 impl CheckArguments {
     fn journal(self) -> Result<Journal, Unrunnable> {
         self.pipeline.run().check()
+    }
+}
+
+#[cfg(feature = "serve")]
+#[derive(clap::Args)]
+struct ServeArguments {
+    #[command(flatten)]
+    pipeline: PipelineArguments,
+    #[arg(
+        long,
+        value_name = "ADDRESS",
+        default_value = "127.0.0.1:3000",
+        help = "The address the pages are served on"
+    )]
+    address: SocketAddr,
+}
+
+#[cfg(feature = "serve")]
+impl ServeArguments {
+    fn journal(self) -> Result<Journal, Unrunnable> {
+        Board::new(self.pipeline).serve(self.address)?;
+
+        Ok(Journal::default())
     }
 }
 
@@ -266,5 +336,48 @@ mod tests {
         let unnamed = Arguments::try_parse_from(["lithify"].iter().chain(&PIPELINE));
 
         assert!(unnamed.is_err());
+    }
+
+    #[cfg(feature = "serve")]
+    #[test]
+    fn a_board_is_served_on_the_loopback_unless_told_otherwise() {
+        let Ok(Command::Serve(served)) = parsed("serve", &[]) else {
+            panic!("serve was named");
+        };
+        let Ok(Command::Serve(addressed)) = parsed("serve", &["--address", "0.0.0.0:8080"]) else {
+            panic!("serve was named");
+        };
+
+        assert_eq!(served.address, "127.0.0.1:3000".parse().unwrap());
+        assert_eq!(addressed.address, "0.0.0.0:8080".parse().unwrap());
+    }
+
+    #[cfg(feature = "serve")]
+    #[test]
+    fn a_build_the_board_assembles_is_one_the_command_line_takes() {
+        let assembled =
+            lithify_ui::command::BuildCommand::new("mysql", "2026-09-20".parse().unwrap())
+                .sink("rustfs")
+                .table(TableId::new("shop", "pets"))
+                .dry_run("plans");
+
+        let Command::Build(built) = Arguments::try_parse_from(
+            assembled
+                .args()
+                .iter()
+                .map(String::as_str)
+                .chain(PIPELINE[1..].iter().copied()),
+        )
+        .unwrap()
+        .command
+        else {
+            panic!("build was assembled");
+        };
+
+        assert_eq!(built.pipeline.directory, PathBuf::from("mysql"));
+        assert_eq!(built.pipeline.sink.as_deref(), Some("rustfs"));
+        assert_eq!(built.snapshot, "2026-09-20".parse::<NaiveDate>().unwrap());
+        assert_eq!(built.table, [TableId::new("shop", "pets")]);
+        assert_eq!(built.dry_run, Some(PathBuf::from("plans")));
     }
 }

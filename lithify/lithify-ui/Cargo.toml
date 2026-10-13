@@ -1,0 +1,24 @@
+[package]
+name = "lithify-ui"
+version.workspace = true
+description.workspace = true
+authors.workspace = true
+edition.workspace = true
+repository.workspace = true
+license-file.workspace = true
+readme.workspace = true
+
+[dependencies]
+axum = { workspace = true }
+chrono = { workspace = true }
+leptos = { workspace = true }
+lithify-config = { workspace = true }
+lithify-core = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "net"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tokio = { workspace = true, features = ["macros"] }
+tower = { version = "0.5", features = ["util"] }
+ulid = { workspace = true }

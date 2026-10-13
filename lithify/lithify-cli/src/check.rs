@@ -69,6 +69,27 @@ impl Display for Discrepancy {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Inspection {
+    schedule: Schedule,
+    latest: Vec<BuildLog>,
+    discrepancies: Vec<Discrepancy>,
+}
+
+impl Inspection {
+    pub fn schedule(&self) -> Schedule {
+        self.schedule
+    }
+
+    pub fn latest(&self) -> &[BuildLog] {
+        &self.latest
+    }
+
+    pub fn discrepancies(&self) -> &[Discrepancy] {
+        &self.discrepancies
+    }
+}
+
 pub struct Expectation {
     schedule: Schedule,
     since: RecordedAt,
@@ -86,13 +107,17 @@ impl Expectation {
         }
     }
 
-    pub fn read<K>(&self, client: &K, namespace: &str) -> Result<Vec<Discrepancy>, Unrunnable>
+    pub fn read<K>(&self, client: &K, namespace: &str) -> Result<Inspection, Unrunnable>
     where
         K: WarehouseClient,
         Unrunnable: From<K::Error>,
     {
         if !client.exists(&BuildLog::path(namespace))? {
-            return Ok(self.discrepancies(&[], &[], &BTreeSet::new()));
+            return Ok(Inspection {
+                schedule: self.schedule,
+                latest: Vec::new(),
+                discrepancies: self.discrepancies(&[], &[], &BTreeSet::new()),
+            });
         }
 
         let latest = client.latest_build_logs(namespace, &Latest::Attempted)?;
@@ -104,7 +129,11 @@ impl Expectation {
             }
         }
 
-        Ok(self.discrepancies(&latest, &succeeded, &present))
+        Ok(Inspection {
+            schedule: self.schedule,
+            discrepancies: self.discrepancies(&latest, &succeeded, &present),
+            latest,
+        })
     }
 
     // TODO: expect the tables the catalog holds at the end of the last closed window rather than
@@ -401,7 +430,8 @@ mod tests {
         assert_eq!(
             expected("2026-09-21T05:00:00Z")
                 .read(&client, "mysql_shop")
-                .unwrap(),
+                .unwrap()
+                .discrepancies(),
             [Discrepancy::Missing {
                 table: TableId::new("shop", "pets"),
                 target: pets.target().clone(),
@@ -419,10 +449,33 @@ mod tests {
         assert_eq!(
             expected("2026-09-21T05:00:00Z")
                 .read(&client, "mysql_shop")
-                .unwrap(),
+                .unwrap()
+                .discrepancies(),
             [Discrepancy::NeverBuilt {
                 since: at("2026-09-19T00:00:00Z")
             }]
+        );
+    }
+
+    #[test]
+    fn a_warehouse_is_inspected_for_the_latest_build_of_each_table() {
+        let failed = logged(
+            3,
+            "people",
+            day("2026-09-20"),
+            Status::Failed("no such column".to_owned()),
+        );
+        let client = logging(&[
+            logged(2, "people", day("2026-09-20"), Status::Succeeded),
+            failed.clone(),
+        ]);
+
+        assert_eq!(
+            expected("2026-09-21T05:00:00Z")
+                .read(&client, "mysql_shop")
+                .unwrap()
+                .latest(),
+            [failed]
         );
     }
 }

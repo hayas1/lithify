@@ -46,12 +46,7 @@ impl Display for Unrunnable {
                 formatter,
                 "the build log was captured as {logged} but the pipeline is captured as {configured} now"
             ),
-            Self::Unsharded(date) => {
-                write!(
-                    formatter,
-                    "no shard is dated {date}, before the change log opens"
-                )
-            }
+            Self::Unsharded(date) => write!(formatter, "the schedule dates no shard {date}"),
             Self::Unclosed(window) => write!(
                 formatter,
                 "the window {} .. {} has not closed yet",

@@ -40,9 +40,21 @@ impl Schedule {
         match date.cmp(&DateTime::<Utc>::try_from(since).ok()?.date_naive()) {
             Ordering::Less => None,
             Ordering::Equal => self.window(since),
-            Ordering::Greater => {
-                self.window(RecordedAt::from(date.and_hms_opt(0, 0, 0)?.and_utc()))
-            }
+            Ordering::Greater => self.window(self.opening(date)?),
+        }
+    }
+
+    pub fn date(self, shard: &Window) -> Option<NaiveDate> {
+        let opened = DateTime::<Utc>::try_from(*shard.from()).ok()?;
+
+        match self {
+            Self::Daily => Some(opened.date_naive()),
+        }
+    }
+
+    fn opening(self, date: NaiveDate) -> Option<RecordedAt> {
+        match self {
+            Self::Daily => Some(RecordedAt::from(date.and_hms_opt(0, 0, 0)?.and_utc())),
         }
     }
 
@@ -129,6 +141,18 @@ mod tests {
                 at("2026-09-21T00:00:00Z")
             ))
         );
+    }
+
+    #[test]
+    fn a_daily_shard_is_dated_by_the_window_it_builds() {
+        for (since, date) in [
+            ("2026-09-20T10:00:00Z", "2026-09-20"),
+            ("2026-09-20T10:00:00Z", "2026-09-21"),
+        ] {
+            let window = Schedule::Daily.shard(at(since), self::date(date)).unwrap();
+
+            assert_eq!(Schedule::Daily.date(&window), Some(self::date(date)));
+        }
     }
 
     #[test]

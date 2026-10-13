@@ -11,7 +11,7 @@ use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbClient};
 use lithify_protocol::sink::duckdb::config::Config;
 use lithify_protocol::sink::duckdb::store::ObjectStore;
 
-use crate::check::Expectation;
+use crate::check::{Expectation, Inspection};
 use crate::course::Course;
 use crate::credential::Credential;
 use crate::journal::Journal;
@@ -70,28 +70,64 @@ impl Run {
 
     pub fn check(&self) -> Result<Journal, Unrunnable> {
         self.each_sink(|sink, source, _, journal| {
-            let expectation = Expectation::new(
-                sink.artifacts().schedule(),
-                source.since(),
-                &source.capture().to_json()?,
-                RecordedAt::from(self.now),
-            );
-            let namespace = sink.artifacts().namespace(ArtifactKind::Snapshot);
-            let discrepancies = match sink.warehouse() {
-                Warehouse::DuckDb(config) => {
-                    expectation.read(&self.duckdb(sink, config)?, namespace)?
-                }
-                Warehouse::BigQuery(config) => {
-                    expectation.read(&self.bigquery(sink, config)?, namespace)?
-                }
-            };
-
-            for discrepancy in &discrepancies {
+            for discrepancy in self.inspection(sink, source)?.discrepancies() {
                 journal.discrepancy(discrepancy);
             }
 
             Ok(())
         })
+    }
+
+    pub fn inspect(&self) -> Result<Vec<(String, Inspection)>, Unrunnable> {
+        let pipeline: Pipeline<Capture, Warehouse> = Pipeline::open(&self.directory)?;
+        let source = Self::source(&pipeline)?;
+
+        self.selected(&pipeline)?
+            .into_iter()
+            .map(|sink| Ok((sink.name().to_owned(), self.inspection(sink, source)?)))
+            .collect()
+    }
+
+    pub fn sinks(&self) -> Result<Vec<String>, Unrunnable> {
+        let pipeline: Pipeline<Capture, Warehouse> = Pipeline::open(&self.directory)?;
+
+        Ok(self
+            .selected(&pipeline)?
+            .into_iter()
+            .map(|sink| sink.name().to_owned())
+            .collect())
+    }
+
+    fn inspection(
+        &self,
+        sink: &Sink<Warehouse>,
+        source: &Source<Capture>,
+    ) -> Result<Inspection, Unrunnable> {
+        let expectation = Expectation::new(
+            sink.artifacts().schedule(),
+            source.since(),
+            &source.capture().to_json()?,
+            RecordedAt::from(self.now),
+        );
+        let namespace = sink.artifacts().namespace(ArtifactKind::Snapshot);
+
+        match sink.warehouse() {
+            Warehouse::DuckDb(config) => expectation.read(&self.duckdb(sink, config)?, namespace),
+            Warehouse::BigQuery(config) => {
+                expectation.read(&self.bigquery(sink, config)?, namespace)
+            }
+        }
+    }
+
+    fn source(pipeline: &Pipeline<Capture, Warehouse>) -> Result<&Source<Capture>, Unrunnable> {
+        let mut sources = pipeline.sources();
+        let source = sources.next().ok_or(Unrunnable::WithoutSource)?;
+
+        if sources.next().is_some() {
+            todo!("order the change log across the boundary between connection eras");
+        }
+
+        Ok(source)
     }
 
     fn each_sink(
@@ -104,16 +140,10 @@ impl Run {
         ) -> Result<(), Unrunnable>,
     ) -> Result<Journal, Unrunnable> {
         let pipeline: Pipeline<Capture, Warehouse> = Pipeline::open(&self.directory)?;
-        let mut sources = pipeline.sources();
-        let source = sources.next().ok_or(Unrunnable::WithoutSource)?;
-
-        if sources.next().is_some() {
-            todo!("order the change log across the boundary between connection eras");
-        }
-
+        let source = Self::source(&pipeline)?;
         let mut journal = Journal::default();
 
-        for sink in self.sinks(&pipeline)? {
+        for sink in self.selected(&pipeline)? {
             journal.sink(sink.name());
 
             let Some(topic_prefix) = source.topic_prefix() else {
@@ -189,7 +219,7 @@ impl Run {
         Ok(BigQueryClient::open(config, sink.change_log())?)
     }
 
-    fn sinks<'a>(
+    fn selected<'a>(
         &self,
         pipeline: &'a Pipeline<Capture, Warehouse>,
     ) -> Result<Vec<&'a Sink<Warehouse>>, Unrunnable> {
