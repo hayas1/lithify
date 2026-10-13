@@ -1,32 +1,24 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 
+use lithify_config::ArtifactKind;
 use lithify_config::infra::{Sink, Source};
-use lithify_core::position::RecordedAt;
 use lithify_core::sink::WarehouseClient;
 use lithify_core::window::Window;
 
 use crate::catch_up::CatchUp;
 use crate::journal::Journal;
 use crate::pipeline::{Capture, Warehouse};
-use crate::plan::Base;
+use crate::plan::{Base, Tables};
 use crate::settlement::Settlement;
+use crate::shard::Shard;
 use crate::unrunnable::Unrunnable;
 
 pub enum Course {
     CatchUp,
-    Window(Window, Base),
+    Shard { date: NaiveDate, tables: Tables },
 }
 
 impl Course {
-    pub fn window(window: Window, onto: Option<RecordedAt>) -> Self {
-        let base = match onto {
-            Some(onto) => Base::Shard(Window::new(onto, *window.from())),
-            None => Base::default(),
-        };
-
-        Self::Window(window, base)
-    }
-
     pub fn itinerary<K>(
         &self,
         sink: &Sink<Warehouse>,
@@ -38,9 +30,14 @@ impl Course {
         K: WarehouseClient,
         Unrunnable: From<K::Error>,
     {
+        client
+            .create_build_log::<Unrunnable>(sink.artifacts().namespace(ArtifactKind::Snapshot))?;
+
         match self {
             Self::CatchUp => CatchUp::new(sink, source, now).itinerary(client),
-            Self::Window(window, base) => Ok(Itinerary::new(vec![window.clone()], base.clone())),
+            Self::Shard { date, tables } => {
+                Shard::new(sink, source, now).itinerary(client, *date, tables)
+            }
         }
     }
 }
@@ -48,24 +45,29 @@ impl Course {
 pub struct Itinerary {
     windows: Vec<Window>,
     base: Base,
+    tables: Tables,
 }
 
 impl Itinerary {
-    pub fn new(windows: Vec<Window>, base: Base) -> Self {
-        Self { windows, base }
+    pub fn new(windows: Vec<Window>, base: Base, tables: Tables) -> Self {
+        Self {
+            windows,
+            base,
+            tables,
+        }
     }
 
     pub fn settle<S: Settlement>(
         self,
         settlement: &S,
         journal: &mut Journal,
-        mut plan: impl FnMut(&Window, &Base) -> Result<S::Output, Unrunnable>,
+        mut plan: impl FnMut(&Window, &Base, &Tables) -> Result<S::Output, Unrunnable>,
     ) -> Result<(), Unrunnable> {
         let mut base = self.base;
 
         for window in self.windows {
             journal.window(&window);
-            if !settlement.report(&window, plan(&window, &base)?, journal)? {
+            if !settlement.report(&window, plan(&window, &base, &self.tables)?, journal)? {
                 break;
             }
             base = Base::Shard(window);
@@ -78,17 +80,53 @@ impl Itinerary {
 #[cfg(test)]
 pub(crate) mod tests {
     use lithify_config::Pipeline;
+    use lithify_core::model::TableId;
+    use lithify_core::sql::SqlString;
     use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbClient};
 
     use super::*;
     use crate::plan::SnapshotPlan;
-    use crate::plan::tests::{CAPTURE, PEOPLE, at, built_before, logged, pipeline, rows};
+    use crate::plan::tests::{
+        BUILT_CHANGE_LOGS, CAPTURE, PEOPLE, at, built_before, logged, pipeline, rows,
+    };
     use crate::settlement::Build;
 
     const NOW: &str = "2026-09-22T05:00:00Z";
 
-    fn day(from: &str, to: &str) -> Window {
-        Window::new(RecordedAt::from(at(from)), RecordedAt::from(at(to)))
+    const PETS_CREATED_ON_20260920: &str = "CREATE SCHEMA mysql_shop_cdc;
+        CREATE TABLE mysql_shop_cdc.mysql AS SELECT * FROM (VALUES
+          ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL}, 'ts_ms': 0::BIGINT,
+            'ddl': 'CREATE TABLE people (id BIGINT)',
+            'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
+              'table': {'primaryKeyColumnNames': ['id'], 'columns': [
+                {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
+                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]}),
+          ({'source': {'file': 'binlog.000001', 'pos': 2::BIGINT, 'gtid': NULL}, 'ts_ms': 1789862400005::BIGINT,
+            'ddl': 'CREATE TABLE pets (id BIGINT)',
+            'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"pets\"',
+              'table': {'primaryKeyColumnNames': ['id'], 'columns': [
+                {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
+                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]})
+        ) AS t(value);
+        CREATE TABLE mysql_shop_cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
+          ({'op': 'c', 'ts_ms': 1789862400001::BIGINT,
+            'source': {'file': 'binlog.000001', 'pos': 3::BIGINT, 'gtid': NULL},
+            'before': NULL::STRUCT(id BIGINT), 'after': {'id': 8::BIGINT}})
+        ) AS t(value);
+        CREATE TABLE mysql_shop_cdc.\"mysql.shop.pets\" AS SELECT * FROM (VALUES
+          ({'op': 'c', 'ts_ms': 1789862400009::BIGINT,
+            'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL},
+            'before': NULL::STRUCT(id BIGINT), 'after': {'id': 9::BIGINT}})
+        ) AS t(value)";
+
+    fn shard(date: &str, tables: &[TableId]) -> Course {
+        Course::Shard {
+            date: date.parse().unwrap(),
+            tables: match tables {
+                [] => Tables::Every,
+                named => Tables::Named(named.iter().cloned().collect()),
+            },
+        }
     }
 
     pub(crate) fn settle(
@@ -108,10 +146,10 @@ pub(crate) mod tests {
         course.itinerary(sink, source, at(now), client)?.settle(
             &settlement,
             &mut journal,
-            |window, base| {
+            |window, base, tables| {
                 source.capture().with_duckdb_change_logs(
                     source.topic_prefix().unwrap(),
-                    SnapshotPlan::new(client, sink, window, base, &settlement),
+                    SnapshotPlan::new(client, sink, window, base, tables, &settlement),
                 )
             },
         )?;
@@ -131,14 +169,79 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_window_given_without_a_base_is_built_from_nothing_whatever_was_built_before() {
+    fn a_shard_folds_onto_the_one_the_build_log_recorded_closing_at_its_opening() {
         let pipeline = pipeline();
         let client = logged(PEOPLE, &[built_before("people", CAPTURE)]);
+
+        settle(&pipeline, &client, &shard("2026-09-20", &[]), NOW).unwrap();
+
+        assert_eq!(
+            built(&client),
+            [
+                folded("mysql_shop.people_20260919", ""),
+                folded("mysql_shop.people_20260920", "mysql_shop.people_20260919"),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_shard_the_change_log_opens_in_is_built_from_nothing() {
+        let pipeline = pipeline();
+        let client = logged(PEOPLE, &[]);
+
+        settle(&pipeline, &client, &shard("1970-01-01", &[]), NOW).unwrap();
+
+        assert_eq!(built(&client), [folded("mysql_shop.people_19700101", "")]);
+    }
+
+    #[test]
+    fn the_shard_the_change_log_opens_in_is_built_before_anything_was_logged() {
+        let pipeline = pipeline();
+        let client = logged(PEOPLE, &[]);
+        client
+            .execute(&SqlString::from("DROP TABLE mysql_shop._lithify_log"))
+            .unwrap();
+
+        settle(&pipeline, &client, &shard("1970-01-01", &[]), NOW).unwrap();
+
+        assert_eq!(built(&client), [folded("mysql_shop.people_19700101", "")]);
+    }
+
+    #[test]
+    fn a_shard_nothing_was_recorded_closing_before_is_not_built() {
+        let pipeline = pipeline();
+        let client = logged(PEOPLE, &[]);
+
+        let baseless = settle(&pipeline, &client, &shard("2026-09-20", &[]), NOW);
+
+        assert!(matches!(baseless, Err(Unrunnable::Baseless(_))));
+    }
+
+    #[test]
+    fn a_shard_that_has_not_closed_is_not_built() {
+        let pipeline = pipeline();
+        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]);
+
+        let open = settle(&pipeline, &client, &shard("2026-09-22", &[]), NOW);
+
+        assert!(matches!(open, Err(Unrunnable::Unclosed(_))));
+    }
+
+    #[test]
+    fn a_shard_narrowed_to_some_tables_builds_only_them() {
+        let pipeline = pipeline();
+        let client = logged(
+            BUILT_CHANGE_LOGS,
+            &[
+                built_before("people", CAPTURE),
+                built_before("pets", CAPTURE),
+            ],
+        );
 
         settle(
             &pipeline,
             &client,
-            &Course::window(day("2026-09-20T00:00:00Z", "2026-09-21T00:00:00Z"), None),
+            &shard("2026-09-20", &[TableId::new("shop", "people")]),
             NOW,
         )
         .unwrap();
@@ -147,52 +250,62 @@ pub(crate) mod tests {
             built(&client),
             [
                 folded("mysql_shop.people_20260919", ""),
-                folded("mysql_shop.people_20260920", ""),
+                folded("mysql_shop.pets_20260919", ""),
+                folded("mysql_shop.people_20260920", "mysql_shop.people_20260919"),
             ]
         );
     }
 
     #[test]
-    fn a_window_given_onto_an_earlier_one_folds_onto_its_snapshot() {
+    fn a_table_created_within_a_shard_is_built_from_nothing_beside_the_ones_folded() {
         let pipeline = pipeline();
-        let client = logged(PEOPLE, &[]);
+        let client = logged(PETS_CREATED_ON_20260920, &[built_before("people", CAPTURE)]);
 
-        settle(
-            &pipeline,
-            &client,
-            &Course::window(
-                day("2026-09-20T00:00:00Z", "2026-09-21T00:00:00Z"),
-                Some(RecordedAt::from(at("2026-09-19T00:00:00Z"))),
-            ),
-            NOW,
-        )
-        .unwrap();
+        settle(&pipeline, &client, &shard("2026-09-20", &[]), NOW).unwrap();
 
         assert_eq!(
             built(&client),
-            [folded(
-                "mysql_shop.people_20260920",
-                "mysql_shop.people_20260919"
-            )]
+            [
+                folded("mysql_shop.people_20260919", ""),
+                folded("mysql_shop.people_20260920", "mysql_shop.people_20260919"),
+                folded("mysql_shop.pets_20260920", ""),
+            ]
         );
     }
 
     #[test]
-    fn a_window_rebuilt_behind_the_latest_makes_the_next_catch_up_rebuild_what_folded_onto_it() {
+    fn a_shard_dated_before_the_change_log_opens_is_not_built() {
+        let pipeline = pipeline();
+        let client = logged(PEOPLE, &[]);
+
+        let unsharded = settle(&pipeline, &client, &shard("1969-12-31", &[]), NOW);
+
+        assert!(matches!(unsharded, Err(Unrunnable::Unsharded(_))));
+    }
+
+    #[test]
+    fn a_shard_narrowed_to_a_table_it_does_not_hold_is_not_built() {
+        let pipeline = pipeline();
+        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]);
+
+        let unknown = settle(
+            &pipeline,
+            &client,
+            &shard("2026-09-20", &[TableId::new("shop", "ghosts")]),
+            NOW,
+        );
+
+        assert!(matches!(unknown, Err(Unrunnable::UnknownTables(_))));
+        assert_eq!(built(&client), [folded("mysql_shop.people_20260919", "")]);
+    }
+
+    #[test]
+    fn a_shard_rebuilt_behind_the_latest_makes_the_next_catch_up_rebuild_what_folded_onto_it() {
         let pipeline = pipeline();
         let client = logged(PEOPLE, &[built_before("people", CAPTURE)]);
 
         settle(&pipeline, &client, &Course::CatchUp, NOW).unwrap();
-        settle(
-            &pipeline,
-            &client,
-            &Course::window(
-                day("2026-09-20T00:00:00Z", "2026-09-21T00:00:00Z"),
-                Some(RecordedAt::from(at("2026-09-19T00:00:00Z"))),
-            ),
-            NOW,
-        )
-        .unwrap();
+        settle(&pipeline, &client, &shard("2026-09-20", &[]), NOW).unwrap();
         settle(&pipeline, &client, &Course::CatchUp, NOW).unwrap();
 
         assert_eq!(

@@ -1,13 +1,15 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use duckdb::types::FromSql;
 use google_cloud_bigquery::error::RowError;
 use google_cloud_bigquery::query::Row;
 
 use lithify_config::infra::Sink;
-use lithify_core::artifact::{Artifact, UnbuildableArtifact};
+use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
+use lithify_core::build_log::Latest;
 use lithify_core::era::EraTracker;
 use lithify_core::model::TableId;
+use lithify_core::position::RecordedAt;
 use lithify_core::sink::TablePath;
 use lithify_core::sink::WarehouseClient;
 use lithify_core::source::{ChangeLogs, SchemaChangeLog, SchemaChangeStream};
@@ -37,6 +39,29 @@ impl Default for Base {
 }
 
 impl Base {
+    pub fn recorded<K>(client: &K, namespace: &str, start: RecordedAt) -> Result<Self, Unrunnable>
+    where
+        K: WarehouseClient,
+        Unrunnable: From<K::Error>,
+    {
+        // TODO: follow a table renamed within the window before, whose log is keyed by the
+        // name it opened that window with rather than the one it opens this window with.
+        Ok(Self::Recorded(
+            client
+                .latest_build_logs(namespace, &Latest::SucceededUntil(start))?
+                .into_iter()
+                .map(|log| (log.origin().clone(), log.target().clone()))
+                .collect(),
+        ))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::Recorded(targets) => targets.is_empty(),
+            Self::Shard(_) => false,
+        }
+    }
+
     fn of(
         &self,
         snapshot: &Snapshot,
@@ -49,11 +74,40 @@ impl Base {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Tables {
+    #[default]
+    Every,
+    Named(BTreeSet<TableId>),
+}
+
+impl Tables {
+    fn narrow<B: ArtifactBuilder>(&self, mut builders: Vec<B>) -> Result<Vec<B>, Unrunnable> {
+        match self {
+            Self::Every => Ok(builders),
+            Self::Named(tables) => {
+                let unknown: Vec<_> = tables
+                    .iter()
+                    .filter(|table| !builders.iter().any(|builder| builder.table() == *table))
+                    .cloned()
+                    .collect();
+                if !unknown.is_empty() {
+                    return Err(Unrunnable::UnknownTables(unknown));
+                }
+                builders.retain(|builder| tables.contains(builder.table()));
+
+                Ok(builders)
+            }
+        }
+    }
+}
+
 pub struct SnapshotPlan<'a, K, S> {
     client: &'a K,
     sink: &'a Sink<Warehouse>,
     window: &'a Window,
     base: &'a Base,
+    tables: &'a Tables,
     settlement: &'a S,
 }
 
@@ -63,6 +117,7 @@ impl<'a, K, S: Settlement> SnapshotPlan<'a, K, S> {
         sink: &'a Sink<Warehouse>,
         window: &'a Window,
         base: &'a Base,
+        tables: &'a Tables,
         settlement: &'a S,
     ) -> Self {
         Self {
@@ -70,6 +125,7 @@ impl<'a, K, S: Settlement> SnapshotPlan<'a, K, S> {
             sink,
             window,
             base,
+            tables,
             settlement,
         }
     }
@@ -82,7 +138,7 @@ impl<'a, K, S: Settlement> SnapshotPlan<'a, K, S> {
         Unrunnable: From<<K as WarehouseClient>::Error>,
     {
         let snapshot = self.sink.snapshot();
-        let builders = self.builders(&snapshot, &logs)?;
+        let builders = self.tables.narrow(self.builders(&snapshot, &logs)?)?;
 
         self.settlement.settle(self.client, &builders)
     }
@@ -206,6 +262,7 @@ pub(crate) mod tests {
                     sink,
                     &window,
                     &Base::default(),
+                    &Tables::Every,
                     &DryRun::new(Path::new("plans"), "rustfs"),
                 ),
             )
@@ -255,6 +312,7 @@ pub(crate) mod tests {
                     sink,
                     &window,
                     &Base::Shard(Window::new(RecordedAt::from(onto), *window.from())),
+                    &Tables::Every,
                     &DryRun::new(Path::new("plans"), "rustfs"),
                 ),
             )
@@ -298,6 +356,7 @@ pub(crate) mod tests {
                     sink,
                     &window,
                     &recorded,
+                    &Tables::Every,
                     &DryRun::new(Path::new("plans"), "rustfs"),
                 ),
             )
@@ -443,6 +502,7 @@ pub(crate) mod tests {
                     sink,
                     &window,
                     &Base::default(),
+                    &Tables::Every,
                     &Build::new(sink, source).unwrap(),
                 ),
             )

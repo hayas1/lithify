@@ -1,9 +1,13 @@
 use std::convert::Infallible;
 use std::fmt::{self, Display, Formatter};
 
+use chrono::NaiveDate;
+
 use lithify_config::Unreadable;
 use lithify_core::artifact::UnbuildableArtifact;
 use lithify_core::listener::OutOfOrder;
+use lithify_core::model::TableId;
+use lithify_core::window::Window;
 use lithify_protocol::sink::bigquery::client::Unqueryable;
 
 #[derive(Debug)]
@@ -18,6 +22,10 @@ pub enum Unrunnable {
     UnknownSink(String),
     CaptureChanged { logged: String, configured: String },
     WithoutSource,
+    Unsharded(NaiveDate),
+    Unclosed(Window),
+    Baseless(Window),
+    UnknownTables(Vec<TableId>),
 }
 
 impl Display for Unrunnable {
@@ -38,6 +46,33 @@ impl Display for Unrunnable {
                 formatter,
                 "the build log was captured as {logged} but the pipeline is captured as {configured} now"
             ),
+            Self::Unsharded(date) => {
+                write!(
+                    formatter,
+                    "no shard is dated {date}, before the change log opens"
+                )
+            }
+            Self::Unclosed(window) => write!(
+                formatter,
+                "the window {} .. {} has not closed yet",
+                window.from(),
+                window.to()
+            ),
+            Self::Baseless(window) => write!(
+                formatter,
+                "nothing was built closing at {}, which the window to {} folds onto",
+                window.from(),
+                window.to()
+            ),
+            Self::UnknownTables(tables) => write!(
+                formatter,
+                "the window holds no table named {}",
+                tables
+                    .iter()
+                    .map(TableId::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         }
     }
 }
@@ -52,7 +87,13 @@ impl std::error::Error for Unrunnable {
             Self::Unbuildable(cause) => Some(cause),
             Self::Unwritable(cause) => Some(cause),
             Self::Unserializable(cause) => Some(cause),
-            Self::UnknownSink(_) | Self::WithoutSource | Self::CaptureChanged { .. } => None,
+            Self::UnknownSink(_)
+            | Self::WithoutSource
+            | Self::CaptureChanged { .. }
+            | Self::Unsharded(_)
+            | Self::Unclosed(_)
+            | Self::Baseless(_)
+            | Self::UnknownTables(_) => None,
         }
     }
 }

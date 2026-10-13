@@ -1,16 +1,16 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use chrono::{DateTime, Utc};
+use chrono::{NaiveDate, Utc};
 use clap::{Parser, Subcommand};
 
 use lithify_cli::course::Course;
 use lithify_cli::credential::{Credential, Secret};
 use lithify_cli::journal::Journal;
+use lithify_cli::plan::Tables;
 use lithify_cli::run::Run;
 use lithify_cli::unrunnable::Unrunnable;
-use lithify_core::position::RecordedAt;
-use lithify_core::window::Window;
+use lithify_core::model::TableId;
 
 #[derive(Parser)]
 #[command(
@@ -29,7 +29,7 @@ enum Command {
     )]
     CatchUp(CatchUpArguments),
     #[command(
-        about = "Build the window of a pipeline's change log that is named, whatever the build log says"
+        about = "Build the shard of a pipeline's snapshots that is named, onto the one the build log recorded before it"
     )]
     Build(BuildArguments),
     #[command(
@@ -126,36 +126,34 @@ struct BuildArguments {
     pipeline: PipelineArguments,
     #[arg(
         long,
-        value_name = "INSTANT",
-        help = "The instant the window to build opens"
+        value_name = "DATE",
+        help = "The date the window of the shard to build opens on, folding onto the shard the build log recorded closing then"
     )]
-    from: DateTime<Utc>,
+    snapshot: NaiveDate,
     #[arg(
         long,
-        value_name = "INSTANT",
-        help = "The instant the window to build closes"
+        value_name = "SCHEMA.TABLE",
+        value_parser = |table: &str| TableId::try_from(table),
+        help = "A table to build the shard of, out of every table the window holds when none is named"
     )]
-    to: DateTime<Utc>,
-    #[arg(
-        long,
-        value_name = "INSTANT",
-        help = "The instant the window before the one to build opened, naming the snapshots to fold onto instead of building from nothing"
-    )]
-    onto: Option<DateTime<Utc>>,
+    table: Vec<TableId>,
     #[arg(
         long,
         value_name = "DIRECTORY",
-        help = "Write the statements the window would run into this directory, one file per sink, instead of running them"
+        help = "Write the statements the shard would run into this directory, one file per sink, instead of running them"
     )]
     dry_run: Option<PathBuf>,
 }
 
 impl BuildArguments {
     fn journal(self) -> Result<Journal, Unrunnable> {
-        let course = Course::window(
-            Window::new(RecordedAt::from(self.from), RecordedAt::from(self.to)),
-            self.onto.map(RecordedAt::from),
-        );
+        let course = Course::Shard {
+            date: self.snapshot,
+            tables: match self.table.is_empty() {
+                true => Tables::Every,
+                false => Tables::Named(self.table.into_iter().collect()),
+            },
+        };
         let run = self.pipeline.run();
 
         match self.dry_run {
@@ -203,21 +201,15 @@ mod tests {
     }
 
     fn build_arguments(extra: &[&str]) -> BuildArguments {
-        let window = [
-            "--from",
-            "2026-09-20T00:00:00Z",
-            "--to",
-            "2026-09-21T00:00:00Z",
-        ];
-
-        match parsed("build", &[&window[..], extra].concat()).unwrap() {
+        match parsed(
+            "build",
+            &[&["--snapshot", "2026-09-20"][..], extra].concat(),
+        )
+        .unwrap()
+        {
             Command::Build(arguments) => arguments,
             _ => unreachable!("build was named"),
         }
-    }
-
-    fn instant(rfc3339: &str) -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339(rfc3339).unwrap().to_utc()
     }
 
     #[test]
@@ -229,25 +221,27 @@ mod tests {
     }
 
     #[test]
-    fn a_build_is_given_the_window_it_builds() {
+    fn a_build_is_given_the_shard_it_builds_every_table_of() {
         let built = build_arguments(&[]);
 
-        assert_eq!(built.from, instant("2026-09-20T00:00:00Z"));
-        assert_eq!(built.to, instant("2026-09-21T00:00:00Z"));
-        assert_eq!(built.onto, None);
+        assert_eq!(built.snapshot, "2026-09-20".parse::<NaiveDate>().unwrap());
+        assert_eq!(built.table, []);
         assert_eq!(built.dry_run, None);
     }
 
     #[test]
-    fn a_build_without_the_close_of_its_window_is_rejected() {
-        assert!(parsed("build", &["--from", "2026-09-20T00:00:00Z"]).is_err());
+    fn a_build_is_narrowed_to_the_tables_it_names() {
+        let narrowed = build_arguments(&["--table", "shop.people", "--table", "shop.pets"]);
+
+        assert_eq!(
+            narrowed.table,
+            [TableId::new("shop", "people"), TableId::new("shop", "pets")]
+        );
     }
 
     #[test]
-    fn a_build_folds_onto_the_snapshot_of_the_window_it_names() {
-        let folded = build_arguments(&["--onto", "2026-09-19T00:00:00Z"]);
-
-        assert_eq!(folded.onto, Some(instant("2026-09-19T00:00:00Z")));
+    fn a_build_without_its_shard_is_rejected() {
+        assert!(parsed("build", &[]).is_err());
     }
 
     #[test]

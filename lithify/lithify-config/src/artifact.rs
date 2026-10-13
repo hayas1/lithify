@@ -1,6 +1,7 @@
+use std::cmp::Ordering;
 use std::fmt::{self, Display, Formatter};
 
-use chrono::{DateTime, Days, Utc};
+use chrono::{DateTime, Days, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
 use lithify_core::position::RecordedAt;
@@ -33,6 +34,16 @@ impl Schedule {
     pub fn windows(self, from: RecordedAt, until: RecordedAt) -> impl Iterator<Item = Window> {
         std::iter::successors(self.window(from), move |window| self.window(*window.to()))
             .take_while(move |window| *window.to() <= until)
+    }
+
+    pub fn shard(self, since: RecordedAt, date: NaiveDate) -> Option<Window> {
+        match date.cmp(&DateTime::<Utc>::try_from(since).ok()?.date_naive()) {
+            Ordering::Less => None,
+            Ordering::Equal => self.window(since),
+            Ordering::Greater => {
+                self.window(RecordedAt::from(date.and_hms_opt(0, 0, 0)?.and_utc()))
+            }
+        }
     }
 
     fn window(self, from: RecordedAt) -> Option<Window> {
@@ -91,6 +102,40 @@ mod tests {
                 .windows(at("2026-09-20T00:00:00Z"), at("2026-09-20T23:59:59Z"))
                 .count(),
             0
+        );
+    }
+
+    fn date(iso: &str) -> NaiveDate {
+        iso.parse().unwrap()
+    }
+
+    #[test]
+    fn a_daily_shard_is_the_window_opening_on_its_date() {
+        assert_eq!(
+            Schedule::Daily.shard(at("2026-09-20T10:00:00Z"), date("2026-09-21")),
+            Some(Window::new(
+                at("2026-09-21T00:00:00Z"),
+                at("2026-09-22T00:00:00Z")
+            ))
+        );
+    }
+
+    #[test]
+    fn the_first_daily_shard_opens_when_the_change_log_does() {
+        assert_eq!(
+            Schedule::Daily.shard(at("2026-09-20T10:00:00Z"), date("2026-09-20")),
+            Some(Window::new(
+                at("2026-09-20T10:00:00Z"),
+                at("2026-09-21T00:00:00Z")
+            ))
+        );
+    }
+
+    #[test]
+    fn no_daily_shard_is_dated_before_the_change_log_opens() {
+        assert_eq!(
+            Schedule::Daily.shard(at("2026-09-20T10:00:00Z"), date("2026-09-19")),
+            None
         );
     }
 

@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use chrono::{DateTime, Utc};
 
 use lithify_config::ArtifactKind;
@@ -10,7 +8,7 @@ use lithify_core::sink::WarehouseClient;
 
 use crate::course::Itinerary;
 use crate::pipeline::{Capture, Warehouse};
-use crate::plan::Base;
+use crate::plan::{Base, Tables};
 use crate::resumption::Resumption;
 use crate::unrunnable::Unrunnable;
 
@@ -30,8 +28,7 @@ impl<'a> CatchUp<'a> {
         K: WarehouseClient,
         Unrunnable: From<K::Error>,
     {
-        // TODO: rebuild only the tables a window is missing rather than every table, and take a
-        // `--table` to name them, once a plan can be narrowed to some of the tables it replays.
+        // TODO: rebuild only the tables a window is missing rather than every table.
         let start = self.resumption(client)?.start();
 
         Ok(Itinerary::new(
@@ -40,7 +37,8 @@ impl<'a> CatchUp<'a> {
                 .schedule()
                 .windows(start, RecordedAt::from(self.now))
                 .collect(),
-            self.base(client, start)?,
+            Base::recorded(client, self.namespace(), start)?,
+            Tables::Every,
         ))
     }
 
@@ -53,30 +51,12 @@ impl<'a> CatchUp<'a> {
         K: WarehouseClient,
         Unrunnable: From<K::Error>,
     {
-        client.create_build_log::<Unrunnable>(self.namespace())?;
-
         Resumption::read(
             &client.latest_build_logs(self.namespace(), &Latest::Attempted)?,
             &client.latest_build_logs(self.namespace(), &Latest::Succeeded)?,
             self.source.since(),
             &self.source.capture().to_json()?,
         )
-    }
-
-    fn base<K>(&self, client: &K, start: RecordedAt) -> Result<Base, Unrunnable>
-    where
-        K: WarehouseClient,
-        Unrunnable: From<K::Error>,
-    {
-        // TODO: follow a table renamed within the window before, whose log is keyed by the
-        // name it opened that window with rather than the one it opens this window with.
-        Ok(Base::Recorded(
-            client
-                .latest_build_logs(self.namespace(), &Latest::SucceededUntil(start))?
-                .into_iter()
-                .map(|log| (log.origin().clone(), log.target().clone()))
-                .collect::<BTreeMap<_, _>>(),
-        ))
     }
 }
 
