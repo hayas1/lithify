@@ -37,7 +37,7 @@ impl<'a> CatchUp<'a> {
                 .schedule()
                 .windows(start, RecordedAt::from(self.now))
                 .collect(),
-            Base::recorded(client, self.namespace(), start)?,
+            Base::recorded(client, self.namespace(), start, self.source.since())?,
             Tables::Every,
         ))
     }

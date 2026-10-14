@@ -268,7 +268,141 @@ pub(crate) mod tests {
 
         let baseless = settle(&pipeline, &client, &shard("2026-09-20", &[]), NOW);
 
-        assert!(matches!(baseless, Err(Unrunnable::Baseless(_))));
+        assert!(matches!(
+            baseless,
+            Err(Unrunnable::Baseless { tables, .. }) if tables == [TableId::new("shop", "people")]
+        ));
+    }
+
+    #[test]
+    fn a_shard_is_refused_naming_the_table_nothing_was_built_for_closing_at_its_opening() {
+        let pipeline = pipeline();
+        let client = logged(BUILT_CHANGE_LOGS, &[built_before("people", CAPTURE)]);
+
+        let baseless = settle(&pipeline, &client, &shard("2026-09-20", &[]), NOW);
+
+        assert!(matches!(
+            baseless,
+            Err(Unrunnable::Baseless { tables, .. }) if tables == [TableId::new("shop", "pets")]
+        ));
+        assert_eq!(built(&client), [folded("mysql_shop.people_20260919", "")]);
+    }
+
+    #[test]
+    fn a_shard_narrowed_away_from_a_table_without_a_base_is_built() {
+        let pipeline = pipeline();
+        let client = logged(BUILT_CHANGE_LOGS, &[built_before("people", CAPTURE)]);
+
+        settle(
+            &pipeline,
+            &client,
+            &shard("2026-09-20", &[TableId::new("shop", "people")]),
+            NOW,
+        )
+        .unwrap();
+
+        assert_eq!(
+            built(&client),
+            [
+                folded("mysql_shop.people_20260919", ""),
+                folded("mysql_shop.people_20260920", "mysql_shop.people_20260919"),
+            ]
+        );
+    }
+
+    fn ids(client: &DuckDbClient, table: &str) -> Vec<String> {
+        rows(
+            client,
+            &format!("SELECT id::VARCHAR, '' FROM mysql_shop.{table} ORDER BY id"),
+        )
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
+    }
+
+    fn caught_up(changes: &str, now: &str) -> DuckDbClient {
+        let client = logged(changes, &[built_before("people", CAPTURE)]);
+        settle(&pipeline(), &client, &Course::CatchUp, now).unwrap();
+
+        client
+    }
+
+    fn windows(journal: Journal) -> Vec<String> {
+        journal
+            .entries()
+            .filter(|entry| entry.starts_with("window"))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn a_catch_up_after_a_narrowed_shard_rebuilds_the_tables_the_shard_left_behind() {
+        let pipeline = pipeline();
+        let client = caught_up(PETS_CREATED_ON_20260920, "2026-09-21T05:00:00Z");
+
+        settle(
+            &pipeline,
+            &client,
+            &shard("2026-09-21", &[TableId::new("shop", "people")]),
+            NOW,
+        )
+        .unwrap();
+        settle(&pipeline, &client, &Course::CatchUp, NOW).unwrap();
+
+        assert_eq!(
+            built(&client),
+            [
+                folded("mysql_shop.people_20260919", ""),
+                folded("mysql_shop.people_20260920", "mysql_shop.people_20260919"),
+                folded("mysql_shop.pets_20260920", ""),
+                folded("mysql_shop.people_20260921", "mysql_shop.people_20260920"),
+                folded("mysql_shop.people_20260921", "mysql_shop.people_20260920"),
+                folded("mysql_shop.pets_20260921", "mysql_shop.pets_20260920"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_catch_up_rewound_by_a_shard_rebuilds_what_folded_onto_it_as_a_straight_one_did() {
+        let pipeline = pipeline();
+        let straight = caught_up(PETS_CREATED_ON_20260920, NOW);
+        let rewound = caught_up(PETS_CREATED_ON_20260920, NOW);
+
+        settle(&pipeline, &rewound, &shard("2026-09-20", &[]), NOW).unwrap();
+        let rebuilt = settle(&pipeline, &rewound, &Course::CatchUp, NOW).unwrap();
+
+        assert_eq!(
+            windows(rebuilt),
+            ["window 2026-09-21T00:00:00+00:00 .. 2026-09-22T00:00:00+00:00"]
+        );
+        assert_eq!(
+            built(&rewound)[built(&straight).len()..],
+            [
+                folded("mysql_shop.people_20260920", "mysql_shop.people_20260919"),
+                folded("mysql_shop.pets_20260920", ""),
+                folded("mysql_shop.people_20260921", "mysql_shop.people_20260920"),
+                folded("mysql_shop.pets_20260921", "mysql_shop.pets_20260920"),
+            ]
+        );
+        for table in ["people_20260921", "pets_20260921"] {
+            assert_eq!(ids(&rewound, table), ids(&straight, table));
+        }
+    }
+
+    #[test]
+    fn a_shard_built_twice_holds_what_it_held_once_and_leaves_the_same_catch_up_to_do() {
+        let pipeline = pipeline();
+        let client = caught_up(PETS_CREATED_ON_20260920, NOW);
+
+        settle(&pipeline, &client, &shard("2026-09-20", &[]), NOW).unwrap();
+        settle(&pipeline, &client, &shard("2026-09-20", &[]), NOW).unwrap();
+
+        assert_eq!(ids(&client, "people_20260920"), ["7", "8"]);
+        assert_eq!(ids(&client, "pets_20260920"), ["9"]);
+        assert_eq!(
+            windows(settle(&pipeline, &client, &Course::CatchUp, NOW).unwrap()),
+            ["window 2026-09-21T00:00:00+00:00 .. 2026-09-22T00:00:00+00:00"]
+        );
     }
 
     #[test]

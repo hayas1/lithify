@@ -137,7 +137,7 @@ impl Expectation {
     }
 
     // TODO: expect the tables the catalog holds at the end of the last closed window rather than
-    // the ones the last run built, once a plan can be narrowed to some of the tables it replays.
+    // only the ones the build log has seen, which leaves out a table never built at all.
     pub fn discrepancies(
         &self,
         latest: &[BuildLog],
@@ -153,10 +153,11 @@ impl Expectation {
 
         let built_last = latest.iter().filter(|log| log.run_id() == last_run);
 
-        self.capture_changed(built_last.clone())
+        self.capture_changed(built_last)
             .into_iter()
             .chain(
-                built_last
+                latest
+                    .iter()
                     .filter_map(|log| log.table_to().map(|table| (table, log)))
                     .flat_map(|(table, log)| {
                         let built = log.last_success(succeeded);
@@ -389,14 +390,18 @@ mod tests {
     }
 
     #[test]
-    fn a_table_the_last_run_did_not_build_is_expected_no_longer() {
-        let gone = logged(1, "gone", day("2026-09-19"), Status::Succeeded);
+    fn a_table_the_last_run_did_not_build_is_still_expected() {
+        let left = logged(1, "pets", day("2026-09-19"), Status::Succeeded);
         let people = logged(2, "people", day("2026-09-20"), Status::Succeeded);
-        let built = [gone, people];
+        let built = [left, people];
 
         assert_eq!(
             expected("2026-09-21T05:00:00Z").discrepancies(&built, &built, &present(&built)),
-            []
+            [Discrepancy::Overdue {
+                table: TableId::new("shop", "pets"),
+                built_until: at("2026-09-20T00:00:00Z"),
+                due_until: at("2026-09-21T00:00:00Z"),
+            }]
         );
     }
 

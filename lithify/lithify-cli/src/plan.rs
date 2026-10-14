@@ -12,7 +12,7 @@ use lithify_core::model::TableId;
 use lithify_core::position::RecordedAt;
 use lithify_core::sink::TablePath;
 use lithify_core::sink::WarehouseClient;
-use lithify_core::source::{ChangeLogs, SchemaChangeLog, SchemaChangeStream};
+use lithify_core::source::{ChangeLogs, RowChangeLog, SchemaChangeLog, SchemaChangeStream};
 use lithify_core::window::Window;
 use lithify_protocol::sink::bigquery::client::{BigQueryChangeLogsFn, BigQueryClient};
 use lithify_protocol::sink::duckdb::client::{DuckDbChangeLogsFn, DuckDbClient};
@@ -26,24 +26,29 @@ use crate::unrunnable::Unrunnable;
 type BuilderOf<'b, C, K> =
     SnapshotBuilder<'b, <C as ChangeLogs>::Row, <K as WarehouseClient>::Warehouse>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Base {
+    #[default]
+    Nothing,
     Recorded(BTreeMap<TableId, TablePath>),
     Shard(Window),
 }
 
-impl Default for Base {
-    fn default() -> Self {
-        Self::Recorded(BTreeMap::new())
-    }
-}
-
 impl Base {
-    pub fn recorded<K>(client: &K, namespace: &str, start: RecordedAt) -> Result<Self, Unrunnable>
+    pub fn recorded<K>(
+        client: &K,
+        namespace: &str,
+        start: RecordedAt,
+        since: RecordedAt,
+    ) -> Result<Self, Unrunnable>
     where
         K: WarehouseClient,
         Unrunnable: From<K::Error>,
     {
+        if start <= since {
+            return Ok(Self::Nothing);
+        }
+
         Ok(Self::Recorded(
             client
                 .latest_build_logs(namespace, &Latest::SucceededUntil(start))?
@@ -53,10 +58,26 @@ impl Base {
         ))
     }
 
-    pub fn is_empty(&self) -> bool {
-        match self {
-            Self::Recorded(targets) => targets.is_empty(),
-            Self::Shard(_) => false,
+    fn verify<L: RowChangeLog, W: lithify_core::sink::Warehouse>(
+        &self,
+        window: &Window,
+        builders: &[SnapshotBuilder<'_, L, W>],
+    ) -> Result<(), Unrunnable> {
+        let tables: Vec<_> = match self {
+            Self::Nothing | Self::Shard(_) => Vec::new(),
+            Self::Recorded(_) => builders
+                .iter()
+                .filter_map(SnapshotBuilder::missing_base)
+                .cloned()
+                .collect(),
+        };
+
+        match tables.is_empty() {
+            true => Ok(()),
+            false => Err(Unrunnable::Baseless {
+                window: window.clone(),
+                tables,
+            }),
         }
     }
 
@@ -66,6 +87,7 @@ impl Base {
         table: &TableId,
     ) -> Result<Option<TablePath>, UnbuildableArtifact> {
         match self {
+            Self::Nothing => Ok(None),
             Self::Recorded(targets) => Ok(targets.get(table).cloned()),
             Self::Shard(window) => snapshot.target(table, window).map(Some),
         }
@@ -137,6 +159,7 @@ impl<'a, K, S: Settlement> SnapshotPlan<'a, K, S> {
     {
         let snapshot = self.sink.snapshot();
         let builders = self.tables.narrow(self.builders(&snapshot, &logs)?)?;
+        self.base.verify(self.window, &builders)?;
 
         self.settlement.settle(self.client, &builders)
     }

@@ -6,7 +6,7 @@ use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
 use lithify_core::build_log::{BuildLog, Outcome, Run};
 use lithify_core::era::Era;
 use lithify_core::listener::{
-    ColumnAdded, ColumnDropped, ColumnRenamed, ColumnRetyped, PrimaryKeyChanged,
+    Appearance, ColumnAdded, ColumnDropped, ColumnRenamed, ColumnRetyped, PrimaryKeyChanged,
     SchemaChangeListener, TableCreated, TableDropped, TableRenamed,
 };
 use lithify_core::model::{ColumnModel, TableId, TableModel};
@@ -65,6 +65,7 @@ pub struct SnapshotBuilder<'a, L, W> {
     query: ChangeLogQuery<'a, L>,
     table_from: Option<TableId>,
     table: TableId,
+    appearance: Option<Appearance>,
     window: Window,
     base: Option<TablePath>,
     target: Option<TablePath>,
@@ -92,12 +93,24 @@ impl<'a, L: RowChangeLog, W: Warehouse> SnapshotBuilder<'a, L, W> {
             target: Some(snapshot.target(&table, &window)?),
             table_from: Some(table.clone()),
             table,
+            appearance: None,
             window,
             base,
             rendered: None,
             fold: Fold::default(),
             warehouse: PhantomData,
         })
+    }
+
+    pub fn missing_base(&self) -> Option<&TableId> {
+        let logged_from_start = self
+            .appearance
+            .is_some_and(|appearance| appearance.is_logged_from_start());
+
+        match logged_from_start || self.base.is_some() {
+            true => None,
+            false => self.table_from.as_ref(),
+        }
     }
 
     fn begin(&mut self, warehouse: &W, table: &TableModel) -> Result<(), UnbuildableArtifact> {
@@ -204,6 +217,7 @@ impl<L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Position>
         _: &W,
         event: &TableCreated<'_>,
     ) -> Result<(), UnbuildableArtifact> {
+        self.appearance = Some(event.appearance());
         if event.appearance().is_creation() {
             self.table_from = None;
         }
@@ -1732,6 +1746,31 @@ mod tests {
             Some(&TableId::new("shop", "customers"))
         );
         assert_eq!(dropped.lifecycle(), Some(Lifecycle::Dropped));
+    }
+
+    #[test]
+    fn a_table_discovered_within_the_window_misses_a_base_it_was_not_given_but_one_created_does_not()
+     {
+        let orders = TableModel::new(
+            TableId::new("shop", "orders"),
+            vec![column("id", ColumnType::Int64)],
+            vec!["id".to_owned()],
+        );
+        let missing = |change: TableChange| {
+            snapshots(customers(), vec![self::change(150, change)], || None)
+                .unwrap()
+                .into_iter()
+                .find(|snapshot| snapshot.table() == &TableId::new("shop", "orders"))
+                .unwrap()
+                .missing_base()
+                .cloned()
+        };
+
+        assert_eq!(
+            missing(TableChange::Altered(orders.clone())),
+            Some(TableId::new("shop", "orders"))
+        );
+        assert_eq!(missing(TableChange::Created(orders)), None);
     }
 
     #[test]

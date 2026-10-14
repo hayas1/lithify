@@ -20,11 +20,17 @@ pub enum Unrunnable {
     Unwritable(std::io::Error),
     Unserializable(serde_json::Error),
     UnknownSink(String),
-    CaptureChanged { logged: String, configured: String },
+    CaptureChanged {
+        logged: String,
+        configured: String,
+    },
     WithoutSource,
     Unsharded(NaiveDate),
     Unclosed(Window),
-    Baseless(Window),
+    Baseless {
+        window: Window,
+        tables: Vec<TableId>,
+    },
     UnknownTables(Vec<TableId>),
 }
 
@@ -53,9 +59,14 @@ impl Display for Unrunnable {
                 window.from(),
                 window.to()
             ),
-            Self::Baseless(window) => write!(
+            Self::Baseless { window, tables } => write!(
                 formatter,
-                "nothing was built closing at {}, which the window to {} folds onto",
+                "nothing was built for {} closing at {}, which the window to {} folds onto; build the windows before it first",
+                tables
+                    .iter()
+                    .map(TableId::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
                 window.from(),
                 window.to()
             ),
@@ -87,7 +98,7 @@ impl std::error::Error for Unrunnable {
             | Self::CaptureChanged { .. }
             | Self::Unsharded(_)
             | Self::Unclosed(_)
-            | Self::Baseless(_)
+            | Self::Baseless { .. }
             | Self::UnknownTables(_) => None,
         }
     }

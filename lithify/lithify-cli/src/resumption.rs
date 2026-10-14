@@ -26,14 +26,17 @@ impl Resumption {
             });
         }
 
-        let start = built_last
+        // TODO: rewind to since for a table the catalog holds but the build log never saw, and stop
+        // waiting on one the build log holds but the catalog no longer does.
+        let start = latest
+            .iter()
             .filter(|log| log.table_to().is_some())
             .map(|log| {
                 log.last_success(succeeded)
                     .map_or(since, |built| *built.window().to())
             })
             .min()
-            .unwrap_or(since);
+            .map_or(since, |start| start.max(since));
 
         Ok(Self { start })
     }
@@ -155,13 +158,13 @@ mod tests {
     }
 
     #[test]
-    fn a_table_the_last_run_did_not_build_holds_the_pipeline_back_no_longer() {
+    fn a_table_the_last_run_did_not_build_still_holds_the_pipeline_back() {
         let people = logged(2, "people", W2, Status::Succeeded);
-        let gone = logged(1, "gone", W1, Status::Succeeded);
+        let left = logged(1, "pets", W1, Status::Succeeded);
 
         assert_eq!(
-            start(&[gone.clone(), people.clone()], &[gone, people]),
-            RecordedAt::from(W2.1)
+            start(&[left.clone(), people.clone()], &[left, people]),
+            RecordedAt::from(W1.1)
         );
     }
 

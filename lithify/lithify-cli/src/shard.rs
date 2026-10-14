@@ -40,12 +40,12 @@ impl<'a> Shard<'a> {
         if *window.to() > RecordedAt::from(self.now) {
             return Err(Unrunnable::Unclosed(window));
         }
-        // TODO: tell a table that stood before the window from one created within it, and refuse
-        // only the former when it has no base, rather than refusing a window with no base at all.
-        let base = Base::recorded(client, self.namespace(), *window.from())?;
-        if *window.from() > self.source.since() && base.is_empty() {
-            return Err(Unrunnable::Baseless(window));
-        }
+        let base = Base::recorded(
+            client,
+            self.namespace(),
+            *window.from(),
+            self.source.since(),
+        )?;
 
         Ok(Itinerary::new(vec![window], base, tables.clone()))
     }
