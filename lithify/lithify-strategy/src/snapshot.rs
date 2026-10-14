@@ -6,8 +6,8 @@ use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
 use lithify_core::build_log::{BuildLog, Outcome, Run};
 use lithify_core::era::Era;
 use lithify_core::listener::{
-    Appearance, ColumnAdded, ColumnDropped, ColumnRenamed, ColumnRetyped, PrimaryKeyChanged,
-    SchemaChangeListener, TableCreated, TableRenamed,
+    ColumnAdded, ColumnDropped, ColumnRenamed, ColumnRetyped, PrimaryKeyChanged,
+    SchemaChangeListener, TableCreated, TableDropped, TableRenamed,
 };
 use lithify_core::model::{ColumnModel, TableId, TableModel};
 use lithify_core::sink::{TablePath, Warehouse};
@@ -67,7 +67,7 @@ pub struct SnapshotBuilder<'a, L, W> {
     table: TableId,
     window: Window,
     base: Option<TablePath>,
-    target: TablePath,
+    target: Option<TablePath>,
     rendered: Option<Target>,
     fold: Fold,
     warehouse: PhantomData<fn(&W)>,
@@ -89,7 +89,7 @@ impl<'a, L: RowChangeLog, W: Warehouse> SnapshotBuilder<'a, L, W> {
         Ok(Self {
             snapshot,
             query: ChangeLogQuery::new(log),
-            target: snapshot.target(&table, &window)?,
+            target: Some(snapshot.target(&table, &window)?),
             table_from: Some(table.clone()),
             table,
             window,
@@ -111,16 +111,16 @@ impl<'a, L: RowChangeLog, W: Warehouse> SnapshotBuilder<'a, L, W> {
         let base = self.select_base(warehouse, table)?;
 
         self.fold.push(warehouse.identifier("base"), base);
-        self.rendered = Some(self.render_target(warehouse));
+        self.rendered = self.render_target(warehouse);
 
         Ok(())
     }
 
-    fn render_target(&self, warehouse: &W) -> Target {
-        Target {
-            namespace: warehouse.create_namespace(self.target.namespace()),
-            table: warehouse.table_ref(&self.target),
-        }
+    fn render_target(&self, warehouse: &W) -> Option<Target> {
+        self.target.as_ref().map(|target| Target {
+            namespace: warehouse.create_namespace(target.namespace()),
+            table: warehouse.table_ref(target),
+        })
     }
 
     fn select_base(
@@ -204,12 +204,18 @@ impl<L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Position>
         _: &W,
         event: &TableCreated<'_>,
     ) -> Result<(), UnbuildableArtifact> {
-        if event.appearance() == Appearance::Created {
+        if event.appearance().is_creation() {
             self.table_from = None;
         }
         if event.appearance().is_logged_from_start() {
             self.base = None;
         }
+
+        Ok(())
+    }
+
+    fn table_dropped(&mut self, _: &W, _: &TableDropped<'_>) -> Result<(), UnbuildableArtifact> {
+        self.target = None;
 
         Ok(())
     }
@@ -229,8 +235,8 @@ impl<L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Position>
     ) -> Result<(), UnbuildableArtifact> {
         self.begin(warehouse, event.before())?;
         self.table = event.after().id().clone();
-        self.target = self.snapshot.target(&self.table, &self.window)?;
-        self.rendered = Some(self.render_target(warehouse));
+        self.target = Some(self.snapshot.target(&self.table, &self.window)?);
+        self.rendered = self.render_target(warehouse);
 
         Ok(())
     }
@@ -324,6 +330,10 @@ impl<L: RowChangeLog, W: Warehouse> ArtifactBuilder for SnapshotBuilder<'_, L, W
     }
 
     fn create(&self) -> Result<Vec<SqlString>, UnbuildableArtifact> {
+        if self.target.is_none() {
+            return Ok(Vec::new());
+        }
+
         match &self.rendered {
             Some(target) => Ok(vec![
                 target.namespace.clone(),
@@ -337,7 +347,7 @@ impl<L: RowChangeLog, W: Warehouse> ArtifactBuilder for SnapshotBuilder<'_, L, W
         BuildLog::new(
             run,
             self.table_from.clone(),
-            Some(self.table.clone()),
+            self.target.as_ref().map(|_| self.table.clone()),
             self.base.clone(),
             self.target.clone(),
             self.window.clone(),
@@ -350,7 +360,7 @@ impl<L: RowChangeLog, W: Warehouse> ArtifactBuilder for SnapshotBuilder<'_, L, W
 mod tests {
     use super::*;
     use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
-    use lithify_core::build_log::Status;
+    use lithify_core::build_log::{Lifecycle, Status};
     use lithify_core::era::{Bound, EraTracker};
     use lithify_core::event::{SchemaChange, TableChange};
     use lithify_core::listener::{CatalogModel, OutOfOrder};
@@ -1524,7 +1534,7 @@ mod tests {
                 Some(TableId::new("shop", "customers")),
                 Some(TableId::new("shop", "customers")),
                 Some(base),
-                TablePath::new("mysql_shop", "customers_20260920"),
+                Some(TablePath::new("mysql_shop", "customers_20260920")),
                 window,
                 Outcome::new(Status::Succeeded, finished_at),
             )
@@ -1555,7 +1565,7 @@ mod tests {
                 Some(TableId::new("shop", "customers")),
                 Some(TableId::new("shop", "clients")),
                 Some(base.clone()),
-                TablePath::new("mysql_shop", "clients_20260920"),
+                Some(TablePath::new("mysql_shop", "clients_20260920")),
                 window(),
                 outcome,
             )
@@ -1598,7 +1608,7 @@ mod tests {
                 None,
                 Some(TableId::new("shop", "orders")),
                 None,
-                TablePath::new("mysql_shop", "orders_20260920"),
+                Some(TablePath::new("mysql_shop", "orders_20260920")),
                 window(),
                 outcome,
             )
@@ -1638,6 +1648,90 @@ mod tests {
             captured.build_log(&run, outcome.clone()).table_from(),
             Some(&TableId::new("shop", "orders"))
         );
+    }
+
+    #[test]
+    fn a_table_dropped_within_the_window_is_logged_without_a_target() {
+        let run = Run::new(
+            ulid::Ulid::nil(),
+            "snapshot",
+            "daily",
+            "primary",
+            "{}",
+            "0.1.0",
+        );
+        let outcome = Outcome::new(
+            Status::Succeeded,
+            DateTime::from_timestamp_millis(1789949000000).unwrap(),
+        );
+        let base = TablePath::new("mysql_shop", "customers_20260919");
+        let dropped = snapshots(
+            customers(),
+            vec![change(
+                150,
+                TableChange::Dropped(TableId::new("shop", "customers")),
+            )],
+            || Some(base.clone()),
+        )
+        .unwrap()
+        .remove(0);
+
+        assert_eq!(dropped.create().unwrap(), Vec::<SqlString>::new());
+        assert_eq!(
+            dropped.build_log(&run, outcome.clone()),
+            BuildLog::new(
+                &run,
+                Some(TableId::new("shop", "customers")),
+                None,
+                Some(base),
+                None,
+                window(),
+                outcome,
+            )
+        );
+    }
+
+    #[test]
+    fn a_table_renamed_and_then_dropped_within_the_window_is_logged_from_its_first_name() {
+        let run = Run::new(
+            ulid::Ulid::nil(),
+            "snapshot",
+            "daily",
+            "primary",
+            "{}",
+            "0.1.0",
+        );
+        let outcome = Outcome::new(
+            Status::Succeeded,
+            DateTime::from_timestamp_millis(1789949000000).unwrap(),
+        );
+        let clients = TableId::new("shop", "clients");
+        let dropped = snapshots(
+            customers(),
+            vec![
+                changes(
+                    150,
+                    vec![
+                        TableChange::Renamed {
+                            from: TableId::new("shop", "customers"),
+                            to: clients.clone(),
+                        },
+                        TableChange::Altered(customers().with_id(&clients)),
+                    ],
+                ),
+                change(160, TableChange::Dropped(clients)),
+            ],
+            || None,
+        )
+        .unwrap()
+        .remove(0)
+        .build_log(&run, outcome);
+
+        assert_eq!(
+            dropped.table_from(),
+            Some(&TableId::new("shop", "customers"))
+        );
+        assert_eq!(dropped.lifecycle(), Some(Lifecycle::Dropped));
     }
 
     #[test]

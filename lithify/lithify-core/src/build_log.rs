@@ -88,7 +88,7 @@ pub struct BuildLog {
     table_from: Option<TableId>,
     table_to: Option<TableId>,
     base: Option<TablePath>,
-    target: TablePath,
+    target: Option<TablePath>,
     window: Window,
     outcome: Outcome,
 }
@@ -118,7 +118,7 @@ impl BuildLog {
         table_from: Option<TableId>,
         table_to: Option<TableId>,
         base: Option<TablePath>,
-        target: TablePath,
+        target: Option<TablePath>,
         window: Window,
         outcome: Outcome,
     ) -> Self {
@@ -185,8 +185,8 @@ impl BuildLog {
         self.base.as_ref()
     }
 
-    pub fn target(&self) -> &TablePath {
-        &self.target
+    pub fn target(&self) -> Option<&TablePath> {
+        self.target.as_ref()
     }
 
     pub fn window(&self) -> &Window {
@@ -195,10 +195,6 @@ impl BuildLog {
 
     pub fn status(&self) -> &Status {
         &self.outcome.status
-    }
-
-    pub fn namespace(&self) -> &str {
-        self.target.namespace()
     }
 
     pub fn cells<W: Warehouse + ?Sized>(&self, warehouse: &W) -> [SqlString; 16] {
@@ -212,7 +208,7 @@ impl BuildLog {
             Self::nullable(warehouse, self.table_to.as_ref()),
             Self::nullable(warehouse, self.lifecycle().as_ref()),
             Self::nullable(warehouse, self.base.as_ref()),
-            warehouse.literal(&self.target.to_string()),
+            Self::nullable(warehouse, self.target.as_ref()),
             warehouse.timestamp_millis(self.window.from().milliseconds_since_epoch()),
             warehouse.timestamp_millis(self.window.to().milliseconds_since_epoch()),
             warehouse.literal(&self.outcome.status.to_string()),
@@ -235,14 +231,22 @@ impl BuildLog {
 
 impl Display for BuildLog {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        match &self.outcome.status {
-            Status::Succeeded => write!(formatter, "built {} into {}", self.named(), self.target),
-            Status::Failed(error) => write!(
-                formatter,
-                "failed to build {} into {}: {error}",
-                self.named(),
-                self.target
-            ),
+        let table = self.named();
+        let target = self
+            .target
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+
+        match (&self.outcome.status, self.lifecycle()) {
+            (Status::Succeeded, Some(Lifecycle::Dropped)) => write!(formatter, "dropped {table}"),
+            (Status::Failed(error), Some(Lifecycle::Dropped)) => {
+                write!(formatter, "failed to drop {table}: {error}")
+            }
+            (Status::Succeeded, _) => write!(formatter, "built {table} into {target}"),
+            (Status::Failed(error), _) => {
+                write!(formatter, "failed to build {table} into {target}: {error}")
+            }
         }
     }
 }
@@ -305,13 +309,18 @@ impl Latest {
         let latest = warehouse.identifier(Self::ALIAS);
         let succeeded = Self::succeeded(warehouse, &latest);
 
+        let standing = Self::standing(warehouse, &latest);
+
         SqlString::from(match self {
-            Self::Attempted => Self::undeparted(warehouse, log, false),
-            Self::Succeeded => {
-                format!("{succeeded} AND {}", Self::undeparted(warehouse, log, true))
+            Self::Attempted => {
+                format!("{standing} AND {}", Self::undeparted(warehouse, log, false))
             }
+            Self::Succeeded => format!(
+                "{standing} AND {succeeded} AND {}",
+                Self::undeparted(warehouse, log, true)
+            ),
             Self::SucceededUntil(to) => format!(
-                "{succeeded} AND {} = {}",
+                "{standing} AND {succeeded} AND {} = {}",
                 Self::column(warehouse, &latest, "window_to"),
                 warehouse.timestamp_millis(to.milliseconds_since_epoch())
             ),
@@ -362,6 +371,10 @@ impl Latest {
         )
     }
 
+    fn standing<W: Warehouse + ?Sized>(warehouse: &W, alias: &SqlString) -> String {
+        format!("{} IS NOT NULL", Self::column(warehouse, alias, "table_to"))
+    }
+
     fn succeeded<W: Warehouse + ?Sized>(warehouse: &W, alias: &SqlString) -> String {
         format!(
             "{} = {}",
@@ -386,7 +399,7 @@ pub struct BuildLogRow {
     pub table_to: Option<String>,
     pub lifecycle: Option<String>,
     pub base: Option<String>,
-    pub target: String,
+    pub target: Option<String>,
     pub window_from: i64,
     pub window_to: i64,
     pub status: String,
@@ -442,7 +455,7 @@ impl TryFrom<BuildLogRow> for BuildLog {
             table_from: BuildLogRow::table(row.table_from.as_deref())?,
             table_to: BuildLogRow::table(row.table_to.as_deref())?,
             base: row.base.as_deref().map(BuildLogRow::path).transpose()?,
-            target: BuildLogRow::path(&row.target)?,
+            target: row.target.as_deref().map(BuildLogRow::path).transpose()?,
             window: Window::new(
                 RecordedAt::from(row.window_from),
                 RecordedAt::from(row.window_to),
@@ -491,7 +504,7 @@ mod tests {
             from.map(|table| TableId::new("shop", table)),
             to.map(|table| TableId::new("shop", table)),
             None,
-            TablePath::new("mysql_shop", "people_20260920"),
+            to.map(|_| TablePath::new("mysql_shop", "people_20260920")),
             Window::new(RecordedAt::from(0), RecordedAt::from(1)),
             Outcome::new(
                 Status::Succeeded,
@@ -545,7 +558,7 @@ mod tests {
             table_to: table_to.map(str::to_owned),
             lifecycle: lifecycle.map(str::to_owned),
             base: None,
-            target: "mysql_shop.people_20260920".to_owned(),
+            target: Some("mysql_shop.people_20260920".to_owned()),
             window_from: 0,
             window_to: 1,
             status: "succeeded".to_owned(),
@@ -577,6 +590,36 @@ mod tests {
                 Some("renamed")
             ))
             .is_err()
+        );
+    }
+
+    #[test]
+    fn a_drop_reads_as_the_table_it_dropped() {
+        assert_eq!(logged(Some("pets"), None).to_string(), "dropped shop.pets");
+    }
+
+    #[test]
+    fn a_drop_that_failed_reads_as_the_table_it_failed_to_drop() {
+        let mut failed = logged(Some("pets"), None);
+        failed.outcome = Outcome::new(
+            Status::Failed("no such table".to_owned()),
+            DateTime::from_timestamp_millis(1).unwrap(),
+        );
+
+        assert_eq!(
+            failed.to_string(),
+            "failed to drop shop.pets: no such table"
+        );
+    }
+
+    #[test]
+    fn a_drop_is_read_without_a_target() {
+        let mut dropped = row(Some("shop.pets"), None, Some("dropped"));
+        dropped.target = None;
+
+        assert_eq!(
+            BuildLog::try_from(dropped).map(|log| log.target().cloned()),
+            Ok(None)
         );
     }
 

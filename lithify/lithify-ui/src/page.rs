@@ -102,7 +102,7 @@ impl Page {
                 <td>{row.status.to_string()}</td>
                 <td>{row.window}</td>
                 <td>{row.base.map(|base| base.to_string()).unwrap_or_default()}</td>
-                <td>{row.target.to_string()}</td>
+                <td>{row.target.map(|target| target.to_string()).unwrap_or_default()}</td>
                 <td>{row.status.error().unwrap_or_default().to_owned()}</td>
                 <td><code>{rebuild.map(|command| command.to_string()).unwrap_or_default()}</code></td>
             </tr>

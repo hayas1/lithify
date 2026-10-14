@@ -109,7 +109,7 @@ mod tests {
             Some(TableId::new("shop", "people")),
             Some(TableId::new("shop", "people")),
             None,
-            TablePath::new("mysql_shop", "people_20260920"),
+            Some(TablePath::new("mysql_shop", "people_20260920")),
             Window::new(
                 RecordedAt::from(1789862400000),
                 RecordedAt::from(1789948800000),

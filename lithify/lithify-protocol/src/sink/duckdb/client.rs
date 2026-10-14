@@ -363,7 +363,7 @@ mod tests {
             table_from.map(|table| TableId::new("shop", table)),
             table_to.map(|table| TableId::new("shop", table)),
             Some(TablePath::new("mysql_shop", &format!("{table}_base"))),
-            TablePath::new("mysql_shop", &format!("{table}_{from}")),
+            table_to.map(|_| TablePath::new("mysql_shop", &format!("{table}_{from}"))),
             window(from, to),
             Outcome::new(
                 status,
@@ -379,7 +379,7 @@ mod tests {
         );
         client.create_build_log::<Logged>("mysql_shop").unwrap();
         for log in logs {
-            client.append_build_log(log).unwrap();
+            client.append_build_log("mysql_shop", log).unwrap();
         }
 
         client
@@ -565,6 +565,23 @@ mod tests {
         ]);
 
         assert_eq!(latest(&client, Latest::Succeeded), [renamed]);
+    }
+
+    #[test]
+    fn a_build_log_reads_nothing_of_a_table_once_dropped() {
+        let client = logging(&[
+            logged("customers", W1, Status::Succeeded, 1789949000000),
+            logged_across(
+                Some("customers"),
+                None,
+                W2,
+                Status::Succeeded,
+                1790035300000,
+            ),
+        ]);
+
+        assert_eq!(latest(&client, Latest::Attempted), []);
+        assert_eq!(latest(&client, Latest::Succeeded), []);
     }
 
     #[test]

@@ -145,6 +145,13 @@ impl fmt::Display for Appearance {
 }
 
 impl Appearance {
+    pub fn is_creation(&self) -> bool {
+        match self {
+            Self::Created => true,
+            Self::Captured | Self::Discovered => false,
+        }
+    }
+
     pub fn is_logged_from_start(&self) -> bool {
         match self {
             Self::Created | Self::Captured => true,

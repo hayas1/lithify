@@ -123,9 +123,9 @@ impl Expectation {
         let latest = client.latest_build_logs(namespace, &Latest::Attempted)?;
         let succeeded = client.latest_build_logs(namespace, &Latest::Succeeded)?;
         let mut present = BTreeSet::new();
-        for built in &succeeded {
-            if client.exists(built.target())? {
-                present.insert(built.target().clone());
+        for target in succeeded.iter().filter_map(BuildLog::target) {
+            if client.exists(target)? {
+                present.insert(target.clone());
             }
         }
 
@@ -212,9 +212,11 @@ impl Expectation {
         built: &BuildLog,
         present: &BTreeSet<TablePath>,
     ) -> Option<Discrepancy> {
-        (!present.contains(built.target())).then(|| Discrepancy::Missing {
+        let target = built.target()?;
+
+        (!present.contains(target)).then(|| Discrepancy::Missing {
             table: table.clone(),
-            target: built.target().clone(),
+            target: target.clone(),
         })
     }
 
@@ -271,10 +273,10 @@ mod tests {
             Some(TableId::new("shop", table)),
             Some(TableId::new("shop", table)),
             None,
-            TablePath::new(
+            Some(TablePath::new(
                 "mysql_shop",
                 &format!("{table}_{}", window.from().milliseconds_since_epoch()),
-            ),
+            )),
             window,
             Outcome::new(status, DateTime::from_timestamp_millis(0).unwrap()),
         )
@@ -285,7 +287,7 @@ mod tests {
     }
 
     fn present(logs: &[BuildLog]) -> BTreeSet<TablePath> {
-        logs.iter().map(|log| log.target().clone()).collect()
+        logs.iter().filter_map(BuildLog::target).cloned().collect()
     }
 
     #[test]
@@ -381,7 +383,7 @@ mod tests {
             expected("2026-09-21T05:00:00Z").discrepancies(&built, &built, &BTreeSet::new()),
             [Discrepancy::Missing {
                 table: TableId::new("shop", "people"),
-                target: people.target().clone(),
+                target: people.target().unwrap().clone(),
             }]
         );
     }
@@ -418,7 +420,7 @@ mod tests {
         );
         client.create_build_log::<Unrunnable>("mysql_shop").unwrap();
         for log in logs {
-            client.append_build_log(log).unwrap();
+            client.append_build_log("mysql_shop", log).unwrap();
         }
 
         client
@@ -432,7 +434,7 @@ mod tests {
         client
             .execute(&SqlString::from(format!(
                 "CREATE TABLE \"mysql_shop\".\"{}\" AS SELECT 1 AS id",
-                people.target().name()
+                people.target().unwrap().name()
             )))
             .unwrap();
 
@@ -443,7 +445,7 @@ mod tests {
                 .discrepancies(),
             [Discrepancy::Missing {
                 table: TableId::new("shop", "pets"),
-                target: pets.target().clone(),
+                target: pets.target().unwrap().clone(),
             }]
         );
     }

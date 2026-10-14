@@ -84,7 +84,7 @@ mod tests {
             Some(TableId::new("shop", table)),
             Some(TableId::new("shop", table)),
             None,
-            TablePath::new("mysql_shop", &format!("{table}_{from}")),
+            Some(TablePath::new("mysql_shop", &format!("{table}_{from}"))),
             Window::new(RecordedAt::from(from), RecordedAt::from(to)),
             Outcome::new(status, DateTime::from_timestamp_millis(to).unwrap()),
         )
@@ -103,7 +103,7 @@ mod tests {
             Some(TableId::new("shop", from)),
             Some(TableId::new("shop", to)),
             None,
-            TablePath::new("mysql_shop", &format!("{to}_{}", window.0)),
+            Some(TablePath::new("mysql_shop", &format!("{to}_{}", window.0))),
             Window::new(RecordedAt::from(window.0), RecordedAt::from(window.1)),
             Outcome::new(status, DateTime::from_timestamp_millis(window.1).unwrap()),
         )

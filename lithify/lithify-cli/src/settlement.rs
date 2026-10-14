@@ -144,7 +144,7 @@ impl Settlement for Build {
             .iter()
             .map(|builder| {
                 let log = builder.build_log(&self.run, Self::outcome(client, builder));
-                client.append_build_log(&log)?;
+                client.append_build_log(&self.namespace, &log)?;
 
                 Ok(log)
             })

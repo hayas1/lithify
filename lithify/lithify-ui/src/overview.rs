@@ -57,7 +57,7 @@ pub struct TableRow {
     pub status: Status,
     pub window: String,
     pub base: Option<TablePath>,
-    pub target: TablePath,
+    pub target: Option<TablePath>,
     pub shard: Option<NaiveDate>,
 }
 
@@ -71,7 +71,7 @@ impl TableRow {
             status: log.status().clone(),
             window: format!("{} .. {}", window.from(), window.to()),
             base: log.base().cloned(),
-            target: log.target().clone(),
+            target: log.target().cloned(),
             shard: schedule.date(window),
         })
     }
@@ -119,7 +119,7 @@ pub(crate) mod tests {
             Some(TableId::new("shop", table)),
             Some(TableId::new("shop", table)),
             base.map(|base| TablePath::new("mysql_shop", base)),
-            TablePath::new("mysql_shop", &format!("{table}_20260920")),
+            Some(TablePath::new("mysql_shop", &format!("{table}_20260920"))),
             Window::new(
                 RecordedAt::from(at("2026-09-20T00:00:00Z")),
                 RecordedAt::from(at("2026-09-21T00:00:00Z")),
@@ -151,7 +151,7 @@ pub(crate) mod tests {
                     status: Status::Succeeded,
                     window: "2026-09-20T00:00:00+00:00 .. 2026-09-21T00:00:00+00:00".to_owned(),
                     base: Some(TablePath::new("mysql_shop", "people_20260919")),
-                    target: TablePath::new("mysql_shop", "people_20260920"),
+                    target: Some(TablePath::new("mysql_shop", "people_20260920")),
                     shard: Some("2026-09-20".parse().unwrap()),
                 },
                 TableRow {
@@ -160,7 +160,7 @@ pub(crate) mod tests {
                     status: Status::Failed("no such column".to_owned()),
                     window: "2026-09-20T00:00:00+00:00 .. 2026-09-21T00:00:00+00:00".to_owned(),
                     base: None,
-                    target: TablePath::new("mysql_shop", "pets_20260920"),
+                    target: Some(TablePath::new("mysql_shop", "pets_20260920")),
                     shard: Some("2026-09-20".parse().unwrap()),
                 },
             ]
@@ -181,7 +181,7 @@ pub(crate) mod tests {
             Some(TableId::new("shop", "people")),
             Some(TableId::new("shop", "persons")),
             None,
-            TablePath::new("mysql_shop", "persons_20260920"),
+            Some(TablePath::new("mysql_shop", "persons_20260920")),
             Window::new(
                 RecordedAt::from(at("2026-09-20T00:00:00Z")),
                 RecordedAt::from(at("2026-09-21T00:00:00Z")),

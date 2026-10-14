@@ -4,8 +4,8 @@ use std::marker::PhantomData;
 
 use crate::event::SchemaChange;
 use crate::listener::{
-    CatalogModel, ColumnAdded, ColumnDropped, ColumnRenamed, ColumnRetyped, PrimaryKeyChanged,
-    SchemaChangeListener, TableCreated, TableDropped, TableRenamed,
+    Appearance, CatalogModel, ColumnAdded, ColumnDropped, ColumnRenamed, ColumnRetyped,
+    PrimaryKeyChanged, SchemaChangeListener, TableCreated, TableDropped, TableRenamed,
 };
 use crate::model::{TableId, TableModel};
 use crate::position::{Position, RecordedAt};
@@ -62,12 +62,14 @@ pub struct EraTracker<F, L, E, P> {
     at: Bound<P>,
     open: F,
     tables: BTreeMap<TableId, Track<L, P>>,
+    dropped: Vec<L>,
     error: PhantomData<fn() -> E>,
 }
 
 struct Track<L, P> {
     listener: L,
     since: Bound<P>,
+    appearance: Option<Appearance>,
 }
 
 impl<L, P: Position> Track<L, P> {
@@ -75,11 +77,18 @@ impl<L, P: Position> Track<L, P> {
         open: &mut impl FnMut(&TableId) -> Result<L, E>,
         table: &TableId,
         since: Bound<P>,
+        appearance: Option<Appearance>,
     ) -> Result<Self, E> {
         Ok(Self {
             listener: open(table)?,
             since,
+            appearance,
         })
+    }
+
+    fn is_created_within(&self) -> bool {
+        self.appearance
+            .is_some_and(|appearance| appearance.is_creation())
     }
 
     fn advance(
@@ -123,6 +132,7 @@ impl<F, L, E, P: Position> EraTracker<F, L, E, P> {
             window,
             open,
             tables: BTreeMap::new(),
+            dropped: Vec::new(),
             error: PhantomData,
         }
     }
@@ -133,26 +143,33 @@ impl<F, L, E, P: Position> EraTracker<F, L, E, P> {
         F: FnMut(&TableId) -> Result<L, E>,
         E: From<L::Error>,
     {
-        catalog
+        let standing = catalog
             .tables()
             .map(|table| {
                 let track = match self.tables.remove(table.id()) {
                     Some(track) => track,
-                    None => self.open(table.id(), Bound::Time(*self.window.from()))?,
+                    None => self.open(table.id(), Bound::Time(*self.window.from()), None)?,
                 };
 
                 Ok(track.finish(context, table, &Bound::Time(*self.window.to()))?)
             })
-            .collect()
+            .collect::<Result<Vec<_>, E>>()?;
+
+        Ok(self.dropped.into_iter().chain(standing).collect())
     }
 
-    fn open(&mut self, table: &TableId, since: Bound<P>) -> Result<Track<L, P>, E>
+    fn open(
+        &mut self,
+        table: &TableId,
+        since: Bound<P>,
+        appearance: Option<Appearance>,
+    ) -> Result<Track<L, P>, E>
     where
         L: SchemaChangeListener<P>,
         F: FnMut(&TableId) -> Result<L, E>,
         E: From<L::Error>,
     {
-        Track::open(&mut self.open, table, since)
+        Track::open(&mut self.open, table, since, appearance)
     }
 
     fn track(&mut self, table: &TableId) -> Result<&mut Track<L, P>, E>
@@ -166,7 +183,7 @@ impl<F, L, E, P: Position> EraTracker<F, L, E, P> {
 
         match tables.entry(table.clone()) {
             Entry::Occupied(track) => Ok(track.into_mut()),
-            Entry::Vacant(vacant) => Ok(vacant.insert(Track::open(open, table, from)?)),
+            Entry::Vacant(vacant) => Ok(vacant.insert(Track::open(open, table, from, None)?)),
         }
     }
 
@@ -224,7 +241,11 @@ where
         context: &Self::Context,
         event: &TableCreated<'_>,
     ) -> Result<(), Self::Error> {
-        let mut track = self.open(event.table().id(), self.at.clone())?;
+        let mut track = self.open(
+            event.table().id(),
+            self.at.clone(),
+            Some(event.appearance()),
+        )?;
 
         track.listener.table_created(context, event)?;
         self.tables.insert(event.table().id().clone(), track);
@@ -237,10 +258,18 @@ where
         context: &Self::Context,
         event: &TableDropped<'_>,
     ) -> Result<(), Self::Error> {
-        match self.tables.remove(event.table().id()) {
-            Some(mut track) => Ok(track.listener.table_dropped(context, event)?),
-            None => Ok(()),
+        let mut track = match self.tables.remove(event.table().id()) {
+            Some(track) => track,
+            None => self.open(event.table().id(), Bound::Time(*self.window.from()), None)?,
+        };
+
+        track.listener.table_dropped(context, event)?;
+        // A table created within the window and gone by its end left nothing to build or resume.
+        if !track.is_created_within() {
+            self.dropped.push(track.listener);
         }
+
+        Ok(())
     }
 
     fn table_renamed(
@@ -712,21 +741,21 @@ mod tests {
     }
 
     #[test]
-    fn a_table_dropped_within_the_window_is_told_nothing_more() {
-        assert!(
+    fn a_table_dropped_within_the_window_is_told_its_drop() {
+        assert_eq!(
             stories(
                 vec![change(
                     1,
                     vec![TableChange::Created(table(people(), &["id"]))]
                 )],
                 vec![change(15, vec![TableChange::Dropped(people())])],
-            )
-            .is_empty()
+            ),
+            [(people(), vec!["dropped shop.people".to_owned()])]
         );
     }
 
     #[test]
-    fn a_table_dropped_and_created_again_lives_only_from_its_new_creation() {
+    fn a_table_dropped_and_created_again_is_told_its_drop_apart_from_its_new_creation() {
         assert_eq!(
             stories(
                 vec![change(
@@ -741,13 +770,30 @@ mod tests {
                     ),
                 ],
             ),
-            [(
-                people(),
+            [
+                (people(), vec!["dropped shop.people".to_owned()]),
+                (
+                    people(),
+                    vec![
+                        "created shop.people".to_owned(),
+                        "era [\"id\", \"name\"] 16@16..20".to_owned()
+                    ]
+                )
+            ]
+        );
+    }
+
+    #[test]
+    fn a_table_created_and_dropped_within_the_window_leaves_nothing_to_tell() {
+        assert!(
+            stories(
+                vec![],
                 vec![
-                    "created shop.people".to_owned(),
-                    "era [\"id\", \"name\"] 16@16..20".to_owned()
-                ]
-            )]
+                    change(12, vec![TableChange::Created(table(pets(), &["id"]))]),
+                    change(15, vec![TableChange::Dropped(pets())]),
+                ],
+            )
+            .is_empty()
         );
     }
 

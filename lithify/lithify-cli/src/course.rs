@@ -85,6 +85,10 @@ pub(crate) mod tests {
     use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbClient};
 
     use super::*;
+    use lithify_config::Schedule;
+    use lithify_core::position::RecordedAt;
+
+    use crate::check::Expectation;
     use crate::plan::SnapshotPlan;
     use crate::plan::tests::{
         BUILT_CHANGE_LOGS, CAPTURE, PEOPLE, at, built_before, logged, pipeline, rows,
@@ -117,6 +121,30 @@ pub(crate) mod tests {
           ({'op': 'c', 'ts_ms': 1789862400009::BIGINT,
             'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL},
             'before': NULL::STRUCT(id BIGINT), 'after': {'id': 9::BIGINT}})
+        ) AS t(value)";
+
+    const PETS_DROPPED_ON_20260920: &str = "CREATE SCHEMA mysql_shop_cdc;
+        CREATE TABLE mysql_shop_cdc.mysql AS SELECT * FROM (VALUES
+          ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL}, 'ts_ms': 0::BIGINT,
+            'ddl': 'CREATE TABLE people (id BIGINT)',
+            'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
+              'table': {'primaryKeyColumnNames': ['id'], 'columns': [
+                {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
+                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]}),
+          ({'source': {'file': 'binlog.000001', 'pos': 2::BIGINT, 'gtid': NULL}, 'ts_ms': 0::BIGINT,
+            'ddl': 'CREATE TABLE pets (id BIGINT)',
+            'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"pets\"',
+              'table': {'primaryKeyColumnNames': ['id'], 'columns': [
+                {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
+                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]}),
+          ({'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL}, 'ts_ms': 1789862400005::BIGINT,
+            'ddl': 'DROP TABLE pets',
+            'tableChanges': [{'type': 'DROP', 'id': '\"shop\".\"pets\"', 'table': NULL}]})
+        ) AS t(value);
+        CREATE TABLE mysql_shop_cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
+          ({'op': 'c', 'ts_ms': 1789862400001::BIGINT,
+            'source': {'file': 'binlog.000001', 'pos': 3::BIGINT, 'gtid': NULL},
+            'before': NULL::STRUCT(id BIGINT), 'after': {'id': 8::BIGINT}})
         ) AS t(value)";
 
     const PEOPLE_RENAMED_ON_20260920: &str = "CREATE SCHEMA mysql_shop_cdc;
@@ -339,6 +367,53 @@ pub(crate) mod tests {
                 ("8".to_owned(), "kept".to_owned()),
                 ("9".to_owned(), "kept".to_owned())
             ]
+        );
+    }
+
+    #[test]
+    fn a_table_dropped_within_a_window_is_logged_as_dropped_and_built_no_more() {
+        let pipeline = pipeline();
+        let client = logged(
+            PETS_DROPPED_ON_20260920,
+            &[
+                built_before("people", CAPTURE),
+                built_before("pets", CAPTURE),
+            ],
+        );
+
+        settle(&pipeline, &client, &Course::CatchUp, NOW).unwrap();
+
+        assert_eq!(
+            rows(
+                &client,
+                "SELECT concat_ws(' ', COALESCE(table_from, '-'), COALESCE(table_to, '-'), COALESCE(lifecycle, '-')), COALESCE(target, '-') FROM mysql_shop._lithify_log WHERE window_from >= '2026-09-20' ORDER BY id"
+            ),
+            [
+                folded("shop.pets - dropped", "-"),
+                folded("shop.people shop.people -", "mysql_shop.people_20260920"),
+                folded("shop.people shop.people -", "mysql_shop.people_20260921"),
+            ]
+        );
+        assert!(matches!(
+            settle(
+                &pipeline,
+                &client,
+                &shard("2026-09-21", &[TableId::new("shop", "pets")]),
+                NOW
+            ),
+            Err(Unrunnable::UnknownTables(_))
+        ));
+        assert_eq!(
+            Expectation::new(
+                Schedule::Daily,
+                pipeline.sources().next().unwrap().since(),
+                CAPTURE,
+                RecordedAt::from(at(NOW)),
+            )
+            .read(&client, "mysql_shop")
+            .unwrap()
+            .discrepancies(),
+            []
         );
     }
 

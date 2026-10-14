@@ -48,7 +48,7 @@ impl Base {
             client
                 .latest_build_logs(namespace, &Latest::SucceededUntil(start))?
                 .into_iter()
-                .filter_map(|log| Some((log.table_to()?.clone(), log.target().clone())))
+                .filter_map(|log| Some((log.table_to()?.clone(), log.target()?.clone())))
                 .collect(),
         ))
     }
@@ -386,7 +386,7 @@ pub(crate) mod tests {
             Some(TableId::new("shop", table)),
             Some(TableId::new("shop", table)),
             None,
-            TablePath::new("mysql_shop", &format!("{table}_20260919")),
+            Some(TablePath::new("mysql_shop", &format!("{table}_20260919"))),
             Window::new(
                 RecordedAt::from(at("2026-09-19T00:00:00Z")),
                 RecordedAt::from(at("2026-09-20T00:00:00Z")),
@@ -410,7 +410,7 @@ pub(crate) mod tests {
             .unwrap();
         client.create_build_log::<Unrunnable>("mysql_shop").unwrap();
         for log in before {
-            client.append_build_log(log).unwrap();
+            client.append_build_log("mysql_shop", log).unwrap();
         }
 
         client

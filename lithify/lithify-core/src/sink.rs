@@ -155,13 +155,13 @@ pub trait Warehouse {
         )))
     }
 
-    fn append_build_log(&self, log: &BuildLog) -> SqlString {
+    fn append_build_log(&self, namespace: &str, log: &BuildLog) -> SqlString {
         let id = self.identifier(BuildLog::ID);
         let columns = BuildLog::COLUMNS
             .iter()
             .map(|(name, _)| self.identifier(name))
             .collect::<Vec<_>>();
-        let table = self.table_ref(&BuildLog::path(log.namespace()));
+        let table = self.table_ref(&BuildLog::path(namespace));
 
         SqlString::from(format!(
             "INSERT INTO {table} ({id}, {})\nSELECT COALESCE(MAX({id}), 0) + 1, {}\nFROM {table}",
@@ -255,8 +255,8 @@ pub trait WarehouseClient {
 
     fn exists(&self, table: &TablePath) -> Result<bool, Self::Error>;
 
-    fn append_build_log(&self, log: &BuildLog) -> Result<(), Self::Error> {
-        self.execute(&self.warehouse().append_build_log(log))
+    fn append_build_log(&self, namespace: &str, log: &BuildLog) -> Result<(), Self::Error> {
+        self.execute(&self.warehouse().append_build_log(namespace, log))
     }
 
     fn build<E>(&self, builder: &impl ArtifactBuilder) -> Result<(), E>
@@ -382,7 +382,7 @@ mod tests {
                 Some(self.0.clone()),
                 Some(self.0.clone()),
                 None,
-                TablePath::new("shop", "people"),
+                Some(TablePath::new("shop", "people")),
                 Window::until(RecordedAt::from(1)),
                 outcome,
             )
