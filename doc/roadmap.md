@@ -21,6 +21,7 @@ Status is one of:
 | Rows of a table without a primary key cannot be told apart, so there is nothing to fold their changes by | The artifact is refused with `UnbuildableArtifact::WithoutPrimaryKey` | Rejected | |
 | Rows before and after a primary key change within a window are identified by different columns, so their changes cannot be folded together | The artifact is refused with `UnbuildableArtifact::PrimaryKeyChanged` | Rejected | |
 | A source column type has no counterpart in the warehouse | The artifact is refused with `UnbuildableArtifact::UnsupportedColumn` | Rejected | |
+| A table stands when a window opens but nothing was built for it closing then, so it would be folded onto nothing | A build by `lithify build` or `lithify catch-up` is refused with `Unrunnable::Baseless` naming the tables; a table created within the window, or one whose change log holds it from its first row such as a captured one, folds onto nothing as it should | Rejected | |
 | A column added within a window has a default that is an expression such as `CURRENT_TIMESTAMP`, which the source evaluates for the rows already there but the replay reads as text | The rows folded before the column was added are filled with `Warehouse::cast_or_null`, so the build goes on with null where the source holds the value of the expression; filling them with the instant of the schema change would match `CURRENT_TIMESTAMP` | Open | |
 
 ## Operations
@@ -43,6 +44,7 @@ Status is one of:
 | History across schema changes | Versions recorded in different eras share one table, as columns are added, dropped or retyped along the way | Not started | |
 | History appended per window | A window appends its versions and closes the ones the window before it left open, rather than rebuilding every version | Not started | |
 | Deletes in history | A deleted row closes its last version instead of disappearing | Not started | |
+| Views | Named by `artifacts` in `table.toml` and created within `lithify catch-up` and `lithify build`, such as a view over the shards of a table | Not started | |
 | Mask columns | `mask` keeps the values of a column out of the artifacts, such as a large document or a personal detail; further masks such as a hash come with the questions written on `Mask` | Partial: `mask` is read from `table.toml` but no artifact applies it | |
 
 ### Capture
@@ -62,14 +64,25 @@ The change log only replays if the source and sink connectors write it the way a
 | Support | Why | Status | Target |
 | --- | --- | --- | --- |
 | Execute artifacts | `lithify catch-up` builds every window closed since the build log says it was last built, and `lithify build --snapshot <DATE> [--table]` rebuilds one shard onto the one the build log recorded before it, or writes its statements with `--dry-run` | Available | |
-| Record runs as a table | Which window was built when, by which version, with what outcome, so the next run, a backfill and an audit read the same record | Available | |
-| Resume from the last built window | A daily run picks its window from what was built rather than from the clock, and a missed day is caught up | Partial: every table of a window is rebuilt rather than only the missing ones | |
-| Backfill a range | Rebuild a range of windows in order, each on top of the one before it | Not started | |
+| Record runs as a table | Which window was built when, by which version, with what outcome, so the next run, a backfill and an audit read the same record | Available: `_lithify_log` per artifact namespace, with the names a table opens and closes each window with and whether it was created, renamed or dropped in it | |
+| Resume from the last built window | A daily run picks its window from what was built rather than from the clock, and a missed day is caught up | Partial: every table of a window is rebuilt rather than only the missing ones; a table the catalog holds but the build log never saw stops the build, and one the build log holds but the catalog dropped without a logged drop holds catch-up back | |
+| Backfill a range | Rebuild a range of windows in order, each on top of the one before it | Partial: `lithify build --snapshot` rebuilds one shard and the next catch-up rebuilds what folded onto it | |
+| Schedules beyond daily | A period and an offset, so a window can close every hour or at an hour other than midnight | Not started: `Schedule` only has `Daily` | |
+| Stream the change log | `lithify stream` keeps the artifacts current as changes arrive rather than once a window closes | Not started | |
 | Wait for the change log to be complete | A window is built only once the sinks have written everything up to its end | Not started | |
 | Publish atomically | Consumers never see a window half built across tables | Not started | |
-| Guard against concurrent runs | Two runs building the same window overwrite each other | Not started | |
-| Record schema changes as a table | Consumers can tell which era a row belongs to without reading the log | Not started | |
-| Stable name for the latest shard | Consumers query one name rather than a dated shard | Not started | |
+| Guard against concurrent runs | Two runs building the same window overwrite each other | Partial: a window built twice comes out the same and is read from the build log as built once, but nothing keeps two runs apart | |
+| Record schema changes as a table | Consumers can tell which era a row belongs to without reading the log | Not started: the build log keeps only whether a table was created, renamed or dropped, as what building needs; column changes are left to whatever manages the schema | |
+| Stable name for the latest shard | Consumers query one name rather than a dated shard, likely as one of the [views](#artifacts) | Not started | |
+
+### Interface
+
+| Support | Why | Status | Target |
+| --- | --- | --- | --- |
+| Overview of the build log | `lithify serve` lists the latest build of each table and what `lithify check` finds, per sink | Available: behind the `serve` feature, rendered on the server | |
+| Assemble a rebuild | The build page assembles the `lithify build --snapshot` that rebuilds a shard, narrowed to the tables chosen | Available | |
+| Run a retry from the page | A failed build is rebuilt from the page rather than by copying the command it assembles | Not started | |
+| List dropped tables | The overview lists the latest build of each table still standing, so a dropped table needs its own read of the build log | Not started | |
 
 ### Deployment
 
@@ -87,6 +100,7 @@ The change log only replays if the source and sink connectors write it the way a
 | --- | --- | --- | --- |
 | Structured logs | Logs a platform can index and alert on | In progress: tracing | |
 | Exit status by cause | A scheduler retries what may pass next time and pages on what will not | Partial: success or failure only | |
+| Alert on check | `lithify check` lists what should have been built by now but was not, to be paged on | Partial: `lithify check` fails with a nonzero exit status on any discrepancy, but nothing hands it to an alerting platform, and a table the build log never saw is not expected | |
 | Metrics | Duration, rows and bytes processed per table and window | Not started | |
 | Cost estimate | A dry run reports what a window would scan before it is paid for | Not started | |
 
@@ -103,6 +117,8 @@ The change log only replays if the source and sink connectors write it the way a
 | Expire old shards | Shards accumulate one per window | Not started | |
 | Switch to a new capture | A source re-snapshotted or moved to another host continues from its `since` | Partial: sources are configured with `since` | |
 | Rebuild after an upgrade | A version that builds artifacts differently tells which windows to rebuild | Not started | |
+| Detect a change of dialect | A pipeline captured under one dialect and configured under another reads its change log differently | Partial: a capture that differs from the one the build log recorded stops `lithify catch-up` and is reported by `lithify check`, but `lithify build --snapshot` does not notice it, and which windows to rebuild under the new one is not worked out | |
+| Plan a configuration change | Comparing the configuration with the one last applied, kept in a table such as `_lithify_state`, shows what a change would rebuild before it is made | Not started | |
 
 ## Refactoring
 
@@ -111,8 +127,8 @@ Status reads as in [Operations](#operations).
 
 | Refactoring | Why | Into | Status | Target |
 | --- | --- | --- | --- | --- |
-| Replay a window into the artifacts of every table | Opening a builder per table on an `EraTracker`, replaying the schema changes through it and finishing it on the tables left standing is spelled out in `SnapshotPlan::statements`, again in `SnapshotBuild` of the end-to-end crate and again in the snapshot tests | core | Not started | |
-| Choose the shard a window builds on | `SnapshotPlan::base` turns `--onto` into the shard of the window before, which a scheduled run, a resume and a backfill all need | core or strategy | Not started | |
-| Choose the source a window reads | `Run::each_sink` takes the only source and leaves ordering the change log across sources to a `todo!` | core | Not started | |
+| Replay a window into the artifacts of every table | Opening a builder per table on an `EraTracker`, replaying the schema changes through it and finishing it on the tables left standing is spelled out in `SnapshotPlan::builders`, again in `SnapshotBuild` of the end-to-end crate and again in the snapshot tests | core | Not started | |
+| Choose the shard a window builds on | `Base` in the command line crate reads the shards a window folds onto from the build log, which a scheduled run, a resume and a backfill all need | core or strategy | Not started | |
+| Choose the source a window reads | `Run::source` takes the only source and leaves ordering the change log across sources to a `todo!` | core | Not started | |
 | Call a fn with the change logs of any warehouse | Every caller implements `DuckDbChangeLogsFn` and `BigQueryChangeLogsFn` with the same body, as `Catalog` and `SnapshotPlan` do | protocol | Not started | |
 | Name the artifacts a sink builds | `Artifacts` is implemented for `Sink<Warehouse>` but reads nothing of the warehouse, and the end-to-end crate reaches into the command line crate for it | config or strategy | Not started | |
