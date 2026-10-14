@@ -83,7 +83,9 @@ impl WarehouseClient for DuckDbClient {
                     schedule: row.get("schedule")?,
                     source: row.get("source")?,
                     capture: row.get("capture")?,
-                    table_id: row.get("table_id")?,
+                    table_from: row.get("table_from")?,
+                    table_to: row.get("table_to")?,
+                    lifecycle: row.get("lifecycle")?,
                     base: row.get("base")?,
                     target: row.get("target")?,
                     window_from: row.get("window_from")?,
@@ -334,8 +336,21 @@ mod tests {
 
     const W1: (i64, i64) = (1789862400000, 1789948800000);
     const W2: (i64, i64) = (1789948800000, 1790035200000);
+    const W3: (i64, i64) = (1790035200000, 1790121600000);
 
-    fn logged(table: &str, (from, to): (i64, i64), status: Status, finished_at: u64) -> BuildLog {
+    fn logged(table: &str, window: (i64, i64), status: Status, finished_at: u64) -> BuildLog {
+        logged_across(Some(table), Some(table), window, status, finished_at)
+    }
+
+    fn logged_across(
+        table_from: Option<&str>,
+        table_to: Option<&str>,
+        (from, to): (i64, i64),
+        status: Status,
+        finished_at: u64,
+    ) -> BuildLog {
+        let table = table_to.or(table_from).unwrap();
+
         BuildLog::new(
             &Run::new(
                 Ulid::from_parts(finished_at, 0),
@@ -345,7 +360,8 @@ mod tests {
                 r#"{"debezium":{"dialect":"mysql"}}"#,
                 "0.1.0",
             ),
-            TableId::new("shop", table),
+            table_from.map(|table| TableId::new("shop", table)),
+            table_to.map(|table| TableId::new("shop", table)),
             Some(TablePath::new("mysql_shop", &format!("{table}_base"))),
             TablePath::new("mysql_shop", &format!("{table}_{from}")),
             window(from, to),
@@ -448,6 +464,107 @@ mod tests {
             ),
             [history[2].clone(), history[1].clone()]
         );
+    }
+
+    #[test]
+    fn a_build_log_reads_no_more_the_name_a_table_was_renamed_away_from() {
+        let renamed = logged_across(
+            Some("customers"),
+            Some("clients"),
+            W2,
+            Status::Succeeded,
+            1790035300000,
+        );
+        let client = logging(&[
+            logged("customers", W1, Status::Succeeded, 1789949000000),
+            renamed.clone(),
+        ]);
+
+        assert_eq!(
+            latest(&client, Latest::Attempted),
+            std::slice::from_ref(&renamed)
+        );
+        assert_eq!(latest(&client, Latest::Succeeded), [renamed]);
+    }
+
+    #[test]
+    fn a_build_log_reads_a_name_again_once_a_table_is_created_under_it() {
+        let renamed = logged_across(
+            Some("customers"),
+            Some("clients"),
+            W2,
+            Status::Succeeded,
+            1790035300000,
+        );
+        let created = logged_across(
+            None,
+            Some("customers"),
+            W3,
+            Status::Succeeded,
+            1790121700000,
+        );
+        let client = logging(&[
+            logged("customers", W1, Status::Succeeded, 1789949000000),
+            renamed.clone(),
+            created.clone(),
+        ]);
+
+        assert_eq!(latest(&client, Latest::Succeeded), [renamed, created]);
+    }
+
+    #[test]
+    fn a_build_log_reads_the_base_of_a_window_under_the_name_it_closed_with_even_once_renamed_away()
+    {
+        let before = logged("customers", W1, Status::Succeeded, 1789949000000);
+        let client = logging(&[
+            before.clone(),
+            logged_across(
+                Some("customers"),
+                Some("clients"),
+                W2,
+                Status::Succeeded,
+                1790035300000,
+            ),
+        ]);
+
+        assert_eq!(
+            latest(&client, Latest::SucceededUntil(RecordedAt::from(W1.1))),
+            [before]
+        );
+    }
+
+    #[test]
+    fn a_build_log_still_reads_the_last_success_of_a_name_a_failed_build_renamed_away_from() {
+        let before = logged("customers", W1, Status::Succeeded, 1789949000000);
+        let renamed = logged_across(
+            Some("customers"),
+            Some("clients"),
+            W2,
+            Status::Failed("no era".to_owned()),
+            1790035300000,
+        );
+        let client = logging(&[before.clone(), renamed.clone()]);
+
+        assert_eq!(latest(&client, Latest::Attempted), [renamed]);
+        assert_eq!(latest(&client, Latest::Succeeded), [before]);
+    }
+
+    #[test]
+    fn a_build_log_reads_no_more_a_name_rebuilt_in_a_window_before_it_was_renamed_away_from() {
+        let renamed = logged_across(
+            Some("customers"),
+            Some("clients"),
+            W2,
+            Status::Succeeded,
+            1790035300000,
+        );
+        let client = logging(&[
+            logged("customers", W1, Status::Succeeded, 1789949000000),
+            renamed.clone(),
+            logged("customers", W1, Status::Succeeded, 1790121700000),
+        ]);
+
+        assert_eq!(latest(&client, Latest::Succeeded), [renamed]);
     }
 
     #[test]

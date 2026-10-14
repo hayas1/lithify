@@ -44,13 +44,11 @@ impl Base {
         K: WarehouseClient,
         Unrunnable: From<K::Error>,
     {
-        // TODO: follow a table renamed within the window before, whose log is keyed by the
-        // name it opened that window with rather than the one it opens this window with.
         Ok(Self::Recorded(
             client
                 .latest_build_logs(namespace, &Latest::SucceededUntil(start))?
                 .into_iter()
-                .map(|log| (log.origin().clone(), log.target().clone()))
+                .filter_map(|log| Some((log.table_to()?.clone(), log.target().clone())))
                 .collect(),
         ))
     }
@@ -385,7 +383,8 @@ pub(crate) mod tests {
                 capture,
                 "0.1.0",
             ),
-            TableId::new("shop", table),
+            Some(TableId::new("shop", table)),
+            Some(TableId::new("shop", table)),
             None,
             TablePath::new("mysql_shop", &format!("{table}_20260919")),
             Window::new(
@@ -520,7 +519,7 @@ pub(crate) mod tests {
         assert_eq!(
             rows(
                 &client,
-                "SELECT table_id, status FROM mysql_shop._lithify_log ORDER BY table_id"
+                "SELECT table_to, status FROM mysql_shop._lithify_log ORDER BY table_to"
             ),
             [
                 ("shop.people".to_owned(), "succeeded".to_owned()),
@@ -574,7 +573,7 @@ pub(crate) mod tests {
         assert_eq!(
             latest
                 .iter()
-                .map(|log| (log.origin().to_string(), log.run_id()))
+                .map(|log| (log.table_to().unwrap().to_string(), log.run_id()))
                 .collect::<Vec<_>>(),
             [
                 ("shop.people".to_owned(), twice[0].run_id()),

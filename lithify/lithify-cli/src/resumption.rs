@@ -27,10 +27,9 @@ impl Resumption {
         }
 
         let start = built_last
+            .filter(|log| log.table_to().is_some())
             .map(|log| {
-                succeeded
-                    .iter()
-                    .find(|built| built.origin() == log.origin())
+                log.last_success(succeeded)
                     .map_or(since, |built| *built.window().to())
             })
             .min()
@@ -82,11 +81,31 @@ mod tests {
                 capture,
                 "0.1.0",
             ),
-            TableId::new("shop", table),
+            Some(TableId::new("shop", table)),
+            Some(TableId::new("shop", table)),
             None,
             TablePath::new("mysql_shop", &format!("{table}_{from}")),
             Window::new(RecordedAt::from(from), RecordedAt::from(to)),
             Outcome::new(status, DateTime::from_timestamp_millis(to).unwrap()),
+        )
+    }
+
+    fn renamed(run: u64, from: &str, to: &str, window: (i64, i64), status: Status) -> BuildLog {
+        BuildLog::new(
+            &Run::new(
+                Ulid::from_parts(run, 0),
+                "snapshot",
+                "daily",
+                "primary",
+                CAPTURE,
+                "0.1.0",
+            ),
+            Some(TableId::new("shop", from)),
+            Some(TableId::new("shop", to)),
+            None,
+            TablePath::new("mysql_shop", &format!("{to}_{}", window.0)),
+            Window::new(RecordedAt::from(window.0), RecordedAt::from(window.1)),
+            Outcome::new(status, DateTime::from_timestamp_millis(window.1).unwrap()),
         )
     }
 
@@ -144,6 +163,20 @@ mod tests {
             start(&[gone.clone(), people.clone()], &[gone, people]),
             RecordedAt::from(W2.1)
         );
+    }
+
+    #[test]
+    fn a_table_whose_rename_failed_to_build_resumes_where_it_was_last_built_under_its_old_name() {
+        let before = logged(1, "customers", W1, Status::Succeeded);
+        let renamed = renamed(
+            2,
+            "customers",
+            "clients",
+            W2,
+            Status::Failed("no era".to_owned()),
+        );
+
+        assert_eq!(start(&[renamed], &[before]), RecordedAt::from(W1.1));
     }
 
     #[test]

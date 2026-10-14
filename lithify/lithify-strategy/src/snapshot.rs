@@ -6,7 +6,7 @@ use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
 use lithify_core::build_log::{BuildLog, Outcome, Run};
 use lithify_core::era::Era;
 use lithify_core::listener::{
-    ColumnAdded, ColumnDropped, ColumnRenamed, ColumnRetyped, PrimaryKeyChanged,
+    Appearance, ColumnAdded, ColumnDropped, ColumnRenamed, ColumnRetyped, PrimaryKeyChanged,
     SchemaChangeListener, TableCreated, TableRenamed,
 };
 use lithify_core::model::{ColumnModel, TableId, TableModel};
@@ -63,7 +63,7 @@ impl Artifact for Snapshot {
 pub struct SnapshotBuilder<'a, L, W> {
     snapshot: &'a Snapshot,
     query: ChangeLogQuery<'a, L>,
-    origin: TableId,
+    table_from: Option<TableId>,
     table: TableId,
     window: Window,
     base: Option<TablePath>,
@@ -90,7 +90,7 @@ impl<'a, L: RowChangeLog, W: Warehouse> SnapshotBuilder<'a, L, W> {
             snapshot,
             query: ChangeLogQuery::new(log),
             target: snapshot.target(&table, &window)?,
-            origin: table.clone(),
+            table_from: Some(table.clone()),
             table,
             window,
             base,
@@ -204,6 +204,9 @@ impl<L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Position>
         _: &W,
         event: &TableCreated<'_>,
     ) -> Result<(), UnbuildableArtifact> {
+        if event.appearance() == Appearance::Created {
+            self.table_from = None;
+        }
         if event.appearance().is_logged_from_start() {
             self.base = None;
         }
@@ -333,7 +336,8 @@ impl<L: RowChangeLog, W: Warehouse> ArtifactBuilder for SnapshotBuilder<'_, L, W
     fn build_log(&self, run: &Run, outcome: Outcome) -> BuildLog {
         BuildLog::new(
             run,
-            self.origin.clone(),
+            self.table_from.clone(),
+            Some(self.table.clone()),
             self.base.clone(),
             self.target.clone(),
             self.window.clone(),
@@ -1517,7 +1521,8 @@ mod tests {
             builder.build_log(&run, Outcome::new(Status::Succeeded, finished_at)),
             BuildLog::new(
                 &run,
-                TableId::new("shop", "customers"),
+                Some(TableId::new("shop", "customers")),
+                Some(TableId::new("shop", "customers")),
                 Some(base),
                 TablePath::new("mysql_shop", "customers_20260920"),
                 window,
@@ -1527,7 +1532,7 @@ mod tests {
     }
 
     #[test]
-    fn a_table_renamed_within_the_window_is_logged_under_its_first_name_and_built_under_its_last() {
+    fn a_table_renamed_within_the_window_is_logged_from_its_first_name_to_its_last() {
         let run = Run::new(
             ulid::Ulid::nil(),
             "snapshot",
@@ -1547,12 +1552,91 @@ mod tests {
             renamed.build_log(&run, outcome.clone()),
             BuildLog::new(
                 &run,
-                TableId::new("shop", "customers"),
+                Some(TableId::new("shop", "customers")),
+                Some(TableId::new("shop", "clients")),
                 Some(base.clone()),
                 TablePath::new("mysql_shop", "clients_20260920"),
                 window(),
                 outcome,
             )
+        );
+    }
+
+    #[test]
+    fn a_table_created_within_the_window_is_logged_as_opening_it_under_no_name() {
+        let run = Run::new(
+            ulid::Ulid::nil(),
+            "snapshot",
+            "daily",
+            "primary",
+            "{}",
+            "0.1.0",
+        );
+        let outcome = Outcome::new(
+            Status::Succeeded,
+            DateTime::from_timestamp_millis(1789949000000).unwrap(),
+        );
+        let orders = TableModel::new(
+            TableId::new("shop", "orders"),
+            vec![column("id", ColumnType::Int64)],
+            vec!["id".to_owned()],
+        );
+        let created = snapshots(
+            customers(),
+            vec![change(150, TableChange::Created(orders))],
+            || Some(TablePath::new("mysql_shop", "customers_20260919")),
+        )
+        .unwrap()
+        .into_iter()
+        .find(|snapshot| snapshot.table() == &TableId::new("shop", "orders"))
+        .unwrap();
+
+        assert_eq!(
+            created.build_log(&run, outcome.clone()),
+            BuildLog::new(
+                &run,
+                None,
+                Some(TableId::new("shop", "orders")),
+                None,
+                TablePath::new("mysql_shop", "orders_20260920"),
+                window(),
+                outcome,
+            )
+        );
+    }
+
+    #[test]
+    fn a_table_captured_within_the_window_is_logged_as_opening_it_under_its_name() {
+        let run = Run::new(
+            ulid::Ulid::nil(),
+            "snapshot",
+            "daily",
+            "primary",
+            "{}",
+            "0.1.0",
+        );
+        let outcome = Outcome::new(
+            Status::Succeeded,
+            DateTime::from_timestamp_millis(1789949000000).unwrap(),
+        );
+        let orders = TableModel::new(
+            TableId::new("shop", "orders"),
+            vec![column("id", ColumnType::Int64)],
+            vec!["id".to_owned()],
+        );
+        let captured = snapshots(
+            customers(),
+            vec![change(150, TableChange::Created(orders)).captured()],
+            || None,
+        )
+        .unwrap()
+        .into_iter()
+        .find(|snapshot| snapshot.table() == &TableId::new("shop", "orders"))
+        .unwrap();
+
+        assert_eq!(
+            captured.build_log(&run, outcome.clone()).table_from(),
+            Some(&TableId::new("shop", "orders"))
         );
     }
 

@@ -155,16 +155,18 @@ impl Expectation {
 
         self.capture_changed(built_last.clone())
             .into_iter()
-            .chain(built_last.flat_map(|log| {
-                let built = succeeded
-                    .iter()
-                    .find(|built| built.origin() == log.origin());
+            .chain(
+                built_last
+                    .filter_map(|log| log.table_to().map(|table| (table, log)))
+                    .flat_map(|(table, log)| {
+                        let built = log.last_success(succeeded);
 
-                self.missing_from(built, present).into_iter().chain(
-                    self.failed(log)
-                        .or_else(|| self.overdue(log.origin(), built)),
-                )
-            }))
+                        self.missing_from(table, built, present).into_iter().chain(
+                            self.failed(table, log)
+                                .or_else(|| self.overdue(table, built)),
+                        )
+                    }),
+            )
             .collect()
     }
 
@@ -189,23 +191,29 @@ impl Expectation {
 
     fn missing_from(
         &self,
+        table: &TableId,
         built: Option<&BuildLog>,
         present: &BTreeSet<TablePath>,
     ) -> Option<Discrepancy> {
-        built.and_then(|built| self.missing(built, present))
+        built.and_then(|built| self.missing(table, built, present))
     }
 
-    fn failed(&self, log: &BuildLog) -> Option<Discrepancy> {
+    fn failed(&self, table: &TableId, log: &BuildLog) -> Option<Discrepancy> {
         log.status().error().map(|error| Discrepancy::Failed {
-            table: log.origin().clone(),
+            table: table.clone(),
             window: log.window().clone(),
             error: error.to_owned(),
         })
     }
 
-    fn missing(&self, built: &BuildLog, present: &BTreeSet<TablePath>) -> Option<Discrepancy> {
+    fn missing(
+        &self,
+        table: &TableId,
+        built: &BuildLog,
+        present: &BTreeSet<TablePath>,
+    ) -> Option<Discrepancy> {
         (!present.contains(built.target())).then(|| Discrepancy::Missing {
-            table: built.origin().clone(),
+            table: table.clone(),
             target: built.target().clone(),
         })
     }
@@ -260,7 +268,8 @@ mod tests {
                 "{}",
                 "0.1.0",
             ),
-            TableId::new("shop", table),
+            Some(TableId::new("shop", table)),
+            Some(TableId::new("shop", table)),
             None,
             TablePath::new(
                 "mysql_shop",

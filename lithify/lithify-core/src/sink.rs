@@ -184,15 +184,16 @@ pub trait Warehouse {
                 }
             })
             .collect::<Vec<_>>();
-        let partition = ["artifact", "schedule", "table_id"]
+        let partition = ["artifact", "schedule", "table_to"]
             .map(|name| self.identifier(name))
             .join(", ");
+        let log = self.table_ref(&BuildLog::path(namespace));
 
         SqlString::from(format!(
-            "SELECT {}\nFROM {}\nWHERE {}\nQUALIFY ROW_NUMBER() OVER (PARTITION BY {partition} ORDER BY {} DESC) = 1\nORDER BY {partition}",
+            "SELECT {}\nFROM {log} AS {}\nWHERE {}\nQUALIFY ROW_NUMBER() OVER (PARTITION BY {partition} ORDER BY {} DESC) = 1\nORDER BY {partition}",
             columns.join(", "),
-            self.table_ref(&BuildLog::path(namespace)),
-            latest.condition(self),
+            self.identifier(Latest::ALIAS),
+            latest.condition(self, &log),
             self.identifier(BuildLog::ID),
         ))
     }
@@ -378,7 +379,8 @@ mod tests {
         fn build_log(&self, run: &Run, outcome: Outcome) -> BuildLog {
             BuildLog::new(
                 run,
-                self.0.clone(),
+                Some(self.0.clone()),
+                Some(self.0.clone()),
                 None,
                 TablePath::new("shop", "people"),
                 Window::until(RecordedAt::from(1)),

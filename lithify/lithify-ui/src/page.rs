@@ -78,6 +78,7 @@ impl Page {
                 <table>
                     <tr>
                         <th>"Table"</th>
+                        <th>"Lifecycle"</th>
                         <th>"Status"</th>
                         <th>"Window"</th>
                         <th>"Base"</th>
@@ -97,6 +98,7 @@ impl Page {
         view! {
             <tr>
                 <td>{row.table.to_string()}</td>
+                <td>{row.lifecycle.map(|lifecycle| lifecycle.to_string()).unwrap_or_default()}</td>
                 <td>{row.status.to_string()}</td>
                 <td>{row.window}</td>
                 <td>{row.base.map(|base| base.to_string()).unwrap_or_default()}</td>

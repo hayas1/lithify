@@ -1,7 +1,7 @@
 use chrono::NaiveDate;
 
 use lithify_config::Schedule;
-use lithify_core::build_log::{BuildLog, Status};
+use lithify_core::build_log::{BuildLog, Lifecycle, Status};
 use lithify_core::model::TableId;
 use lithify_core::sink::TablePath;
 
@@ -38,7 +38,7 @@ impl SinkOverview {
         let mut rows: Vec<_> = self
             .latest
             .iter()
-            .map(|log| TableRow::new(log, self.schedule))
+            .filter_map(|log| TableRow::new(log, self.schedule))
             .collect();
         rows.sort_by(|left, right| left.table.cmp(&right.table));
 
@@ -53,6 +53,7 @@ impl SinkOverview {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableRow {
     pub table: TableId,
+    pub lifecycle: Option<Lifecycle>,
     pub status: Status,
     pub window: String,
     pub base: Option<TablePath>,
@@ -61,17 +62,18 @@ pub struct TableRow {
 }
 
 impl TableRow {
-    fn new(log: &BuildLog, schedule: Schedule) -> Self {
+    fn new(log: &BuildLog, schedule: Schedule) -> Option<Self> {
         let window = log.window();
 
-        Self {
-            table: log.origin().clone(),
+        Some(Self {
+            table: log.table()?.clone(),
+            lifecycle: log.lifecycle(),
             status: log.status().clone(),
             window: format!("{} .. {}", window.from(), window.to()),
             base: log.base().cloned(),
             target: log.target().clone(),
             shard: schedule.date(window),
-        }
+        })
     }
 
     // TODO: run the rebuild from the page rather than only assembling the command to run it with.
@@ -89,7 +91,7 @@ pub(crate) mod tests {
     use chrono::{DateTime, Utc};
     use ulid::Ulid;
 
-    use lithify_core::build_log::{BuildLog, Outcome, Run, Status};
+    use lithify_core::build_log::{BuildLog, Lifecycle, Outcome, Run, Status};
     use lithify_core::model::TableId;
     use lithify_core::position::RecordedAt;
     use lithify_core::sink::TablePath;
@@ -114,7 +116,8 @@ pub(crate) mod tests {
                 "{}",
                 "0.1.0",
             ),
-            TableId::new("shop", table),
+            Some(TableId::new("shop", table)),
+            Some(TableId::new("shop", table)),
             base.map(|base| TablePath::new("mysql_shop", base)),
             TablePath::new("mysql_shop", &format!("{table}_20260920")),
             Window::new(
@@ -144,6 +147,7 @@ pub(crate) mod tests {
             [
                 TableRow {
                     table: TableId::new("shop", "people"),
+                    lifecycle: None,
                     status: Status::Succeeded,
                     window: "2026-09-20T00:00:00+00:00 .. 2026-09-21T00:00:00+00:00".to_owned(),
                     base: Some(TablePath::new("mysql_shop", "people_20260919")),
@@ -152,6 +156,7 @@ pub(crate) mod tests {
                 },
                 TableRow {
                     table: TableId::new("shop", "pets"),
+                    lifecycle: None,
                     status: Status::Failed("no such column".to_owned()),
                     window: "2026-09-20T00:00:00+00:00 .. 2026-09-21T00:00:00+00:00".to_owned(),
                     base: None,
@@ -160,6 +165,33 @@ pub(crate) mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_table_renamed_within_its_window_is_listed_under_its_new_name_as_renamed() {
+        let renamed = BuildLog::new(
+            &Run::new(
+                Ulid::from_parts(1, 0),
+                "snapshot",
+                "daily",
+                "primary",
+                "{}",
+                "0.1.0",
+            ),
+            Some(TableId::new("shop", "people")),
+            Some(TableId::new("shop", "persons")),
+            None,
+            TablePath::new("mysql_shop", "persons_20260920"),
+            Window::new(
+                RecordedAt::from(at("2026-09-20T00:00:00Z")),
+                RecordedAt::from(at("2026-09-21T00:00:00Z")),
+            ),
+            Outcome::new(Status::Succeeded, at("2026-09-21T00:10:00Z")),
+        );
+        let rows = SinkOverview::new("rustfs", Schedule::Daily, vec![renamed], vec![]).rows();
+
+        assert_eq!(rows[0].table, TableId::new("shop", "persons"));
+        assert_eq!(rows[0].lifecycle, Some(Lifecycle::Renamed));
     }
 
     #[test]

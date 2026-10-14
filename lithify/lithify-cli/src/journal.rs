@@ -106,7 +106,8 @@ mod tests {
                 "{}",
                 "0.1.0",
             ),
-            TableId::new("shop", "people"),
+            Some(TableId::new("shop", "people")),
+            Some(TableId::new("shop", "people")),
             None,
             TablePath::new("mysql_shop", "people_20260920"),
             Window::new(
