@@ -6,8 +6,8 @@ use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
 use lithify_core::build_log::{BuildLog, Outcome, Run};
 use lithify_core::era::Era;
 use lithify_core::listener::{
-    Alteration, Appearance, ColumnRenamed, SchemaChangeListener, TableAltered, TableCreated,
-    TableDropped, TableRenamed,
+    Alteration, Appearance, SchemaChangeListener, TableAltered, TableCreated, TableDropped,
+    TableRenamed,
 };
 use lithify_core::model::{ColumnModel, TableId, TableModel};
 use lithify_core::sink::{TablePath, Warehouse};
@@ -205,29 +205,45 @@ impl<'a, L: RowChangeLog, W: Warehouse> SnapshotBuilder<'a, L, W> {
         Ok(())
     }
 
+    fn source(
+        warehouse: &W,
+        alterations: &[Alteration<'_>],
+        column: &ColumnModel,
+        name: &SqlString,
+    ) -> SqlString {
+        alterations
+            .iter()
+            .filter_map(Alteration::as_column_renamed)
+            .find(|(_, renamed)| renamed.name() == column.name())
+            .map_or_else(
+                || name.clone(),
+                |(previous, _)| warehouse.identifier(previous.name()),
+            )
+    }
+
     fn carried(
         warehouse: &W,
         alterations: &[Alteration<'_>],
         column: &ColumnModel,
         name: &SqlString,
     ) -> Result<SqlString, UnbuildableArtifact> {
-        let altered = alterations.iter().find_map(|alteration| match alteration {
-            Alteration::ColumnAdded(added) if added.name() == column.name() => {
-                Some(warehouse.fill(column))
-            }
-            Alteration::ColumnRetyped {
-                column: retyped, ..
-            } if retyped.name() == column.name() => Some(
-                warehouse
-                    .column_type(column.column_type())
-                    .map(|column_type| SqlString::from(format!("CAST({name} AS {column_type})"))),
-            ),
-            _ => None,
-        });
+        let source = Self::source(warehouse, alterations, column, name);
+        let added = alterations
+            .iter()
+            .filter_map(Alteration::as_column_added)
+            .any(|added| added.name() == column.name());
+        let retyped = alterations
+            .iter()
+            .filter_map(Alteration::as_column_retyped)
+            .any(|(_, retyped)| retyped.name() == column.name());
 
-        match altered {
-            Some(carried) => Ok(carried?),
-            None => Ok(name.clone()),
+        match (added, retyped) {
+            (true, _) => Ok(warehouse.fill(column)?),
+            (false, true) => Ok(SqlString::from(format!(
+                "CAST({source} AS {})",
+                warehouse.column_type(column.column_type())?
+            ))),
+            (false, false) => Ok(source),
         }
     }
 }
@@ -281,24 +297,6 @@ impl<L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Position>
         Ok(())
     }
 
-    fn column_renamed(
-        &mut self,
-        warehouse: &W,
-        event: &ColumnRenamed<'_>,
-    ) -> Result<(), UnbuildableArtifact> {
-        self.begin(warehouse, event.before())?;
-
-        let renamed = event.column();
-        let previous = warehouse.identifier(event.previous().name());
-
-        self.carry(warehouse, event.after(), |column, name| {
-            match column.name() == renamed.name() {
-                true => Ok(previous.clone()),
-                false => Ok(name.clone()),
-            }
-        })
-    }
-
     fn table_altered(
         &mut self,
         warehouse: &W,
@@ -307,7 +305,7 @@ impl<L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Position>
         let rekeyed = event
             .alterations()
             .iter()
-            .any(|alteration| matches!(alteration, Alteration::PrimaryKeyChanged));
+            .any(Alteration::is_primary_key_changed);
         if rekeyed {
             return Err(UnbuildableArtifact::PrimaryKeyChanged(
                 event.after().id().clone(),
@@ -366,7 +364,7 @@ mod tests {
     use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
     use lithify_core::build_log::{Lifecycle, Status};
     use lithify_core::era::{Bound, EraTracker};
-    use lithify_core::event::{SchemaChange, TableChange};
+    use lithify_core::event::{Hint, SchemaChange, TableChange};
     use lithify_core::listener::{CatalogModel, OutOfOrder};
     use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
     use lithify_core::position::{Coordinate, Position, RecordedAt};
@@ -571,11 +569,18 @@ mod tests {
         SchemaChange::new(Offset(at as u64), RecordedAt::from(at), "", tables)
     }
 
-    fn renamed(from: &str, to: &str) -> TableChange {
-        TableChange::ColumnRenamed {
+    fn renamed(from: &str, to: &str) -> Hint {
+        Hint::ColumnRename {
             table: TableId::new("shop", "customers"),
             from: from.to_owned(),
             to: to.to_owned(),
+        }
+    }
+
+    fn moved_to(table: &TableId) -> Hint {
+        Hint::TableRename {
+            from: TableId::new("shop", "customers"),
+            to: table.clone(),
         }
     }
 
@@ -1181,13 +1186,10 @@ mod tests {
 
         let statement = statement(snapshots(
             customers(),
-            vec![changes(
-                150,
-                vec![
-                    renamed("name", "full_name"),
-                    TableChange::Altered(renamed_to),
-                ],
-            )],
+            vec![
+                changes(150, vec![TableChange::Altered(renamed_to)])
+                    .with_hints(vec![renamed("name", "full_name")]),
+            ],
             || None,
         ));
 
@@ -1204,7 +1206,7 @@ mod tests {
     }
 
     #[test]
-    fn a_column_renamed_and_another_added_by_one_statement_are_carried_one_after_the_other() {
+    fn a_column_renamed_and_another_added_by_one_statement_are_carried_in_one_relation() {
         let reshaped = customers_with(
             vec![
                 column("id", ColumnType::Int64),
@@ -1216,23 +1218,47 @@ mod tests {
 
         let statement = statement(snapshots(
             customers(),
-            vec![changes(
-                150,
-                vec![renamed("name", "full_name"), TableChange::Altered(reshaped)],
-            )],
+            vec![
+                changes(150, vec![TableChange::Altered(reshaped)])
+                    .with_hints(vec![renamed("name", "full_name")]),
+            ],
             || None,
         ));
 
         assert!(statement.contains(concat!(
-            "    \"name\" AS \"full_name\"\n",
-            "  FROM \"era_1\"\n",
-            "),\n",
-            "\"era_3\" AS (\n",
+            "\"era_2\" AS (\n",
             "  SELECT\n",
             "    \"id\" AS \"id\",\n",
-            "    \"full_name\" AS \"full_name\",\n",
+            "    \"name\" AS \"full_name\",\n",
             "    CAST(NULL AS TEXT) AS \"email\"\n",
-            "  FROM \"era_2\"\n",
+            "  FROM \"era_1\"\n",
+            "),\n",
+        )));
+    }
+
+    #[test]
+    fn a_column_renamed_and_retyped_by_one_statement_casts_the_rows_under_its_old_name() {
+        let reshaped = customers_with(
+            vec![
+                column("id", ColumnType::Int64),
+                column("full_name", ColumnType::Int64),
+            ],
+            &["id"],
+        );
+
+        let statement = statement(snapshots(
+            customers(),
+            vec![
+                changes(150, vec![TableChange::Altered(reshaped)])
+                    .with_hints(vec![renamed("name", "full_name")]),
+            ],
+            || None,
+        ));
+
+        assert!(statement.contains(concat!(
+            "    \"id\" AS \"id\",\n",
+            "    CAST(\"name\" AS BIGINT) AS \"full_name\"\n",
+            "  FROM \"era_1\"\n",
         )));
     }
 
@@ -1248,10 +1274,10 @@ mod tests {
 
         let statement = statement(snapshots(
             customers(),
-            vec![changes(
-                150,
-                vec![renamed("id", "customer_id"), TableChange::Altered(rekeyed)],
-            )],
+            vec![
+                changes(150, vec![TableChange::Altered(rekeyed)])
+                    .with_hints(vec![renamed("id", "customer_id")]),
+            ],
             || None,
         ));
 
@@ -1279,16 +1305,13 @@ mod tests {
 
         snapshots(
             customers(),
-            vec![changes(
-                150,
-                vec![
-                    TableChange::Renamed {
-                        from: TableId::new("shop", "customers"),
-                        to: clients.clone(),
-                    },
-                    TableChange::Altered(customers().with_id(&clients)),
-                ],
-            )],
+            vec![
+                changes(
+                    150,
+                    vec![TableChange::Altered(customers().with_id(&clients))],
+                )
+                .with_hints(vec![moved_to(&clients)]),
+            ],
             base,
         )
         .unwrap()
@@ -1351,16 +1374,10 @@ mod tests {
 
         let statement = statement(snapshots(
             customers(),
-            vec![changes(
-                150,
-                vec![
-                    TableChange::Renamed {
-                        from: TableId::new("shop", "customers"),
-                        to: clients,
-                    },
-                    TableChange::Altered(widened),
-                ],
-            )],
+            vec![
+                changes(150, vec![TableChange::Altered(widened)])
+                    .with_hints(vec![moved_to(&clients)]),
+            ],
             || None,
         ));
 
@@ -1707,14 +1724,9 @@ mod tests {
             vec![
                 changes(
                     150,
-                    vec![
-                        TableChange::Renamed {
-                            from: TableId::new("shop", "customers"),
-                            to: clients.clone(),
-                        },
-                        TableChange::Altered(customers().with_id(&clients)),
-                    ],
-                ),
+                    vec![TableChange::Altered(customers().with_id(&clients))],
+                )
+                .with_hints(vec![moved_to(&clients)]),
                 change(160, TableChange::Dropped(clients)),
             ],
             || None,

@@ -1,7 +1,7 @@
 use sqlparser::ast::{AlterTable, AlterTableOperation, ObjectName, RenameTableNameKind, Statement};
 use sqlparser::parser::Parser;
 
-use lithify_core::event::TableChange;
+use lithify_core::event::Hint;
 use lithify_core::model::TableId;
 
 pub struct RenameReader<S> {
@@ -13,7 +13,7 @@ impl<S: sqlparser::dialect::Dialect> RenameReader<S> {
         Self { dialect }
     }
 
-    pub fn read(&self, ddl: &str, schema: &str) -> Vec<TableChange> {
+    pub fn read(&self, ddl: &str, schema: &str) -> Vec<Hint> {
         Parser::parse_sql(&self.dialect, ddl)
             .unwrap_or_default()
             .iter()
@@ -21,11 +21,11 @@ impl<S: sqlparser::dialect::Dialect> RenameReader<S> {
             .collect()
     }
 
-    fn statement(statement: &Statement, schema: &str) -> Vec<TableChange> {
+    fn statement(statement: &Statement, schema: &str) -> Vec<Hint> {
         match statement {
             Statement::RenameTable(renames) => renames
                 .iter()
-                .map(|rename| TableChange::Renamed {
+                .map(|rename| Hint::TableRename {
                     from: Self::id(&rename.old_name, schema),
                     to: Self::id(&rename.new_name, schema),
                 })
@@ -35,7 +35,7 @@ impl<S: sqlparser::dialect::Dialect> RenameReader<S> {
         }
     }
 
-    fn alter(alter: &AlterTable, schema: &str) -> Vec<TableChange> {
+    fn alter(alter: &AlterTable, schema: &str) -> Vec<Hint> {
         let table = Self::id(&alter.name, schema);
         let columns = alter
             .operations
@@ -49,7 +49,7 @@ impl<S: sqlparser::dialect::Dialect> RenameReader<S> {
         columns.chain(tables).collect()
     }
 
-    fn column(operation: &AlterTableOperation, table: &TableId) -> Option<TableChange> {
+    fn column(operation: &AlterTableOperation, table: &TableId) -> Option<Hint> {
         let (from, to) = match operation {
             AlterTableOperation::RenameColumn {
                 old_column_name,
@@ -61,22 +61,18 @@ impl<S: sqlparser::dialect::Dialect> RenameReader<S> {
             _ => return None,
         };
 
-        (from != to).then(|| TableChange::ColumnRenamed {
+        (from != to).then(|| Hint::ColumnRename {
             table: table.clone(),
             from: from.value.clone(),
             to: to.value.clone(),
         })
     }
 
-    fn table(
-        operation: &AlterTableOperation,
-        table: &TableId,
-        schema: &str,
-    ) -> Option<TableChange> {
+    fn table(operation: &AlterTableOperation, table: &TableId, schema: &str) -> Option<Hint> {
         match operation {
             AlterTableOperation::RenameTable {
                 table_name: RenameTableNameKind::To(name) | RenameTableNameKind::As(name),
-            } => Some(TableChange::Renamed {
+            } => Some(Hint::TableRename {
                 from: table.clone(),
                 to: Self::id(name, schema),
             }),

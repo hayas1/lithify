@@ -218,12 +218,6 @@ mod tests {
                         .tables()
                         .map(|table| match table {
                             TableChange::Created(table) => format!("created {}", table.id()),
-                            TableChange::Renamed { from, to } => {
-                                format!("renamed {from} to {to}")
-                            }
-                            TableChange::ColumnRenamed { table, from, to } => {
-                                format!("renamed {table}.{from} to {to}")
-                            }
                             TableChange::Altered(table) => format!("altered {}", table.id()),
                             TableChange::Dropped(id) => format!("dropped {id}"),
                         })

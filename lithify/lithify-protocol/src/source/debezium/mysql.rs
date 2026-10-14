@@ -120,7 +120,7 @@ impl Dialect for MySql {
 mod tests {
     use super::super::Debezium;
     use super::*;
-    use lithify_core::event::{MalformedEvent, TableChange};
+    use lithify_core::event::{Hint, MalformedEvent, TableChange};
     use serde_json::{Value, json};
 
     fn source(source: Value) -> MySqlSource {
@@ -289,22 +289,21 @@ mod tests {
             }))
             .unwrap();
 
-        change
-            .tables()
-            .map(|table| match table {
-                TableChange::Renamed { from, to } => format!("renamed {from} to {to}"),
-                TableChange::ColumnRenamed { table, from, to } => {
-                    format!("renamed {table}.{from} to {to}")
-                }
-                TableChange::Altered(table) => format!("altered {}", table.id()),
-                TableChange::Created(table) => format!("created {}", table.id()),
-                TableChange::Dropped(id) => format!("dropped {id}"),
-            })
-            .collect()
+        let hints = change.hints().map(|hint| match hint {
+            Hint::TableRename { from, to } => format!("renamed {from} to {to}"),
+            Hint::ColumnRename { table, from, to } => format!("renamed {table}.{from} to {to}"),
+        });
+        let tables = change.tables().map(|table| match table {
+            TableChange::Altered(table) => format!("altered {}", table.id()),
+            TableChange::Created(table) => format!("created {}", table.id()),
+            TableChange::Dropped(id) => format!("dropped {id}"),
+        });
+
+        hints.chain(tables).collect()
     }
 
     #[test]
-    fn a_column_renamed_by_rename_column_is_renamed_before_the_table_is_altered() {
+    fn a_column_renamed_by_rename_column_is_hinted_beside_the_altered_table() {
         assert_eq!(
             altered(
                 "ALTER TABLE probe RENAME COLUMN name TO full_name",
@@ -315,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn a_column_renamed_by_change_is_renamed_before_the_table_is_altered() {
+    fn a_column_renamed_by_change_is_hinted_beside_the_altered_table() {
         assert_eq!(
             altered(
                 "ALTER TABLE probe CHANGE email mail VARCHAR(128)",

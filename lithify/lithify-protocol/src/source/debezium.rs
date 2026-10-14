@@ -7,7 +7,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use lithify_core::event::{MalformedEvent, SchemaChange, TableChange};
+use lithify_core::event::{Hint, MalformedEvent, SchemaChange, TableChange};
 use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
 use lithify_core::position::{Coordinate, Position, RecordedAt};
 use lithify_core::source::{
@@ -40,7 +40,7 @@ pub trait Dialect {
 
     fn syntax(&self) -> Self::Syntax;
 
-    fn renames(&self, ddl: &str, schema: &str) -> Vec<TableChange> {
+    fn hints(&self, ddl: &str, schema: &str) -> Vec<Hint> {
         RenameReader::new(self.syntax()).read(ddl, schema)
     }
 }
@@ -254,23 +254,23 @@ impl<D: Dialect> SchemaChangeLog for Debezium<D> {
         &self,
         statement: Self::Record,
     ) -> Result<SchemaChange<Self::Position>, MalformedEvent> {
-        let altered = statement
+        let tables = statement
             .table_changes
             .into_iter()
             .map(|change| self.table_change(change))
             .collect::<Result<Vec<_>, _>>()?;
-        let renamed = altered
+        let hints = tables
             .first()
-            .map(|change| self.dialect.renames(&statement.ddl, change.id().schema()))
+            .map(|change| self.dialect.hints(&statement.ddl, change.id().schema()))
             .unwrap_or_default();
-        let tables = renamed.into_iter().chain(altered).collect();
 
         let change = SchemaChange::new(
             self.dialect.position(&statement.source),
             RecordedAt::from(statement.ts_ms),
             &statement.ddl,
             tables,
-        );
+        )
+        .with_hints(hints);
 
         match self.captured(&statement.source) {
             true => Ok(change.captured()),

@@ -4,8 +4,8 @@ use std::marker::PhantomData;
 
 use crate::event::SchemaChange;
 use crate::listener::{
-    Appearance, CatalogModel, ColumnRenamed, SchemaChangeListener, TableAltered, TableCreated,
-    TableDropped, TableRenamed,
+    Appearance, CatalogModel, SchemaChangeListener, TableAltered, TableCreated, TableDropped,
+    TableRenamed,
 };
 use crate::model::{TableId, TableModel};
 use crate::position::{Position, RecordedAt};
@@ -285,16 +285,6 @@ where
         Ok(())
     }
 
-    fn column_renamed(
-        &mut self,
-        context: &Self::Context,
-        event: &ColumnRenamed<'_>,
-    ) -> Result<(), Self::Error> {
-        self.alter(context, event.before(), |listener| {
-            listener.column_renamed(context, event)
-        })
-    }
-
     fn table_altered(
         &mut self,
         context: &Self::Context,
@@ -309,10 +299,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::{SchemaChange, TableChange};
+    use crate::event::{Hint, SchemaChange, TableChange};
     use crate::listener::{
-        Alteration, ColumnRenamed, OutOfOrder, TableAltered, TableCreated, TableDropped,
-        TableRenamed,
+        Alteration, OutOfOrder, TableAltered, TableCreated, TableDropped, TableRenamed,
     };
     use crate::model::{ColumnModel, ColumnType, TableModel};
     use crate::position::Position;
@@ -386,16 +375,6 @@ mod tests {
                 "renamed {} to {}",
                 event.before().id(),
                 event.after().id()
-            ));
-
-            Ok(())
-        }
-
-        fn column_renamed(&mut self, _: &(), event: &ColumnRenamed<'_>) -> Result<(), Untold> {
-            self.told.push(format!(
-                "renamed {} to {}",
-                event.previous().name(),
-                event.column().name()
             ));
 
             Ok(())
@@ -597,23 +576,23 @@ mod tests {
                     1,
                     vec![TableChange::Created(table(people(), &["id", "name"]))]
                 )],
-                vec![change(
-                    15,
-                    vec![
-                        TableChange::ColumnRenamed {
-                            table: people(),
-                            from: "name".to_owned(),
-                            to: "full_name".to_owned(),
-                        },
-                        TableChange::Altered(table(people(), &["id", "full_name"])),
-                    ]
-                )],
+                vec![
+                    change(
+                        15,
+                        vec![TableChange::Altered(table(people(), &["id", "full_name"]))]
+                    )
+                    .with_hints(vec![Hint::ColumnRename {
+                        table: people(),
+                        from: "name".to_owned(),
+                        to: "full_name".to_owned(),
+                    }])
+                ],
             ),
             [(
                 people(),
                 vec![
                     "era [\"id\", \"name\"] 10..15@15".to_owned(),
-                    "renamed name to full_name".to_owned(),
+                    "altered: renamed name to full_name".to_owned(),
                     "era [\"id\", \"full_name\"] 15@15..20".to_owned()
                 ]
             )]
@@ -628,16 +607,14 @@ mod tests {
                     1,
                     vec![TableChange::Created(table(people(), &["id"]))]
                 )],
-                vec![change(
-                    15,
-                    vec![
-                        TableChange::Renamed {
+                vec![
+                    change(15, vec![TableChange::Altered(table(persons(), &["id"]))]).with_hints(
+                        vec![Hint::TableRename {
                             from: people(),
                             to: persons(),
-                        },
-                        TableChange::Altered(table(persons(), &["id"])),
-                    ]
-                )],
+                        }]
+                    )
+                ],
             ),
             [(
                 people(),
@@ -659,20 +636,14 @@ mod tests {
                     vec![TableChange::Created(table(people(), &["id"]))]
                 )],
                 vec![
-                    change(
-                        12,
-                        vec![TableChange::Renamed {
-                            from: people(),
-                            to: persons(),
-                        }]
-                    ),
-                    change(
-                        15,
-                        vec![TableChange::Renamed {
-                            from: persons(),
-                            to: pets(),
-                        }]
-                    ),
+                    change(12, vec![]).with_hints(vec![Hint::TableRename {
+                        from: people(),
+                        to: persons(),
+                    }]),
+                    change(15, vec![]).with_hints(vec![Hint::TableRename {
+                        from: persons(),
+                        to: pets(),
+                    }]),
                 ],
             ),
             [(

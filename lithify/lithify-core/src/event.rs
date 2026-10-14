@@ -6,15 +6,6 @@ use crate::position::RecordedAt;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TableChange {
     Created(TableModel),
-    Renamed {
-        from: TableId,
-        to: TableId,
-    },
-    ColumnRenamed {
-        table: TableId,
-        from: String,
-        to: String,
-    },
     Altered(TableModel),
     Dropped(TableId),
 }
@@ -23,16 +14,43 @@ impl TableChange {
     pub fn id(&self) -> &TableId {
         match self {
             Self::Created(table) | Self::Altered(table) => table.id(),
-            Self::Renamed { from, .. } => from,
-            Self::ColumnRenamed { table, .. } => table,
             Self::Dropped(id) => id,
         }
     }
+}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Hint {
+    TableRename {
+        from: TableId,
+        to: TableId,
+    },
+    ColumnRename {
+        table: TableId,
+        from: String,
+        to: String,
+    },
+}
+
+impl Hint {
     pub fn ids(&self) -> Vec<&TableId> {
         match self {
-            Self::Renamed { from, to } => vec![from, to],
-            other => vec![other.id()],
+            Self::TableRename { from, to } => vec![from, to],
+            Self::ColumnRename { table, .. } => vec![table],
+        }
+    }
+
+    pub fn as_table_rename(&self) -> Option<(&TableId, &TableId)> {
+        match self {
+            Self::TableRename { from, to } => Some((from, to)),
+            Self::ColumnRename { .. } => None,
+        }
+    }
+
+    pub fn as_column_rename(&self) -> Option<(&TableId, &str, &str)> {
+        match self {
+            Self::TableRename { .. } => None,
+            Self::ColumnRename { table, from, to } => Some((table, from, to)),
         }
     }
 }
@@ -43,6 +61,7 @@ pub struct SchemaChange<P> {
     recorded_at: RecordedAt,
     statement: String,
     tables: Vec<TableChange>,
+    hints: Vec<Hint>,
     captured: bool,
 }
 
@@ -63,6 +82,26 @@ impl<P> SchemaChange<P> {
         self.tables.iter()
     }
 
+    pub fn hints(&self) -> impl Iterator<Item = &Hint> {
+        self.hints.iter()
+    }
+
+    pub fn column_renames<'a>(
+        &'a self,
+        table: &'a TableId,
+    ) -> impl Iterator<Item = (&'a str, &'a str)> {
+        let renamed_to = move |id: &TableId| {
+            self.hints()
+                .filter_map(Hint::as_table_rename)
+                .any(|(from, to)| from == id && to == table)
+        };
+
+        self.hints()
+            .filter_map(Hint::as_column_rename)
+            .filter(move |(renamed, ..)| *renamed == table || renamed_to(renamed))
+            .map(|(_, from, to)| (from, to))
+    }
+
     pub fn new(
         position: P,
         recorded_at: RecordedAt,
@@ -74,8 +113,13 @@ impl<P> SchemaChange<P> {
             recorded_at,
             statement: statement.to_owned(),
             tables,
+            hints: Vec::new(),
             captured: false,
         }
+    }
+
+    pub fn with_hints(self, hints: Vec<Hint>) -> Self {
+        Self { hints, ..self }
     }
 
     pub fn captured(self) -> Self {
