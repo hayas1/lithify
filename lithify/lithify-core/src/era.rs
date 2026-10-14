@@ -4,8 +4,8 @@ use std::marker::PhantomData;
 
 use crate::event::SchemaChange;
 use crate::listener::{
-    Appearance, CatalogModel, ColumnAdded, ColumnDropped, ColumnRenamed, ColumnRetyped,
-    PrimaryKeyChanged, SchemaChangeListener, TableCreated, TableDropped, TableRenamed,
+    Appearance, CatalogModel, ColumnRenamed, SchemaChangeListener, TableAltered, TableCreated,
+    TableDropped, TableRenamed,
 };
 use crate::model::{TableId, TableModel};
 use crate::position::{Position, RecordedAt};
@@ -295,43 +295,13 @@ where
         })
     }
 
-    fn column_added(
+    fn table_altered(
         &mut self,
         context: &Self::Context,
-        event: &ColumnAdded<'_>,
+        event: &TableAltered<'_>,
     ) -> Result<(), Self::Error> {
         self.alter(context, event.before(), |listener| {
-            listener.column_added(context, event)
-        })
-    }
-
-    fn column_dropped(
-        &mut self,
-        context: &Self::Context,
-        event: &ColumnDropped<'_>,
-    ) -> Result<(), Self::Error> {
-        self.alter(context, event.before(), |listener| {
-            listener.column_dropped(context, event)
-        })
-    }
-
-    fn column_retyped(
-        &mut self,
-        context: &Self::Context,
-        event: &ColumnRetyped<'_>,
-    ) -> Result<(), Self::Error> {
-        self.alter(context, event.before(), |listener| {
-            listener.column_retyped(context, event)
-        })
-    }
-
-    fn primary_key_changed(
-        &mut self,
-        context: &Self::Context,
-        event: &PrimaryKeyChanged<'_>,
-    ) -> Result<(), Self::Error> {
-        self.alter(context, event.before(), |listener| {
-            listener.primary_key_changed(context, event)
+            listener.table_altered(context, event)
         })
     }
 }
@@ -341,7 +311,7 @@ mod tests {
     use super::*;
     use crate::event::{SchemaChange, TableChange};
     use crate::listener::{
-        ColumnAdded, ColumnDropped, ColumnRenamed, OutOfOrder, TableCreated, TableDropped,
+        Alteration, ColumnRenamed, OutOfOrder, TableAltered, TableCreated, TableDropped,
         TableRenamed,
     };
     use crate::model::{ColumnModel, ColumnType, TableModel};
@@ -431,14 +401,14 @@ mod tests {
             Ok(())
         }
 
-        fn column_added(&mut self, _: &(), event: &ColumnAdded<'_>) -> Result<(), Untold> {
-            self.told.push(format!("added {}", event.column().name()));
-
-            Ok(())
-        }
-
-        fn column_dropped(&mut self, _: &(), event: &ColumnDropped<'_>) -> Result<(), Untold> {
-            self.told.push(format!("dropped {}", event.column().name()));
+        fn table_altered(&mut self, _: &(), event: &TableAltered<'_>) -> Result<(), Untold> {
+            let alterations: Vec<String> = event
+                .alterations()
+                .iter()
+                .map(Alteration::announcement)
+                .collect();
+            self.told
+                .push(format!("altered: {}", alterations.join(", ")));
 
             Ok(())
         }
@@ -531,7 +501,7 @@ mod tests {
                 people(),
                 vec![
                     "era [\"id\"] 10..15@15".to_owned(),
-                    "added name".to_owned(),
+                    "altered: added name".to_owned(),
                     "era [\"id\", \"name\"] 15@15..20".to_owned()
                 ]
             )]
@@ -557,7 +527,7 @@ mod tests {
                 people(),
                 vec![
                     "era [\"id\"] 10..15@99".to_owned(),
-                    "added name".to_owned(),
+                    "altered: added name".to_owned(),
                     "era [\"id\", \"name\"] 15@99..20".to_owned()
                 ]
             )]
@@ -565,7 +535,7 @@ mod tests {
     }
 
     #[test]
-    fn a_statement_that_changes_a_table_twice_ends_one_era() {
+    fn a_statement_that_changes_a_table_twice_ends_one_era_and_tells_both_changes_at_once() {
         assert_eq!(
             stories(
                 vec![change(
@@ -584,8 +554,7 @@ mod tests {
                 people(),
                 vec![
                     "era [\"id\"] 10..15@15".to_owned(),
-                    "added name".to_owned(),
-                    "added born".to_owned(),
+                    "altered: added name, added born".to_owned(),
                     "era [\"id\", \"name\", \"born\"] 15@15..20".to_owned()
                 ]
             )]
@@ -593,7 +562,7 @@ mod tests {
     }
 
     #[test]
-    fn a_statement_that_steps_through_several_changes_ends_the_era_of_the_schema_before_it() {
+    fn a_statement_that_drops_and_adds_columns_ends_the_era_of_the_schema_before_it() {
         assert_eq!(
             stories(
                 vec![change(
@@ -609,8 +578,7 @@ mod tests {
                 people(),
                 vec![
                     "era [\"id\", \"name\"] 10..15@15".to_owned(),
-                    "dropped name".to_owned(),
-                    "added born".to_owned(),
+                    "altered: dropped name, added born".to_owned(),
                     "era [\"id\", \"born\"] 15@15..20".to_owned()
                 ]
             )]
@@ -854,7 +822,7 @@ mod tests {
                 people(),
                 vec![
                     "era [\"id\"] 10..10@10".to_owned(),
-                    "added name".to_owned(),
+                    "altered: added name".to_owned(),
                     "era [\"id\", \"name\"] 10@10..20".to_owned()
                 ]
             )]

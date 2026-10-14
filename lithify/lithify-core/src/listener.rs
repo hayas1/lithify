@@ -81,40 +81,10 @@ pub trait SchemaChangeListener<P> {
         Ok(())
     }
 
-    fn column_added(
+    fn table_altered(
         &mut self,
         context: &Self::Context,
-        event: &ColumnAdded<'_>,
-    ) -> Result<(), Self::Error> {
-        let _ = (context, event);
-
-        Ok(())
-    }
-
-    fn column_dropped(
-        &mut self,
-        context: &Self::Context,
-        event: &ColumnDropped<'_>,
-    ) -> Result<(), Self::Error> {
-        let _ = (context, event);
-
-        Ok(())
-    }
-
-    fn column_retyped(
-        &mut self,
-        context: &Self::Context,
-        event: &ColumnRetyped<'_>,
-    ) -> Result<(), Self::Error> {
-        let _ = (context, event);
-
-        Ok(())
-    }
-
-    fn primary_key_changed(
-        &mut self,
-        context: &Self::Context,
-        event: &PrimaryKeyChanged<'_>,
+        event: &TableAltered<'_>,
     ) -> Result<(), Self::Error> {
         let _ = (context, event);
 
@@ -232,124 +202,14 @@ impl<'a> ColumnRenamed<'a> {
     }
 }
 
-pub struct ColumnAdded<'a> {
-    before: &'a TableModel,
-    after: &'a TableModel,
-    column: &'a ColumnModel,
-}
-
-impl<'a> ColumnAdded<'a> {
-    pub fn before(&self) -> &'a TableModel {
-        self.before
-    }
-
-    pub fn after(&self) -> &'a TableModel {
-        self.after
-    }
-
-    pub fn column(&self) -> &'a ColumnModel {
-        self.column
-    }
-}
-
-pub struct ColumnDropped<'a> {
-    before: &'a TableModel,
-    after: &'a TableModel,
-    column: &'a ColumnModel,
-}
-
-impl<'a> ColumnDropped<'a> {
-    pub fn before(&self) -> &'a TableModel {
-        self.before
-    }
-
-    pub fn after(&self) -> &'a TableModel {
-        self.after
-    }
-
-    pub fn column(&self) -> &'a ColumnModel {
-        self.column
-    }
-}
-
-pub struct ColumnRetyped<'a> {
-    before: &'a TableModel,
-    after: &'a TableModel,
-    previous: &'a ColumnModel,
-    column: &'a ColumnModel,
-}
-
-impl<'a> ColumnRetyped<'a> {
-    pub fn before(&self) -> &'a TableModel {
-        self.before
-    }
-
-    pub fn after(&self) -> &'a TableModel {
-        self.after
-    }
-
-    pub fn previous(&self) -> &'a ColumnModel {
-        self.previous
-    }
-
-    pub fn column(&self) -> &'a ColumnModel {
-        self.column
-    }
-}
-
-pub struct PrimaryKeyChanged<'a> {
-    before: &'a TableModel,
-    after: &'a TableModel,
-}
-
-impl<'a> PrimaryKeyChanged<'a> {
-    pub fn before(&self) -> &'a TableModel {
-        self.before
-    }
-
-    pub fn after(&self) -> &'a TableModel {
-        self.after
-    }
-}
-
-pub enum TableEvent<'a> {
-    TableCreated(TableCreated<'a>),
-    TableDropped(TableDropped<'a>),
-    TableRenamed(TableRenamed<'a>),
-    ColumnRenamed(ColumnRenamed<'a>),
-    ColumnAdded(ColumnAdded<'a>),
-    ColumnDropped(ColumnDropped<'a>),
-    ColumnRetyped(ColumnRetyped<'a>),
-    PrimaryKeyChanged(PrimaryKeyChanged<'a>),
-}
-
-impl TableEvent<'_> {
-    pub fn accept<P, L: SchemaChangeListener<P>>(
-        &self,
-        context: &L::Context,
-        listener: &mut L,
-    ) -> Result<(), L::Error> {
-        match self {
-            Self::TableCreated(event) => listener.table_created(context, event),
-            Self::TableDropped(event) => listener.table_dropped(context, event),
-            Self::TableRenamed(event) => listener.table_renamed(context, event),
-            Self::ColumnRenamed(event) => listener.column_renamed(context, event),
-            Self::ColumnAdded(event) => listener.column_added(context, event),
-            Self::ColumnDropped(event) => listener.column_dropped(context, event),
-            Self::ColumnRetyped(event) => listener.column_retyped(context, event),
-            Self::PrimaryKeyChanged(event) => listener.primary_key_changed(context, event),
-        }
-    }
-}
-
-enum Alteration<'a> {
-    Dropped(&'a ColumnModel),
-    Retyped {
+pub enum Alteration<'a> {
+    ColumnAdded(&'a ColumnModel),
+    ColumnDropped(&'a ColumnModel),
+    ColumnRetyped {
         previous: &'a ColumnModel,
         column: &'a ColumnModel,
     },
-    Added(&'a ColumnModel),
-    Rekeyed(Vec<&'a str>),
+    PrimaryKeyChanged,
 }
 
 impl<'a> Alteration<'a> {
@@ -357,28 +217,36 @@ impl<'a> Alteration<'a> {
         let dropped = before
             .columns()
             .filter(|column| after.column(column.name()).is_none())
-            .map(Self::Dropped);
+            .map(Self::ColumnDropped);
         let retyped = before.columns().filter_map(|previous| {
             after
                 .column(previous.name())
                 .filter(|column| column.type_name() != previous.type_name())
-                .map(|column| Self::Retyped { previous, column })
+                .map(|column| Self::ColumnRetyped { previous, column })
         });
         let added = after
             .columns()
             .filter(|column| before.column(column.name()).is_none())
-            .map(Self::Added);
+            .map(Self::ColumnAdded);
         let rekeyed = before
             .primary_key()
             .ne(after.primary_key())
-            .then(|| Self::Rekeyed(after.primary_key().collect()));
+            .then_some(Self::PrimaryKeyChanged);
 
         dropped.chain(retyped).chain(added).chain(rekeyed).collect()
     }
 
     fn warn_of_unread_rename<P>(alterations: &[Self], table: &TableId, change: &SchemaChange<P>) {
-        let dropped: Vec<&str> = alterations.iter().filter_map(Self::as_dropped).collect();
-        let added: Vec<&str> = alterations.iter().filter_map(Self::as_added).collect();
+        let dropped: Vec<&str> = alterations
+            .iter()
+            .filter_map(Self::as_column_dropped)
+            .map(ColumnModel::name)
+            .collect();
+        let added: Vec<&str> = alterations
+            .iter()
+            .filter_map(Self::as_column_added)
+            .map(ColumnModel::name)
+            .collect();
 
         if !dropped.is_empty() && !added.is_empty() {
             tracing::warn!(
@@ -393,50 +261,61 @@ impl<'a> Alteration<'a> {
         }
     }
 
-    fn as_dropped(&self) -> Option<&str> {
+    fn as_column_dropped(&self) -> Option<&'a ColumnModel> {
         match self {
-            Self::Dropped(column) => Some(column.name()),
+            Self::ColumnDropped(column) => Some(column),
             _ => None,
         }
     }
 
-    fn as_added(&self) -> Option<&str> {
+    fn as_column_added(&self) -> Option<&'a ColumnModel> {
         match self {
-            Self::Added(column) => Some(column.name()),
+            Self::ColumnAdded(column) => Some(column),
             _ => None,
         }
     }
+}
 
-    fn apply(&self, shape: &TableModel) -> TableModel {
-        match self {
-            Self::Dropped(column) => shape.without_column(column.name()),
-            Self::Retyped { column, .. } | Self::Added(column) => shape.with_column(column),
-            Self::Rekeyed(primary_key) => shape.keyed_by(primary_key.iter().copied()),
-        }
+pub struct TableAltered<'a> {
+    before: &'a TableModel,
+    after: &'a TableModel,
+    alterations: Vec<Alteration<'a>>,
+}
+
+impl<'a> TableAltered<'a> {
+    pub fn before(&self) -> &'a TableModel {
+        self.before
     }
 
-    fn event<'b>(&self, before: &'b TableModel, after: &'b TableModel) -> TableEvent<'b>
-    where
-        'a: 'b,
-    {
-        match *self {
-            Self::Dropped(column) => TableEvent::ColumnDropped(ColumnDropped {
-                before,
-                after,
-                column,
-            }),
-            Self::Retyped { previous, column } => TableEvent::ColumnRetyped(ColumnRetyped {
-                before,
-                after,
-                previous,
-                column,
-            }),
-            Self::Added(column) => TableEvent::ColumnAdded(ColumnAdded {
-                before,
-                after,
-                column,
-            }),
-            Self::Rekeyed(_) => TableEvent::PrimaryKeyChanged(PrimaryKeyChanged { before, after }),
+    pub fn after(&self) -> &'a TableModel {
+        self.after
+    }
+
+    pub fn alterations(&self) -> &[Alteration<'a>] {
+        &self.alterations
+    }
+}
+
+pub enum TableEvent<'a> {
+    TableCreated(TableCreated<'a>),
+    TableDropped(TableDropped<'a>),
+    TableRenamed(TableRenamed<'a>),
+    ColumnRenamed(ColumnRenamed<'a>),
+    TableAltered(TableAltered<'a>),
+}
+
+impl TableEvent<'_> {
+    pub fn accept<P, L: SchemaChangeListener<P>>(
+        &self,
+        context: &L::Context,
+        listener: &mut L,
+    ) -> Result<(), L::Error> {
+        match self {
+            Self::TableCreated(event) => listener.table_created(context, event),
+            Self::TableDropped(event) => listener.table_dropped(context, event),
+            Self::TableRenamed(event) => listener.table_renamed(context, event),
+            Self::ColumnRenamed(event) => listener.column_renamed(context, event),
+            Self::TableAltered(event) => listener.table_altered(context, event),
         }
     }
 }
@@ -630,7 +509,7 @@ impl<P: Position> CatalogModel<P> {
                 to,
                 statement = change.statement(),
                 "a statement renamed a column the table never had, or onto a name it already \
-                 holds, so the rename steps through as the alteration that follows it"
+                 holds, so the rename is left to the alteration that follows it"
             );
 
             return Ok(());
@@ -661,21 +540,15 @@ impl<P: Position> CatalogModel<P> {
         };
         let alterations = Alteration::between(&before, after);
         Alteration::warn_of_unread_rename(&alterations, after.id(), change);
-        let last = alterations.len().saturating_sub(1);
-        let mut shape = before.clone();
 
-        for (step, alteration) in alterations.into_iter().enumerate() {
-            // What no event announces (an order, a default, a nullability) lands with the last
-            // step, so the steps end at the very table the catalog remembers.
-            let next = match step == last {
-                true => after.clone(),
-                false => alteration.apply(&shape),
-            };
-
-            alteration.event(&shape, &next).accept(context, listener)?;
-            shape = next;
+        if !alterations.is_empty() {
+            TableEvent::TableAltered(TableAltered {
+                before: &before,
+                after,
+                alterations,
+            })
+            .accept(context, listener)?;
         }
-
         self.remember(change, after);
 
         Ok(())
@@ -707,6 +580,17 @@ mod tests {
     struct Offset(u64);
 
     impl Position for Offset {}
+
+    impl Alteration<'_> {
+        pub(crate) fn announcement(&self) -> String {
+            match self {
+                Self::ColumnAdded(column) => format!("added {}", column.name()),
+                Self::ColumnDropped(column) => format!("dropped {}", column.name()),
+                Self::ColumnRetyped { column, .. } => format!("retyped {}", column.name()),
+                Self::PrimaryKeyChanged => "rekeyed".to_owned(),
+            }
+        }
+    }
 
     #[derive(Debug, Default)]
     struct Journal {
@@ -767,49 +651,27 @@ mod tests {
             Ok(())
         }
 
-        fn column_added(&mut self, _: &(), event: &ColumnAdded<'_>) -> Result<(), Infallible> {
-            self.entries.push(format!(
-                "added {}.{}",
-                event.after().id(),
-                event.column().name()
-            ));
-
-            Ok(())
-        }
-
-        fn column_dropped(&mut self, _: &(), event: &ColumnDropped<'_>) -> Result<(), Infallible> {
-            self.entries.push(format!(
-                "dropped {}.{}",
-                event.before().id(),
-                event.column().name()
-            ));
-
-            Ok(())
-        }
-
-        fn column_retyped(&mut self, _: &(), event: &ColumnRetyped<'_>) -> Result<(), Infallible> {
-            self.entries.push(format!(
-                "retyped {}.{} {} -> {}",
-                event.after().id(),
-                event.column().name(),
-                event.previous().type_name(),
-                event.column().type_name()
-            ));
-
-            Ok(())
-        }
-
-        fn primary_key_changed(
-            &mut self,
-            _: &(),
-            event: &PrimaryKeyChanged<'_>,
-        ) -> Result<(), Infallible> {
-            self.entries.push(format!(
-                "primary key {} {:?} -> {:?}",
-                event.after().id(),
-                event.before().primary_key().collect::<Vec<_>>(),
-                event.after().primary_key().collect::<Vec<_>>()
-            ));
+        fn table_altered(&mut self, _: &(), event: &TableAltered<'_>) -> Result<(), Infallible> {
+            let id = event.after().id();
+            let entries = event
+                .alterations()
+                .iter()
+                .map(|alteration| match alteration {
+                    Alteration::ColumnAdded(column) => format!("added {id}.{}", column.name()),
+                    Alteration::ColumnDropped(column) => format!("dropped {id}.{}", column.name()),
+                    Alteration::ColumnRetyped { previous, column } => format!(
+                        "retyped {id}.{} {} -> {}",
+                        column.name(),
+                        previous.type_name(),
+                        column.type_name()
+                    ),
+                    Alteration::PrimaryKeyChanged => format!(
+                        "primary key {id} {:?} -> {:?}",
+                        event.before().primary_key().collect::<Vec<_>>(),
+                        event.after().primary_key().collect::<Vec<_>>()
+                    ),
+                });
+            self.entries.extend(entries);
 
             Ok(())
         }
@@ -1132,42 +994,13 @@ mod tests {
             Ok(())
         }
 
-        fn column_added(&mut self, _: &(), event: &ColumnAdded<'_>) -> Result<(), Infallible> {
-            self.take(
-                format!("added {}", event.column().name()),
-                event.before(),
-                event.after(),
-            );
-
-            Ok(())
-        }
-
-        fn column_dropped(&mut self, _: &(), event: &ColumnDropped<'_>) -> Result<(), Infallible> {
-            self.take(
-                format!("dropped {}", event.column().name()),
-                event.before(),
-                event.after(),
-            );
-
-            Ok(())
-        }
-
-        fn column_retyped(&mut self, _: &(), event: &ColumnRetyped<'_>) -> Result<(), Infallible> {
-            self.take(
-                format!("retyped {}", event.column().name()),
-                event.before(),
-                event.after(),
-            );
-
-            Ok(())
-        }
-
-        fn primary_key_changed(
-            &mut self,
-            _: &(),
-            event: &PrimaryKeyChanged<'_>,
-        ) -> Result<(), Infallible> {
-            self.take("rekeyed".to_owned(), event.before(), event.after());
+        fn table_altered(&mut self, _: &(), event: &TableAltered<'_>) -> Result<(), Infallible> {
+            let announced: Vec<String> = event
+                .alterations()
+                .iter()
+                .map(Alteration::announcement)
+                .collect();
+            self.take(announced.join(", "), event.before(), event.after());
 
             Ok(())
         }
@@ -1238,155 +1071,23 @@ mod tests {
     }
 
     #[test]
-    fn an_alteration_steps_through_drops_then_retypes_then_additions_then_its_key() {
+    fn an_alteration_of_several_changes_steps_once_from_the_table_before_it_to_the_table_after_it()
+    {
         let (before, after) = reshaped();
 
         assert_eq!(
-            steps(before, after).announcements(),
-            [
-                "dropped email",
-                "retyped name",
-                "added nickname",
-                "added phone",
-                "rekeyed"
-            ]
+            steps(before.clone(), after.clone()).taken,
+            [Step {
+                announced: "dropped email, retyped name, added nickname, added phone, rekeyed"
+                    .to_owned(),
+                before,
+                after
+            }]
         );
     }
 
     #[test]
-    fn each_step_of_an_alteration_starts_from_the_table_the_step_before_it_left() {
-        let (before, after) = reshaped();
-        let steps = steps(before, after);
-
-        for pair in steps.taken.windows(2) {
-            assert_eq!(pair[0].after, pair[1].before);
-        }
-    }
-
-    #[test]
-    fn the_first_step_of_an_alteration_starts_from_the_table_before_it() {
-        let (before, after) = reshaped();
-
-        assert_eq!(steps(before.clone(), after).taken[0].before, before);
-    }
-
-    #[test]
-    fn the_last_step_of_an_alteration_ends_in_the_table_after_it() {
-        let (before, after) = reshaped();
-
-        assert_eq!(
-            steps(before, after.clone()).taken.last().unwrap().after,
-            after
-        );
-    }
-
-    #[test]
-    fn each_step_of_an_alteration_changes_only_what_it_announces() {
-        let (before, after) = reshaped();
-
-        assert_eq!(
-            steps(before, after).outlines(),
-            [
-                (
-                    listed(&["id BIGINT", "name VARCHAR", "email VARCHAR", "key [\"id\"]"]),
-                    listed(&["id BIGINT", "name VARCHAR", "key [\"id\"]"]),
-                ),
-                (
-                    listed(&["id BIGINT", "name VARCHAR", "key [\"id\"]"]),
-                    listed(&["id BIGINT", "name TEXT", "key [\"id\"]"]),
-                ),
-                (
-                    listed(&["id BIGINT", "name TEXT", "key [\"id\"]"]),
-                    listed(&["id BIGINT", "name TEXT", "nickname VARCHAR", "key [\"id\"]"]),
-                ),
-                (
-                    listed(&["id BIGINT", "name TEXT", "nickname VARCHAR", "key [\"id\"]"]),
-                    listed(&[
-                        "id BIGINT",
-                        "name TEXT",
-                        "nickname VARCHAR",
-                        "phone VARCHAR",
-                        "key [\"id\"]"
-                    ]),
-                ),
-                (
-                    listed(&[
-                        "id BIGINT",
-                        "name TEXT",
-                        "nickname VARCHAR",
-                        "phone VARCHAR",
-                        "key [\"id\"]"
-                    ]),
-                    listed(&[
-                        "id BIGINT",
-                        "nickname VARCHAR",
-                        "name TEXT",
-                        "phone VARCHAR",
-                        "key [\"id\", \"nickname\"]"
-                    ]),
-                ),
-            ]
-        );
-    }
-
-    #[test]
-    fn columns_added_together_are_added_one_step_at_a_time() {
-        let before = table(vec![identifier(), name()], &["id"]);
-        let after = table(vec![identifier(), name(), nickname(), phone()], &["id"]);
-
-        assert_eq!(
-            steps(before, after).outlines(),
-            [
-                (
-                    listed(&["id BIGINT", "name VARCHAR", "key [\"id\"]"]),
-                    listed(&[
-                        "id BIGINT",
-                        "name VARCHAR",
-                        "nickname VARCHAR",
-                        "key [\"id\"]"
-                    ]),
-                ),
-                (
-                    listed(&[
-                        "id BIGINT",
-                        "name VARCHAR",
-                        "nickname VARCHAR",
-                        "key [\"id\"]"
-                    ]),
-                    listed(&[
-                        "id BIGINT",
-                        "name VARCHAR",
-                        "nickname VARCHAR",
-                        "phone VARCHAR",
-                        "key [\"id\"]"
-                    ]),
-                ),
-            ]
-        );
-    }
-
-    #[test]
-    fn columns_dropped_together_are_dropped_one_step_at_a_time() {
-        let before = table(vec![identifier(), name(), email()], &["id"]);
-        let after = table(vec![identifier()], &["id"]);
-
-        assert_eq!(
-            steps(before, after).outlines(),
-            [
-                (
-                    listed(&["id BIGINT", "name VARCHAR", "email VARCHAR", "key [\"id\"]"]),
-                    listed(&["id BIGINT", "email VARCHAR", "key [\"id\"]"]),
-                ),
-                (
-                    listed(&["id BIGINT", "email VARCHAR", "key [\"id\"]"]),
-                    listed(&["id BIGINT", "key [\"id\"]"]),
-                ),
-            ]
-        );
-    }
-
-    #[test]
-    fn a_column_replaced_by_one_of_its_name_is_retyped_in_one_step() {
+    fn a_column_replaced_by_one_of_its_name_is_announced_as_retyped() {
         let before = table(vec![identifier(), name()], &["id"]);
         let after = table(
             vec![identifier(), column("name", "TEXT", ColumnType::Text)],
@@ -1397,7 +1098,7 @@ mod tests {
     }
 
     #[test]
-    fn what_no_step_announces_changes_in_the_last_step() {
+    fn what_no_alteration_lists_still_reaches_the_listener_in_the_table_after_it() {
         let before = table(vec![identifier(), name()], &["id"]);
         let after = table(
             vec![
@@ -1429,21 +1130,7 @@ mod tests {
     }
 
     #[test]
-    fn what_no_step_announces_waits_for_the_last_of_several_steps() {
-        let before = table(vec![identifier(), name()], &["id"]);
-        let anonymous =
-            ColumnModel::new("name", "VARCHAR", ColumnType::Text, true, Some("anonymous"));
-        let after = table(vec![identifier(), anonymous, email(), phone()], &["id"]);
-
-        let steps = steps(before, after.clone());
-
-        assert_eq!(steps.announcements(), ["added email", "added phone"]);
-        assert_eq!(steps.taken[0].after.column("name"), Some(&name()));
-        assert_eq!(steps.taken[1].after, after);
-    }
-
-    #[test]
-    fn a_key_changed_alone_steps_from_the_table_before_it_to_the_table_after_it() {
+    fn a_key_changed_alone_is_announced_as_rekeyed() {
         let before = table(vec![identifier(), name()], &["id"]);
         let after = table(vec![identifier(), name()], &["id", "name"]);
 
@@ -1469,36 +1156,19 @@ mod tests {
         }
     }
 
-    #[derive(Debug, Default)]
-    struct Refusing {
-        announced: Vec<String>,
-    }
+    struct Refusing;
 
     impl SchemaChangeListener<Offset> for Refusing {
         type Context = ();
         type Error = Halted;
 
-        fn column_added(&mut self, _: &(), event: &ColumnAdded<'_>) -> Result<(), Halted> {
-            Err(Halted::Refused(event.column().name().to_owned()))
-        }
-
-        fn column_dropped(&mut self, _: &(), event: &ColumnDropped<'_>) -> Result<(), Halted> {
-            self.announced
-                .push(format!("dropped {}", event.column().name()));
-
-            Ok(())
-        }
-
-        fn column_retyped(&mut self, _: &(), event: &ColumnRetyped<'_>) -> Result<(), Halted> {
-            self.announced
-                .push(format!("retyped {}", event.column().name()));
-
-            Ok(())
+        fn table_altered(&mut self, _: &(), event: &TableAltered<'_>) -> Result<(), Halted> {
+            Err(Halted::Refused(event.after().id().to_string()))
         }
     }
 
     #[test]
-    fn an_alteration_halts_at_the_step_its_listener_refuses_and_is_not_remembered() {
+    fn an_alteration_its_listener_refuses_halts_and_is_not_remembered() {
         let before = table(vec![identifier(), name(), email()], &["id"]);
         let after = table(
             vec![
@@ -1517,16 +1187,14 @@ mod tests {
                 &mut (),
             )
             .unwrap();
-        let mut refusing = Refusing::default();
 
         let halted = catalog.accept::<Halted, _>(
             &(),
             &change(2, vec![TableChange::Altered(after)]),
-            &mut refusing,
+            &mut Refusing,
         );
 
-        assert_eq!(halted, Err(Halted::Refused("phone".to_owned())));
-        assert_eq!(refusing.announced, ["dropped email", "retyped name"]);
+        assert_eq!(halted, Err(Halted::Refused("shop.customers".to_owned())));
         assert_eq!(catalog.table(&customers()), Some(&before));
     }
 

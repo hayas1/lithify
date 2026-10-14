@@ -6,8 +6,8 @@ use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
 use lithify_core::build_log::{BuildLog, Outcome, Run};
 use lithify_core::era::Era;
 use lithify_core::listener::{
-    Appearance, ColumnAdded, ColumnDropped, ColumnRenamed, ColumnRetyped, PrimaryKeyChanged,
-    SchemaChangeListener, TableCreated, TableDropped, TableRenamed,
+    Alteration, Appearance, ColumnRenamed, SchemaChangeListener, TableAltered, TableCreated,
+    TableDropped, TableRenamed,
 };
 use lithify_core::model::{ColumnModel, TableId, TableModel};
 use lithify_core::sink::{TablePath, Warehouse};
@@ -204,6 +204,32 @@ impl<'a, L: RowChangeLog, W: Warehouse> SnapshotBuilder<'a, L, W> {
 
         Ok(())
     }
+
+    fn carried(
+        warehouse: &W,
+        alterations: &[Alteration<'_>],
+        column: &ColumnModel,
+        name: &SqlString,
+    ) -> Result<SqlString, UnbuildableArtifact> {
+        let altered = alterations.iter().find_map(|alteration| match alteration {
+            Alteration::ColumnAdded(added) if added.name() == column.name() => {
+                Some(warehouse.fill(column))
+            }
+            Alteration::ColumnRetyped {
+                column: retyped, ..
+            } if retyped.name() == column.name() => Some(
+                warehouse
+                    .column_type(column.column_type())
+                    .map(|column_type| SqlString::from(format!("CAST({name} AS {column_type})"))),
+            ),
+            _ => None,
+        });
+
+        match altered {
+            Some(carried) => Ok(carried?),
+            None => Ok(name.clone()),
+        }
+    }
 }
 
 impl<L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Position>
@@ -273,61 +299,25 @@ impl<L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Position>
         })
     }
 
-    fn column_added(
+    fn table_altered(
         &mut self,
         warehouse: &W,
-        event: &ColumnAdded<'_>,
+        event: &TableAltered<'_>,
     ) -> Result<(), UnbuildableArtifact> {
+        let rekeyed = event
+            .alterations()
+            .iter()
+            .any(|alteration| matches!(alteration, Alteration::PrimaryKeyChanged));
+        if rekeyed {
+            return Err(UnbuildableArtifact::PrimaryKeyChanged(
+                event.after().id().clone(),
+            ));
+        }
         self.begin(warehouse, event.before())?;
-
-        let added = event.column();
 
         self.carry(warehouse, event.after(), |column, name| {
-            match column.name() == added.name() {
-                true => Ok(warehouse.fill(column)?),
-                false => Ok(name.clone()),
-            }
+            Self::carried(warehouse, event.alterations(), column, name)
         })
-    }
-
-    fn column_dropped(
-        &mut self,
-        warehouse: &W,
-        event: &ColumnDropped<'_>,
-    ) -> Result<(), UnbuildableArtifact> {
-        self.begin(warehouse, event.before())?;
-
-        self.carry(warehouse, event.after(), |_, name| Ok(name.clone()))
-    }
-
-    fn column_retyped(
-        &mut self,
-        warehouse: &W,
-        event: &ColumnRetyped<'_>,
-    ) -> Result<(), UnbuildableArtifact> {
-        self.begin(warehouse, event.before())?;
-
-        let retyped = event.column();
-
-        self.carry(warehouse, event.after(), |column, name| {
-            match column.name() == retyped.name() {
-                true => Ok(SqlString::from(format!(
-                    "CAST({name} AS {})",
-                    warehouse.column_type(column.column_type())?
-                ))),
-                false => Ok(name.clone()),
-            }
-        })
-    }
-
-    fn primary_key_changed(
-        &mut self,
-        _: &W,
-        event: &PrimaryKeyChanged<'_>,
-    ) -> Result<(), UnbuildableArtifact> {
-        Err(UnbuildableArtifact::PrimaryKeyChanged(
-            event.after().id().clone(),
-        ))
     }
 }
 
@@ -897,7 +887,7 @@ mod tests {
     }
 
     #[test]
-    fn each_column_a_statement_adds_is_carried_in_a_relation_of_its_own() {
+    fn the_columns_a_statement_adds_are_carried_in_one_relation() {
         let twice = customers_with(
             vec![
                 column("id", ColumnType::Int64),
@@ -914,13 +904,16 @@ mod tests {
             || None,
         ));
 
-        assert!(statement.contains("    CAST(NULL AS TEXT) AS \"email\"\n  FROM \"era_1\"\n"));
-        assert!(statement.contains("    CAST(NULL AS TEXT) AS \"phone\"\n  FROM \"era_2\"\n"));
-        assert!(statement.ends_with("SELECT * FROM \"era_4\""));
+        assert!(statement.contains(concat!(
+            "    CAST(NULL AS TEXT) AS \"email\",\n",
+            "    CAST(NULL AS TEXT) AS \"phone\"\n",
+            "  FROM \"era_1\"\n"
+        )));
+        assert!(statement.ends_with("SELECT * FROM \"era_3\""));
     }
 
     #[test]
-    fn a_column_dropped_and_one_added_by_one_statement_are_carried_one_after_the_other() {
+    fn a_column_dropped_and_one_added_by_one_statement_are_carried_in_one_relation() {
         let replaced = customers_with(
             vec![
                 column("id", ColumnType::Int64),
@@ -938,21 +931,16 @@ mod tests {
         assert!(statement.contains(concat!(
             "\"era_2\" AS (\n",
             "  SELECT\n",
-            "    \"id\" AS \"id\"\n",
-            "  FROM \"era_1\"\n",
-            "),\n",
-            "\"era_3\" AS (\n",
-            "  SELECT\n",
             "    \"id\" AS \"id\",\n",
             "    CAST(NULL AS TEXT) AS \"email\"\n",
-            "  FROM \"era_2\"\n",
+            "  FROM \"era_1\"\n",
             "),\n",
         )));
-        assert!(statement.ends_with("SELECT * FROM \"era_4\""));
+        assert!(statement.ends_with("SELECT * FROM \"era_3\""));
     }
 
     #[test]
-    fn a_column_retyped_and_one_added_by_one_statement_are_carried_one_after_the_other() {
+    fn a_column_retyped_and_one_added_by_one_statement_are_carried_in_one_relation() {
         let reshaped = customers_with(
             vec![
                 column("id", ColumnType::Int64),
@@ -972,15 +960,9 @@ mod tests {
             "\"era_2\" AS (\n",
             "  SELECT\n",
             "    \"id\" AS \"id\",\n",
-            "    CAST(\"name\" AS BIGINT) AS \"name\"\n",
-            "  FROM \"era_1\"\n",
-            "),\n",
-            "\"era_3\" AS (\n",
-            "  SELECT\n",
-            "    \"id\" AS \"id\",\n",
-            "    \"name\" AS \"name\",\n",
+            "    CAST(\"name\" AS BIGINT) AS \"name\",\n",
             "    CAST(NULL AS TEXT) AS \"email\"\n",
-            "  FROM \"era_2\"\n",
+            "  FROM \"era_1\"\n",
             "),\n",
         )));
     }
