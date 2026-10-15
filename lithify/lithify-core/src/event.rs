@@ -4,47 +4,18 @@ use crate::model::{TableId, TableModel};
 use crate::position::RecordedAt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TableChange {
-    id: TableId,
-    table: Option<TableModel>,
-    initialization: bool,
+pub enum TableChange {
+    Created(TableModel),
+    Altered(TableModel),
+    Dropped(TableId),
 }
 
 impl TableChange {
-    pub fn initialized(table: TableModel) -> Self {
-        Self {
-            id: table.id().clone(),
-            table: Some(table),
-            initialization: true,
-        }
-    }
-
-    pub fn altered(table: TableModel) -> Self {
-        Self {
-            id: table.id().clone(),
-            table: Some(table),
-            initialization: false,
-        }
-    }
-
-    pub fn dropped(id: TableId) -> Self {
-        Self {
-            id,
-            table: None,
-            initialization: false,
-        }
-    }
-
     pub fn id(&self) -> &TableId {
-        &self.id
-    }
-
-    pub fn table(&self) -> Option<&TableModel> {
-        self.table.as_ref()
-    }
-
-    pub fn is_initialization(&self) -> bool {
-        self.initialization
+        match self {
+            Self::Created(table) | Self::Altered(table) => table.id(),
+            Self::Dropped(id) => id,
+        }
     }
 }
 
@@ -200,30 +171,23 @@ mod tests {
     }
 
     #[test]
-    fn an_initialized_table_carries_its_definition_and_is_an_initialization() {
-        let change = TableChange::initialized(customers());
-
-        assert_eq!(change.id(), &TableId::new("shop", "customers"));
-        assert_eq!(change.table(), Some(&customers()));
-        assert!(change.is_initialization());
+    fn a_table_created_or_altered_is_named_by_its_definition() {
+        assert_eq!(
+            TableChange::Created(customers()).id(),
+            &TableId::new("shop", "customers")
+        );
+        assert_eq!(
+            TableChange::Altered(customers()).id(),
+            &TableId::new("shop", "customers")
+        );
     }
 
     #[test]
-    fn an_altered_table_is_defined_without_being_initialized() {
-        let change = TableChange::altered(customers());
-
-        assert_eq!(change.id(), &TableId::new("shop", "customers"));
-        assert_eq!(change.table(), Some(&customers()));
-        assert!(!change.is_initialization());
-    }
-
-    #[test]
-    fn a_dropped_table_is_left_without_a_definition() {
-        let change = TableChange::dropped(TableId::new("shop", "customers"));
-
-        assert_eq!(change.id(), &TableId::new("shop", "customers"));
-        assert_eq!(change.table(), None);
-        assert!(!change.is_initialization());
+    fn a_dropped_table_is_named_by_its_id_alone() {
+        assert_eq!(
+            TableChange::Dropped(TableId::new("shop", "customers")).id(),
+            &TableId::new("shop", "customers")
+        );
     }
 
     #[test]

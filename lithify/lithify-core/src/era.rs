@@ -462,7 +462,7 @@ mod tests {
             stories(
                 vec![change(
                     1,
-                    vec![TableChange::initialized(table(people(), &["id"]))]
+                    vec![TableChange::Created(table(people(), &["id"]))]
                 )],
                 vec![]
             ),
@@ -476,11 +476,11 @@ mod tests {
             stories(
                 vec![change(
                     1,
-                    vec![TableChange::initialized(table(people(), &["id"]))]
+                    vec![TableChange::Created(table(people(), &["id"]))]
                 )],
                 vec![change(
                     15,
-                    vec![TableChange::altered(table(people(), &["id", "name"]))]
+                    vec![TableChange::Altered(table(people(), &["id", "name"]))]
                 )],
             ),
             [(
@@ -500,13 +500,13 @@ mod tests {
             stories(
                 vec![change(
                     1,
-                    vec![TableChange::initialized(table(people(), &["id"]))]
+                    vec![TableChange::Created(table(people(), &["id"]))]
                 )],
                 vec![SchemaChange::new(
                     Offset(99),
                     RecordedAt::from(15),
                     "",
-                    vec![TableChange::altered(table(people(), &["id", "name"]))],
+                    vec![TableChange::Altered(table(people(), &["id", "name"]))],
                     Vec::new(),
                 )],
             ),
@@ -527,11 +527,11 @@ mod tests {
             stories(
                 vec![change(
                     1,
-                    vec![TableChange::initialized(table(people(), &["id"]))]
+                    vec![TableChange::Created(table(people(), &["id"]))]
                 )],
                 vec![change(
                     15,
-                    vec![TableChange::altered(table(
+                    vec![TableChange::Altered(table(
                         people(),
                         &["id", "name", "born"]
                     ))]
@@ -554,11 +554,11 @@ mod tests {
             stories(
                 vec![change(
                     1,
-                    vec![TableChange::initialized(table(people(), &["id", "name"]))]
+                    vec![TableChange::Created(table(people(), &["id", "name"]))]
                 )],
                 vec![change(
                     15,
-                    vec![TableChange::altered(table(people(), &["id", "born"]))]
+                    vec![TableChange::Altered(table(people(), &["id", "born"]))]
                 )],
             ),
             [(
@@ -587,9 +587,9 @@ mod tests {
             stories(
                 vec![change(
                     1,
-                    vec![TableChange::initialized(table(people(), &["id"]))]
+                    vec![TableChange::Created(table(people(), &["id"]))]
                 )],
-                vec![change(15, vec![TableChange::altered(described)])],
+                vec![change(15, vec![TableChange::Altered(described)])],
             ),
             [(
                 people(),
@@ -611,7 +611,7 @@ mod tests {
             stories(
                 vec![change(
                     1,
-                    vec![TableChange::initialized(table(people(), &["id", "name"]))]
+                    vec![TableChange::Created(table(people(), &["id", "name"]))]
                 )],
                 vec![hinted(
                     15,
@@ -620,7 +620,7 @@ mod tests {
                         from: "name".to_owned(),
                         to: "full_name".to_owned(),
                     }],
-                    vec![TableChange::altered(table(people(), &["id", "full_name"]))]
+                    vec![TableChange::Altered(table(people(), &["id", "full_name"]))]
                 )],
             ),
             [(
@@ -640,7 +640,7 @@ mod tests {
             stories(
                 vec![change(
                     1,
-                    vec![TableChange::initialized(table(people(), &["id"]))]
+                    vec![TableChange::Created(table(people(), &["id"]))]
                 )],
                 vec![hinted(
                     15,
@@ -648,7 +648,7 @@ mod tests {
                         from: people(),
                         to: persons(),
                     }],
-                    vec![TableChange::altered(table(persons(), &["id"]))]
+                    vec![TableChange::Altered(table(persons(), &["id"]))]
                 )],
             ),
             [(
@@ -668,7 +668,7 @@ mod tests {
             stories(
                 vec![change(
                     1,
-                    vec![TableChange::initialized(table(people(), &["id"]))]
+                    vec![TableChange::Created(table(people(), &["id"]))]
                 )],
                 vec![
                     hinted(
@@ -709,7 +709,7 @@ mod tests {
                 vec![],
                 vec![change(
                     12,
-                    vec![TableChange::initialized(table(pets(), &["id"]))]
+                    vec![TableChange::Created(table(pets(), &["id"]))]
                 )],
             ),
             [(
@@ -728,9 +728,9 @@ mod tests {
             stories(
                 vec![change(
                     1,
-                    vec![TableChange::initialized(table(people(), &["id"]))]
+                    vec![TableChange::Created(table(people(), &["id"]))]
                 )],
-                vec![change(15, vec![TableChange::dropped(people())])],
+                vec![change(15, vec![TableChange::Dropped(people())])],
             ),
             [(people(), vec!["dropped shop.people".to_owned()])]
         );
@@ -742,13 +742,13 @@ mod tests {
             stories(
                 vec![change(
                     1,
-                    vec![TableChange::initialized(table(people(), &["id"]))]
+                    vec![TableChange::Created(table(people(), &["id"]))]
                 )],
                 vec![
-                    change(13, vec![TableChange::dropped(people())]),
+                    change(13, vec![TableChange::Dropped(people())]),
                     change(
                         16,
-                        vec![TableChange::initialized(table(people(), &["id", "name"]))]
+                        vec![TableChange::Created(table(people(), &["id", "name"]))]
                     ),
                 ],
             ),
@@ -771,8 +771,8 @@ mod tests {
             stories(
                 vec![],
                 vec![
-                    change(12, vec![TableChange::initialized(table(pets(), &["id"]))]),
-                    change(15, vec![TableChange::dropped(pets())]),
+                    change(12, vec![TableChange::Created(table(pets(), &["id"]))]),
+                    change(15, vec![TableChange::Dropped(pets())]),
                 ],
             )
             .is_empty()
@@ -785,7 +785,7 @@ mod tests {
         catalog
             .accept::<OutOfOrder, _>(
                 &(),
-                &change(1, vec![TableChange::initialized(table(people(), &["id"]))]),
+                &change(1, vec![TableChange::Created(table(people(), &["id"]))]),
                 &mut (),
             )
             .unwrap();
@@ -825,11 +825,11 @@ mod tests {
             stories(
                 vec![change(
                     1,
-                    vec![TableChange::initialized(table(people(), &["id"]))]
+                    vec![TableChange::Created(table(people(), &["id"]))]
                 )],
                 vec![change(
                     10,
-                    vec![TableChange::altered(table(people(), &["id", "name"]))]
+                    vec![TableChange::Altered(table(people(), &["id", "name"]))]
                 )],
             ),
             [(

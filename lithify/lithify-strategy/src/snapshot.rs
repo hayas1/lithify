@@ -624,11 +624,7 @@ mod tests {
         base: impl Fn() -> Option<TablePath>,
     ) -> Result<Vec<SnapshotBuilder<'static, Log, W>>, Untold> {
         let mut catalog = CatalogModel::default();
-        catalog.accept::<OutOfOrder, _>(
-            &(),
-            &change(1, TableChange::initialized(created)),
-            &mut (),
-        )?;
+        catalog.accept::<OutOfOrder, _>(&(), &change(1, TableChange::Created(created)), &mut ())?;
         let mut tracker = EraTracker::new(
             Window::new(RecordedAt::from(100), RecordedAt::from(200)),
             |table: &TableId| {
@@ -771,7 +767,7 @@ mod tests {
 
         let snapshots = snapshots(
             customers(),
-            vec![change(150, TableChange::altered(orders))],
+            vec![change(150, TableChange::Altered(orders))],
             || Some(TablePath::new("mysql_shop", "orders_20260919")),
         )
         .unwrap();
@@ -807,7 +803,7 @@ mod tests {
 
         let snapshots = snapshots(
             customers(),
-            vec![change(150, TableChange::initialized(orders))],
+            vec![change(150, TableChange::Created(orders))],
             || Some(TablePath::new("mysql_shop", "customers_20260919")),
         )
         .unwrap();
@@ -857,7 +853,7 @@ mod tests {
                 Offset(7),
                 RecordedAt::from(150),
                 "",
-                vec![TableChange::altered(widened())],
+                vec![TableChange::Altered(widened())],
                 Vec::new(),
             )],
             || None,
@@ -884,7 +880,7 @@ mod tests {
     fn a_column_added_within_the_window_fills_in_the_rows_folded_before_it() {
         let statement = statement(snapshots(
             customers(),
-            vec![change(150, TableChange::altered(widened()))],
+            vec![change(150, TableChange::Altered(widened()))],
             || None,
         ));
 
@@ -917,7 +913,7 @@ mod tests {
 
         let statement = statement(snapshots(
             customers(),
-            vec![change(150, TableChange::altered(twice))],
+            vec![change(150, TableChange::Altered(twice))],
             || None,
         ));
 
@@ -941,7 +937,7 @@ mod tests {
 
         let statement = statement(snapshots(
             customers(),
-            vec![change(150, TableChange::altered(replaced))],
+            vec![change(150, TableChange::Altered(replaced))],
             || None,
         ));
 
@@ -969,7 +965,7 @@ mod tests {
 
         let statement = statement(snapshots(
             customers(),
-            vec![change(150, TableChange::altered(reshaped))],
+            vec![change(150, TableChange::Altered(reshaped))],
             || None,
         ));
 
@@ -997,7 +993,7 @@ mod tests {
 
         let statement = statement(snapshots(
             customers(),
-            vec![change(150, TableChange::altered(inserted))],
+            vec![change(150, TableChange::Altered(inserted))],
             || None,
         ));
 
@@ -1032,8 +1028,8 @@ mod tests {
         let statement = statement(snapshots(
             customers(),
             vec![
-                change(130, TableChange::altered(widened)),
-                change(160, TableChange::altered(narrowed)),
+                change(130, TableChange::Altered(widened)),
+                change(160, TableChange::Altered(narrowed)),
             ],
             || None,
         ));
@@ -1075,7 +1071,7 @@ mod tests {
 
         let statement = statement(snapshots(
             customers(),
-            vec![change(150, TableChange::altered(described))],
+            vec![change(150, TableChange::Altered(described))],
             || None,
         ));
 
@@ -1097,7 +1093,7 @@ mod tests {
 
         let statement = statement(snapshots(
             customers(),
-            vec![change(150, TableChange::altered(retyped))],
+            vec![change(150, TableChange::Altered(retyped))],
             || None,
         ));
 
@@ -1110,7 +1106,7 @@ mod tests {
 
         let statement = statement(snapshots(
             customers(),
-            vec![change(150, TableChange::altered(narrowed))],
+            vec![change(150, TableChange::Altered(narrowed))],
             || None,
         ));
 
@@ -1135,7 +1131,7 @@ mod tests {
         assert_eq!(
             snapshots(
                 customers(),
-                vec![change(150, TableChange::altered(rekeyed))],
+                vec![change(150, TableChange::Altered(rekeyed))],
                 || None
             )
             .map(drop)
@@ -1168,7 +1164,7 @@ mod tests {
 
         let statement = statement(snapshots(
             customers,
-            vec![change(150, TableChange::altered(moved))],
+            vec![change(150, TableChange::Altered(moved))],
             || None,
         ));
 
@@ -1196,7 +1192,7 @@ mod tests {
         assert_eq!(
             snapshots(
                 customers(),
-                vec![change(150, TableChange::altered(rekeyed))],
+                vec![change(150, TableChange::Altered(rekeyed))],
                 || None
             )
             .map(drop)
@@ -1223,7 +1219,7 @@ mod tests {
             vec![hinted(
                 150,
                 vec![renamed("name", "full_name")],
-                vec![TableChange::altered(renamed_to)],
+                vec![TableChange::Altered(renamed_to)],
             )],
             || None,
         ));
@@ -1256,7 +1252,7 @@ mod tests {
             vec![hinted(
                 150,
                 vec![renamed("name", "full_name")],
-                vec![TableChange::altered(reshaped)],
+                vec![TableChange::Altered(reshaped)],
             )],
             || None,
         ));
@@ -1287,7 +1283,7 @@ mod tests {
             vec![hinted(
                 150,
                 vec![renamed("name", "full_name")],
-                vec![TableChange::altered(reshaped)],
+                vec![TableChange::Altered(reshaped)],
             )],
             || None,
         ));
@@ -1314,7 +1310,7 @@ mod tests {
             vec![hinted(
                 150,
                 vec![renamed("id", "customer_id")],
-                vec![TableChange::altered(rekeyed)],
+                vec![TableChange::Altered(rekeyed)],
             )],
             || None,
         ));
@@ -1346,7 +1342,7 @@ mod tests {
             vec![hinted(
                 150,
                 vec![moved_to(&clients)],
-                vec![TableChange::altered(customers().with_id(&clients))],
+                vec![TableChange::Altered(customers().with_id(&clients))],
             )],
             base,
         )
@@ -1413,7 +1409,7 @@ mod tests {
             vec![hinted(
                 150,
                 vec![moved_to(&clients)],
-                vec![TableChange::altered(widened)],
+                vec![TableChange::Altered(widened)],
             )],
             || None,
         ));
@@ -1643,7 +1639,7 @@ mod tests {
         );
         let created = snapshots(
             customers(),
-            vec![change(150, TableChange::initialized(orders))],
+            vec![change(150, TableChange::Created(orders))],
             || Some(TablePath::new("mysql_shop", "customers_20260919")),
         )
         .unwrap()
@@ -1686,7 +1682,7 @@ mod tests {
         );
         let captured = snapshots(
             customers(),
-            vec![change(150, TableChange::initialized(orders)).captured()],
+            vec![change(150, TableChange::Created(orders)).captured()],
             || None,
         )
         .unwrap()
@@ -1719,7 +1715,7 @@ mod tests {
             customers(),
             vec![change(
                 150,
-                TableChange::dropped(TableId::new("shop", "customers")),
+                TableChange::Dropped(TableId::new("shop", "customers")),
             )],
             || Some(base.clone()),
         )
@@ -1762,9 +1758,9 @@ mod tests {
                 hinted(
                     150,
                     vec![moved_to(&clients)],
-                    vec![TableChange::altered(customers().with_id(&clients))],
+                    vec![TableChange::Altered(customers().with_id(&clients))],
                 ),
-                change(160, TableChange::dropped(clients)),
+                change(160, TableChange::Dropped(clients)),
             ],
             || None,
         )
@@ -1798,10 +1794,10 @@ mod tests {
         };
 
         assert_eq!(
-            missing(TableChange::altered(orders.clone())),
+            missing(TableChange::Altered(orders.clone())),
             Some(TableId::new("shop", "orders"))
         );
-        assert_eq!(missing(TableChange::initialized(orders)), None);
+        assert_eq!(missing(TableChange::Created(orders)), None);
     }
 
     #[test]

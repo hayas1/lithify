@@ -121,7 +121,7 @@ mod tests {
     use super::super::Debezium;
     use super::super::tests::described;
     use super::*;
-    use lithify_core::event::{Hint, MalformedEvent};
+    use lithify_core::event::{Hint, MalformedEvent, TableChange};
     use serde_json::{Value, json};
 
     fn source(source: Value) -> MySqlSource {
@@ -241,10 +241,9 @@ mod tests {
             }))
             .unwrap();
 
-        let created = change.tables().next().unwrap();
-        let table = created.table().unwrap();
-
-        assert!(created.is_initialization());
+        let Some(TableChange::Created(table)) = change.tables().next() else {
+            panic!("expected a created table");
+        };
         assert_eq!(
             table.column("amount").unwrap().column_type(),
             &ColumnType::Decimal {

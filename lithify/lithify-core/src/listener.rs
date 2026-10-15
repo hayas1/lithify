@@ -378,28 +378,6 @@ impl<'a> TableAltered<'a> {
     }
 }
 
-pub enum TableEvent<'a> {
-    TableCreated(TableCreated<'a>),
-    TableDropped(TableDropped<'a>),
-    TableRenamed(TableRenamed<'a>),
-    TableAltered(TableAltered<'a>),
-}
-
-impl TableEvent<'_> {
-    pub fn accept<P, L: SchemaChangeListener<P>>(
-        &self,
-        context: &L::Context,
-        listener: &mut L,
-    ) -> Result<(), L::Error> {
-        match self {
-            Self::TableCreated(event) => listener.table_created(context, event),
-            Self::TableDropped(event) => listener.table_dropped(context, event),
-            Self::TableRenamed(event) => listener.table_renamed(context, event),
-            Self::TableAltered(event) => listener.table_altered(context, event),
-        }
-    }
-}
-
 #[derive(Debug, PartialEq, Eq)]
 pub struct OutOfOrder {
     pub table: TableId,
@@ -472,12 +450,12 @@ impl<P: Position> CatalogModel<P> {
             self.rename(context, change, from, to, listener)?;
         }
         for table in change.tables() {
-            match table.table() {
-                Some(defined) if table.is_initialization() => {
-                    self.create(context, change, defined, Appearance::of(change), listener)?
+            match table {
+                TableChange::Created(table) => {
+                    self.create(context, change, table, Appearance::of(change), listener)?
                 }
-                Some(defined) => self.alter(context, change, defined, listener)?,
-                None => self.forget(context, change, table.id(), listener)?,
+                TableChange::Altered(table) => self.alter(context, change, table, listener)?,
+                TableChange::Dropped(id) => self.forget(context, change, id, listener)?,
             }
         }
 
@@ -503,7 +481,7 @@ impl<P: Position> CatalogModel<P> {
         appearance: Appearance,
         listener: &mut L,
     ) -> Result<(), L::Error> {
-        TableEvent::TableCreated(TableCreated { table, appearance }).accept(context, listener)?;
+        listener.table_created(context, &TableCreated { table, appearance })?;
         self.remember(change, table);
 
         Ok(())
@@ -517,9 +495,7 @@ impl<P: Position> CatalogModel<P> {
         listener: &mut L,
     ) -> Result<(), L::Error> {
         match self.tables.get(id) {
-            Some(table) => {
-                TableEvent::TableDropped(TableDropped { table }).accept(context, listener)?
-            }
+            Some(table) => listener.table_dropped(context, &TableDropped { table })?,
             None => tracing::warn!(
                 table = %id,
                 statement = change.statement(),
@@ -553,11 +529,13 @@ impl<P: Position> CatalogModel<P> {
         };
         let after = before.with_id(to);
 
-        TableEvent::TableRenamed(TableRenamed {
-            before: &before,
-            after: &after,
-        })
-        .accept(context, listener)?;
+        listener.table_renamed(
+            context,
+            &TableRenamed {
+                before: &before,
+                after: &after,
+            },
+        )?;
         self.release(change, from);
         self.remember(change, &after);
 
@@ -595,12 +573,14 @@ impl<P: Position> CatalogModel<P> {
         Alteration::warn_of_unread_rename(&alterations, after.id(), change);
 
         if !alterations.is_empty() {
-            TableEvent::TableAltered(TableAltered {
-                before: &before,
-                after,
-                alterations,
-            })
-            .accept(context, listener)?;
+            listener.table_altered(
+                context,
+                &TableAltered {
+                    before: &before,
+                    after,
+                    alterations,
+                },
+            )?;
         }
         self.remember(change, after);
 
@@ -784,7 +764,7 @@ mod tests {
     fn created(offset: u64) -> SchemaChange<Offset> {
         change(
             offset,
-            vec![TableChange::initialized(table(
+            vec![TableChange::Created(table(
                 vec![identifier(), name()],
                 &["id"],
             ))],
@@ -798,7 +778,7 @@ mod tests {
     ) -> SchemaChange<Offset> {
         change(
             offset,
-            vec![TableChange::altered(table(columns, primary_key))],
+            vec![TableChange::Altered(table(columns, primary_key))],
         )
     }
 
@@ -907,7 +887,7 @@ mod tests {
         let (steps, _) = statement_steps(
             before,
             vec![renaming("name", "full_name")],
-            vec![TableChange::altered(after)],
+            vec![TableChange::Altered(after)],
         );
 
         assert_eq!(
@@ -948,7 +928,7 @@ mod tests {
 
         let entries = accept(
             &mut catalog,
-            change(2, vec![TableChange::dropped(customers())]),
+            change(2, vec![TableChange::Dropped(customers())]),
         );
 
         assert_eq!(entries, ["dropped shop.customers"]);
@@ -985,7 +965,7 @@ mod tests {
 
         let entries = accept(
             &mut catalog,
-            change(1, vec![TableChange::dropped(customers())]),
+            change(1, vec![TableChange::Dropped(customers())]),
         );
 
         assert_eq!(entries, ["dropped shop.customers"]);
@@ -1108,17 +1088,13 @@ mod tests {
     fn steps(before: TableModel, after: TableModel) -> Steps {
         let mut catalog = CatalogModel::default();
         catalog
-            .accept::<OutOfOrder, _>(
-                &(),
-                &change(1, vec![TableChange::initialized(before)]),
-                &mut (),
-            )
+            .accept::<OutOfOrder, _>(&(), &change(1, vec![TableChange::Created(before)]), &mut ())
             .unwrap();
         let mut steps = Steps::default();
         catalog
             .accept::<OutOfOrder, _>(
                 &(),
-                &change(2, vec![TableChange::altered(after)]),
+                &change(2, vec![TableChange::Altered(after)]),
                 &mut steps,
             )
             .unwrap();
@@ -1270,14 +1246,14 @@ mod tests {
         catalog
             .accept::<OutOfOrder, _>(
                 &(),
-                &change(1, vec![TableChange::initialized(before.clone())]),
+                &change(1, vec![TableChange::Created(before.clone())]),
                 &mut (),
             )
             .unwrap();
 
         let halted = catalog.accept::<Halted, _>(
             &(),
-            &change(2, vec![TableChange::altered(after)]),
+            &change(2, vec![TableChange::Altered(after)]),
             &mut Refusing,
         );
 
@@ -1311,11 +1287,7 @@ mod tests {
     ) -> (Steps, CatalogModel<Offset>) {
         let mut catalog = CatalogModel::default();
         catalog
-            .accept::<OutOfOrder, _>(
-                &(),
-                &change(1, vec![TableChange::initialized(before)]),
-                &mut (),
-            )
+            .accept::<OutOfOrder, _>(&(), &change(1, vec![TableChange::Created(before)]), &mut ())
             .unwrap();
         let mut steps = Steps::default();
         catalog
@@ -1336,7 +1308,7 @@ mod tests {
         let (steps, catalog) = statement_steps(
             before.clone(),
             vec![renaming("name", "full_name")],
-            vec![TableChange::altered(after.clone())],
+            vec![TableChange::Altered(after.clone())],
         );
 
         assert_eq!(
@@ -1358,7 +1330,7 @@ mod tests {
         let (steps, _) = statement_steps(
             before,
             vec![renaming("name", "full_name")],
-            vec![TableChange::altered(after)],
+            vec![TableChange::Altered(after)],
         );
 
         assert_eq!(
@@ -1378,7 +1350,7 @@ mod tests {
         let (steps, _) = statement_steps(
             before,
             vec![renaming("name", "full_name")],
-            vec![TableChange::altered(after)],
+            vec![TableChange::Altered(after)],
         );
 
         assert_eq!(
@@ -1398,7 +1370,7 @@ mod tests {
         let (steps, _) = statement_steps(
             before,
             vec![renaming("id", "customer_id")],
-            vec![TableChange::altered(after)],
+            vec![TableChange::Altered(after)],
         );
 
         assert_eq!(steps.announcements(), ["renamed id to customer_id"]);
@@ -1415,7 +1387,7 @@ mod tests {
                 renaming("name", "full_name"),
                 renaming("full_name", "nickname"),
             ],
-            vec![TableChange::altered(after)],
+            vec![TableChange::Altered(after)],
         );
 
         assert_eq!(steps.announcements(), ["renamed name to nickname"]);
@@ -1429,7 +1401,7 @@ mod tests {
         let (steps, _) = statement_steps(
             before,
             vec![renaming("nickname", "alias")],
-            vec![TableChange::altered(after)],
+            vec![TableChange::Altered(after)],
         );
 
         assert!(steps.taken.is_empty());
@@ -1443,7 +1415,7 @@ mod tests {
         let (steps, _) = statement_steps(
             before,
             vec![renaming("name", "full_name")],
-            vec![TableChange::altered(after)],
+            vec![TableChange::Altered(after)],
         );
 
         assert_eq!(steps.announcements(), ["dropped name"]);
@@ -1457,7 +1429,7 @@ mod tests {
         let (steps, catalog) = statement_steps(
             before.clone(),
             vec![to_clients()],
-            vec![TableChange::altered(after.clone())],
+            vec![TableChange::Altered(after.clone())],
         );
 
         assert_eq!(
@@ -1480,7 +1452,7 @@ mod tests {
         let (steps, _) = statement_steps(
             before,
             vec![to_clients()],
-            vec![TableChange::altered(after.clone())],
+            vec![TableChange::Altered(after.clone())],
         );
 
         assert_eq!(
@@ -1498,7 +1470,7 @@ mod tests {
         let (steps, _) = statement_steps(
             before,
             vec![renaming("name", "full_name"), to_clients()],
-            vec![TableChange::altered(after)],
+            vec![TableChange::Altered(after)],
         );
 
         assert_eq!(
@@ -1517,7 +1489,7 @@ mod tests {
 
         let entries = accept(
             &mut catalog,
-            hinted(1, vec![to_clients()], vec![TableChange::altered(after)]),
+            hinted(1, vec![to_clients()], vec![TableChange::Altered(after)]),
         );
 
         assert_eq!(entries, ["created shop.clients"]);
@@ -1548,7 +1520,7 @@ mod tests {
             &mut catalog,
             change(
                 3,
-                vec![TableChange::initialized(
+                vec![TableChange::Created(
                     table(vec![identifier()], &["id"]).with_id(&clients()),
                 )],
             ),
@@ -1573,7 +1545,7 @@ mod tests {
         let (steps, catalog) = statement_steps(
             before.clone(),
             vec![renaming("name", "email")],
-            vec![TableChange::altered(before.clone())],
+            vec![TableChange::Altered(before.clone())],
         );
 
         assert!(steps.taken.is_empty());
@@ -1628,7 +1600,7 @@ mod tests {
             &mut catalog,
             change(
                 1,
-                vec![TableChange::initialized(table(
+                vec![TableChange::Created(table(
                     vec![identifier(), name()],
                     &["id"],
                 ))],
@@ -1658,7 +1630,7 @@ mod tests {
     fn an_alteration_that_drops_and_adds_columns_warns_of_a_rename_it_may_hide() {
         let warning = warned(
             vec![],
-            vec![TableChange::altered(table(
+            vec![TableChange::Altered(table(
                 vec![identifier(), full_name()],
                 &["id"],
             ))],
@@ -1677,7 +1649,7 @@ mod tests {
         assert_eq!(
             warned(
                 vec![],
-                vec![TableChange::altered(table(
+                vec![TableChange::Altered(table(
                     vec![identifier(), name(), email()],
                     &["id"],
                 ))]
@@ -1691,7 +1663,7 @@ mod tests {
         assert_eq!(
             warned(
                 vec![renaming("name", "full_name")],
-                vec![TableChange::altered(table(
+                vec![TableChange::Altered(table(
                     vec![identifier(), full_name()],
                     &["id"]
                 ))],
@@ -1704,7 +1676,7 @@ mod tests {
     fn an_alteration_whose_drop_and_add_no_hint_explains_still_warns_of_a_rename_it_may_hide() {
         let warning = warned(
             vec![renaming("name", "full_name")],
-            vec![TableChange::altered(table(
+            vec![TableChange::Altered(table(
                 vec![identifier(), nickname()],
                 &["id"],
             ))],
@@ -1785,7 +1757,7 @@ mod tests {
             appearances(vec![hinted(
                 1,
                 vec![to_clients()],
-                vec![TableChange::altered(
+                vec![TableChange::Altered(
                     table(vec![identifier()], &["id"]).with_id(&clients())
                 )]
             )]),
@@ -1807,7 +1779,7 @@ mod tests {
 
         let entries = accept(
             &mut catalog,
-            change(2, vec![TableChange::dropped(customers())]),
+            change(2, vec![TableChange::Dropped(customers())]),
         );
 
         assert!(entries.is_empty());
@@ -1825,12 +1797,12 @@ mod tests {
 
     #[test]
     fn a_drop_of_a_table_the_catalog_knows_warns_of_nothing() {
-        assert_eq!(warned(vec![], vec![TableChange::dropped(customers())]), "");
+        assert_eq!(warned(vec![], vec![TableChange::Dropped(customers())]), "");
     }
 
     #[test]
     fn a_drop_of_a_table_the_catalog_never_saw_warns_of_it() {
-        let warning = warned(vec![], vec![TableChange::dropped(orders())]);
+        let warning = warned(vec![], vec![TableChange::Dropped(orders())]);
 
         assert!(warning.contains("WARN"));
         assert!(warning.contains("table=shop.orders"));
@@ -1855,7 +1827,7 @@ mod tests {
     fn a_rename_of_a_column_the_table_never_had_warns_of_it() {
         let warning = warned(
             vec![renaming("nickname", "alias")],
-            vec![TableChange::altered(table(
+            vec![TableChange::Altered(table(
                 vec![identifier(), name()],
                 &["id"],
             ))],
@@ -1870,7 +1842,7 @@ mod tests {
     fn a_rename_of_a_column_onto_a_name_the_table_holds_warns_of_it() {
         let warning = warned(
             vec![renaming("name", "id")],
-            vec![TableChange::altered(table(
+            vec![TableChange::Altered(table(
                 vec![identifier(), name()],
                 &["id"],
             ))],

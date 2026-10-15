@@ -159,9 +159,9 @@ impl<D: Dialect> Debezium<D> {
         };
 
         match change.r#type.as_str() {
-            "CREATE" => Ok(TableChange::initialized(table(change.table)?)),
-            "ALTER" => Ok(TableChange::altered(table(change.table)?)),
-            "DROP" => Ok(TableChange::dropped(id)),
+            "CREATE" => Ok(TableChange::Created(table(change.table)?)),
+            "ALTER" => Ok(TableChange::Altered(table(change.table)?)),
+            "DROP" => Ok(TableChange::Dropped(id)),
             _ => Err(MalformedEvent::UnknownTableChange(change.r#type)),
         }
     }
@@ -304,10 +304,10 @@ pub(crate) mod tests {
     use serde_json::json;
 
     pub(crate) fn described(table: &TableChange) -> String {
-        match table.table() {
-            Some(_) if table.is_initialization() => format!("created {}", table.id()),
-            Some(_) => format!("altered {}", table.id()),
-            None => format!("dropped {}", table.id()),
+        match table {
+            TableChange::Created(table) => format!("created {}", table.id()),
+            TableChange::Altered(table) => format!("altered {}", table.id()),
+            TableChange::Dropped(id) => format!("dropped {id}"),
         }
     }
 
@@ -349,15 +349,11 @@ pub(crate) mod tests {
                 }]
             }))
             .unwrap();
-        let change = statement.tables().next().unwrap();
+        let Some(TableChange::Altered(table)) = statement.tables().next() else {
+            panic!("expected an altered table");
+        };
 
-        change
-            .table()
-            .unwrap()
-            .column("id")
-            .unwrap()
-            .comment()
-            .map(str::to_owned)
+        table.column("id").unwrap().comment().map(str::to_owned)
     }
 
     #[test]
@@ -417,10 +413,9 @@ pub(crate) mod tests {
             }))
             .unwrap();
 
-        let change = statement.tables().next().unwrap();
-        let table = change.table().unwrap();
-
-        assert!(!change.is_initialization());
+        let Some(TableChange::Altered(table)) = statement.tables().next() else {
+            panic!("expected an altered table");
+        };
 
         assert_eq!(
             table.columns().map(ColumnModel::name).collect::<Vec<_>>(),
