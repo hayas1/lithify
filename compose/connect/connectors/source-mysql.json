@@ -11,5 +11,6 @@
   "schema.history.internal.kafka.bootstrap.servers": "kafka:9092",
   "schema.history.internal.kafka.topic": "_schema-history.mysql",
   "decimal.handling.mode": "string",
+  "include.schema.comments": "true",
   "tombstones.on.delete": "false"
 }

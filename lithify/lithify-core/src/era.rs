@@ -4,8 +4,8 @@ use std::marker::PhantomData;
 
 use crate::event::SchemaChange;
 use crate::listener::{
-    Appearance, CatalogModel, SchemaChangeListener, TableAltered, TableCreated, TableDropped,
-    TableRenamed,
+    Alteration, Appearance, CatalogModel, SchemaChangeListener, TableAltered, TableCreated,
+    TableDropped, TableRenamed,
 };
 use crate::model::{TableId, TableModel};
 use crate::position::{Position, RecordedAt};
@@ -290,9 +290,12 @@ where
         context: &Self::Context,
         event: &TableAltered<'_>,
     ) -> Result<(), Self::Error> {
-        self.alter(context, event.before(), |listener| {
-            listener.table_altered(context, event)
-        })
+        let visit = |listener: &mut L| listener.table_altered(context, event);
+
+        match event.alterations().iter().all(Alteration::is_metadata_only) {
+            true => Ok(visit(&mut self.track(event.before().id())?.listener)?),
+            false => self.alter(context, event.before(), visit),
+        }
     }
 }
 
@@ -564,6 +567,35 @@ mod tests {
                     "era [\"id\", \"name\"] 10..15@15".to_owned(),
                     "altered: dropped name, added born".to_owned(),
                     "era [\"id\", \"born\"] 15@15..20".to_owned()
+                ]
+            )]
+        );
+    }
+
+    #[test]
+    fn a_statement_that_only_describes_columns_ends_no_era() {
+        let described = TableModel::new(
+            people(),
+            vec![
+                ColumnModel::new("id", "BIGINT", ColumnType::Int64, false, None)
+                    .with_comment(Some("who they are")),
+            ],
+            vec!["id".to_owned()],
+        );
+
+        assert_eq!(
+            stories(
+                vec![change(
+                    1,
+                    vec![TableChange::initialized(table(people(), &["id"]))]
+                )],
+                vec![change(15, vec![TableChange::altered(described)])],
+            ),
+            [(
+                people(),
+                vec![
+                    "altered: described id".to_owned(),
+                    "era [\"id\"] 10..20".to_owned()
                 ]
             )]
         );

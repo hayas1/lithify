@@ -311,6 +311,9 @@ impl<L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Position>
                 event.after().id().clone(),
             ));
         }
+        if event.alterations().iter().all(Alteration::is_metadata_only) {
+            return Ok(());
+        }
         self.begin(warehouse, event.before())?;
 
         self.carry(warehouse, event.after(), |column, name| {
@@ -1058,6 +1061,28 @@ mod tests {
         )));
         assert!(statement.contains("  WHERE (\"ts_ms\" > 160 OR (\"ts_ms\" = 160 AND \"source\".\"offset\" >= 160)) AND \"ts_ms\" < 200\n"));
         assert!(statement.ends_with("SELECT * FROM \"era_5\""));
+    }
+
+    #[test]
+    fn a_column_described_within_the_window_snapshots_as_if_nothing_changed() {
+        let described = customers_with(
+            vec![
+                column("id", ColumnType::Int64),
+                column("name", ColumnType::Text).with_comment(Some("how to call them")),
+            ],
+            &["id"],
+        );
+
+        let statement = statement(snapshots(
+            customers(),
+            vec![change(150, TableChange::altered(described))],
+            || None,
+        ));
+
+        assert_eq!(
+            statement,
+            self::statement(snapshots(customers(), vec![], || None))
+        );
     }
 
     #[test]

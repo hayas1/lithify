@@ -80,6 +80,7 @@ Reset everything with `docker compose down -v`.
 The Debezium envelope is kept as is (no `ExtractNewRecordState`), so every sink row carries `op` (`r` snapshot / `c` / `u` / `d`), `before`, `after`, `source` (binlog position, LSN, ...) and `ts_ms`.
 Deletes are plain `op = d` events; tombstones are disabled.
 Decimals are emitted as strings (`decimal.handling.mode=string`). PostgreSQL tables use `REPLICA IDENTITY FULL` so `before` is always complete.
+The MySQL connector includes column comments in the schema changes it logs (`include.schema.comments=true`).
 
 | Sink | Table | Extra columns |
 | --- | --- | --- |

@@ -178,6 +178,10 @@ pub enum Alteration<'a> {
         previous: &'a ColumnModel,
         column: &'a ColumnModel,
     },
+    ColumnDescribed {
+        previous: &'a ColumnModel,
+        column: &'a ColumnModel,
+    },
     PrimaryKeyChanged,
 }
 
@@ -202,6 +206,11 @@ impl<'a> Alteration<'a> {
                 .filter(|column| column.type_name() != previous.type_name())
                 .map(|column| Self::ColumnRetyped { previous, column })
         });
+        let described = lineage.carried(after).filter_map(|(previous, column)| {
+            column
+                .filter(|column| column.comment() != previous.comment())
+                .map(|column| Self::ColumnDescribed { previous, column })
+        });
         let added = after
             .columns()
             .filter(|column| !lineage.holds(column.name()))
@@ -215,6 +224,7 @@ impl<'a> Alteration<'a> {
         dropped
             .chain(renamed)
             .chain(retyped)
+            .chain(described)
             .chain(added)
             .chain(rekeyed)
             .collect()
@@ -270,6 +280,24 @@ impl<'a> Alteration<'a> {
         match self {
             Self::ColumnRetyped { previous, column } => Some((previous, column)),
             _ => None,
+        }
+    }
+
+    pub fn as_column_described(&self) -> Option<(&'a ColumnModel, &'a ColumnModel)> {
+        match self {
+            Self::ColumnDescribed { previous, column } => Some((previous, column)),
+            _ => None,
+        }
+    }
+
+    pub fn is_metadata_only(&self) -> bool {
+        match self {
+            Self::ColumnDescribed { .. } => true,
+            Self::ColumnAdded(_)
+            | Self::ColumnDropped(_)
+            | Self::ColumnRenamed { .. }
+            | Self::ColumnRetyped { .. }
+            | Self::PrimaryKeyChanged => false,
         }
     }
 
@@ -615,6 +643,7 @@ mod tests {
                     format!("renamed {} to {}", previous.name(), column.name())
                 }
                 Self::ColumnRetyped { column, .. } => format!("retyped {}", column.name()),
+                Self::ColumnDescribed { column, .. } => format!("described {}", column.name()),
                 Self::PrimaryKeyChanged => "rekeyed".to_owned(),
             }
         }
@@ -695,6 +724,12 @@ mod tests {
                         column.name(),
                         previous.type_name(),
                         column.type_name()
+                    ),
+                    Alteration::ColumnDescribed { previous, column } => format!(
+                        "described {id}.{} {:?} -> {:?}",
+                        column.name(),
+                        previous.comment(),
+                        column.comment()
                     ),
                     Alteration::PrimaryKeyChanged => format!(
                         "primary key {id} {:?} -> {:?}",
@@ -839,6 +874,46 @@ mod tests {
         );
 
         assert_eq!(entries, ["retyped shop.customers.name VARCHAR -> TEXT"]);
+    }
+
+    #[test]
+    fn a_column_whose_comment_changed_is_announced_with_both_comments() {
+        let mut catalog = CatalogModel::default();
+        accept(&mut catalog, created(1));
+
+        let entries = accept(
+            &mut catalog,
+            altered(
+                2,
+                vec![identifier(), name().with_comment(Some("how to call them"))],
+                &["id"],
+            ),
+        );
+
+        assert_eq!(
+            entries,
+            ["described shop.customers.name None -> Some(\"how to call them\")"]
+        );
+    }
+
+    #[test]
+    fn a_column_renamed_and_described_by_one_statement_is_announced_renamed_and_described() {
+        let before = table(vec![identifier(), name()], &["id"]);
+        let after = table(
+            vec![identifier(), full_name().with_comment(Some("as printed"))],
+            &["id"],
+        );
+
+        let (steps, _) = statement_steps(
+            before,
+            vec![renaming("name", "full_name")],
+            vec![TableChange::altered(after)],
+        );
+
+        assert_eq!(
+            steps.announcements(),
+            ["renamed name to full_name, described full_name"]
+        );
     }
 
     #[test]

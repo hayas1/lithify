@@ -74,6 +74,7 @@ pub struct ColumnModel {
     column_type: ColumnType,
     optional: bool,
     default_value: Option<String>,
+    comment: Option<String>,
 }
 
 impl ColumnModel {
@@ -90,6 +91,14 @@ impl ColumnModel {
             column_type,
             optional,
             default_value: default_value.map(str::to_owned),
+            comment: None,
+        }
+    }
+
+    pub fn with_comment(self, comment: Option<&str>) -> Self {
+        Self {
+            comment: comment.map(str::to_owned),
+            ..self
         }
     }
 
@@ -111,6 +120,10 @@ impl ColumnModel {
 
     pub fn default_value(&self) -> Option<&str> {
         self.default_value.as_deref()
+    }
+
+    pub fn comment(&self) -> Option<&str> {
+        self.comment.as_deref()
     }
 }
 
@@ -177,6 +190,17 @@ mod tests {
 
     fn names(table: &TableModel) -> Vec<&str> {
         table.columns().map(ColumnModel::name).collect()
+    }
+
+    #[test]
+    fn a_column_is_undescribed_until_given_a_comment() {
+        let column = column("name", "VARCHAR");
+
+        assert_eq!(column.comment(), None);
+        assert_eq!(
+            column.with_comment(Some("how to call them")).comment(),
+            Some("how to call them")
+        );
     }
 
     #[test]

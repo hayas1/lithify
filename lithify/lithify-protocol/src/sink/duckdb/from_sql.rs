@@ -161,6 +161,7 @@ impl FromSql for DdlColumn {
             default_value_expression: member(column, row, "defaultValueExpression")?,
             length: member(column, row, "length")?,
             scale: member(column, row, "scale")?,
+            comment: member_or_none(column, row, "comment")?,
         })
     }
 }
@@ -262,6 +263,41 @@ mod tests {
             Some("0.00")
         );
         assert!(table.columns[1].optional);
+    }
+
+    #[test]
+    fn a_column_carries_the_comment_the_sink_wrote() {
+        let statement = statement(
+            "SELECT {
+               'source': {'file': 'binlog.000002', 'pos': 448, 'gtid': NULL},
+               'ts_ms': 1789800000000::BIGINT,
+               'ddl': 'CREATE TABLE `customers` (`id` bigint COMMENT ''who they are'')',
+               'tableChanges': [{
+                 'type': 'CREATE',
+                 'id': '\"shop\".\"customers\"',
+                 'table': {
+                   'primaryKeyColumnNames': ['id'],
+                   'columns': [{
+                     'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
+                     'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL,
+                     'comment': 'who they are'
+                   }]
+                 }
+               }]
+             }",
+        )
+        .unwrap();
+
+        let table = statement.table_changes[0].table.as_ref().unwrap();
+        assert_eq!(table.columns[0].comment.as_deref(), Some("who they are"));
+    }
+
+    #[test]
+    fn a_column_the_sink_wrote_without_a_comment_is_read_without_one() {
+        let statement = statement(CUSTOMERS).unwrap();
+
+        let table = statement.table_changes[0].table.as_ref().unwrap();
+        assert_eq!(table.columns[0].comment, None);
     }
 
     #[test]

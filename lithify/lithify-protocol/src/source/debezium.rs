@@ -77,18 +77,17 @@ pub struct DdlTable {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[cfg_attr(feature = "bigquery", derive(google_cloud_bigquery::query::FromSql))]
 #[serde(rename_all = "camelCase")]
 pub struct DdlColumn {
     pub name: String,
-    #[cfg_attr(feature = "bigquery", bigquery(rename = "typeName"))]
     pub type_name: String,
     pub position: i64,
     pub optional: bool,
-    #[cfg_attr(feature = "bigquery", bigquery(rename = "defaultValueExpression"))]
     pub default_value_expression: Option<String>,
     pub length: Option<i64>,
     pub scale: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -191,6 +190,7 @@ impl<D: Dialect> Debezium<D> {
             column.optional,
             column.default_value_expression.as_deref(),
         )
+        .with_comment(column.comment.as_deref())
     }
 }
 
@@ -334,6 +334,53 @@ pub(crate) mod tests {
             serde_json::from_value(row.clone()).unwrap();
 
         assert_eq!(serde_json::to_value(statement).unwrap(), row);
+    }
+
+    fn comment_of(column: Value) -> Option<String> {
+        let statement = Debezium::new("mysql", MySql)
+            .schema_change_json(json!({
+                "source": {"file": "binlog.000002", "pos": 448, "gtid": null},
+                "ts_ms": 1789800000000i64,
+                "ddl": "ALTER TABLE `customers` MODIFY `id` bigint COMMENT 'who they are'",
+                "tableChanges": [{
+                    "type": "ALTER",
+                    "id": "\"shop\".\"customers\"",
+                    "table": {"primaryKeyColumnNames": ["id"], "columns": [column]}
+                }]
+            }))
+            .unwrap();
+        let change = statement.tables().next().unwrap();
+
+        change
+            .table()
+            .unwrap()
+            .column("id")
+            .unwrap()
+            .comment()
+            .map(str::to_owned)
+    }
+
+    #[test]
+    fn a_column_carries_the_comment_the_source_described_it_with() {
+        assert_eq!(
+            comment_of(json!({
+                "name": "id", "typeName": "BIGINT", "position": 1, "optional": false,
+                "defaultValueExpression": null, "length": null, "scale": null,
+                "comment": "who they are"
+            })),
+            Some("who they are".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_column_logged_without_a_comment_is_undescribed() {
+        assert_eq!(
+            comment_of(json!({
+                "name": "id", "typeName": "BIGINT", "position": 1, "optional": false,
+                "defaultValueExpression": null, "length": null, "scale": null
+            })),
+            None
+        );
     }
 
     #[test]
