@@ -249,8 +249,9 @@ impl<'a> Alteration<'a> {
                 ?added,
                 statement = change.statement(),
                 "one statement dropped and added columns; if it renamed a column the dialect could \
-                 not read, the values of the dropped column are lost to the added one, so carry \
-                 them over by hand from the snapshot taken before the statement"
+                 not read, the column it became is filled as an added one rather than with the \
+                 values it had, so carry them over by hand from the shard the window folds onto \
+                 and the change log before the statement"
             );
         }
     }
