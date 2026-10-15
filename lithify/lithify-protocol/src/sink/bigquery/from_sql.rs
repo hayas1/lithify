@@ -1,9 +1,54 @@
-use google_cloud_bigquery::error::RowError;
+use google_cloud_bigquery::error::{ConvertError, RowError};
 use google_cloud_bigquery::query::{FromSql, Row};
 
 use lithify_core::build_log::BuildLogRow;
 
-use crate::source::debezium::DebeziumDdl;
+use crate::source::debezium::{DdlColumn, DebeziumDdl};
+
+impl FromSql for DdlColumn {
+    fn from_sql(value: wkt::Value) -> Result<Self, ConvertError> {
+        const FIELDS: [&str; 8] = [
+            "name",
+            "typeName",
+            "position",
+            "optional",
+            "defaultValueExpression",
+            "length",
+            "scale",
+            "comment",
+        ];
+        let mut fields: wkt::Struct = match value {
+            wkt::Value::Object(fields) => fields,
+            wkt::Value::Array(values) => FIELDS
+                .iter()
+                .map(|name| (*name).to_owned())
+                .zip(values)
+                .collect(),
+            other => {
+                return Err(ConvertError::TypeMismatch {
+                    expected: "array or object",
+                    got: other,
+                });
+            }
+        };
+        let mut take = |name: &str| {
+            fields
+                .remove(name)
+                .ok_or_else(|| ConvertError::MissingField(name.to_owned()))
+        };
+
+        Ok(Self {
+            name: FromSql::from_sql(take("name")?)?,
+            type_name: FromSql::from_sql(take("typeName")?)?,
+            position: FromSql::from_sql(take("position")?)?,
+            optional: FromSql::from_sql(take("optional")?)?,
+            default_value_expression: FromSql::from_sql(take("defaultValueExpression")?)?,
+            length: FromSql::from_sql(take("length")?)?,
+            scale: FromSql::from_sql(take("scale")?)?,
+            comment: FromSql::from_sql(take("comment").unwrap_or_default())?,
+        })
+    }
+}
 
 impl<S: FromSql> TryFrom<Row> for DebeziumDdl<S> {
     type Error = RowError;
@@ -58,9 +103,9 @@ impl TryFrom<Row> for BigQueryBuildLogRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::debezium::DdlTableChange;
     use crate::source::debezium::mysql::MySqlSource;
     use crate::source::debezium::postgres::PostgresSource;
-    use crate::source::debezium::{DdlColumn, DdlTableChange};
     use serde_json::json;
 
     #[test]
@@ -117,6 +162,39 @@ mod tests {
         assert!(!column.optional);
         assert_eq!(column.length, Some(12));
         assert_eq!(column.scale, Some(2));
+    }
+
+    #[test]
+    fn a_column_carries_the_comment_the_sink_wrote() {
+        let column = DdlColumn::from_sql(json!({
+            "name": "id",
+            "typeName": "BIGINT",
+            "position": "1",
+            "optional": false,
+            "defaultValueExpression": null,
+            "length": null,
+            "scale": null,
+            "comment": "who they are"
+        }))
+        .unwrap();
+
+        assert_eq!(column.comment.as_deref(), Some("who they are"));
+    }
+
+    #[test]
+    fn a_column_the_sink_wrote_without_a_comment_is_read_without_one() {
+        let column = DdlColumn::from_sql(json!({
+            "name": "id",
+            "typeName": "BIGINT",
+            "position": "1",
+            "optional": false,
+            "defaultValueExpression": null,
+            "length": null,
+            "scale": null
+        }))
+        .unwrap();
+
+        assert_eq!(column.comment, None);
     }
 
     #[test]

@@ -7,7 +7,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use lithify_core::event::{MalformedEvent, SchemaChange, TableChange};
+use lithify_core::event::{Hint, MalformedEvent, SchemaChange, TableChange};
 use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
 use lithify_core::position::{Coordinate, Position, RecordedAt};
 use lithify_core::source::{
@@ -40,7 +40,7 @@ pub trait Dialect {
 
     fn syntax(&self) -> Self::Syntax;
 
-    fn renames(&self, ddl: &str, schema: &str) -> Vec<TableChange> {
+    fn hints(&self, ddl: &str, schema: &str) -> Vec<Hint> {
         RenameReader::new(self.syntax()).read(ddl, schema)
     }
 }
@@ -77,18 +77,17 @@ pub struct DdlTable {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[cfg_attr(feature = "bigquery", derive(google_cloud_bigquery::query::FromSql))]
 #[serde(rename_all = "camelCase")]
 pub struct DdlColumn {
     pub name: String,
-    #[cfg_attr(feature = "bigquery", bigquery(rename = "typeName"))]
     pub type_name: String,
     pub position: i64,
     pub optional: bool,
-    #[cfg_attr(feature = "bigquery", bigquery(rename = "defaultValueExpression"))]
     pub default_value_expression: Option<String>,
     pub length: Option<i64>,
     pub scale: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -191,6 +190,7 @@ impl<D: Dialect> Debezium<D> {
             column.optional,
             column.default_value_expression.as_deref(),
         )
+        .with_comment(column.comment.as_deref())
     }
 }
 
@@ -254,22 +254,22 @@ impl<D: Dialect> SchemaChangeLog for Debezium<D> {
         &self,
         statement: Self::Record,
     ) -> Result<SchemaChange<Self::Position>, MalformedEvent> {
-        let altered = statement
+        let tables = statement
             .table_changes
             .into_iter()
             .map(|change| self.table_change(change))
             .collect::<Result<Vec<_>, _>>()?;
-        let renamed = altered
+        let hints = tables
             .first()
-            .map(|change| self.dialect.renames(&statement.ddl, change.id().schema()))
+            .map(|change| self.dialect.hints(&statement.ddl, change.id().schema()))
             .unwrap_or_default();
-        let tables = renamed.into_iter().chain(altered).collect();
 
         let change = SchemaChange::new(
             self.dialect.position(&statement.source),
             RecordedAt::from(statement.ts_ms),
             &statement.ddl,
             tables,
+            hints,
         );
 
         match self.captured(&statement.source) {
@@ -298,10 +298,18 @@ impl<D: Dialect> RowChangeLog for Debezium<D> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::mysql::MySql;
     use super::*;
     use serde_json::json;
+
+    pub(crate) fn described(table: &TableChange) -> String {
+        match table {
+            TableChange::Created(table) => format!("created {}", table.id()),
+            TableChange::Altered(table) => format!("altered {}", table.id()),
+            TableChange::Dropped(id) => format!("dropped {id}"),
+        }
+    }
 
     #[test]
     fn a_statement_survives_a_round_trip_through_its_payload() {
@@ -326,6 +334,49 @@ mod tests {
             serde_json::from_value(row.clone()).unwrap();
 
         assert_eq!(serde_json::to_value(statement).unwrap(), row);
+    }
+
+    fn comment_of(column: Value) -> Option<String> {
+        let statement = Debezium::new("mysql", MySql)
+            .schema_change_json(json!({
+                "source": {"file": "binlog.000002", "pos": 448, "gtid": null},
+                "ts_ms": 1789800000000i64,
+                "ddl": "ALTER TABLE `customers` MODIFY `id` bigint COMMENT 'who they are'",
+                "tableChanges": [{
+                    "type": "ALTER",
+                    "id": "\"shop\".\"customers\"",
+                    "table": {"primaryKeyColumnNames": ["id"], "columns": [column]}
+                }]
+            }))
+            .unwrap();
+        let Some(TableChange::Altered(table)) = statement.tables().next() else {
+            panic!("expected an altered table");
+        };
+
+        table.column("id").unwrap().comment().map(str::to_owned)
+    }
+
+    #[test]
+    fn a_column_carries_the_comment_the_source_described_it_with() {
+        assert_eq!(
+            comment_of(json!({
+                "name": "id", "typeName": "BIGINT", "position": 1, "optional": false,
+                "defaultValueExpression": null, "length": null, "scale": null,
+                "comment": "who they are"
+            })),
+            Some("who they are".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_column_logged_without_a_comment_is_undescribed() {
+        assert_eq!(
+            comment_of(json!({
+                "name": "id", "typeName": "BIGINT", "position": 1, "optional": false,
+                "defaultValueExpression": null, "length": null, "scale": null
+            })),
+            None
+        );
     }
 
     #[test]
@@ -363,7 +414,7 @@ mod tests {
             .unwrap();
 
         let Some(TableChange::Altered(table)) = statement.tables().next() else {
-            panic!("an alteration of one table");
+            panic!("expected an altered table");
         };
 
         assert_eq!(

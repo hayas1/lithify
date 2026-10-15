@@ -162,10 +162,11 @@ mod tests {
     use super::*;
     use crate::source::debezium::Debezium;
     use crate::source::debezium::mysql::MySql;
+    use crate::source::debezium::tests::described;
     use chrono::DateTime;
     use lithify_core::artifact::UnbuildableArtifact;
     use lithify_core::build_log::{Outcome, Run, Status};
-    use lithify_core::event::{MalformedEvent, SchemaChange, TableChange};
+    use lithify_core::event::{MalformedEvent, SchemaChange};
     use lithify_core::listener::OutOfOrder;
     use lithify_core::model::TableId;
     use lithify_core::position::RecordedAt;
@@ -214,20 +215,7 @@ mod tests {
                 format!(
                     "{} {:?}",
                     change.statement(),
-                    change
-                        .tables()
-                        .map(|table| match table {
-                            TableChange::Created(table) => format!("created {}", table.id()),
-                            TableChange::Renamed { from, to } => {
-                                format!("renamed {from} to {to}")
-                            }
-                            TableChange::ColumnRenamed { table, from, to } => {
-                                format!("renamed {table}.{from} to {to}")
-                            }
-                            TableChange::Altered(table) => format!("altered {}", table.id()),
-                            TableChange::Dropped(id) => format!("dropped {id}"),
-                        })
-                        .collect::<Vec<_>>()
+                    change.tables().map(described).collect::<Vec<_>>()
                 )
             })
             .collect()
@@ -663,6 +651,7 @@ mod tests {
                 Line(0),
                 RecordedAt::from(0),
                 &statement,
+                Vec::new(),
                 Vec::new(),
             ))
         }

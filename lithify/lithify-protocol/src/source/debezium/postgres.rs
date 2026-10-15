@@ -96,7 +96,7 @@ impl Dialect for Postgres {
 mod tests {
     use super::super::Debezium;
     use super::*;
-    use lithify_core::event::{MalformedEvent, TableChange};
+    use lithify_core::event::{Hint, MalformedEvent};
     use lithify_core::model::{ColumnType, TableId};
     use serde_json::{Value, json};
 
@@ -215,8 +215,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            change.tables().next(),
-            Some(&TableChange::ColumnRenamed {
+            change.hints().next(),
+            Some(&Hint::ColumnRename {
                 table: TableId::new("shop", "customers"),
                 from: "name".to_owned(),
                 to: "full_name".to_owned(),

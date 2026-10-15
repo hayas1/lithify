@@ -6,8 +6,8 @@ use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
 use lithify_core::build_log::{BuildLog, Outcome, Run};
 use lithify_core::era::Era;
 use lithify_core::listener::{
-    Appearance, ColumnAdded, ColumnDropped, ColumnRenamed, ColumnRetyped, PrimaryKeyChanged,
-    SchemaChangeListener, TableCreated, TableDropped, TableRenamed,
+    Alteration, Appearance, SchemaChangeListener, TableAltered, TableCreated, TableDropped,
+    TableRenamed,
 };
 use lithify_core::model::{ColumnModel, TableId, TableModel};
 use lithify_core::sink::{TablePath, Warehouse};
@@ -204,6 +204,48 @@ impl<'a, L: RowChangeLog, W: Warehouse> SnapshotBuilder<'a, L, W> {
 
         Ok(())
     }
+
+    fn source(
+        warehouse: &W,
+        alterations: &[Alteration<'_>],
+        column: &ColumnModel,
+        name: &SqlString,
+    ) -> SqlString {
+        alterations
+            .iter()
+            .filter_map(Alteration::as_column_renamed)
+            .find(|(_, renamed)| renamed.name() == column.name())
+            .map_or_else(
+                || name.clone(),
+                |(previous, _)| warehouse.identifier(previous.name()),
+            )
+    }
+
+    fn carried(
+        warehouse: &W,
+        alterations: &[Alteration<'_>],
+        column: &ColumnModel,
+        name: &SqlString,
+    ) -> Result<SqlString, UnbuildableArtifact> {
+        let source = Self::source(warehouse, alterations, column, name);
+        let added = alterations
+            .iter()
+            .filter_map(Alteration::as_column_added)
+            .any(|added| added.name() == column.name());
+        let retyped = alterations
+            .iter()
+            .filter_map(Alteration::as_column_retyped)
+            .any(|(_, retyped)| retyped.name() == column.name());
+
+        match (added, retyped) {
+            (true, _) => Ok(warehouse.fill(column)?),
+            (false, true) => Ok(SqlString::from(format!(
+                "CAST({source} AS {})",
+                warehouse.column_type(column.column_type())?
+            ))),
+            (false, false) => Ok(source),
+        }
+    }
 }
 
 impl<L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Position>
@@ -255,79 +297,28 @@ impl<L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Position>
         Ok(())
     }
 
-    fn column_renamed(
+    fn table_altered(
         &mut self,
         warehouse: &W,
-        event: &ColumnRenamed<'_>,
+        event: &TableAltered<'_>,
     ) -> Result<(), UnbuildableArtifact> {
+        let rekeyed = event
+            .alterations()
+            .iter()
+            .any(Alteration::is_primary_key_changed);
+        if rekeyed {
+            return Err(UnbuildableArtifact::PrimaryKeyChanged(
+                event.after().id().clone(),
+            ));
+        }
+        if event.alterations().iter().all(Alteration::is_metadata_only) {
+            return Ok(());
+        }
         self.begin(warehouse, event.before())?;
-
-        let renamed = event.column();
-        let previous = warehouse.identifier(event.previous().name());
 
         self.carry(warehouse, event.after(), |column, name| {
-            match column.name() == renamed.name() {
-                true => Ok(previous.clone()),
-                false => Ok(name.clone()),
-            }
+            Self::carried(warehouse, event.alterations(), column, name)
         })
-    }
-
-    fn column_added(
-        &mut self,
-        warehouse: &W,
-        event: &ColumnAdded<'_>,
-    ) -> Result<(), UnbuildableArtifact> {
-        self.begin(warehouse, event.before())?;
-
-        let added = event.column();
-
-        self.carry(warehouse, event.after(), |column, name| {
-            match column.name() == added.name() {
-                true => Ok(warehouse.fill(column)?),
-                false => Ok(name.clone()),
-            }
-        })
-    }
-
-    fn column_dropped(
-        &mut self,
-        warehouse: &W,
-        event: &ColumnDropped<'_>,
-    ) -> Result<(), UnbuildableArtifact> {
-        self.begin(warehouse, event.before())?;
-
-        self.carry(warehouse, event.after(), |_, name| Ok(name.clone()))
-    }
-
-    fn column_retyped(
-        &mut self,
-        warehouse: &W,
-        event: &ColumnRetyped<'_>,
-    ) -> Result<(), UnbuildableArtifact> {
-        self.begin(warehouse, event.before())?;
-
-        let retyped = event.column();
-
-        self.carry(warehouse, event.after(), |column, name| {
-            match column.name() == retyped.name() {
-                true => Ok(SqlString::from(format!(
-                    "CAST({name} AS {})",
-                    warehouse.column_type(column.column_type())?
-                ))),
-                false => Ok(name.clone()),
-            }
-        })
-    }
-
-    fn primary_key_changed(
-        &mut self,
-        _: &W,
-        event: &PrimaryKeyChanged<'_>,
-    ) -> Result<(), UnbuildableArtifact> {
-        Err(UnbuildableArtifact::PrimaryKeyChanged(
-            event.after().id().clone(),
-        ))
     }
 }
 
@@ -376,7 +367,7 @@ mod tests {
     use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
     use lithify_core::build_log::{Lifecycle, Status};
     use lithify_core::era::{Bound, EraTracker};
-    use lithify_core::event::{SchemaChange, TableChange};
+    use lithify_core::event::{Hint, SchemaChange, TableChange};
     use lithify_core::listener::{CatalogModel, OutOfOrder};
     use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
     use lithify_core::position::{Coordinate, Position, RecordedAt};
@@ -578,14 +569,25 @@ mod tests {
     }
 
     fn changes(at: i64, tables: Vec<TableChange>) -> SchemaChange<Offset> {
-        SchemaChange::new(Offset(at as u64), RecordedAt::from(at), "", tables)
+        hinted(at, Vec::new(), tables)
     }
 
-    fn renamed(from: &str, to: &str) -> TableChange {
-        TableChange::ColumnRenamed {
+    fn hinted(at: i64, hints: Vec<Hint>, tables: Vec<TableChange>) -> SchemaChange<Offset> {
+        SchemaChange::new(Offset(at as u64), RecordedAt::from(at), "", tables, hints)
+    }
+
+    fn renamed(from: &str, to: &str) -> Hint {
+        Hint::ColumnRename {
             table: TableId::new("shop", "customers"),
             from: from.to_owned(),
             to: to.to_owned(),
+        }
+    }
+
+    fn moved_to(table: &TableId) -> Hint {
+        Hint::TableRename {
+            from: TableId::new("shop", "customers"),
+            to: table.clone(),
         }
     }
 
@@ -852,6 +854,7 @@ mod tests {
                 RecordedAt::from(150),
                 "",
                 vec![TableChange::Altered(widened())],
+                Vec::new(),
             )],
             || None,
         ));
@@ -897,7 +900,7 @@ mod tests {
     }
 
     #[test]
-    fn each_column_a_statement_adds_is_carried_in_a_relation_of_its_own() {
+    fn the_columns_a_statement_adds_are_carried_in_one_relation() {
         let twice = customers_with(
             vec![
                 column("id", ColumnType::Int64),
@@ -914,13 +917,16 @@ mod tests {
             || None,
         ));
 
-        assert!(statement.contains("    CAST(NULL AS TEXT) AS \"email\"\n  FROM \"era_1\"\n"));
-        assert!(statement.contains("    CAST(NULL AS TEXT) AS \"phone\"\n  FROM \"era_2\"\n"));
-        assert!(statement.ends_with("SELECT * FROM \"era_4\""));
+        assert!(statement.contains(concat!(
+            "    CAST(NULL AS TEXT) AS \"email\",\n",
+            "    CAST(NULL AS TEXT) AS \"phone\"\n",
+            "  FROM \"era_1\"\n"
+        )));
+        assert!(statement.ends_with("SELECT * FROM \"era_3\""));
     }
 
     #[test]
-    fn a_column_dropped_and_one_added_by_one_statement_are_carried_one_after_the_other() {
+    fn a_column_dropped_and_one_added_by_one_statement_are_carried_in_one_relation() {
         let replaced = customers_with(
             vec![
                 column("id", ColumnType::Int64),
@@ -938,21 +944,16 @@ mod tests {
         assert!(statement.contains(concat!(
             "\"era_2\" AS (\n",
             "  SELECT\n",
-            "    \"id\" AS \"id\"\n",
-            "  FROM \"era_1\"\n",
-            "),\n",
-            "\"era_3\" AS (\n",
-            "  SELECT\n",
             "    \"id\" AS \"id\",\n",
             "    CAST(NULL AS TEXT) AS \"email\"\n",
-            "  FROM \"era_2\"\n",
+            "  FROM \"era_1\"\n",
             "),\n",
         )));
-        assert!(statement.ends_with("SELECT * FROM \"era_4\""));
+        assert!(statement.ends_with("SELECT * FROM \"era_3\""));
     }
 
     #[test]
-    fn a_column_retyped_and_one_added_by_one_statement_are_carried_one_after_the_other() {
+    fn a_column_retyped_and_one_added_by_one_statement_are_carried_in_one_relation() {
         let reshaped = customers_with(
             vec![
                 column("id", ColumnType::Int64),
@@ -972,15 +973,9 @@ mod tests {
             "\"era_2\" AS (\n",
             "  SELECT\n",
             "    \"id\" AS \"id\",\n",
-            "    CAST(\"name\" AS BIGINT) AS \"name\"\n",
-            "  FROM \"era_1\"\n",
-            "),\n",
-            "\"era_3\" AS (\n",
-            "  SELECT\n",
-            "    \"id\" AS \"id\",\n",
-            "    \"name\" AS \"name\",\n",
+            "    CAST(\"name\" AS BIGINT) AS \"name\",\n",
             "    CAST(NULL AS TEXT) AS \"email\"\n",
-            "  FROM \"era_2\"\n",
+            "  FROM \"era_1\"\n",
             "),\n",
         )));
     }
@@ -1062,6 +1057,28 @@ mod tests {
         )));
         assert!(statement.contains("  WHERE (\"ts_ms\" > 160 OR (\"ts_ms\" = 160 AND \"source\".\"offset\" >= 160)) AND \"ts_ms\" < 200\n"));
         assert!(statement.ends_with("SELECT * FROM \"era_5\""));
+    }
+
+    #[test]
+    fn a_column_described_within_the_window_snapshots_as_if_nothing_changed() {
+        let described = customers_with(
+            vec![
+                column("id", ColumnType::Int64),
+                column("name", ColumnType::Text).with_comment(Some("how to call them")),
+            ],
+            &["id"],
+        );
+
+        let statement = statement(snapshots(
+            customers(),
+            vec![change(150, TableChange::Altered(described))],
+            || None,
+        ));
+
+        assert_eq!(
+            statement,
+            self::statement(snapshots(customers(), vec![], || None))
+        );
     }
 
     #[test]
@@ -1199,12 +1216,10 @@ mod tests {
 
         let statement = statement(snapshots(
             customers(),
-            vec![changes(
+            vec![hinted(
                 150,
-                vec![
-                    renamed("name", "full_name"),
-                    TableChange::Altered(renamed_to),
-                ],
+                vec![renamed("name", "full_name")],
+                vec![TableChange::Altered(renamed_to)],
             )],
             || None,
         ));
@@ -1222,7 +1237,7 @@ mod tests {
     }
 
     #[test]
-    fn a_column_renamed_and_another_added_by_one_statement_are_carried_one_after_the_other() {
+    fn a_column_renamed_and_another_added_by_one_statement_are_carried_in_one_relation() {
         let reshaped = customers_with(
             vec![
                 column("id", ColumnType::Int64),
@@ -1234,23 +1249,49 @@ mod tests {
 
         let statement = statement(snapshots(
             customers(),
-            vec![changes(
+            vec![hinted(
                 150,
-                vec![renamed("name", "full_name"), TableChange::Altered(reshaped)],
+                vec![renamed("name", "full_name")],
+                vec![TableChange::Altered(reshaped)],
             )],
             || None,
         ));
 
         assert!(statement.contains(concat!(
-            "    \"name\" AS \"full_name\"\n",
-            "  FROM \"era_1\"\n",
-            "),\n",
-            "\"era_3\" AS (\n",
+            "\"era_2\" AS (\n",
             "  SELECT\n",
             "    \"id\" AS \"id\",\n",
-            "    \"full_name\" AS \"full_name\",\n",
+            "    \"name\" AS \"full_name\",\n",
             "    CAST(NULL AS TEXT) AS \"email\"\n",
-            "  FROM \"era_2\"\n",
+            "  FROM \"era_1\"\n",
+            "),\n",
+        )));
+    }
+
+    #[test]
+    fn a_column_renamed_and_retyped_by_one_statement_casts_the_rows_under_its_old_name() {
+        let reshaped = customers_with(
+            vec![
+                column("id", ColumnType::Int64),
+                column("full_name", ColumnType::Int64),
+            ],
+            &["id"],
+        );
+
+        let statement = statement(snapshots(
+            customers(),
+            vec![hinted(
+                150,
+                vec![renamed("name", "full_name")],
+                vec![TableChange::Altered(reshaped)],
+            )],
+            || None,
+        ));
+
+        assert!(statement.contains(concat!(
+            "    \"id\" AS \"id\",\n",
+            "    CAST(\"name\" AS BIGINT) AS \"full_name\"\n",
+            "  FROM \"era_1\"\n",
         )));
     }
 
@@ -1266,9 +1307,10 @@ mod tests {
 
         let statement = statement(snapshots(
             customers(),
-            vec![changes(
+            vec![hinted(
                 150,
-                vec![renamed("id", "customer_id"), TableChange::Altered(rekeyed)],
+                vec![renamed("id", "customer_id")],
+                vec![TableChange::Altered(rekeyed)],
             )],
             || None,
         ));
@@ -1297,15 +1339,10 @@ mod tests {
 
         snapshots(
             customers(),
-            vec![changes(
+            vec![hinted(
                 150,
-                vec![
-                    TableChange::Renamed {
-                        from: TableId::new("shop", "customers"),
-                        to: clients.clone(),
-                    },
-                    TableChange::Altered(customers().with_id(&clients)),
-                ],
+                vec![moved_to(&clients)],
+                vec![TableChange::Altered(customers().with_id(&clients))],
             )],
             base,
         )
@@ -1369,15 +1406,10 @@ mod tests {
 
         let statement = statement(snapshots(
             customers(),
-            vec![changes(
+            vec![hinted(
                 150,
-                vec![
-                    TableChange::Renamed {
-                        from: TableId::new("shop", "customers"),
-                        to: clients,
-                    },
-                    TableChange::Altered(widened),
-                ],
+                vec![moved_to(&clients)],
+                vec![TableChange::Altered(widened)],
             )],
             || None,
         ));
@@ -1723,15 +1755,10 @@ mod tests {
         let dropped = snapshots(
             customers(),
             vec![
-                changes(
+                hinted(
                     150,
-                    vec![
-                        TableChange::Renamed {
-                            from: TableId::new("shop", "customers"),
-                            to: clients.clone(),
-                        },
-                        TableChange::Altered(customers().with_id(&clients)),
-                    ],
+                    vec![moved_to(&clients)],
+                    vec![TableChange::Altered(customers().with_id(&clients))],
                 ),
                 change(160, TableChange::Dropped(clients)),
             ],
