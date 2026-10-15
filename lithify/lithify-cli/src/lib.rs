@@ -1,7 +1,13 @@
 pub mod artifacts;
+pub mod catch_up;
+pub mod check;
+pub mod course;
 pub mod credential;
 pub mod journal;
 pub mod pipeline;
 pub mod plan;
+pub mod resumption;
 pub mod run;
+pub mod settlement;
+pub mod shard;
 pub mod unrunnable;

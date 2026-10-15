@@ -3,10 +3,11 @@ use std::marker::PhantomData;
 use chrono::{DateTime, Utc};
 
 use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
+use lithify_core::build_log::{BuildLog, Outcome, Run};
 use lithify_core::era::Era;
 use lithify_core::listener::{
-    ColumnAdded, ColumnDropped, ColumnRenamed, ColumnRetyped, PrimaryKeyChanged,
-    SchemaChangeListener, TableCreated, TableRenamed,
+    Alteration, Appearance, SchemaChangeListener, TableAltered, TableCreated, TableDropped,
+    TableRenamed,
 };
 use lithify_core::model::{ColumnModel, TableId, TableModel};
 use lithify_core::sink::{TablePath, Warehouse};
@@ -54,7 +55,7 @@ impl Artifact for Snapshot {
         table: TableId,
         window: &'a Window,
         base: Option<TablePath>,
-    ) -> Self::Builder<'a, L, W> {
+    ) -> Result<Self::Builder<'a, L, W>, UnbuildableArtifact> {
         SnapshotBuilder::new(self, log, table, window.clone(), base)
     }
 }
@@ -62,10 +63,13 @@ impl Artifact for Snapshot {
 pub struct SnapshotBuilder<'a, L, W> {
     snapshot: &'a Snapshot,
     query: ChangeLogQuery<'a, L>,
+    table_from: Option<TableId>,
     table: TableId,
+    appearance: Option<Appearance>,
     window: Window,
     base: Option<TablePath>,
-    target: Option<Target>,
+    target: Option<TablePath>,
+    rendered: Option<Target>,
     fold: Fold,
     warehouse: PhantomData<fn(&W)>,
 }
@@ -82,36 +86,61 @@ impl<'a, L: RowChangeLog, W: Warehouse> SnapshotBuilder<'a, L, W> {
         table: TableId,
         window: Window,
         base: Option<TablePath>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, UnbuildableArtifact> {
+        Ok(Self {
             snapshot,
             query: ChangeLogQuery::new(log),
+            target: Some(snapshot.target(&table, &window)?),
+            table_from: Some(table.clone()),
             table,
+            appearance: None,
             window,
             base,
-            target: None,
+            rendered: None,
             fold: Fold::default(),
             warehouse: PhantomData,
+        })
+    }
+
+    pub fn missing_base(&self) -> Option<&TableId> {
+        let logged_from_start = self
+            .appearance
+            .is_some_and(|appearance| appearance.is_logged_from_start());
+
+        match logged_from_start || self.base.is_some() {
+            true => None,
+            false => self.table_from.as_ref(),
         }
     }
 
     fn begin(&mut self, warehouse: &W, table: &TableModel) -> Result<(), UnbuildableArtifact> {
-        if self.target.is_some() {
+        if self.rendered.is_some() {
             return Ok(());
         }
         if table.primary_key().next().is_none() {
             return Err(UnbuildableArtifact::WithoutPrimaryKey(table.id().clone()));
         }
 
-        let base = self.base(warehouse, table)?;
+        let base = self.select_base(warehouse, table)?;
 
         self.fold.push(warehouse.identifier("base"), base);
-        self.target = Some(self.resolve_target(warehouse)?);
+        self.rendered = self.render_target(warehouse);
 
         Ok(())
     }
 
-    fn base(&self, warehouse: &W, table: &TableModel) -> Result<SqlString, UnbuildableArtifact> {
+    fn render_target(&self, warehouse: &W) -> Option<Target> {
+        self.target.as_ref().map(|target| Target {
+            namespace: warehouse.create_namespace(target.namespace()),
+            table: warehouse.table_ref(target),
+        })
+    }
+
+    fn select_base(
+        &self,
+        warehouse: &W,
+        table: &TableModel,
+    ) -> Result<SqlString, UnbuildableArtifact> {
         match &self.base {
             Some(base) => Ok(self.query.shard(warehouse, base, table)),
             None => self.query.captured(
@@ -120,15 +149,6 @@ impl<'a, L: RowChangeLog, W: Warehouse> SnapshotBuilder<'a, L, W> {
                 table,
             ),
         }
-    }
-
-    fn resolve_target(&self, warehouse: &W) -> Result<Target, UnbuildableArtifact> {
-        let target = self.snapshot.target(&self.table, &self.window)?;
-
-        Ok(Target {
-            namespace: warehouse.create_namespace(target.namespace()),
-            table: warehouse.table_ref(&target),
-        })
     }
 
     fn previous(&self) -> Result<SqlString, UnbuildableArtifact> {
@@ -184,6 +204,48 @@ impl<'a, L: RowChangeLog, W: Warehouse> SnapshotBuilder<'a, L, W> {
 
         Ok(())
     }
+
+    fn source(
+        warehouse: &W,
+        alterations: &[Alteration<'_>],
+        column: &ColumnModel,
+        name: &SqlString,
+    ) -> SqlString {
+        alterations
+            .iter()
+            .filter_map(Alteration::as_column_renamed)
+            .find(|(_, renamed)| renamed.name() == column.name())
+            .map_or_else(
+                || name.clone(),
+                |(previous, _)| warehouse.identifier(previous.name()),
+            )
+    }
+
+    fn carried(
+        warehouse: &W,
+        alterations: &[Alteration<'_>],
+        column: &ColumnModel,
+        name: &SqlString,
+    ) -> Result<SqlString, UnbuildableArtifact> {
+        let source = Self::source(warehouse, alterations, column, name);
+        let added = alterations
+            .iter()
+            .filter_map(Alteration::as_column_added)
+            .any(|added| added.name() == column.name());
+        let retyped = alterations
+            .iter()
+            .filter_map(Alteration::as_column_retyped)
+            .any(|(_, retyped)| retyped.name() == column.name());
+
+        match (added, retyped) {
+            (true, _) => Ok(warehouse.fill(column)?),
+            (false, true) => Ok(SqlString::from(format!(
+                "CAST({source} AS {})",
+                warehouse.column_type(column.column_type())?
+            ))),
+            (false, false) => Ok(source),
+        }
+    }
 }
 
 impl<L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Position>
@@ -197,9 +259,19 @@ impl<L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Position>
         _: &W,
         event: &TableCreated<'_>,
     ) -> Result<(), UnbuildableArtifact> {
+        self.appearance = Some(event.appearance());
+        if event.appearance().is_creation() {
+            self.table_from = None;
+        }
         if event.appearance().is_logged_from_start() {
             self.base = None;
         }
+
+        Ok(())
+    }
+
+    fn table_dropped(&mut self, _: &W, _: &TableDropped<'_>) -> Result<(), UnbuildableArtifact> {
+        self.target = None;
 
         Ok(())
     }
@@ -219,84 +291,34 @@ impl<L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Position>
     ) -> Result<(), UnbuildableArtifact> {
         self.begin(warehouse, event.before())?;
         self.table = event.after().id().clone();
-        self.target = Some(self.resolve_target(warehouse)?);
+        self.target = Some(self.snapshot.target(&self.table, &self.window)?);
+        self.rendered = self.render_target(warehouse);
 
         Ok(())
     }
 
-    fn column_renamed(
+    fn table_altered(
         &mut self,
         warehouse: &W,
-        event: &ColumnRenamed<'_>,
+        event: &TableAltered<'_>,
     ) -> Result<(), UnbuildableArtifact> {
+        let rekeyed = event
+            .alterations()
+            .iter()
+            .any(Alteration::is_primary_key_changed);
+        if rekeyed {
+            return Err(UnbuildableArtifact::PrimaryKeyChanged(
+                event.after().id().clone(),
+            ));
+        }
+        if event.alterations().iter().all(Alteration::is_metadata_only) {
+            return Ok(());
+        }
         self.begin(warehouse, event.before())?;
-
-        let renamed = event.column();
-        let previous = warehouse.identifier(event.previous().name());
 
         self.carry(warehouse, event.after(), |column, name| {
-            match column.name() == renamed.name() {
-                true => Ok(previous.clone()),
-                false => Ok(name.clone()),
-            }
+            Self::carried(warehouse, event.alterations(), column, name)
         })
-    }
-
-    fn column_added(
-        &mut self,
-        warehouse: &W,
-        event: &ColumnAdded<'_>,
-    ) -> Result<(), UnbuildableArtifact> {
-        self.begin(warehouse, event.before())?;
-
-        let added = event.column();
-
-        self.carry(warehouse, event.after(), |column, name| {
-            match column.name() == added.name() {
-                true => Ok(warehouse.fill(column)?),
-                false => Ok(name.clone()),
-            }
-        })
-    }
-
-    fn column_dropped(
-        &mut self,
-        warehouse: &W,
-        event: &ColumnDropped<'_>,
-    ) -> Result<(), UnbuildableArtifact> {
-        self.begin(warehouse, event.before())?;
-
-        self.carry(warehouse, event.after(), |_, name| Ok(name.clone()))
-    }
-
-    fn column_retyped(
-        &mut self,
-        warehouse: &W,
-        event: &ColumnRetyped<'_>,
-    ) -> Result<(), UnbuildableArtifact> {
-        self.begin(warehouse, event.before())?;
-
-        let retyped = event.column();
-
-        self.carry(warehouse, event.after(), |column, name| {
-            match column.name() == retyped.name() {
-                true => Ok(SqlString::from(format!(
-                    "CAST({name} AS {})",
-                    warehouse.column_type(column.column_type())?
-                ))),
-                false => Ok(name.clone()),
-            }
-        })
-    }
-
-    fn primary_key_changed(
-        &mut self,
-        _: &W,
-        event: &PrimaryKeyChanged<'_>,
-    ) -> Result<(), UnbuildableArtifact> {
-        Err(UnbuildableArtifact::PrimaryKeyChanged(
-            event.after().id().clone(),
-        ))
     }
 }
 
@@ -306,14 +328,18 @@ impl<L: RowChangeLog, W: Warehouse> ArtifactBuilder for SnapshotBuilder<'_, L, W
     }
 
     fn select(&self) -> Result<SqlString, UnbuildableArtifact> {
-        match &self.target {
+        match &self.rendered {
             Some(_) => Ok(self.fold.select()),
             None => Err(self.without_era()),
         }
     }
 
     fn create(&self) -> Result<Vec<SqlString>, UnbuildableArtifact> {
-        match &self.target {
+        if self.target.is_none() {
+            return Ok(Vec::new());
+        }
+
+        match &self.rendered {
             Some(target) => Ok(vec![
                 target.namespace.clone(),
                 self.fold.create(&target.table),
@@ -321,14 +347,27 @@ impl<L: RowChangeLog, W: Warehouse> ArtifactBuilder for SnapshotBuilder<'_, L, W
             None => Err(self.without_era()),
         }
     }
+
+    fn build_log(&self, run: &Run, outcome: Outcome) -> BuildLog {
+        BuildLog::new(
+            run,
+            self.table_from.clone(),
+            self.target.as_ref().map(|_| self.table.clone()),
+            self.base.clone(),
+            self.target.clone(),
+            self.window.clone(),
+            outcome,
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
+    use lithify_core::build_log::{Lifecycle, Status};
     use lithify_core::era::{Bound, EraTracker};
-    use lithify_core::event::{SchemaChange, TableChange};
+    use lithify_core::event::{Hint, SchemaChange, TableChange};
     use lithify_core::listener::{CatalogModel, OutOfOrder};
     use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
     use lithify_core::position::{Coordinate, Position, RecordedAt};
@@ -386,6 +425,18 @@ mod tests {
     impl Warehouse for Engine {
         type Config = ();
 
+        fn timestamp_millis(&self, milliseconds: i64) -> SqlString {
+            SqlString::from(milliseconds.to_string())
+        }
+
+        fn unix_millis(&self, expression: &SqlString) -> SqlString {
+            expression.clone()
+        }
+
+        fn select_existence(&self, table: &TablePath) -> SqlString {
+            SqlString::from(format!("SELECT COUNT(*) FROM {table}"))
+        }
+
         fn change_log_namespace(&self) -> &str {
             "mysql_shop_cdc"
         }
@@ -437,6 +488,18 @@ mod tests {
 
     impl Warehouse for Lake {
         type Config = ();
+
+        fn timestamp_millis(&self, milliseconds: i64) -> SqlString {
+            SqlString::from(milliseconds.to_string())
+        }
+
+        fn unix_millis(&self, expression: &SqlString) -> SqlString {
+            expression.clone()
+        }
+
+        fn select_existence(&self, table: &TablePath) -> SqlString {
+            SqlString::from(format!("SELECT COUNT(*) FROM {table}"))
+        }
 
         fn identifier(&self, name: &str) -> SqlString {
             Engine.identifier(name)
@@ -506,14 +569,25 @@ mod tests {
     }
 
     fn changes(at: i64, tables: Vec<TableChange>) -> SchemaChange<Offset> {
-        SchemaChange::new(Offset(at as u64), RecordedAt::from(at), "", tables)
+        hinted(at, Vec::new(), tables)
     }
 
-    fn renamed(from: &str, to: &str) -> TableChange {
-        TableChange::ColumnRenamed {
+    fn hinted(at: i64, hints: Vec<Hint>, tables: Vec<TableChange>) -> SchemaChange<Offset> {
+        SchemaChange::new(Offset(at as u64), RecordedAt::from(at), "", tables, hints)
+    }
+
+    fn renamed(from: &str, to: &str) -> Hint {
+        Hint::ColumnRename {
             table: TableId::new("shop", "customers"),
             from: from.to_owned(),
             to: to.to_owned(),
+        }
+    }
+
+    fn moved_to(table: &TableId) -> Hint {
+        Hint::TableRename {
+            from: TableId::new("shop", "customers"),
+            to: table.clone(),
         }
     }
 
@@ -560,7 +634,7 @@ mod tests {
                     table.clone(),
                     window(),
                     base(),
-                ))
+                )?)
             },
         );
         for change in &within {
@@ -780,6 +854,7 @@ mod tests {
                 RecordedAt::from(150),
                 "",
                 vec![TableChange::Altered(widened())],
+                Vec::new(),
             )],
             || None,
         ));
@@ -825,7 +900,7 @@ mod tests {
     }
 
     #[test]
-    fn each_column_a_statement_adds_is_carried_in_a_relation_of_its_own() {
+    fn the_columns_a_statement_adds_are_carried_in_one_relation() {
         let twice = customers_with(
             vec![
                 column("id", ColumnType::Int64),
@@ -842,13 +917,16 @@ mod tests {
             || None,
         ));
 
-        assert!(statement.contains("    CAST(NULL AS TEXT) AS \"email\"\n  FROM \"era_1\"\n"));
-        assert!(statement.contains("    CAST(NULL AS TEXT) AS \"phone\"\n  FROM \"era_2\"\n"));
-        assert!(statement.ends_with("SELECT * FROM \"era_4\""));
+        assert!(statement.contains(concat!(
+            "    CAST(NULL AS TEXT) AS \"email\",\n",
+            "    CAST(NULL AS TEXT) AS \"phone\"\n",
+            "  FROM \"era_1\"\n"
+        )));
+        assert!(statement.ends_with("SELECT * FROM \"era_3\""));
     }
 
     #[test]
-    fn a_column_dropped_and_one_added_by_one_statement_are_carried_one_after_the_other() {
+    fn a_column_dropped_and_one_added_by_one_statement_are_carried_in_one_relation() {
         let replaced = customers_with(
             vec![
                 column("id", ColumnType::Int64),
@@ -866,21 +944,16 @@ mod tests {
         assert!(statement.contains(concat!(
             "\"era_2\" AS (\n",
             "  SELECT\n",
-            "    \"id\" AS \"id\"\n",
-            "  FROM \"era_1\"\n",
-            "),\n",
-            "\"era_3\" AS (\n",
-            "  SELECT\n",
             "    \"id\" AS \"id\",\n",
             "    CAST(NULL AS TEXT) AS \"email\"\n",
-            "  FROM \"era_2\"\n",
+            "  FROM \"era_1\"\n",
             "),\n",
         )));
-        assert!(statement.ends_with("SELECT * FROM \"era_4\""));
+        assert!(statement.ends_with("SELECT * FROM \"era_3\""));
     }
 
     #[test]
-    fn a_column_retyped_and_one_added_by_one_statement_are_carried_one_after_the_other() {
+    fn a_column_retyped_and_one_added_by_one_statement_are_carried_in_one_relation() {
         let reshaped = customers_with(
             vec![
                 column("id", ColumnType::Int64),
@@ -900,15 +973,9 @@ mod tests {
             "\"era_2\" AS (\n",
             "  SELECT\n",
             "    \"id\" AS \"id\",\n",
-            "    CAST(\"name\" AS BIGINT) AS \"name\"\n",
-            "  FROM \"era_1\"\n",
-            "),\n",
-            "\"era_3\" AS (\n",
-            "  SELECT\n",
-            "    \"id\" AS \"id\",\n",
-            "    \"name\" AS \"name\",\n",
+            "    CAST(\"name\" AS BIGINT) AS \"name\",\n",
             "    CAST(NULL AS TEXT) AS \"email\"\n",
-            "  FROM \"era_2\"\n",
+            "  FROM \"era_1\"\n",
             "),\n",
         )));
     }
@@ -990,6 +1057,28 @@ mod tests {
         )));
         assert!(statement.contains("  WHERE (\"ts_ms\" > 160 OR (\"ts_ms\" = 160 AND \"source\".\"offset\" >= 160)) AND \"ts_ms\" < 200\n"));
         assert!(statement.ends_with("SELECT * FROM \"era_5\""));
+    }
+
+    #[test]
+    fn a_column_described_within_the_window_snapshots_as_if_nothing_changed() {
+        let described = customers_with(
+            vec![
+                column("id", ColumnType::Int64),
+                column("name", ColumnType::Text).with_comment(Some("how to call them")),
+            ],
+            &["id"],
+        );
+
+        let statement = statement(snapshots(
+            customers(),
+            vec![change(150, TableChange::Altered(described))],
+            || None,
+        ));
+
+        assert_eq!(
+            statement,
+            self::statement(snapshots(customers(), vec![], || None))
+        );
     }
 
     #[test]
@@ -1127,12 +1216,10 @@ mod tests {
 
         let statement = statement(snapshots(
             customers(),
-            vec![changes(
+            vec![hinted(
                 150,
-                vec![
-                    renamed("name", "full_name"),
-                    TableChange::Altered(renamed_to),
-                ],
+                vec![renamed("name", "full_name")],
+                vec![TableChange::Altered(renamed_to)],
             )],
             || None,
         ));
@@ -1150,7 +1237,7 @@ mod tests {
     }
 
     #[test]
-    fn a_column_renamed_and_another_added_by_one_statement_are_carried_one_after_the_other() {
+    fn a_column_renamed_and_another_added_by_one_statement_are_carried_in_one_relation() {
         let reshaped = customers_with(
             vec![
                 column("id", ColumnType::Int64),
@@ -1162,23 +1249,49 @@ mod tests {
 
         let statement = statement(snapshots(
             customers(),
-            vec![changes(
+            vec![hinted(
                 150,
-                vec![renamed("name", "full_name"), TableChange::Altered(reshaped)],
+                vec![renamed("name", "full_name")],
+                vec![TableChange::Altered(reshaped)],
             )],
             || None,
         ));
 
         assert!(statement.contains(concat!(
-            "    \"name\" AS \"full_name\"\n",
-            "  FROM \"era_1\"\n",
-            "),\n",
-            "\"era_3\" AS (\n",
+            "\"era_2\" AS (\n",
             "  SELECT\n",
             "    \"id\" AS \"id\",\n",
-            "    \"full_name\" AS \"full_name\",\n",
+            "    \"name\" AS \"full_name\",\n",
             "    CAST(NULL AS TEXT) AS \"email\"\n",
-            "  FROM \"era_2\"\n",
+            "  FROM \"era_1\"\n",
+            "),\n",
+        )));
+    }
+
+    #[test]
+    fn a_column_renamed_and_retyped_by_one_statement_casts_the_rows_under_its_old_name() {
+        let reshaped = customers_with(
+            vec![
+                column("id", ColumnType::Int64),
+                column("full_name", ColumnType::Int64),
+            ],
+            &["id"],
+        );
+
+        let statement = statement(snapshots(
+            customers(),
+            vec![hinted(
+                150,
+                vec![renamed("name", "full_name")],
+                vec![TableChange::Altered(reshaped)],
+            )],
+            || None,
+        ));
+
+        assert!(statement.contains(concat!(
+            "    \"id\" AS \"id\",\n",
+            "    CAST(\"name\" AS BIGINT) AS \"full_name\"\n",
+            "  FROM \"era_1\"\n",
         )));
     }
 
@@ -1194,9 +1307,10 @@ mod tests {
 
         let statement = statement(snapshots(
             customers(),
-            vec![changes(
+            vec![hinted(
                 150,
-                vec![renamed("id", "customer_id"), TableChange::Altered(rekeyed)],
+                vec![renamed("id", "customer_id")],
+                vec![TableChange::Altered(rekeyed)],
             )],
             || None,
         ));
@@ -1225,15 +1339,10 @@ mod tests {
 
         snapshots(
             customers(),
-            vec![changes(
+            vec![hinted(
                 150,
-                vec![
-                    TableChange::Renamed {
-                        from: TableId::new("shop", "customers"),
-                        to: clients.clone(),
-                    },
-                    TableChange::Altered(customers().with_id(&clients)),
-                ],
+                vec![moved_to(&clients)],
+                vec![TableChange::Altered(customers().with_id(&clients))],
             )],
             base,
         )
@@ -1297,15 +1406,10 @@ mod tests {
 
         let statement = statement(snapshots(
             customers(),
-            vec![changes(
+            vec![hinted(
                 150,
-                vec![
-                    TableChange::Renamed {
-                        from: TableId::new("shop", "customers"),
-                        to: clients,
-                    },
-                    TableChange::Altered(widened),
-                ],
+                vec![moved_to(&clients)],
+                vec![TableChange::Altered(widened)],
             )],
             || None,
         ));
@@ -1373,7 +1477,8 @@ mod tests {
             TableId::new("shop", "customers"),
             window(),
             None,
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             snapshot.create().unwrap_err(),
@@ -1410,10 +1515,24 @@ mod tests {
     }
 
     #[test]
+    fn a_window_no_shard_can_be_named_after_yields_no_builder() {
+        let window = Window::new(RecordedAt::from(i64::MAX), RecordedAt::from(i64::MAX));
+
+        assert_eq!(
+            shop()
+                .builder::<Log, Engine>(&Log, TableId::new("shop", "customers"), &window, None)
+                .map(drop)
+                .unwrap_err(),
+            UnbuildableArtifact::Unshardable(RecordedAt::from(i64::MAX))
+        );
+    }
+
+    #[test]
     fn a_snapshot_hands_a_builder_that_builds_it_from_the_eras_it_is_told_of() {
         let window = window();
-        let mut fold =
-            shop().builder::<Log, Engine>(&Log, TableId::new("shop", "customers"), &window, None);
+        let mut fold = shop()
+            .builder::<Log, Engine>(&Log, TableId::new("shop", "customers"), &window, None)
+            .unwrap();
 
         fold.era_boundary(
             &Engine,
@@ -1430,6 +1549,255 @@ mod tests {
                 .as_str()
                 .starts_with("CREATE OR REPLACE TABLE \"mysql_shop\".\"customers_20260920\" AS\n")
         );
+    }
+
+    #[test]
+    fn a_snapshot_is_logged_with_the_shard_it_folds_onto_and_the_one_it_builds() {
+        let window = window();
+        let base = TablePath::new("mysql_shop", "customers_20260919");
+        let run = Run::new(
+            ulid::Ulid::nil(),
+            "snapshot",
+            "daily",
+            "primary",
+            "{}",
+            "0.1.0",
+        );
+        let finished_at = DateTime::from_timestamp_millis(1789949000000).unwrap();
+        let builder = shop()
+            .builder::<Log, Engine>(
+                &Log,
+                TableId::new("shop", "customers"),
+                &window,
+                Some(base.clone()),
+            )
+            .unwrap();
+
+        assert_eq!(
+            builder.build_log(&run, Outcome::new(Status::Succeeded, finished_at)),
+            BuildLog::new(
+                &run,
+                Some(TableId::new("shop", "customers")),
+                Some(TableId::new("shop", "customers")),
+                Some(base),
+                Some(TablePath::new("mysql_shop", "customers_20260920")),
+                window,
+                Outcome::new(Status::Succeeded, finished_at),
+            )
+        );
+    }
+
+    #[test]
+    fn a_table_renamed_within_the_window_is_logged_from_its_first_name_to_its_last() {
+        let run = Run::new(
+            ulid::Ulid::nil(),
+            "snapshot",
+            "daily",
+            "primary",
+            "{}",
+            "0.1.0",
+        );
+        let outcome = Outcome::new(
+            Status::Succeeded,
+            DateTime::from_timestamp_millis(1789949000000).unwrap(),
+        );
+        let base = TablePath::new("mysql_shop", "customers_20260919");
+        let renamed = renamed_to_clients(|| Some(base.clone())).remove(0);
+
+        assert_eq!(
+            renamed.build_log(&run, outcome.clone()),
+            BuildLog::new(
+                &run,
+                Some(TableId::new("shop", "customers")),
+                Some(TableId::new("shop", "clients")),
+                Some(base.clone()),
+                Some(TablePath::new("mysql_shop", "clients_20260920")),
+                window(),
+                outcome,
+            )
+        );
+    }
+
+    #[test]
+    fn a_table_created_within_the_window_is_logged_as_opening_it_under_no_name() {
+        let run = Run::new(
+            ulid::Ulid::nil(),
+            "snapshot",
+            "daily",
+            "primary",
+            "{}",
+            "0.1.0",
+        );
+        let outcome = Outcome::new(
+            Status::Succeeded,
+            DateTime::from_timestamp_millis(1789949000000).unwrap(),
+        );
+        let orders = TableModel::new(
+            TableId::new("shop", "orders"),
+            vec![column("id", ColumnType::Int64)],
+            vec!["id".to_owned()],
+        );
+        let created = snapshots(
+            customers(),
+            vec![change(150, TableChange::Created(orders))],
+            || Some(TablePath::new("mysql_shop", "customers_20260919")),
+        )
+        .unwrap()
+        .into_iter()
+        .find(|snapshot| snapshot.table() == &TableId::new("shop", "orders"))
+        .unwrap();
+
+        assert_eq!(
+            created.build_log(&run, outcome.clone()),
+            BuildLog::new(
+                &run,
+                None,
+                Some(TableId::new("shop", "orders")),
+                None,
+                Some(TablePath::new("mysql_shop", "orders_20260920")),
+                window(),
+                outcome,
+            )
+        );
+    }
+
+    #[test]
+    fn a_table_captured_within_the_window_is_logged_as_opening_it_under_its_name() {
+        let run = Run::new(
+            ulid::Ulid::nil(),
+            "snapshot",
+            "daily",
+            "primary",
+            "{}",
+            "0.1.0",
+        );
+        let outcome = Outcome::new(
+            Status::Succeeded,
+            DateTime::from_timestamp_millis(1789949000000).unwrap(),
+        );
+        let orders = TableModel::new(
+            TableId::new("shop", "orders"),
+            vec![column("id", ColumnType::Int64)],
+            vec!["id".to_owned()],
+        );
+        let captured = snapshots(
+            customers(),
+            vec![change(150, TableChange::Created(orders)).captured()],
+            || None,
+        )
+        .unwrap()
+        .into_iter()
+        .find(|snapshot| snapshot.table() == &TableId::new("shop", "orders"))
+        .unwrap();
+
+        assert_eq!(
+            captured.build_log(&run, outcome.clone()).table_from(),
+            Some(&TableId::new("shop", "orders"))
+        );
+    }
+
+    #[test]
+    fn a_table_dropped_within_the_window_is_logged_without_a_target() {
+        let run = Run::new(
+            ulid::Ulid::nil(),
+            "snapshot",
+            "daily",
+            "primary",
+            "{}",
+            "0.1.0",
+        );
+        let outcome = Outcome::new(
+            Status::Succeeded,
+            DateTime::from_timestamp_millis(1789949000000).unwrap(),
+        );
+        let base = TablePath::new("mysql_shop", "customers_20260919");
+        let dropped = snapshots(
+            customers(),
+            vec![change(
+                150,
+                TableChange::Dropped(TableId::new("shop", "customers")),
+            )],
+            || Some(base.clone()),
+        )
+        .unwrap()
+        .remove(0);
+
+        assert_eq!(dropped.create().unwrap(), Vec::<SqlString>::new());
+        assert_eq!(
+            dropped.build_log(&run, outcome.clone()),
+            BuildLog::new(
+                &run,
+                Some(TableId::new("shop", "customers")),
+                None,
+                Some(base),
+                None,
+                window(),
+                outcome,
+            )
+        );
+    }
+
+    #[test]
+    fn a_table_renamed_and_then_dropped_within_the_window_is_logged_from_its_first_name() {
+        let run = Run::new(
+            ulid::Ulid::nil(),
+            "snapshot",
+            "daily",
+            "primary",
+            "{}",
+            "0.1.0",
+        );
+        let outcome = Outcome::new(
+            Status::Succeeded,
+            DateTime::from_timestamp_millis(1789949000000).unwrap(),
+        );
+        let clients = TableId::new("shop", "clients");
+        let dropped = snapshots(
+            customers(),
+            vec![
+                hinted(
+                    150,
+                    vec![moved_to(&clients)],
+                    vec![TableChange::Altered(customers().with_id(&clients))],
+                ),
+                change(160, TableChange::Dropped(clients)),
+            ],
+            || None,
+        )
+        .unwrap()
+        .remove(0)
+        .build_log(&run, outcome);
+
+        assert_eq!(
+            dropped.table_from(),
+            Some(&TableId::new("shop", "customers"))
+        );
+        assert_eq!(dropped.lifecycle(), Some(Lifecycle::Dropped));
+    }
+
+    #[test]
+    fn a_table_discovered_within_the_window_misses_a_base_it_was_not_given_but_one_created_does_not()
+     {
+        let orders = TableModel::new(
+            TableId::new("shop", "orders"),
+            vec![column("id", ColumnType::Int64)],
+            vec!["id".to_owned()],
+        );
+        let missing = |change: TableChange| {
+            snapshots(customers(), vec![self::change(150, change)], || None)
+                .unwrap()
+                .into_iter()
+                .find(|snapshot| snapshot.table() == &TableId::new("shop", "orders"))
+                .unwrap()
+                .missing_base()
+                .cloned()
+        };
+
+        assert_eq!(
+            missing(TableChange::Altered(orders.clone())),
+            Some(TableId::new("shop", "orders"))
+        );
+        assert_eq!(missing(TableChange::Created(orders)), None);
     }
 
     #[test]

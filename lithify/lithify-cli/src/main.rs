@@ -1,40 +1,91 @@
+#[cfg(feature = "serve")]
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use chrono::{DateTime, Utc};
-use clap::Parser;
+use chrono::{NaiveDate, Utc};
+use clap::{Parser, Subcommand};
 
-use lithify_core::position::RecordedAt;
-use lithify_core::window::Window;
-
+use lithify_cli::course::Course;
 use lithify_cli::credential::{Credential, Secret};
 use lithify_cli::journal::Journal;
+use lithify_cli::plan::Tables;
 use lithify_cli::run::Run;
 use lithify_cli::unrunnable::Unrunnable;
+use lithify_core::model::TableId;
+#[cfg(feature = "serve")]
+use lithify_ui::overview::SinkOverview;
+#[cfg(feature = "serve")]
+use lithify_ui::server::{Board, Survey};
 
 #[derive(Parser)]
 #[command(
     name = "lithify",
-    about = "Report the schema changes a window of a pipeline's change log holds, or plan the snapshots it would build"
+    about = "Settle the change log of a pipeline into the artifacts of its warehouses"
 )]
 struct Arguments {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    #[command(
+        about = "Build every window of a pipeline's change log that closed since the build log says it was last built"
+    )]
+    CatchUp(CatchUpArguments),
+    #[command(
+        about = "Build the shard of a pipeline's snapshots that is named, onto the one the build log recorded before it"
+    )]
+    Build(BuildArguments),
+    #[command(
+        about = "List what should have been built by now but was not, and fail if anything is listed"
+    )]
+    Check(CheckArguments),
+    #[cfg(feature = "serve")]
+    #[command(
+        about = "Serve the pages listing what was built, and assembling the builds to rebuild it with"
+    )]
+    Serve(ServeArguments),
+}
+
+impl Command {
+    fn execute(self) -> ExitCode {
+        let journal = match self {
+            Self::CatchUp(arguments) => arguments.journal(),
+            Self::Build(arguments) => arguments.journal(),
+            Self::Check(arguments) => arguments.journal(),
+            #[cfg(feature = "serve")]
+            Self::Serve(arguments) => arguments.journal(),
+        };
+
+        match journal {
+            Ok(journal) => {
+                for entry in journal.entries() {
+                    println!("{entry}");
+                }
+
+                match journal.complete() {
+                    true => ExitCode::SUCCESS,
+                    false => ExitCode::FAILURE,
+                }
+            }
+            Err(unrunnable) => {
+                eprintln!("{unrunnable}");
+
+                ExitCode::FAILURE
+            }
+        }
+    }
+}
+
+#[derive(clap::Args)]
+struct PipelineArguments {
     #[arg(
         value_name = "DIRECTORY",
         help = "The directory holding the infra.toml and table.toml of one pipeline"
     )]
     directory: PathBuf,
-    #[arg(
-        long,
-        value_name = "INSTANT",
-        help = "The instant the window opens, as RFC 3339"
-    )]
-    from: DateTime<Utc>,
-    #[arg(
-        long,
-        value_name = "INSTANT",
-        help = "The instant the window closes, as RFC 3339"
-    )]
-    to: DateTime<Utc>,
     #[arg(
         long,
         env = "S3_ACCESS_KEY_ID",
@@ -57,49 +108,140 @@ struct Arguments {
         help = "The sink to read, out of the ones the pipeline is sunk into"
     )]
     sink: Option<String>,
+}
+
+impl PipelineArguments {
+    fn run(&self) -> Run {
+        Run::new(
+            self.directory.clone(),
+            Credential::new(self.access_key_id.clone(), self.secret_access_key.clone()),
+            self.sink.clone(),
+            Utc::now(),
+        )
+    }
+}
+
+#[cfg(feature = "serve")]
+impl Survey for PipelineArguments {
+    fn directory(&self) -> String {
+        self.directory.display().to_string()
+    }
+
+    fn sinks(&self) -> Result<Vec<String>, String> {
+        self.run()
+            .sinks()
+            .map_err(|unrunnable| unrunnable.to_string())
+    }
+
+    fn inspect(&self) -> Result<Vec<SinkOverview>, String> {
+        Ok(self
+            .run()
+            .inspect()
+            .map_err(|unrunnable| unrunnable.to_string())?
+            .into_iter()
+            .map(|(sink, inspection)| {
+                SinkOverview::new(
+                    &sink,
+                    inspection.schedule(),
+                    inspection.latest().to_vec(),
+                    inspection
+                        .discrepancies()
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect(),
+                )
+            })
+            .collect())
+    }
+}
+
+#[derive(clap::Args)]
+struct CatchUpArguments {
+    #[command(flatten)]
+    pipeline: PipelineArguments,
+}
+
+impl CatchUpArguments {
+    fn journal(self) -> Result<Journal, Unrunnable> {
+        self.pipeline.run().build(&Course::CatchUp)
+    }
+}
+
+#[derive(clap::Args)]
+struct BuildArguments {
+    #[command(flatten)]
+    pipeline: PipelineArguments,
+    #[arg(
+        long,
+        value_name = "DATE",
+        help = "The date the window of the shard to build opens on, folding onto the shard the build log recorded closing then"
+    )]
+    snapshot: NaiveDate,
+    #[arg(
+        long,
+        value_name = "SCHEMA.TABLE",
+        value_parser = |table: &str| TableId::try_from(table),
+        help = "A table to build the shard of, out of every table the window holds when none is named"
+    )]
+    table: Vec<TableId>,
     #[arg(
         long,
         value_name = "DIRECTORY",
-        help = "Write the statements a snapshot of each table would run into this directory, one file per sink, instead of reporting the schema changes"
+        help = "Write the statements the shard would run into this directory, one file per sink, instead of running them"
     )]
     dry_run: Option<PathBuf>,
-    // TODO: read the window to fold onto from a history of the runs that built snapshots, once
-    // the command builds them instead of only planning them.
-    #[arg(
-        long,
-        value_name = "INSTANT",
-        help = "The instant the window before this one opened, naming the snapshots to fold onto; without it the window folds onto what the capture read"
-    )]
-    onto: Option<DateTime<Utc>>,
 }
 
-impl Arguments {
-    fn window(&self) -> Window {
-        Window::new(RecordedAt::from(self.from), RecordedAt::from(self.to))
-    }
+impl BuildArguments {
+    fn journal(self) -> Result<Journal, Unrunnable> {
+        let course = Course::Shard {
+            date: self.snapshot,
+            tables: match self.table.is_empty() {
+                true => Tables::Every,
+                false => Tables::Named(self.table.into_iter().collect()),
+            },
+        };
+        let run = self.pipeline.run();
 
-    fn journal(mut self) -> Result<Journal, Unrunnable> {
-        let dry_run = self.dry_run.take();
-        let run = Run::from(self);
-
-        match dry_run {
-            Some(into) => run.plan(&into),
-            None => run.report(),
+        match self.dry_run {
+            Some(into) => run.plan(&course, &into),
+            None => run.build(&course),
         }
     }
 }
 
-impl From<Arguments> for Run {
-    fn from(arguments: Arguments) -> Self {
-        let window = arguments.window();
+#[derive(clap::Args)]
+struct CheckArguments {
+    #[command(flatten)]
+    pipeline: PipelineArguments,
+}
 
-        Self::new(
-            arguments.directory,
-            window,
-            Credential::new(arguments.access_key_id, arguments.secret_access_key),
-            arguments.sink,
-            arguments.onto,
-        )
+impl CheckArguments {
+    fn journal(self) -> Result<Journal, Unrunnable> {
+        self.pipeline.run().check()
+    }
+}
+
+#[cfg(feature = "serve")]
+#[derive(clap::Args)]
+struct ServeArguments {
+    #[command(flatten)]
+    pipeline: PipelineArguments,
+    #[arg(
+        long,
+        value_name = "ADDRESS",
+        default_value = "127.0.0.1:3000",
+        help = "The address the pages are served on"
+    )]
+    address: SocketAddr,
+}
+
+#[cfg(feature = "serve")]
+impl ServeArguments {
+    fn journal(self) -> Result<Journal, Unrunnable> {
+        Board::new(self.pipeline).serve(self.address)?;
+
+        Ok(Journal::default())
     }
 }
 
@@ -107,134 +249,135 @@ fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .init();
-    let arguments = Arguments::parse();
 
-    match arguments.journal() {
-        Ok(journal) => {
-            for entry in journal.entries() {
-                println!("{entry}");
-            }
-
-            match journal.complete() {
-                true => ExitCode::SUCCESS,
-                false => ExitCode::FAILURE,
-            }
-        }
-        Err(unrunnable) => {
-            eprintln!("{unrunnable}");
-
-            ExitCode::FAILURE
-        }
-    }
+    Arguments::parse().command.execute()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn arguments(from: &str, to: &str) -> Arguments {
-        Arguments::parse_from([
-            "lithify",
-            "mysql",
-            "--from",
-            from,
-            "--to",
-            to,
-            "--access-key-id",
-            "rustfsadmin",
-            "--secret-access-key",
-            "rustfsadmin",
-        ])
+    const PIPELINE: [&str; 5] = [
+        "mysql",
+        "--access-key-id",
+        "rustfsadmin",
+        "--secret-access-key",
+        "rustfsadmin",
+    ];
+
+    fn parsed(subcommand: &str, extra: &[&str]) -> Result<Command, clap::Error> {
+        Arguments::try_parse_from(["lithify", subcommand].iter().chain(&PIPELINE).chain(extra))
+            .map(|arguments| arguments.command)
+    }
+
+    fn build_arguments(extra: &[&str]) -> BuildArguments {
+        match parsed(
+            "build",
+            &[&["--snapshot", "2026-09-20"][..], extra].concat(),
+        )
+        .unwrap()
+        {
+            Command::Build(arguments) => arguments,
+            _ => unreachable!("build was named"),
+        }
+    }
+
+    #[test]
+    fn a_catch_up_is_given_nothing_but_the_pipeline() {
+        assert!(matches!(parsed("catch-up", &[]), Ok(Command::CatchUp(_))));
+        assert!(parsed("catch-up", &["--from", "2026-09-20T00:00:00Z"]).is_err());
+        assert!(parsed("catch-up", &["--onto", "2026-09-19T00:00:00Z"]).is_err());
+        assert!(parsed("catch-up", &["--dry-run", "plans"]).is_err());
+    }
+
+    #[test]
+    fn a_build_is_given_the_shard_it_builds_every_table_of() {
+        let built = build_arguments(&[]);
+
+        assert_eq!(built.snapshot, "2026-09-20".parse::<NaiveDate>().unwrap());
+        assert_eq!(built.table, []);
+        assert_eq!(built.dry_run, None);
+    }
+
+    #[test]
+    fn a_build_is_narrowed_to_the_tables_it_names() {
+        let narrowed = build_arguments(&["--table", "shop.people", "--table", "shop.pets"]);
+
+        assert_eq!(
+            narrowed.table,
+            [TableId::new("shop", "people"), TableId::new("shop", "pets")]
+        );
+    }
+
+    #[test]
+    fn a_build_without_its_shard_is_rejected() {
+        assert!(parsed("build", &[]).is_err());
     }
 
     #[test]
     fn a_dry_run_names_the_directory_the_plans_are_written_into() {
-        let planned = Arguments::parse_from([
-            "lithify",
-            "mysql",
-            "--from",
-            "2026-09-20T00:00:00Z",
-            "--to",
-            "2026-09-21T00:00:00Z",
-            "--access-key-id",
-            "rustfsadmin",
-            "--secret-access-key",
-            "rustfsadmin",
-            "--dry-run",
-            "plans",
-        ]);
+        let planned = build_arguments(&["--dry-run", "plans"]);
 
         assert_eq!(planned.dry_run, Some(PathBuf::from("plans")));
-        assert_eq!(
-            arguments("2026-09-20T00:00:00Z", "2026-09-21T00:00:00Z").dry_run,
-            None
-        );
     }
 
     #[test]
-    fn a_run_folds_onto_the_snapshot_of_the_window_it_names() {
-        let folded = Arguments::parse_from([
-            "lithify",
-            "mysql",
-            "--from",
-            "2026-09-20T00:00:00Z",
-            "--to",
-            "2026-09-21T00:00:00Z",
-            "--access-key-id",
-            "rustfsadmin",
-            "--secret-access-key",
-            "rustfsadmin",
-            "--onto",
-            "2026-09-19T00:00:00Z",
-        ]);
+    fn a_check_reads_the_pipeline_a_catch_up_would() {
+        let Ok(Command::Check(arguments)) = parsed("check", &["--sink", "rustfs"]) else {
+            panic!("check was named");
+        };
 
-        assert_eq!(
-            folded.onto,
-            Some(
-                DateTime::parse_from_rfc3339("2026-09-19T00:00:00Z")
-                    .unwrap()
-                    .to_utc()
-            )
-        );
-        assert_eq!(
-            arguments("2026-09-20T00:00:00Z", "2026-09-21T00:00:00Z").onto,
-            None
-        );
+        assert_eq!(arguments.pipeline.directory, PathBuf::from("mysql"));
+        assert_eq!(arguments.pipeline.sink.as_deref(), Some("rustfs"));
     }
 
     #[test]
-    fn a_run_reads_the_window_it_is_given() {
-        let window = arguments("2026-09-20T00:00:00Z", "2026-09-21T00:00:00Z").window();
+    fn a_pipeline_given_without_naming_what_to_do_with_it_is_rejected() {
+        let unnamed = Arguments::try_parse_from(["lithify"].iter().chain(&PIPELINE));
 
-        assert_eq!(window.from(), &RecordedAt::from(1789862400000));
-        assert_eq!(window.to(), &RecordedAt::from(1789948800000));
+        assert!(unnamed.is_err());
     }
 
+    #[cfg(feature = "serve")]
     #[test]
-    fn a_run_reads_a_window_given_in_another_zone_as_the_instant_it_names() {
-        let window = arguments("2026-09-20T09:00:00+09:00", "2026-09-21T09:00:00+09:00").window();
+    fn a_board_is_served_on_the_loopback_unless_told_otherwise() {
+        let Ok(Command::Serve(served)) = parsed("serve", &[]) else {
+            panic!("serve was named");
+        };
+        let Ok(Command::Serve(addressed)) = parsed("serve", &["--address", "0.0.0.0:8080"]) else {
+            panic!("serve was named");
+        };
 
-        assert_eq!(
-            window,
-            arguments("2026-09-20T00:00:00Z", "2026-09-21T00:00:00Z").window()
-        );
+        assert_eq!(served.address, "127.0.0.1:3000".parse().unwrap());
+        assert_eq!(addressed.address, "0.0.0.0:8080".parse().unwrap());
     }
 
+    #[cfg(feature = "serve")]
     #[test]
-    fn a_window_that_is_not_an_instant_is_rejected() {
-        let unreadable = Arguments::try_parse_from([
-            "lithify",
-            "mysql",
-            "--from",
-            "yesterday afternoon",
-            "--to",
-            "2026-09-21T00:00:00Z",
-            "--access-key-id",
-            "rustfsadmin",
-            "--secret-access-key",
-            "rustfsadmin",
-        ]);
+    fn a_build_the_board_assembles_is_one_the_command_line_takes() {
+        let assembled =
+            lithify_ui::command::BuildCommand::new("mysql", "2026-09-20".parse().unwrap())
+                .sink("rustfs")
+                .table(TableId::new("shop", "pets"))
+                .dry_run("plans");
 
-        assert!(unreadable.is_err());
+        let Command::Build(built) = Arguments::try_parse_from(
+            assembled
+                .args()
+                .iter()
+                .map(String::as_str)
+                .chain(PIPELINE[1..].iter().copied()),
+        )
+        .unwrap()
+        .command
+        else {
+            panic!("build was assembled");
+        };
+
+        assert_eq!(built.pipeline.directory, PathBuf::from("mysql"));
+        assert_eq!(built.pipeline.sink.as_deref(), Some("rustfs"));
+        assert_eq!(built.snapshot, "2026-09-20".parse::<NaiveDate>().unwrap());
+        assert_eq!(built.table, [TableId::new("shop", "pets")]);
+        assert_eq!(built.dry_run, Some(PathBuf::from("plans")));
     }
 }

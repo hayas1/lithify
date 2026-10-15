@@ -15,6 +15,7 @@ members = [
     "lithify-core",
     "lithify-protocol",
     "lithify-strategy",
+    "lithify-ui",
 ]
 resolver = "3"
 
@@ -24,13 +25,16 @@ lithify-config = { version = "0.1.0", path = "lithify-config" }
 lithify-core = { version = "0.1.0", path = "lithify-core" }
 lithify-protocol = { version = "0.1.0", path = "lithify-protocol" }
 lithify-strategy = { version = "0.1.0", path = "lithify-strategy" }
+lithify-ui = { version = "0.1.0", path = "lithify-ui" }
 
+axum = "0.8.9"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 clap = { version = "4", features = ["derive", "env"] }
 duckdb = "1.10505.0"
 google-cloud-auth = "1.16"
 google-cloud-bigquery = "=0.16.1-preview"
 google-cloud-gax = "1.14"
+leptos = { version = "0.8.22", features = ["ssr"] }
 mysql = "28.0.2"
 semigroup = { version = "0.6.0", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
@@ -38,6 +42,7 @@ serde_json = "1.0.151"
 sqlparser = "0.63"
 tokio = { version = "1", features = ["rt"] }
 tracing = "0.1"
+ulid = "3"
 tracing-subscriber = "0.3"
 toml = "0.9"
 wkt = { package = "google-cloud-wkt", version = "1.7" }

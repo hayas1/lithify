@@ -1,13 +1,9 @@
-use std::convert::Infallible;
 use std::fmt::Display;
 
-use chrono::{DateTime, Utc};
+use lithify_core::build_log::BuildLog;
+use lithify_core::window::Window;
 
-use lithify_core::event::SchemaChange;
-use lithify_core::listener::{
-    ColumnAdded, ColumnDropped, ColumnRenamed, ColumnRetyped, PrimaryKeyChanged,
-    SchemaChangeListener, TableCreated, TableDropped, TableRenamed,
-};
+use crate::check::Discrepancy;
 
 #[derive(Debug, Default)]
 pub struct Journal {
@@ -33,233 +29,46 @@ impl Journal {
         self.entries.push(format!("{name}: {cause}"));
     }
 
+    pub fn window(&mut self, window: &Window) {
+        self.entries
+            .push(format!("window {} .. {}", window.from(), window.to()));
+    }
+
+    pub fn built(&mut self, log: &BuildLog) {
+        self.failed |= log.status().failed();
+        self.entries.push(format!("  {log}"));
+    }
+
+    pub fn discrepancy(&mut self, discrepancy: &Discrepancy) {
+        self.failed = true;
+        self.entries.push(format!("  {discrepancy}"));
+    }
+
     pub fn complete(&self) -> bool {
         !self.failed
-    }
-
-    fn table(&mut self, entry: String) {
-        self.entries.push(format!("  {entry}"));
-    }
-
-    fn recorded_at<P>(change: &SchemaChange<P>) -> String {
-        match DateTime::<Utc>::try_from(*change.recorded_at()) {
-            Ok(at) => at.to_rfc3339(),
-            Err(recorded_at) => recorded_at.milliseconds_since_epoch().to_string(),
-        }
-    }
-}
-
-impl<P> SchemaChangeListener<P> for Journal {
-    type Context = ();
-    type Error = Infallible;
-
-    fn visit_statement(&mut self, _: &(), change: &SchemaChange<P>) -> Result<(), Infallible> {
-        self.entries.push(format!(
-            "{} {}",
-            Self::recorded_at(change),
-            change.statement()
-        ));
-
-        Ok(())
-    }
-
-    fn table_created(&mut self, _: &(), event: &TableCreated<'_>) -> Result<(), Infallible> {
-        self.table(format!(
-            "{} {} ({} columns, key {:?})",
-            event.appearance(),
-            event.table().id(),
-            event.table().columns().count(),
-            event.table().primary_key().collect::<Vec<_>>()
-        ));
-
-        Ok(())
-    }
-
-    fn table_dropped(&mut self, _: &(), event: &TableDropped<'_>) -> Result<(), Infallible> {
-        self.table(format!("dropped {}", event.table().id()));
-
-        Ok(())
-    }
-
-    fn table_renamed(&mut self, _: &(), event: &TableRenamed<'_>) -> Result<(), Infallible> {
-        self.table(format!(
-            "renamed {} to {}",
-            event.before().id(),
-            event.after().id()
-        ));
-
-        Ok(())
-    }
-
-    fn column_renamed(&mut self, _: &(), event: &ColumnRenamed<'_>) -> Result<(), Infallible> {
-        self.table(format!(
-            "renamed {}.{} to {}",
-            event.after().id(),
-            event.previous().name(),
-            event.column().name()
-        ));
-
-        Ok(())
-    }
-
-    fn column_added(&mut self, _: &(), event: &ColumnAdded<'_>) -> Result<(), Infallible> {
-        self.table(format!(
-            "added {}.{}",
-            event.after().id(),
-            event.column().name()
-        ));
-
-        Ok(())
-    }
-
-    fn column_dropped(&mut self, _: &(), event: &ColumnDropped<'_>) -> Result<(), Infallible> {
-        self.table(format!(
-            "dropped {}.{}",
-            event.before().id(),
-            event.column().name()
-        ));
-
-        Ok(())
-    }
-
-    fn column_retyped(&mut self, _: &(), event: &ColumnRetyped<'_>) -> Result<(), Infallible> {
-        self.table(format!(
-            "retyped {}.{} {} -> {}",
-            event.after().id(),
-            event.column().name(),
-            event.previous().type_name(),
-            event.column().type_name()
-        ));
-
-        Ok(())
-    }
-
-    fn primary_key_changed(
-        &mut self,
-        _: &(),
-        event: &PrimaryKeyChanged<'_>,
-    ) -> Result<(), Infallible> {
-        self.table(format!(
-            "keyed {} {:?} -> {:?}",
-            event.after().id(),
-            event.before().primary_key().collect::<Vec<_>>(),
-            event.after().primary_key().collect::<Vec<_>>()
-        ));
-
-        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use chrono::DateTime;
+
+    use lithify_core::build_log::{Outcome, Run, Status};
+    use lithify_core::model::TableId;
+    use lithify_core::position::RecordedAt;
+    use lithify_core::sink::TablePath;
+
     use super::*;
-    use lithify_core::event::TableChange;
-    use lithify_core::listener::{CatalogModel, OutOfOrder};
-    use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
-    use lithify_core::position::{Position, RecordedAt};
-
-    #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
-    struct Offset(u64);
-
-    impl Position for Offset {}
-
-    fn customers(columns: Vec<ColumnModel>) -> TableModel {
-        TableModel::new(
-            TableId::new("shop", "customers"),
-            columns,
-            vec!["id".to_owned()],
-        )
-    }
-
-    fn identifier() -> ColumnModel {
-        ColumnModel::new("id", "BIGINT", ColumnType::Int64, false, None)
-    }
-
-    fn change(at: u64, statement: &str, tables: Vec<TableChange>) -> SchemaChange<Offset> {
-        SchemaChange::new(
-            Offset(at),
-            RecordedAt::from(1789800000000 + at as i64 * 1000),
-            statement,
-            tables,
-        )
-    }
-
-    fn journal(changes: Vec<SchemaChange<Offset>>) -> Vec<String> {
-        let mut catalog = CatalogModel::default();
-        let mut journal = Journal::default();
-
-        for change in &changes {
-            catalog
-                .accept::<OutOfOrder, _>(&(), change, &mut journal)
-                .unwrap();
-        }
-
-        journal.entries().map(str::to_owned).collect()
-    }
-
-    #[test]
-    fn a_statement_is_reported_with_the_time_the_source_recorded_it() {
-        let entries = journal(vec![change(
-            1,
-            "CREATE TABLE `customers` (`id` bigint)",
-            vec![TableChange::Created(customers(vec![identifier()]))],
-        )]);
-
-        assert_eq!(
-            entries,
-            [
-                "2026-09-19T06:40:01+00:00 CREATE TABLE `customers` (`id` bigint)",
-                "  created shop.customers (1 columns, key [\"id\"])",
-            ]
-        );
-    }
-
-    #[test]
-    fn a_statement_that_changes_a_table_is_reported_under_the_statement() {
-        let nickname = ColumnModel::new("nickname", "varchar", ColumnType::Text, true, None);
-        let entries = journal(vec![
-            change(
-                1,
-                "CREATE TABLE `customers` (`id` bigint)",
-                vec![TableChange::Created(customers(vec![identifier()]))],
-            ),
-            change(
-                2,
-                "ALTER TABLE `customers` ADD COLUMN `nickname` varchar(255)",
-                vec![TableChange::Altered(customers(vec![
-                    identifier(),
-                    nickname,
-                ]))],
-            ),
-            change(
-                3,
-                "DROP TABLE `customers`",
-                vec![TableChange::Dropped(TableId::new("shop", "customers"))],
-            ),
-        ]);
-
-        assert_eq!(
-            entries
-                .iter()
-                .filter(|entry| entry.starts_with("  "))
-                .collect::<Vec<_>>(),
-            [
-                "  created shop.customers (1 columns, key [\"id\"])",
-                "  added shop.customers.nickname",
-                "  dropped shop.customers",
-            ]
-        );
-    }
 
     #[test]
     fn a_note_is_reported_as_it_stands() {
         let mut journal = Journal::default();
 
-        journal.note("primary lands no schema changes");
+        journal.note("wrote 3 statements to plans/rustfs.sql");
 
         assert_eq!(
             journal.entries().collect::<Vec<_>>(),
-            ["primary lands no schema changes"]
+            ["wrote 3 statements to plans/rustfs.sql"]
         );
         assert!(journal.complete());
     }
@@ -287,78 +96,84 @@ mod tests {
         assert!(!journal.complete());
     }
 
+    fn logged(status: Status) -> BuildLog {
+        BuildLog::new(
+            &Run::new(
+                ulid::Ulid::nil(),
+                "snapshot",
+                "daily",
+                "primary",
+                "{}",
+                "0.1.0",
+            ),
+            Some(TableId::new("shop", "people")),
+            Some(TableId::new("shop", "people")),
+            None,
+            Some(TablePath::new("mysql_shop", "people_20260920")),
+            Window::new(
+                RecordedAt::from(1789862400000),
+                RecordedAt::from(1789948800000),
+            ),
+            Outcome::new(
+                status,
+                DateTime::from_timestamp_millis(1789949000000).unwrap(),
+            ),
+        )
+    }
+
     #[test]
-    fn a_rename_is_reported_with_both_names() {
-        let name = ColumnModel::new("name", "varchar", ColumnType::Text, true, None);
-        let full_name = ColumnModel::new("full_name", "varchar", ColumnType::Text, true, None);
-        let clients = TableId::new("shop", "clients");
-        let entries = journal(vec![
-            change(
-                1,
-                "CREATE TABLE `customers` (`id` bigint, `name` varchar(255))",
-                vec![TableChange::Created(customers(vec![identifier(), name]))],
-            ),
-            change(
-                2,
-                "ALTER TABLE `customers` RENAME COLUMN `name` TO `full_name`, RENAME TO `clients`",
-                vec![
-                    TableChange::ColumnRenamed {
-                        table: TableId::new("shop", "customers"),
-                        from: "name".to_owned(),
-                        to: "full_name".to_owned(),
-                    },
-                    TableChange::Renamed {
-                        from: TableId::new("shop", "customers"),
-                        to: clients.clone(),
-                    },
-                    TableChange::Altered(
-                        customers(vec![identifier(), full_name]).with_id(&clients),
-                    ),
-                ],
-            ),
-        ]);
+    fn a_window_is_reported_by_the_instants_it_opens_and_closes_at() {
+        let mut journal = Journal::default();
+
+        journal.window(&Window::new(
+            RecordedAt::from(1789862400000),
+            RecordedAt::from(1789948800000),
+        ));
 
         assert_eq!(
-            entries
-                .iter()
-                .filter(|entry| entry.starts_with("  renamed"))
-                .collect::<Vec<_>>(),
-            [
-                "  renamed shop.customers.name to full_name",
-                "  renamed shop.customers to shop.clients",
-            ]
+            journal.entries().collect::<Vec<_>>(),
+            ["window 2026-09-20T00:00:00+00:00 .. 2026-09-21T00:00:00+00:00"]
         );
     }
 
     #[test]
-    fn a_table_is_reported_as_it_appeared_to_the_catalog() {
-        let entries = journal(vec![
-            change(
-                1,
-                "CREATE TABLE `customers` (`id` bigint)",
-                vec![TableChange::Created(customers(vec![identifier()]))],
-            )
-            .captured(),
-            change(
-                2,
-                "ALTER TABLE `orders` ADD COLUMN `note` text",
-                vec![TableChange::Altered(TableModel::new(
-                    TableId::new("shop", "orders"),
-                    vec![identifier()],
-                    vec!["id".to_owned()],
-                ))],
-            ),
-        ]);
+    fn a_discrepancy_is_reported_as_it_reads_and_leaves_the_check_incomplete() {
+        let mut journal = Journal::default();
+
+        journal.discrepancy(&Discrepancy::NeverBuilt {
+            since: RecordedAt::from(1789862400000),
+        });
 
         assert_eq!(
-            entries
-                .iter()
-                .filter(|entry| entry.starts_with("  "))
-                .collect::<Vec<_>>(),
-            [
-                "  captured shop.customers (1 columns, key [\"id\"])",
-                "  discovered shop.orders (1 columns, key [\"id\"])",
-            ]
+            journal.entries().collect::<Vec<_>>(),
+            ["  nothing is built since 2026-09-20T00:00:00+00:00"]
         );
+        assert!(!journal.complete());
+    }
+
+    #[test]
+    fn a_table_built_is_reported_by_where_it_was_built() {
+        let mut journal = Journal::default();
+
+        journal.built(&logged(Status::Succeeded));
+
+        assert_eq!(
+            journal.entries().collect::<Vec<_>>(),
+            ["  built shop.people into mysql_shop.people_20260920"]
+        );
+        assert!(journal.complete());
+    }
+
+    #[test]
+    fn a_table_that_failed_to_build_is_reported_with_why_and_leaves_the_run_incomplete() {
+        let mut journal = Journal::default();
+
+        journal.built(&logged(Status::Failed("no era".to_owned())));
+
+        assert_eq!(
+            journal.entries().collect::<Vec<_>>(),
+            ["  failed to build shop.people into mysql_shop.people_20260920: no era"]
+        );
+        assert!(!journal.complete());
     }
 }

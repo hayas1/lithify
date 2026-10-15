@@ -1,4 +1,5 @@
 pub mod artifact;
+pub mod build_log;
 pub mod era;
 pub mod event;
 pub mod listener;

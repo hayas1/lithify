@@ -1,7 +1,60 @@
+use std::path::{Path, PathBuf};
+
 use serde::{Deserialize, Serialize};
 
 use lithify_core::sink::TablePath;
 use lithify_core::sql::SqlString;
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(try_from = "WrittenConfig", into = "WrittenConfig")]
+pub struct Config {
+    database: Option<PathBuf>,
+    store: Store,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WrittenConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    database: Option<PathBuf>,
+    s3: Option<S3>,
+}
+
+impl TryFrom<WrittenConfig> for Config {
+    type Error = &'static str;
+
+    fn try_from(written: WrittenConfig) -> Result<Self, Self::Error> {
+        match written.s3 {
+            Some(s3) => Ok(Self::new(written.database, Store::S3(s3))),
+            None => Err("a duckdb warehouse names no store its change log is read from"),
+        }
+    }
+}
+
+impl From<Config> for WrittenConfig {
+    fn from(config: Config) -> Self {
+        match config.store {
+            Store::S3(s3) => Self {
+                database: config.database,
+                s3: Some(s3),
+            },
+        }
+    }
+}
+
+impl Config {
+    pub fn new(database: Option<PathBuf>, store: Store) -> Self {
+        Self { database, store }
+    }
+
+    pub fn database(&self) -> Option<&Path> {
+        self.database.as_deref()
+    }
+
+    pub fn store(&self) -> &Store {
+        &self.store
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "lowercase")]
@@ -104,6 +157,56 @@ pub(crate) mod tests {
             }
         }))
         .unwrap()
+    }
+
+    pub(crate) fn kept_in(database: Option<&str>) -> Config {
+        let mut config = serde_json::json!({
+            "s3": {
+                "endpoint": "http://rustfs:9000",
+                "region": "us-east-1",
+                "bucket": "lithify",
+                "format": "parquet"
+            }
+        });
+        if let Some(database) = database {
+            config["database"] = serde_json::json!(database);
+        }
+
+        serde_json::from_value(config).unwrap()
+    }
+
+    #[test]
+    fn a_warehouse_keeps_what_it_builds_in_the_database_it_names() {
+        assert_eq!(
+            kept_in(Some("lithify.duckdb")).database(),
+            Some(std::path::Path::new("lithify.duckdb"))
+        );
+        assert_eq!(kept_in(None).database(), None);
+        assert_eq!(kept_in(None).store(), &s3("http://rustfs:9000"));
+    }
+
+    #[test]
+    fn a_warehouse_naming_what_it_does_not_know_is_rejected() {
+        let unknown = serde_json::from_value::<Config>(serde_json::json!({
+            "database": "lithify.duckdb",
+            "s3": {
+                "endpoint": "http://rustfs:9000",
+                "region": "us-east-1",
+                "bucket": "lithify",
+                "format": "parquet"
+            },
+            "catalog": "lithify"
+        }));
+
+        assert!(unknown.is_err());
+    }
+
+    #[test]
+    fn a_warehouse_naming_no_store_is_rejected() {
+        let storeless =
+            serde_json::from_value::<Config>(serde_json::json!({"database": "lithify.duckdb"}));
+
+        assert!(storeless.is_err());
     }
 
     #[test]

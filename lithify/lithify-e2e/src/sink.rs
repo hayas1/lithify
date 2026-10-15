@@ -292,7 +292,7 @@ impl DuckDbChangeLogsFn for SnapshotBuild<'_> {
                 table.clone(),
                 self.window,
                 None,
-            ))
+            )?)
         });
         let catalog = self.client.replay::<Unbuildable, _>(
             self.client.warehouse(),

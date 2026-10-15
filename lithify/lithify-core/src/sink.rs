@@ -1,6 +1,7 @@
 use std::fmt;
 
 use crate::artifact::{ArtifactBuilder, UnbuildableArtifact};
+use crate::build_log::{BuildLog, Latest};
 use crate::model::{ColumnModel, ColumnType};
 use crate::source::{ColumnPath, SchemaChangeLog};
 use crate::sql::SqlString;
@@ -113,6 +114,8 @@ pub trait Warehouse {
         SqlString::from(format!("'{}'", text.replace('\'', "''")))
     }
 
+    fn timestamp_millis(&self, milliseconds: i64) -> SqlString;
+
     fn create_namespace(&self, namespace: &str) -> SqlString {
         SqlString::from(format!(
             "CREATE SCHEMA IF NOT EXISTS {}",
@@ -127,6 +130,72 @@ pub trait Warehouse {
                 .collect::<Vec<_>>()
                 .join("."),
         )
+    }
+
+    fn unix_millis(&self, expression: &SqlString) -> SqlString;
+
+    fn select_existence(&self, table: &TablePath) -> SqlString;
+
+    fn create_build_log(&self, namespace: &str) -> Result<SqlString, UnsupportedColumn> {
+        let columns = std::iter::once(&(BuildLog::ID, ColumnType::Int64))
+            .chain(BuildLog::COLUMNS.iter())
+            .map(|(name, column_type)| {
+                Ok(format!(
+                    "{} {}",
+                    self.identifier(name),
+                    self.column_type(column_type)?
+                ))
+            })
+            .collect::<Result<Vec<_>, UnsupportedColumn>>()?;
+
+        Ok(SqlString::from(format!(
+            "CREATE TABLE IF NOT EXISTS {} ({})",
+            self.table_ref(&BuildLog::path(namespace)),
+            columns.join(", ")
+        )))
+    }
+
+    fn append_build_log(&self, namespace: &str, log: &BuildLog) -> SqlString {
+        let id = self.identifier(BuildLog::ID);
+        let columns = BuildLog::COLUMNS
+            .iter()
+            .map(|(name, _)| self.identifier(name))
+            .collect::<Vec<_>>();
+        let table = self.table_ref(&BuildLog::path(namespace));
+
+        SqlString::from(format!(
+            "INSERT INTO {table} ({id}, {})\nSELECT COALESCE(MAX({id}), 0) + 1, {}\nFROM {table}",
+            columns.join(", "),
+            log.cells(self).join(", ")
+        ))
+    }
+
+    fn select_latest_build_logs(&self, namespace: &str, latest: &Latest) -> SqlString {
+        let columns = BuildLog::COLUMNS
+            .iter()
+            .map(|(name, column_type)| {
+                let column = self.identifier(name);
+
+                match column_type {
+                    ColumnType::ZonedTimestamp => {
+                        format!("{} AS {column}", self.unix_millis(&column))
+                    }
+                    _ => column.to_string(),
+                }
+            })
+            .collect::<Vec<_>>();
+        let partition = ["artifact", "schedule", "table_to"]
+            .map(|name| self.identifier(name))
+            .join(", ");
+        let log = self.table_ref(&BuildLog::path(namespace));
+
+        SqlString::from(format!(
+            "SELECT {}\nFROM {log} AS {}\nWHERE {}\nQUALIFY ROW_NUMBER() OVER (PARTITION BY {partition} ORDER BY {} DESC) = 1\nORDER BY {partition}",
+            columns.join(", "),
+            self.identifier(Latest::ALIAS),
+            latest.condition(self, &log),
+            self.identifier(BuildLog::ID),
+        ))
     }
 
     fn select_schema_changes(&self, log: &impl SchemaChangeLog, window: &Window) -> SqlString {
@@ -162,6 +231,34 @@ pub trait WarehouseClient {
     // instead of being spelled out as SQL by every artifact.
     fn execute(&self, statement: &SqlString) -> Result<(), Self::Error>;
 
+    fn latest_build_logs(
+        &self,
+        namespace: &str,
+        latest: &Latest,
+    ) -> Result<Vec<BuildLog>, Self::Error>;
+
+    fn create_build_log<E>(&self, namespace: &str) -> Result<(), E>
+    where
+        E: From<Self::Error> + From<UnbuildableArtifact>,
+    {
+        let warehouse = self.warehouse();
+
+        self.execute(&warehouse.create_namespace(namespace))?;
+        self.execute(
+            &warehouse
+                .create_build_log(namespace)
+                .map_err(UnbuildableArtifact::from)?,
+        )?;
+
+        Ok(())
+    }
+
+    fn exists(&self, table: &TablePath) -> Result<bool, Self::Error>;
+
+    fn append_build_log(&self, namespace: &str, log: &BuildLog) -> Result<(), Self::Error> {
+        self.execute(&self.warehouse().append_build_log(namespace, log))
+    }
+
     fn build<E>(&self, builder: &impl ArtifactBuilder) -> Result<(), E>
     where
         E: From<Self::Error> + From<UnbuildableArtifact>,
@@ -179,12 +276,26 @@ mod tests {
     use std::cell::RefCell;
 
     use super::*;
+    use crate::build_log::{Outcome, Run};
     use crate::model::TableId;
+    use crate::position::RecordedAt;
 
     struct Engine;
 
     impl Warehouse for Engine {
         type Config = ();
+
+        fn timestamp_millis(&self, milliseconds: i64) -> SqlString {
+            SqlString::from(milliseconds.to_string())
+        }
+
+        fn unix_millis(&self, expression: &SqlString) -> SqlString {
+            expression.clone()
+        }
+
+        fn select_existence(&self, table: &TablePath) -> SqlString {
+            SqlString::from(format!("SELECT COUNT(*) FROM {table}"))
+        }
 
         fn change_log_namespace(&self) -> &str {
             "cdc"
@@ -237,6 +348,14 @@ mod tests {
 
             Ok(())
         }
+
+        fn latest_build_logs(&self, _: &str, _: &Latest) -> Result<Vec<BuildLog>, Self::Error> {
+            Ok(vec![])
+        }
+
+        fn exists(&self, _: &TablePath) -> Result<bool, Self::Error> {
+            Ok(false)
+        }
     }
 
     struct Namespaced(TableId);
@@ -255,6 +374,18 @@ mod tests {
                 Engine.create_namespace("shop"),
                 SqlString::from("CREATE TABLE shop.people (id BIGINT)"),
             ])
+        }
+
+        fn build_log(&self, run: &Run, outcome: Outcome) -> BuildLog {
+            BuildLog::new(
+                run,
+                Some(self.0.clone()),
+                Some(self.0.clone()),
+                None,
+                Some(TablePath::new("shop", "people")),
+                Window::until(RecordedAt::from(1)),
+                outcome,
+            )
         }
     }
 

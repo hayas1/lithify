@@ -35,14 +35,16 @@ fn statements<W: Warehouse>(warehouse: &W) -> String {
         RecordedAt::from(1789948800000),
     );
     let artifact = Snapshot::new("mysql_shop", "%Y%m%d");
-    let mut snapshot = artifact.builder::<_, W>(
-        &log,
-        customers().id().clone(),
-        &window,
-        std::env::args()
-            .nth(2)
-            .map(|shard| TablePath::new("mysql_shop", &shard)),
-    );
+    let mut snapshot = artifact
+        .builder::<_, W>(
+            &log,
+            customers().id().clone(),
+            &window,
+            std::env::args()
+                .nth(2)
+                .map(|shard| TablePath::new("mysql_shop", &shard)),
+        )
+        .unwrap();
 
     SchemaChangeListener::<MySqlPosition>::era_boundary(
         &mut snapshot,

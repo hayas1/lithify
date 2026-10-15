@@ -75,13 +75,13 @@ mod tests {
     use crate::table::Mask;
     use crate::unreadable::Cause;
     use lithify_protocol::sink::bigquery::config as bigquery;
-    use lithify_protocol::sink::duckdb::config::Store;
+    use lithify_protocol::sink::duckdb::config as duckdb;
     use lithify_protocol::source::debezium::config as debezium;
 
     #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
     #[serde(deny_unknown_fields, rename_all = "lowercase")]
     enum Sunk {
-        DuckDb(Store),
+        DuckDb(duckdb::Config),
         BigQuery(bigquery::Config),
     }
 

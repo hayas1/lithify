@@ -3,7 +3,7 @@ use std::convert::Infallible;
 use std::fmt;
 
 use crate::era::Era;
-use crate::event::{SchemaChange, TableChange};
+use crate::event::{Hint, SchemaChange, TableChange};
 use crate::model::{ColumnModel, TableId, TableModel};
 use crate::position::Position;
 
@@ -71,50 +71,10 @@ pub trait SchemaChangeListener<P> {
         Ok(())
     }
 
-    fn column_renamed(
+    fn table_altered(
         &mut self,
         context: &Self::Context,
-        event: &ColumnRenamed<'_>,
-    ) -> Result<(), Self::Error> {
-        let _ = (context, event);
-
-        Ok(())
-    }
-
-    fn column_added(
-        &mut self,
-        context: &Self::Context,
-        event: &ColumnAdded<'_>,
-    ) -> Result<(), Self::Error> {
-        let _ = (context, event);
-
-        Ok(())
-    }
-
-    fn column_dropped(
-        &mut self,
-        context: &Self::Context,
-        event: &ColumnDropped<'_>,
-    ) -> Result<(), Self::Error> {
-        let _ = (context, event);
-
-        Ok(())
-    }
-
-    fn column_retyped(
-        &mut self,
-        context: &Self::Context,
-        event: &ColumnRetyped<'_>,
-    ) -> Result<(), Self::Error> {
-        let _ = (context, event);
-
-        Ok(())
-    }
-
-    fn primary_key_changed(
-        &mut self,
-        context: &Self::Context,
-        event: &PrimaryKeyChanged<'_>,
+        event: &TableAltered<'_>,
     ) -> Result<(), Self::Error> {
         let _ = (context, event);
 
@@ -145,6 +105,13 @@ impl fmt::Display for Appearance {
 }
 
 impl Appearance {
+    pub fn is_creation(&self) -> bool {
+        match self {
+            Self::Created => true,
+            Self::Captured | Self::Discovered => false,
+        }
+    }
+
     pub fn is_logged_from_start(&self) -> bool {
         match self {
             Self::Created | Self::Captured => true,
@@ -200,178 +167,80 @@ impl<'a> TableRenamed<'a> {
     }
 }
 
-pub struct ColumnRenamed<'a> {
-    before: &'a TableModel,
-    after: &'a TableModel,
-    previous: &'a ColumnModel,
-    column: &'a ColumnModel,
-}
-
-impl<'a> ColumnRenamed<'a> {
-    pub fn before(&self) -> &'a TableModel {
-        self.before
-    }
-
-    pub fn after(&self) -> &'a TableModel {
-        self.after
-    }
-
-    pub fn previous(&self) -> &'a ColumnModel {
-        self.previous
-    }
-
-    pub fn column(&self) -> &'a ColumnModel {
-        self.column
-    }
-}
-
-pub struct ColumnAdded<'a> {
-    before: &'a TableModel,
-    after: &'a TableModel,
-    column: &'a ColumnModel,
-}
-
-impl<'a> ColumnAdded<'a> {
-    pub fn before(&self) -> &'a TableModel {
-        self.before
-    }
-
-    pub fn after(&self) -> &'a TableModel {
-        self.after
-    }
-
-    pub fn column(&self) -> &'a ColumnModel {
-        self.column
-    }
-}
-
-pub struct ColumnDropped<'a> {
-    before: &'a TableModel,
-    after: &'a TableModel,
-    column: &'a ColumnModel,
-}
-
-impl<'a> ColumnDropped<'a> {
-    pub fn before(&self) -> &'a TableModel {
-        self.before
-    }
-
-    pub fn after(&self) -> &'a TableModel {
-        self.after
-    }
-
-    pub fn column(&self) -> &'a ColumnModel {
-        self.column
-    }
-}
-
-pub struct ColumnRetyped<'a> {
-    before: &'a TableModel,
-    after: &'a TableModel,
-    previous: &'a ColumnModel,
-    column: &'a ColumnModel,
-}
-
-impl<'a> ColumnRetyped<'a> {
-    pub fn before(&self) -> &'a TableModel {
-        self.before
-    }
-
-    pub fn after(&self) -> &'a TableModel {
-        self.after
-    }
-
-    pub fn previous(&self) -> &'a ColumnModel {
-        self.previous
-    }
-
-    pub fn column(&self) -> &'a ColumnModel {
-        self.column
-    }
-}
-
-pub struct PrimaryKeyChanged<'a> {
-    before: &'a TableModel,
-    after: &'a TableModel,
-}
-
-impl<'a> PrimaryKeyChanged<'a> {
-    pub fn before(&self) -> &'a TableModel {
-        self.before
-    }
-
-    pub fn after(&self) -> &'a TableModel {
-        self.after
-    }
-}
-
-pub enum TableEvent<'a> {
-    TableCreated(TableCreated<'a>),
-    TableDropped(TableDropped<'a>),
-    TableRenamed(TableRenamed<'a>),
-    ColumnRenamed(ColumnRenamed<'a>),
-    ColumnAdded(ColumnAdded<'a>),
-    ColumnDropped(ColumnDropped<'a>),
-    ColumnRetyped(ColumnRetyped<'a>),
-    PrimaryKeyChanged(PrimaryKeyChanged<'a>),
-}
-
-impl TableEvent<'_> {
-    pub fn accept<P, L: SchemaChangeListener<P>>(
-        &self,
-        context: &L::Context,
-        listener: &mut L,
-    ) -> Result<(), L::Error> {
-        match self {
-            Self::TableCreated(event) => listener.table_created(context, event),
-            Self::TableDropped(event) => listener.table_dropped(context, event),
-            Self::TableRenamed(event) => listener.table_renamed(context, event),
-            Self::ColumnRenamed(event) => listener.column_renamed(context, event),
-            Self::ColumnAdded(event) => listener.column_added(context, event),
-            Self::ColumnDropped(event) => listener.column_dropped(context, event),
-            Self::ColumnRetyped(event) => listener.column_retyped(context, event),
-            Self::PrimaryKeyChanged(event) => listener.primary_key_changed(context, event),
-        }
-    }
-}
-
-enum Alteration<'a> {
-    Dropped(&'a ColumnModel),
-    Retyped {
+pub enum Alteration<'a> {
+    ColumnAdded(&'a ColumnModel),
+    ColumnDropped(&'a ColumnModel),
+    ColumnRenamed {
         previous: &'a ColumnModel,
         column: &'a ColumnModel,
     },
-    Added(&'a ColumnModel),
-    Rekeyed(Vec<&'a str>),
+    ColumnRetyped {
+        previous: &'a ColumnModel,
+        column: &'a ColumnModel,
+    },
+    ColumnDescribed {
+        previous: &'a ColumnModel,
+        column: &'a ColumnModel,
+    },
+    PrimaryKeyChanged,
 }
 
 impl<'a> Alteration<'a> {
-    fn between(before: &'a TableModel, after: &'a TableModel) -> Vec<Self> {
-        let dropped = before
-            .columns()
-            .filter(|column| after.column(column.name()).is_none())
-            .map(Self::Dropped);
-        let retyped = before.columns().filter_map(|previous| {
-            after
-                .column(previous.name())
+    fn between<P>(
+        before: &'a TableModel,
+        after: &'a TableModel,
+        change: &'a SchemaChange<P>,
+    ) -> Vec<Self> {
+        let lineage = ColumnLineage::traced(before, after.id(), change);
+        let dropped = lineage
+            .carried(after)
+            .filter(|(_, column)| column.is_none())
+            .map(|(previous, _)| Self::ColumnDropped(previous));
+        let renamed = lineage.carried(after).filter_map(|(previous, column)| {
+            column
+                .filter(|column| column.name() != previous.name())
+                .map(|column| Self::ColumnRenamed { previous, column })
+        });
+        let retyped = lineage.carried(after).filter_map(|(previous, column)| {
+            column
                 .filter(|column| column.type_name() != previous.type_name())
-                .map(|column| Self::Retyped { previous, column })
+                .map(|column| Self::ColumnRetyped { previous, column })
+        });
+        let described = lineage.carried(after).filter_map(|(previous, column)| {
+            column
+                .filter(|column| column.comment() != previous.comment())
+                .map(|column| Self::ColumnDescribed { previous, column })
         });
         let added = after
             .columns()
-            .filter(|column| before.column(column.name()).is_none())
-            .map(Self::Added);
+            .filter(|column| !lineage.holds(column.name()))
+            .map(Self::ColumnAdded);
         let rekeyed = before
             .primary_key()
+            .map(|key| lineage.name_of(key))
             .ne(after.primary_key())
-            .then(|| Self::Rekeyed(after.primary_key().collect()));
+            .then_some(Self::PrimaryKeyChanged);
 
-        dropped.chain(retyped).chain(added).chain(rekeyed).collect()
+        dropped
+            .chain(renamed)
+            .chain(retyped)
+            .chain(described)
+            .chain(added)
+            .chain(rekeyed)
+            .collect()
     }
 
     fn warn_of_unread_rename<P>(alterations: &[Self], table: &TableId, change: &SchemaChange<P>) {
-        let dropped: Vec<&str> = alterations.iter().filter_map(Self::as_dropped).collect();
-        let added: Vec<&str> = alterations.iter().filter_map(Self::as_added).collect();
+        let dropped: Vec<&str> = alterations
+            .iter()
+            .filter_map(Self::as_column_dropped)
+            .map(ColumnModel::name)
+            .collect();
+        let added: Vec<&str> = alterations
+            .iter()
+            .filter_map(Self::as_column_added)
+            .map(ColumnModel::name)
+            .collect();
 
         if !dropped.is_empty() && !added.is_empty() {
             tracing::warn!(
@@ -380,57 +249,133 @@ impl<'a> Alteration<'a> {
                 ?added,
                 statement = change.statement(),
                 "one statement dropped and added columns; if it renamed a column the dialect could \
-                 not read, the values of the dropped column are lost to the added one, so carry \
-                 them over by hand from the snapshot taken before the statement"
+                 not read, the column it became is filled as an added one rather than with the \
+                 values it had, so carry them over by hand from the shard the window folds onto \
+                 and the change log before the statement"
             );
         }
     }
 
-    fn as_dropped(&self) -> Option<&str> {
+    pub fn as_column_added(&self) -> Option<&'a ColumnModel> {
         match self {
-            Self::Dropped(column) => Some(column.name()),
+            Self::ColumnAdded(column) => Some(column),
             _ => None,
         }
     }
 
-    fn as_added(&self) -> Option<&str> {
+    pub fn as_column_dropped(&self) -> Option<&'a ColumnModel> {
         match self {
-            Self::Added(column) => Some(column.name()),
+            Self::ColumnDropped(column) => Some(column),
             _ => None,
         }
     }
 
-    fn apply(&self, shape: &TableModel) -> TableModel {
+    pub fn as_column_renamed(&self) -> Option<(&'a ColumnModel, &'a ColumnModel)> {
         match self {
-            Self::Dropped(column) => shape.without_column(column.name()),
-            Self::Retyped { column, .. } | Self::Added(column) => shape.with_column(column),
-            Self::Rekeyed(primary_key) => shape.keyed_by(primary_key.iter().copied()),
+            Self::ColumnRenamed { previous, column } => Some((previous, column)),
+            _ => None,
         }
     }
 
-    fn event<'b>(&self, before: &'b TableModel, after: &'b TableModel) -> TableEvent<'b>
-    where
-        'a: 'b,
-    {
-        match *self {
-            Self::Dropped(column) => TableEvent::ColumnDropped(ColumnDropped {
-                before,
-                after,
-                column,
-            }),
-            Self::Retyped { previous, column } => TableEvent::ColumnRetyped(ColumnRetyped {
-                before,
-                after,
-                previous,
-                column,
-            }),
-            Self::Added(column) => TableEvent::ColumnAdded(ColumnAdded {
-                before,
-                after,
-                column,
-            }),
-            Self::Rekeyed(_) => TableEvent::PrimaryKeyChanged(PrimaryKeyChanged { before, after }),
+    pub fn as_column_retyped(&self) -> Option<(&'a ColumnModel, &'a ColumnModel)> {
+        match self {
+            Self::ColumnRetyped { previous, column } => Some((previous, column)),
+            _ => None,
         }
+    }
+
+    pub fn as_column_described(&self) -> Option<(&'a ColumnModel, &'a ColumnModel)> {
+        match self {
+            Self::ColumnDescribed { previous, column } => Some((previous, column)),
+            _ => None,
+        }
+    }
+
+    pub fn is_metadata_only(&self) -> bool {
+        match self {
+            Self::ColumnDescribed { .. } => true,
+            Self::ColumnAdded(_)
+            | Self::ColumnDropped(_)
+            | Self::ColumnRenamed { .. }
+            | Self::ColumnRetyped { .. }
+            | Self::PrimaryKeyChanged => false,
+        }
+    }
+
+    pub fn is_primary_key_changed(&self) -> bool {
+        matches!(self, Self::PrimaryKeyChanged)
+    }
+}
+
+struct ColumnLineage<'a> {
+    names: Vec<(&'a ColumnModel, &'a str)>,
+}
+
+impl<'a> ColumnLineage<'a> {
+    fn traced<P>(before: &'a TableModel, table: &'a TableId, change: &'a SchemaChange<P>) -> Self {
+        let mut names: Vec<_> = before
+            .columns()
+            .map(|column| (column, column.name()))
+            .collect();
+
+        for (from, to) in change.column_renames(table) {
+            let renamed = names.iter().position(|&(_, name)| name == from);
+            let held = names.iter().any(|&(_, name)| name == to);
+
+            match (renamed, held) {
+                (Some(at), false) => names[at].1 = to,
+                _ => tracing::warn!(
+                    table = %table,
+                    column = from,
+                    to,
+                    statement = change.statement(),
+                    "a statement renamed a column the table never had, or onto a name it already \
+                     holds, so this rename is ignored and the column is matched by its name"
+                ),
+            }
+        }
+
+        Self { names }
+    }
+
+    fn carried(
+        &self,
+        after: &'a TableModel,
+    ) -> impl Iterator<Item = (&'a ColumnModel, Option<&'a ColumnModel>)> + '_ {
+        self.names
+            .iter()
+            .map(move |&(previous, name)| (previous, after.column(name)))
+    }
+
+    fn name_of(&self, previous: &'a str) -> &'a str {
+        self.names
+            .iter()
+            .find(|(column, _)| column.name() == previous)
+            .map_or(previous, |&(_, name)| name)
+    }
+
+    fn holds(&self, name: &str) -> bool {
+        self.names.iter().any(|&(_, held)| held == name)
+    }
+}
+
+pub struct TableAltered<'a> {
+    before: &'a TableModel,
+    after: &'a TableModel,
+    alterations: Vec<Alteration<'a>>,
+}
+
+impl<'a> TableAltered<'a> {
+    pub fn before(&self) -> &'a TableModel {
+        self.before
+    }
+
+    pub fn after(&self) -> &'a TableModel {
+        self.after
+    }
+
+    pub fn alterations(&self) -> &[Alteration<'a>] {
+        &self.alterations
     }
 }
 
@@ -491,22 +436,24 @@ impl<P: Position> CatalogModel<P> {
         L: SchemaChangeListener<P>,
         E: From<OutOfOrder> + From<L::Error>,
     {
-        for table in change.tables().flat_map(TableChange::ids) {
+        let touched = change
+            .tables()
+            .map(TableChange::id)
+            .chain(change.hints().flat_map(Hint::ids));
+        for table in touched {
             self.guard_order(table, change.position())?;
         }
 
         listener.visit_statement(context, change)?;
 
+        self.warn_of_unseen_column_renames(change);
+        for (from, to) in change.hints().filter_map(Hint::as_table_rename) {
+            self.rename(context, change, from, to, listener)?;
+        }
         for table in change.tables() {
             match table {
                 TableChange::Created(table) => {
                     self.create(context, change, table, Appearance::of(change), listener)?
-                }
-                TableChange::Renamed { from, to } => {
-                    self.rename(context, change, from, to, listener)?
-                }
-                TableChange::ColumnRenamed { table, from, to } => {
-                    self.rename_column(context, change, table, from, to, listener)?
                 }
                 TableChange::Altered(table) => self.alter(context, change, table, listener)?,
                 TableChange::Dropped(id) => self.forget(context, change, id, listener)?,
@@ -535,7 +482,7 @@ impl<P: Position> CatalogModel<P> {
         appearance: Appearance,
         listener: &mut L,
     ) -> Result<(), L::Error> {
-        TableEvent::TableCreated(TableCreated { table, appearance }).accept(context, listener)?;
+        listener.table_created(context, &TableCreated { table, appearance })?;
         self.remember(change, table);
 
         Ok(())
@@ -549,9 +496,7 @@ impl<P: Position> CatalogModel<P> {
         listener: &mut L,
     ) -> Result<(), L::Error> {
         match self.tables.get(id) {
-            Some(table) => {
-                TableEvent::TableDropped(TableDropped { table }).accept(context, listener)?
-            }
+            Some(table) => listener.table_dropped(context, &TableDropped { table })?,
             None => tracing::warn!(
                 table = %id,
                 statement = change.statement(),
@@ -585,27 +530,26 @@ impl<P: Position> CatalogModel<P> {
         };
         let after = before.with_id(to);
 
-        TableEvent::TableRenamed(TableRenamed {
-            before: &before,
-            after: &after,
-        })
-        .accept(context, listener)?;
+        listener.table_renamed(
+            context,
+            &TableRenamed {
+                before: &before,
+                after: &after,
+            },
+        )?;
         self.release(change, from);
         self.remember(change, &after);
 
         Ok(())
     }
 
-    fn rename_column<L: SchemaChangeListener<P>>(
-        &mut self,
-        context: &L::Context,
-        change: &SchemaChange<P>,
-        table: &TableId,
-        from: &str,
-        to: &str,
-        listener: &mut L,
-    ) -> Result<(), L::Error> {
-        let Some(before) = self.tables.get(table).cloned() else {
+    fn warn_of_unseen_column_renames(&self, change: &SchemaChange<P>) {
+        let unseen = change
+            .hints()
+            .filter_map(Hint::as_column_rename)
+            .filter(|(table, ..)| !self.tables.contains_key(table));
+
+        for (table, from, to) in unseen {
             tracing::warn!(
                 table = %table,
                 column = from,
@@ -613,33 +557,7 @@ impl<P: Position> CatalogModel<P> {
                 statement = change.statement(),
                 "a statement renamed a column of a table the catalog never saw"
             );
-
-            return Ok(());
-        };
-        let (Some(previous), None) = (before.column(from), before.column(to)) else {
-            tracing::warn!(
-                table = %table,
-                column = from,
-                to,
-                statement = change.statement(),
-                "a statement renamed a column the table never had, or onto a name it already \
-                 holds, so the rename steps through as the alteration that follows it"
-            );
-
-            return Ok(());
-        };
-        let after = before.with_column_renamed(from, to);
-
-        TableEvent::ColumnRenamed(ColumnRenamed {
-            before: &before,
-            after: &after,
-            previous,
-            column: &previous.named(to),
-        })
-        .accept(context, listener)?;
-        self.remember(change, &after);
-
-        Ok(())
+        }
     }
 
     fn alter<L: SchemaChangeListener<P>>(
@@ -652,23 +570,19 @@ impl<P: Position> CatalogModel<P> {
         let Some(before) = self.tables.get(after.id()).cloned() else {
             return self.create(context, change, after, Appearance::Discovered, listener);
         };
-        let alterations = Alteration::between(&before, after);
+        let alterations = Alteration::between(&before, after, change);
         Alteration::warn_of_unread_rename(&alterations, after.id(), change);
-        let last = alterations.len().saturating_sub(1);
-        let mut shape = before.clone();
 
-        for (step, alteration) in alterations.into_iter().enumerate() {
-            // What no event announces (an order, a default, a nullability) lands with the last
-            // step, so the steps end at the very table the catalog remembers.
-            let next = match step == last {
-                true => after.clone(),
-                false => alteration.apply(&shape),
-            };
-
-            alteration.event(&shape, &next).accept(context, listener)?;
-            shape = next;
+        if !alterations.is_empty() {
+            listener.table_altered(
+                context,
+                &TableAltered {
+                    before: &before,
+                    after,
+                    alterations,
+                },
+            )?;
         }
-
         self.remember(change, after);
 
         Ok(())
@@ -692,7 +606,7 @@ mod tests {
     use std::convert::Infallible;
 
     use super::*;
-    use crate::event::TableChange;
+    use crate::event::{Hint, TableChange};
     use crate::model::{ColumnType, TableId};
     use crate::position::RecordedAt;
 
@@ -700,6 +614,21 @@ mod tests {
     struct Offset(u64);
 
     impl Position for Offset {}
+
+    impl Alteration<'_> {
+        pub(crate) fn announcement(&self) -> String {
+            match self {
+                Self::ColumnAdded(column) => format!("added {}", column.name()),
+                Self::ColumnDropped(column) => format!("dropped {}", column.name()),
+                Self::ColumnRenamed { previous, column } => {
+                    format!("renamed {} to {}", previous.name(), column.name())
+                }
+                Self::ColumnRetyped { column, .. } => format!("retyped {}", column.name()),
+                Self::ColumnDescribed { column, .. } => format!("described {}", column.name()),
+                Self::PrimaryKeyChanged => "rekeyed".to_owned(),
+            }
+        }
+    }
 
     #[derive(Debug, Default)]
     struct Journal {
@@ -760,49 +689,36 @@ mod tests {
             Ok(())
         }
 
-        fn column_added(&mut self, _: &(), event: &ColumnAdded<'_>) -> Result<(), Infallible> {
-            self.entries.push(format!(
-                "added {}.{}",
-                event.after().id(),
-                event.column().name()
-            ));
-
-            Ok(())
-        }
-
-        fn column_dropped(&mut self, _: &(), event: &ColumnDropped<'_>) -> Result<(), Infallible> {
-            self.entries.push(format!(
-                "dropped {}.{}",
-                event.before().id(),
-                event.column().name()
-            ));
-
-            Ok(())
-        }
-
-        fn column_retyped(&mut self, _: &(), event: &ColumnRetyped<'_>) -> Result<(), Infallible> {
-            self.entries.push(format!(
-                "retyped {}.{} {} -> {}",
-                event.after().id(),
-                event.column().name(),
-                event.previous().type_name(),
-                event.column().type_name()
-            ));
-
-            Ok(())
-        }
-
-        fn primary_key_changed(
-            &mut self,
-            _: &(),
-            event: &PrimaryKeyChanged<'_>,
-        ) -> Result<(), Infallible> {
-            self.entries.push(format!(
-                "primary key {} {:?} -> {:?}",
-                event.after().id(),
-                event.before().primary_key().collect::<Vec<_>>(),
-                event.after().primary_key().collect::<Vec<_>>()
-            ));
+        fn table_altered(&mut self, _: &(), event: &TableAltered<'_>) -> Result<(), Infallible> {
+            let id = event.after().id();
+            let entries = event
+                .alterations()
+                .iter()
+                .map(|alteration| match alteration {
+                    Alteration::ColumnAdded(column) => format!("added {id}.{}", column.name()),
+                    Alteration::ColumnDropped(column) => format!("dropped {id}.{}", column.name()),
+                    Alteration::ColumnRenamed { previous, column } => {
+                        format!("renamed {id}.{} to {}", previous.name(), column.name())
+                    }
+                    Alteration::ColumnRetyped { previous, column } => format!(
+                        "retyped {id}.{} {} -> {}",
+                        column.name(),
+                        previous.type_name(),
+                        column.type_name()
+                    ),
+                    Alteration::ColumnDescribed { previous, column } => format!(
+                        "described {id}.{} {:?} -> {:?}",
+                        column.name(),
+                        previous.comment(),
+                        column.comment()
+                    ),
+                    Alteration::PrimaryKeyChanged => format!(
+                        "primary key {id} {:?} -> {:?}",
+                        event.before().primary_key().collect::<Vec<_>>(),
+                        event.after().primary_key().collect::<Vec<_>>()
+                    ),
+                });
+            self.entries.extend(entries);
 
             Ok(())
         }
@@ -833,7 +749,17 @@ mod tests {
     }
 
     fn change(offset: u64, tables: Vec<TableChange>) -> SchemaChange<Offset> {
-        SchemaChange::new(Offset(offset), RecordedAt::from(offset as i64), "", tables)
+        hinted(offset, Vec::new(), tables)
+    }
+
+    fn hinted(offset: u64, hints: Vec<Hint>, tables: Vec<TableChange>) -> SchemaChange<Offset> {
+        SchemaChange::new(
+            Offset(offset),
+            RecordedAt::from(offset as i64),
+            "",
+            tables,
+            hints,
+        )
     }
 
     fn created(offset: u64) -> SchemaChange<Offset> {
@@ -929,6 +855,46 @@ mod tests {
         );
 
         assert_eq!(entries, ["retyped shop.customers.name VARCHAR -> TEXT"]);
+    }
+
+    #[test]
+    fn a_column_whose_comment_changed_is_announced_with_both_comments() {
+        let mut catalog = CatalogModel::default();
+        accept(&mut catalog, created(1));
+
+        let entries = accept(
+            &mut catalog,
+            altered(
+                2,
+                vec![identifier(), name().with_comment(Some("how to call them"))],
+                &["id"],
+            ),
+        );
+
+        assert_eq!(
+            entries,
+            ["described shop.customers.name None -> Some(\"how to call them\")"]
+        );
+    }
+
+    #[test]
+    fn a_column_renamed_and_described_by_one_statement_is_announced_renamed_and_described() {
+        let before = table(vec![identifier(), name()], &["id"]);
+        let after = table(
+            vec![identifier(), full_name().with_comment(Some("as printed"))],
+            &["id"],
+        );
+
+        let (steps, _) = statement_steps(
+            before,
+            vec![renaming("name", "full_name")],
+            vec![TableChange::Altered(after)],
+        );
+
+        assert_eq!(
+            steps.announcements(),
+            ["renamed name to full_name, described full_name"]
+        );
     }
 
     #[test]
@@ -1080,21 +1046,6 @@ mod tests {
                 .map(|step| step.announced.as_str())
                 .collect()
         }
-
-        fn outlines(&self) -> Vec<(Vec<String>, Vec<String>)> {
-            self.taken
-                .iter()
-                .map(|step| (Self::outline(&step.before), Self::outline(&step.after)))
-                .collect()
-        }
-
-        fn outline(table: &TableModel) -> Vec<String> {
-            table
-                .columns()
-                .map(|column| format!("{} {}", column.name(), column.type_name()))
-                .chain([format!("key {:?}", table.primary_key().collect::<Vec<_>>())])
-                .collect()
-        }
     }
 
     impl SchemaChangeListener<Offset> for Steps {
@@ -1111,56 +1062,13 @@ mod tests {
             Ok(())
         }
 
-        fn column_renamed(&mut self, _: &(), event: &ColumnRenamed<'_>) -> Result<(), Infallible> {
-            self.take(
-                format!(
-                    "renamed {} to {}",
-                    event.previous().name(),
-                    event.column().name()
-                ),
-                event.before(),
-                event.after(),
-            );
-
-            Ok(())
-        }
-
-        fn column_added(&mut self, _: &(), event: &ColumnAdded<'_>) -> Result<(), Infallible> {
-            self.take(
-                format!("added {}", event.column().name()),
-                event.before(),
-                event.after(),
-            );
-
-            Ok(())
-        }
-
-        fn column_dropped(&mut self, _: &(), event: &ColumnDropped<'_>) -> Result<(), Infallible> {
-            self.take(
-                format!("dropped {}", event.column().name()),
-                event.before(),
-                event.after(),
-            );
-
-            Ok(())
-        }
-
-        fn column_retyped(&mut self, _: &(), event: &ColumnRetyped<'_>) -> Result<(), Infallible> {
-            self.take(
-                format!("retyped {}", event.column().name()),
-                event.before(),
-                event.after(),
-            );
-
-            Ok(())
-        }
-
-        fn primary_key_changed(
-            &mut self,
-            _: &(),
-            event: &PrimaryKeyChanged<'_>,
-        ) -> Result<(), Infallible> {
-            self.take("rekeyed".to_owned(), event.before(), event.after());
+        fn table_altered(&mut self, _: &(), event: &TableAltered<'_>) -> Result<(), Infallible> {
+            let announced: Vec<String> = event
+                .alterations()
+                .iter()
+                .map(Alteration::announcement)
+                .collect();
+            self.take(announced.join(", "), event.before(), event.after());
 
             Ok(())
         }
@@ -1192,10 +1100,6 @@ mod tests {
             )
             .unwrap();
         steps
-    }
-
-    fn listed(entries: &[&str]) -> Vec<String> {
-        entries.iter().map(|entry| (*entry).to_owned()).collect()
     }
 
     fn reshaped() -> (TableModel, TableModel) {
@@ -1231,155 +1135,23 @@ mod tests {
     }
 
     #[test]
-    fn an_alteration_steps_through_drops_then_retypes_then_additions_then_its_key() {
+    fn an_alteration_of_several_changes_steps_once_from_the_table_before_it_to_the_table_after_it()
+    {
         let (before, after) = reshaped();
 
         assert_eq!(
-            steps(before, after).announcements(),
-            [
-                "dropped email",
-                "retyped name",
-                "added nickname",
-                "added phone",
-                "rekeyed"
-            ]
+            steps(before.clone(), after.clone()).taken,
+            [Step {
+                announced: "dropped email, retyped name, added nickname, added phone, rekeyed"
+                    .to_owned(),
+                before,
+                after
+            }]
         );
     }
 
     #[test]
-    fn each_step_of_an_alteration_starts_from_the_table_the_step_before_it_left() {
-        let (before, after) = reshaped();
-        let steps = steps(before, after);
-
-        for pair in steps.taken.windows(2) {
-            assert_eq!(pair[0].after, pair[1].before);
-        }
-    }
-
-    #[test]
-    fn the_first_step_of_an_alteration_starts_from_the_table_before_it() {
-        let (before, after) = reshaped();
-
-        assert_eq!(steps(before.clone(), after).taken[0].before, before);
-    }
-
-    #[test]
-    fn the_last_step_of_an_alteration_ends_in_the_table_after_it() {
-        let (before, after) = reshaped();
-
-        assert_eq!(
-            steps(before, after.clone()).taken.last().unwrap().after,
-            after
-        );
-    }
-
-    #[test]
-    fn each_step_of_an_alteration_changes_only_what_it_announces() {
-        let (before, after) = reshaped();
-
-        assert_eq!(
-            steps(before, after).outlines(),
-            [
-                (
-                    listed(&["id BIGINT", "name VARCHAR", "email VARCHAR", "key [\"id\"]"]),
-                    listed(&["id BIGINT", "name VARCHAR", "key [\"id\"]"]),
-                ),
-                (
-                    listed(&["id BIGINT", "name VARCHAR", "key [\"id\"]"]),
-                    listed(&["id BIGINT", "name TEXT", "key [\"id\"]"]),
-                ),
-                (
-                    listed(&["id BIGINT", "name TEXT", "key [\"id\"]"]),
-                    listed(&["id BIGINT", "name TEXT", "nickname VARCHAR", "key [\"id\"]"]),
-                ),
-                (
-                    listed(&["id BIGINT", "name TEXT", "nickname VARCHAR", "key [\"id\"]"]),
-                    listed(&[
-                        "id BIGINT",
-                        "name TEXT",
-                        "nickname VARCHAR",
-                        "phone VARCHAR",
-                        "key [\"id\"]"
-                    ]),
-                ),
-                (
-                    listed(&[
-                        "id BIGINT",
-                        "name TEXT",
-                        "nickname VARCHAR",
-                        "phone VARCHAR",
-                        "key [\"id\"]"
-                    ]),
-                    listed(&[
-                        "id BIGINT",
-                        "nickname VARCHAR",
-                        "name TEXT",
-                        "phone VARCHAR",
-                        "key [\"id\", \"nickname\"]"
-                    ]),
-                ),
-            ]
-        );
-    }
-
-    #[test]
-    fn columns_added_together_are_added_one_step_at_a_time() {
-        let before = table(vec![identifier(), name()], &["id"]);
-        let after = table(vec![identifier(), name(), nickname(), phone()], &["id"]);
-
-        assert_eq!(
-            steps(before, after).outlines(),
-            [
-                (
-                    listed(&["id BIGINT", "name VARCHAR", "key [\"id\"]"]),
-                    listed(&[
-                        "id BIGINT",
-                        "name VARCHAR",
-                        "nickname VARCHAR",
-                        "key [\"id\"]"
-                    ]),
-                ),
-                (
-                    listed(&[
-                        "id BIGINT",
-                        "name VARCHAR",
-                        "nickname VARCHAR",
-                        "key [\"id\"]"
-                    ]),
-                    listed(&[
-                        "id BIGINT",
-                        "name VARCHAR",
-                        "nickname VARCHAR",
-                        "phone VARCHAR",
-                        "key [\"id\"]"
-                    ]),
-                ),
-            ]
-        );
-    }
-
-    #[test]
-    fn columns_dropped_together_are_dropped_one_step_at_a_time() {
-        let before = table(vec![identifier(), name(), email()], &["id"]);
-        let after = table(vec![identifier()], &["id"]);
-
-        assert_eq!(
-            steps(before, after).outlines(),
-            [
-                (
-                    listed(&["id BIGINT", "name VARCHAR", "email VARCHAR", "key [\"id\"]"]),
-                    listed(&["id BIGINT", "email VARCHAR", "key [\"id\"]"]),
-                ),
-                (
-                    listed(&["id BIGINT", "email VARCHAR", "key [\"id\"]"]),
-                    listed(&["id BIGINT", "key [\"id\"]"]),
-                ),
-            ]
-        );
-    }
-
-    #[test]
-    fn a_column_replaced_by_one_of_its_name_is_retyped_in_one_step() {
+    fn a_column_replaced_by_one_of_its_name_is_announced_as_retyped() {
         let before = table(vec![identifier(), name()], &["id"]);
         let after = table(
             vec![identifier(), column("name", "TEXT", ColumnType::Text)],
@@ -1390,7 +1162,7 @@ mod tests {
     }
 
     #[test]
-    fn what_no_step_announces_changes_in_the_last_step() {
+    fn what_no_alteration_lists_still_reaches_the_listener_in_the_table_after_it() {
         let before = table(vec![identifier(), name()], &["id"]);
         let after = table(
             vec![
@@ -1422,21 +1194,7 @@ mod tests {
     }
 
     #[test]
-    fn what_no_step_announces_waits_for_the_last_of_several_steps() {
-        let before = table(vec![identifier(), name()], &["id"]);
-        let anonymous =
-            ColumnModel::new("name", "VARCHAR", ColumnType::Text, true, Some("anonymous"));
-        let after = table(vec![identifier(), anonymous, email(), phone()], &["id"]);
-
-        let steps = steps(before, after.clone());
-
-        assert_eq!(steps.announcements(), ["added email", "added phone"]);
-        assert_eq!(steps.taken[0].after.column("name"), Some(&name()));
-        assert_eq!(steps.taken[1].after, after);
-    }
-
-    #[test]
-    fn a_key_changed_alone_steps_from_the_table_before_it_to_the_table_after_it() {
+    fn a_key_changed_alone_is_announced_as_rekeyed() {
         let before = table(vec![identifier(), name()], &["id"]);
         let after = table(vec![identifier(), name()], &["id", "name"]);
 
@@ -1462,36 +1220,19 @@ mod tests {
         }
     }
 
-    #[derive(Debug, Default)]
-    struct Refusing {
-        announced: Vec<String>,
-    }
+    struct Refusing;
 
     impl SchemaChangeListener<Offset> for Refusing {
         type Context = ();
         type Error = Halted;
 
-        fn column_added(&mut self, _: &(), event: &ColumnAdded<'_>) -> Result<(), Halted> {
-            Err(Halted::Refused(event.column().name().to_owned()))
-        }
-
-        fn column_dropped(&mut self, _: &(), event: &ColumnDropped<'_>) -> Result<(), Halted> {
-            self.announced
-                .push(format!("dropped {}", event.column().name()));
-
-            Ok(())
-        }
-
-        fn column_retyped(&mut self, _: &(), event: &ColumnRetyped<'_>) -> Result<(), Halted> {
-            self.announced
-                .push(format!("retyped {}", event.column().name()));
-
-            Ok(())
+        fn table_altered(&mut self, _: &(), event: &TableAltered<'_>) -> Result<(), Halted> {
+            Err(Halted::Refused(event.after().id().to_string()))
         }
     }
 
     #[test]
-    fn an_alteration_halts_at_the_step_its_listener_refuses_and_is_not_remembered() {
+    fn an_alteration_its_listener_refuses_halts_and_is_not_remembered() {
         let before = table(vec![identifier(), name(), email()], &["id"]);
         let after = table(
             vec![
@@ -1510,16 +1251,14 @@ mod tests {
                 &mut (),
             )
             .unwrap();
-        let mut refusing = Refusing::default();
 
         let halted = catalog.accept::<Halted, _>(
             &(),
             &change(2, vec![TableChange::Altered(after)]),
-            &mut refusing,
+            &mut Refusing,
         );
 
-        assert_eq!(halted, Err(Halted::Refused("phone".to_owned())));
-        assert_eq!(refusing.announced, ["dropped email", "retyped name"]);
+        assert_eq!(halted, Err(Halted::Refused("shop.customers".to_owned())));
         assert_eq!(catalog.table(&customers()), Some(&before));
     }
 
@@ -1527,16 +1266,24 @@ mod tests {
         TableId::new("shop", "clients")
     }
 
-    fn renaming(from: &str, to: &str) -> TableChange {
-        TableChange::ColumnRenamed {
+    fn renaming(from: &str, to: &str) -> Hint {
+        Hint::ColumnRename {
             table: customers(),
             from: from.to_owned(),
             to: to.to_owned(),
         }
     }
 
+    fn to_clients() -> Hint {
+        Hint::TableRename {
+            from: customers(),
+            to: clients(),
+        }
+    }
+
     fn statement_steps(
         before: TableModel,
+        hints: Vec<Hint>,
         tables: Vec<TableChange>,
     ) -> (Steps, CatalogModel<Offset>) {
         let mut catalog = CatalogModel::default();
@@ -1545,7 +1292,7 @@ mod tests {
             .unwrap();
         let mut steps = Steps::default();
         catalog
-            .accept::<OutOfOrder, _>(&(), &change(2, tables), &mut steps)
+            .accept::<OutOfOrder, _>(&(), &hinted(2, hints, tables), &mut steps)
             .unwrap();
         (steps, catalog)
     }
@@ -1561,10 +1308,8 @@ mod tests {
 
         let (steps, catalog) = statement_steps(
             before.clone(),
-            vec![
-                renaming("name", "full_name"),
-                TableChange::Altered(after.clone()),
-            ],
+            vec![renaming("name", "full_name")],
+            vec![TableChange::Altered(after.clone())],
         );
 
         assert_eq!(
@@ -1579,37 +1324,24 @@ mod tests {
     }
 
     #[test]
-    fn a_column_renamed_and_another_added_by_one_statement_step_one_after_the_other() {
+    fn a_column_renamed_and_another_added_by_one_statement_are_announced_in_one_step() {
         let before = table(vec![identifier(), name()], &["id"]);
         let after = table(vec![identifier(), full_name(), email()], &["id"]);
 
         let (steps, _) = statement_steps(
             before,
-            vec![renaming("name", "full_name"), TableChange::Altered(after)],
+            vec![renaming("name", "full_name")],
+            vec![TableChange::Altered(after)],
         );
 
         assert_eq!(
-            steps.outlines(),
-            [
-                (
-                    listed(&["id BIGINT", "name VARCHAR", "key [\"id\"]"]),
-                    listed(&["id BIGINT", "full_name VARCHAR", "key [\"id\"]"]),
-                ),
-                (
-                    listed(&["id BIGINT", "full_name VARCHAR", "key [\"id\"]"]),
-                    listed(&[
-                        "id BIGINT",
-                        "full_name VARCHAR",
-                        "email VARCHAR",
-                        "key [\"id\"]"
-                    ]),
-                ),
-            ]
+            steps.announcements(),
+            ["renamed name to full_name, added email"]
         );
     }
 
     #[test]
-    fn a_column_renamed_and_retyped_by_one_statement_is_retyped_under_its_new_name() {
+    fn a_column_renamed_and_retyped_by_one_statement_is_announced_renamed_and_retyped() {
         let before = table(vec![identifier(), name()], &["id"]);
         let after = table(
             vec![identifier(), column("full_name", "TEXT", ColumnType::Text)],
@@ -1618,12 +1350,13 @@ mod tests {
 
         let (steps, _) = statement_steps(
             before,
-            vec![renaming("name", "full_name"), TableChange::Altered(after)],
+            vec![renaming("name", "full_name")],
+            vec![TableChange::Altered(after)],
         );
 
         assert_eq!(
             steps.announcements(),
-            ["renamed name to full_name", "retyped full_name"]
+            ["renamed name to full_name, retyped full_name"]
         );
     }
 
@@ -1637,14 +1370,15 @@ mod tests {
 
         let (steps, _) = statement_steps(
             before,
-            vec![renaming("id", "customer_id"), TableChange::Altered(after)],
+            vec![renaming("id", "customer_id")],
+            vec![TableChange::Altered(after)],
         );
 
         assert_eq!(steps.announcements(), ["renamed id to customer_id"]);
     }
 
     #[test]
-    fn a_column_renamed_twice_in_one_statement_ends_under_its_last_name() {
+    fn a_column_renamed_twice_in_one_statement_is_announced_under_its_first_and_last_names() {
         let before = table(vec![identifier(), name()], &["id"]);
         let after = table(vec![identifier(), nickname()], &["id"]);
 
@@ -1653,14 +1387,11 @@ mod tests {
             vec![
                 renaming("name", "full_name"),
                 renaming("full_name", "nickname"),
-                TableChange::Altered(after),
             ],
+            vec![TableChange::Altered(after)],
         );
 
-        assert_eq!(
-            steps.announcements(),
-            ["renamed name to full_name", "renamed full_name to nickname"]
-        );
+        assert_eq!(steps.announcements(), ["renamed name to nickname"]);
     }
 
     #[test]
@@ -1670,10 +1401,25 @@ mod tests {
 
         let (steps, _) = statement_steps(
             before,
-            vec![renaming("nickname", "alias"), TableChange::Altered(after)],
+            vec![renaming("nickname", "alias")],
+            vec![TableChange::Altered(after)],
         );
 
         assert!(steps.taken.is_empty());
+    }
+
+    #[test]
+    fn a_rename_whose_column_the_definition_after_it_lacks_is_announced_as_a_drop() {
+        let before = table(vec![identifier(), name()], &["id"]);
+        let after = table(vec![identifier()], &["id"]);
+
+        let (steps, _) = statement_steps(
+            before,
+            vec![renaming("name", "full_name")],
+            vec![TableChange::Altered(after)],
+        );
+
+        assert_eq!(steps.announcements(), ["dropped name"]);
     }
 
     #[test]
@@ -1683,13 +1429,8 @@ mod tests {
 
         let (steps, catalog) = statement_steps(
             before.clone(),
-            vec![
-                TableChange::Renamed {
-                    from: customers(),
-                    to: clients(),
-                },
-                TableChange::Altered(after.clone()),
-            ],
+            vec![to_clients()],
+            vec![TableChange::Altered(after.clone())],
         );
 
         assert_eq!(
@@ -1711,13 +1452,8 @@ mod tests {
 
         let (steps, _) = statement_steps(
             before,
-            vec![
-                TableChange::Renamed {
-                    from: customers(),
-                    to: clients(),
-                },
-                TableChange::Altered(after.clone()),
-            ],
+            vec![to_clients()],
+            vec![TableChange::Altered(after.clone())],
         );
 
         assert_eq!(
@@ -1728,22 +1464,33 @@ mod tests {
     }
 
     #[test]
+    fn a_column_renamed_under_the_old_name_of_a_table_renamed_by_the_same_statement_is_announced() {
+        let before = table(vec![identifier(), name()], &["id"]);
+        let after = table(vec![identifier(), full_name()], &["id"]).with_id(&clients());
+
+        let (steps, _) = statement_steps(
+            before,
+            vec![renaming("name", "full_name"), to_clients()],
+            vec![TableChange::Altered(after)],
+        );
+
+        assert_eq!(
+            steps.announcements(),
+            [
+                "renamed shop.customers to shop.clients",
+                "renamed name to full_name"
+            ]
+        );
+    }
+
+    #[test]
     fn a_rename_of_a_table_the_catalog_never_saw_leaves_the_alteration_to_create_it() {
         let mut catalog = CatalogModel::default();
         let after = table(vec![identifier()], &["id"]).with_id(&clients());
 
         let entries = accept(
             &mut catalog,
-            change(
-                1,
-                vec![
-                    TableChange::Renamed {
-                        from: customers(),
-                        to: clients(),
-                    },
-                    TableChange::Altered(after),
-                ],
-            ),
+            hinted(1, vec![to_clients()], vec![TableChange::Altered(after)]),
         );
 
         assert_eq!(entries, ["created shop.clients"]);
@@ -1758,13 +1505,7 @@ mod tests {
             catalog
                 .accept::<OutOfOrder, _>(
                     &(),
-                    &change(
-                        1,
-                        vec![TableChange::Renamed {
-                            from: customers(),
-                            to: clients(),
-                        }]
-                    ),
+                    &hinted(1, vec![to_clients()], vec![]),
                     &mut Journal::default()
                 )
                 .unwrap_err(),
@@ -1790,13 +1531,7 @@ mod tests {
             catalog
                 .accept::<OutOfOrder, _>(
                     &(),
-                    &change(
-                        2,
-                        vec![TableChange::Renamed {
-                            from: customers(),
-                            to: clients(),
-                        }]
-                    ),
+                    &hinted(2, vec![to_clients()], vec![]),
                     &mut Journal::default()
                 )
                 .unwrap_err(),
@@ -1808,7 +1543,11 @@ mod tests {
     fn a_rename_of_a_column_onto_a_name_the_table_holds_announces_nothing() {
         let before = table(vec![identifier(), name(), email()], &["id"]);
 
-        let (steps, catalog) = statement_steps(before.clone(), vec![renaming("name", "email")]);
+        let (steps, catalog) = statement_steps(
+            before.clone(),
+            vec![renaming("name", "email")],
+            vec![TableChange::Altered(before.clone())],
+        );
 
         assert!(steps.taken.is_empty());
         assert_eq!(catalog.table(&customers()), Some(&before));
@@ -1818,7 +1557,10 @@ mod tests {
     fn a_rename_of_a_column_of_a_table_the_catalog_never_saw_announces_nothing() {
         let mut catalog = CatalogModel::default();
 
-        let entries = accept(&mut catalog, change(1, vec![renaming("name", "full_name")]));
+        let entries = accept(
+            &mut catalog,
+            hinted(1, vec![renaming("name", "full_name")], vec![]),
+        );
 
         assert!(entries.is_empty());
         assert_eq!(catalog.table(&customers()), None);
@@ -1847,7 +1589,7 @@ mod tests {
         }
     }
 
-    fn warned(tables: Vec<TableChange>) -> String {
+    fn warned(hints: Vec<Hint>, tables: Vec<TableChange>) -> String {
         let traces = Traces::default();
         let subscriber = tracing_subscriber::fmt()
             .with_writer(traces.clone())
@@ -1875,6 +1617,7 @@ mod tests {
                         RecordedAt::from(2),
                         "ALTER TABLE customers DROP name, ADD full_name VARCHAR(64)",
                         tables,
+                        hints,
                     ),
                     &mut (),
                 )
@@ -1886,10 +1629,13 @@ mod tests {
 
     #[test]
     fn an_alteration_that_drops_and_adds_columns_warns_of_a_rename_it_may_hide() {
-        let warning = warned(vec![TableChange::Altered(table(
-            vec![identifier(), full_name()],
-            &["id"],
-        ))]);
+        let warning = warned(
+            vec![],
+            vec![TableChange::Altered(table(
+                vec![identifier(), full_name()],
+                &["id"],
+            ))],
+        );
 
         assert!(warning.contains("WARN"));
         assert!(warning.contains("table=shop.customers"));
@@ -1902,10 +1648,13 @@ mod tests {
     #[test]
     fn an_alteration_that_only_adds_columns_warns_of_nothing() {
         assert_eq!(
-            warned(vec![TableChange::Altered(table(
-                vec![identifier(), name(), email()],
-                &["id"],
-            ))]),
+            warned(
+                vec![],
+                vec![TableChange::Altered(table(
+                    vec![identifier(), name(), email()],
+                    &["id"],
+                ))]
+            ),
             ""
         );
     }
@@ -1913,12 +1662,29 @@ mod tests {
     #[test]
     fn an_alteration_whose_rename_was_read_warns_of_nothing() {
         assert_eq!(
-            warned(vec![
-                renaming("name", "full_name"),
-                TableChange::Altered(table(vec![identifier(), full_name()], &["id"])),
-            ]),
+            warned(
+                vec![renaming("name", "full_name")],
+                vec![TableChange::Altered(table(
+                    vec![identifier(), full_name()],
+                    &["id"]
+                ))],
+            ),
             ""
         );
+    }
+
+    #[test]
+    fn an_alteration_whose_drop_and_add_no_hint_explains_still_warns_of_a_rename_it_may_hide() {
+        let warning = warned(
+            vec![renaming("name", "full_name")],
+            vec![TableChange::Altered(table(
+                vec![identifier(), nickname()],
+                &["id"],
+            ))],
+        );
+
+        assert!(warning.contains("dropped=[\"name\"]"));
+        assert!(warning.contains("added=[\"nickname\"]"));
     }
 
     #[derive(Debug, Default)]
@@ -1968,6 +1734,17 @@ mod tests {
     }
 
     #[test]
+    fn a_table_the_catalog_knows_captured_again_is_announced_as_captured() {
+        assert_eq!(
+            appearances(vec![created(1), created(2).captured()]),
+            [
+                (customers(), Appearance::Created),
+                (customers(), Appearance::Captured)
+            ]
+        );
+    }
+
+    #[test]
     fn a_table_first_seen_altered_is_announced_as_discovered() {
         assert_eq!(
             appearances(vec![altered(1, vec![identifier()], &["id"])]),
@@ -1978,15 +1755,12 @@ mod tests {
     #[test]
     fn a_table_first_seen_renamed_onto_is_announced_as_discovered() {
         assert_eq!(
-            appearances(vec![change(
+            appearances(vec![hinted(
                 1,
-                vec![
-                    TableChange::Renamed {
-                        from: customers(),
-                        to: clients(),
-                    },
-                    TableChange::Altered(table(vec![identifier()], &["id"]).with_id(&clients())),
-                ]
+                vec![to_clients()],
+                vec![TableChange::Altered(
+                    table(vec![identifier()], &["id"]).with_id(&clients())
+                )]
             )]),
             [(clients(), Appearance::Discovered)]
         );
@@ -2024,12 +1798,12 @@ mod tests {
 
     #[test]
     fn a_drop_of_a_table_the_catalog_knows_warns_of_nothing() {
-        assert_eq!(warned(vec![TableChange::Dropped(customers())]), "");
+        assert_eq!(warned(vec![], vec![TableChange::Dropped(customers())]), "");
     }
 
     #[test]
     fn a_drop_of_a_table_the_catalog_never_saw_warns_of_it() {
-        let warning = warned(vec![TableChange::Dropped(orders())]);
+        let warning = warned(vec![], vec![TableChange::Dropped(orders())]);
 
         assert!(warning.contains("WARN"));
         assert!(warning.contains("table=shop.orders"));
@@ -2037,10 +1811,13 @@ mod tests {
 
     #[test]
     fn a_rename_of_a_table_the_catalog_never_saw_warns_of_it() {
-        let warning = warned(vec![TableChange::Renamed {
-            from: orders(),
-            to: clients(),
-        }]);
+        let warning = warned(
+            vec![Hint::TableRename {
+                from: orders(),
+                to: clients(),
+            }],
+            vec![],
+        );
 
         assert!(warning.contains("WARN"));
         assert!(warning.contains("table=shop.orders"));
@@ -2049,7 +1826,13 @@ mod tests {
 
     #[test]
     fn a_rename_of_a_column_the_table_never_had_warns_of_it() {
-        let warning = warned(vec![renaming("nickname", "alias")]);
+        let warning = warned(
+            vec![renaming("nickname", "alias")],
+            vec![TableChange::Altered(table(
+                vec![identifier(), name()],
+                &["id"],
+            ))],
+        );
 
         assert!(warning.contains("WARN"));
         assert!(warning.contains("table=shop.customers"));
@@ -2058,7 +1841,13 @@ mod tests {
 
     #[test]
     fn a_rename_of_a_column_onto_a_name_the_table_holds_warns_of_it() {
-        let warning = warned(vec![renaming("name", "id")]);
+        let warning = warned(
+            vec![renaming("name", "id")],
+            vec![TableChange::Altered(table(
+                vec![identifier(), name()],
+                &["id"],
+            ))],
+        );
 
         assert!(warning.contains("WARN"));
         assert!(warning.contains("column=\"name\""));
@@ -2067,11 +1856,14 @@ mod tests {
 
     #[test]
     fn a_rename_of_a_column_of_a_table_the_catalog_never_saw_warns_of_it() {
-        let warning = warned(vec![TableChange::ColumnRenamed {
-            table: orders(),
-            from: "note".to_owned(),
-            to: "remark".to_owned(),
-        }]);
+        let warning = warned(
+            vec![Hint::ColumnRename {
+                table: orders(),
+                from: "note".to_owned(),
+                to: "remark".to_owned(),
+            }],
+            vec![],
+        );
 
         assert!(warning.contains("WARN"));
         assert!(warning.contains("table=shop.orders"));

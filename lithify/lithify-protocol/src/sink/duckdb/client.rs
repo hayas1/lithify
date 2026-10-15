@@ -1,7 +1,8 @@
 use duckdb::types::{FromSql, Type};
 use duckdb::{Connection, Error, Statement};
 
-use lithify_core::sink::{Warehouse, WarehouseClient};
+use lithify_core::build_log::{BuildLog, BuildLogRow, Latest};
+use lithify_core::sink::{TablePath, Warehouse, WarehouseClient};
 use lithify_core::source::{
     ChangeLogs, SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed,
 };
@@ -52,6 +53,55 @@ impl WarehouseClient for DuckDbClient {
 
     fn execute(&self, statement: &SqlString) -> Result<(), Self::Error> {
         self.connection.execute_batch(statement.as_str())
+    }
+
+    fn exists(&self, table: &TablePath) -> Result<bool, Self::Error> {
+        let count: i64 = self.connection.query_row(
+            self.warehouse.select_existence(table).as_str(),
+            [],
+            |row| row.get(0),
+        )?;
+
+        Ok(count > 0)
+    }
+
+    fn latest_build_logs(
+        &self,
+        namespace: &str,
+        latest: &Latest,
+    ) -> Result<Vec<BuildLog>, Self::Error> {
+        self.connection
+            .prepare(
+                self.warehouse
+                    .select_latest_build_logs(namespace, latest)
+                    .as_str(),
+            )?
+            .query_map([], |row| {
+                Ok(BuildLogRow {
+                    run_id: row.get("run_id")?,
+                    artifact: row.get("artifact")?,
+                    schedule: row.get("schedule")?,
+                    source: row.get("source")?,
+                    capture: row.get("capture")?,
+                    table_from: row.get("table_from")?,
+                    table_to: row.get("table_to")?,
+                    lifecycle: row.get("lifecycle")?,
+                    base: row.get("base")?,
+                    target: row.get("target")?,
+                    window_from: row.get("window_from")?,
+                    window_to: row.get("window_to")?,
+                    status: row.get("status")?,
+                    finished_at: row.get("finished_at")?,
+                    error: row.get("error")?,
+                    version: row.get("version")?,
+                })
+            })?
+            .map(|row| {
+                BuildLog::try_from(row?).map_err(|unreadable| {
+                    Error::FromSqlConversionFailure(0, Type::Any, Box::new(unreadable))
+                })
+            })
+            .collect()
     }
 }
 
@@ -112,12 +162,18 @@ mod tests {
     use super::*;
     use crate::source::debezium::Debezium;
     use crate::source::debezium::mysql::MySql;
-    use lithify_core::event::{MalformedEvent, SchemaChange, TableChange};
+    use crate::source::debezium::tests::described;
+    use chrono::DateTime;
+    use lithify_core::artifact::UnbuildableArtifact;
+    use lithify_core::build_log::{Outcome, Run, Status};
+    use lithify_core::event::{MalformedEvent, SchemaChange};
     use lithify_core::listener::OutOfOrder;
     use lithify_core::model::TableId;
     use lithify_core::position::RecordedAt;
     use lithify_core::position::{Coordinate, Position};
+    use lithify_core::sink::TablePath;
     use lithify_core::source::{ChangeLog, ColumnPath};
+    use ulid::Ulid;
 
     const CHANGE_LOG: &str = "CREATE SCHEMA mysql_shop_cdc;
         CREATE TABLE mysql_shop_cdc.mysql AS
@@ -159,20 +215,7 @@ mod tests {
                 format!(
                     "{} {:?}",
                     change.statement(),
-                    change
-                        .tables()
-                        .map(|table| match table {
-                            TableChange::Created(table) => format!("created {}", table.id()),
-                            TableChange::Renamed { from, to } => {
-                                format!("renamed {from} to {to}")
-                            }
-                            TableChange::ColumnRenamed { table, from, to } => {
-                                format!("renamed {table}.{from} to {to}")
-                            }
-                            TableChange::Altered(table) => format!("altered {}", table.id()),
-                            TableChange::Dropped(id) => format!("dropped {id}"),
-                        })
-                        .collect::<Vec<_>>()
+                    change.tables().map(described).collect::<Vec<_>>()
                 )
             })
             .collect()
@@ -279,6 +322,277 @@ mod tests {
         assert_eq!(id, 1);
     }
 
+    const W1: (i64, i64) = (1789862400000, 1789948800000);
+    const W2: (i64, i64) = (1789948800000, 1790035200000);
+    const W3: (i64, i64) = (1790035200000, 1790121600000);
+
+    fn logged(table: &str, window: (i64, i64), status: Status, finished_at: u64) -> BuildLog {
+        logged_across(Some(table), Some(table), window, status, finished_at)
+    }
+
+    fn logged_across(
+        table_from: Option<&str>,
+        table_to: Option<&str>,
+        (from, to): (i64, i64),
+        status: Status,
+        finished_at: u64,
+    ) -> BuildLog {
+        let table = table_to.or(table_from).unwrap();
+
+        BuildLog::new(
+            &Run::new(
+                Ulid::from_parts(finished_at, 0),
+                "snapshot",
+                "daily",
+                "primary",
+                r#"{"debezium":{"dialect":"mysql"}}"#,
+                "0.1.0",
+            ),
+            table_from.map(|table| TableId::new("shop", table)),
+            table_to.map(|table| TableId::new("shop", table)),
+            Some(TablePath::new("mysql_shop", &format!("{table}_base"))),
+            table_to.map(|_| TablePath::new("mysql_shop", &format!("{table}_{from}"))),
+            window(from, to),
+            Outcome::new(
+                status,
+                DateTime::from_timestamp_millis(finished_at as i64).unwrap(),
+            ),
+        )
+    }
+
+    fn logging(logs: &[BuildLog]) -> DuckDbClient {
+        let client = DuckDbClient::new(
+            Connection::open_in_memory().unwrap(),
+            DuckDbWarehouse::new("mysql_shop_cdc"),
+        );
+        client.create_build_log::<Logged>("mysql_shop").unwrap();
+        for log in logs {
+            client.append_build_log("mysql_shop", log).unwrap();
+        }
+
+        client
+    }
+
+    fn latest(client: &DuckDbClient, latest: Latest) -> Vec<BuildLog> {
+        client.latest_build_logs("mysql_shop", &latest).unwrap()
+    }
+
+    #[derive(Debug)]
+    struct Logged;
+
+    impl From<Error> for Logged {
+        fn from(_: Error) -> Self {
+            Self
+        }
+    }
+
+    impl From<UnbuildableArtifact> for Logged {
+        fn from(_: UnbuildableArtifact) -> Self {
+            Self
+        }
+    }
+
+    fn history() -> Vec<BuildLog> {
+        vec![
+            logged(
+                "customers",
+                W1,
+                Status::Failed("no era".to_owned()),
+                1789949000000,
+            ),
+            logged("orders", W1, Status::Succeeded, 1789949100000),
+            logged("customers", W1, Status::Succeeded, 1789949200000),
+            logged("customers", W2, Status::Succeeded, 1790035300000),
+            logged(
+                "orders",
+                W2,
+                Status::Failed("it's gone".to_owned()),
+                1790035400000,
+            ),
+        ]
+    }
+
+    #[test]
+    fn a_build_log_is_created_once_however_often_it_is_asked_for() {
+        let client = logging(&history()[..1]);
+
+        client.create_build_log::<Logged>("mysql_shop").unwrap();
+
+        assert_eq!(latest(&client, Latest::Attempted).len(), 1);
+    }
+
+    #[test]
+    fn a_build_log_reads_back_the_latest_record_of_each_table_as_it_was_written() {
+        let history = history();
+
+        assert_eq!(
+            latest(&logging(&history), Latest::Attempted),
+            [history[3].clone(), history[4].clone()]
+        );
+    }
+
+    #[test]
+    fn a_build_log_reads_the_latest_success_of_each_table() {
+        let history = history();
+
+        assert_eq!(
+            latest(&logging(&history), Latest::Succeeded),
+            [history[3].clone(), history[1].clone()]
+        );
+    }
+
+    #[test]
+    fn a_build_log_reads_the_latest_success_of_each_table_closing_at_an_instant() {
+        let history = history();
+
+        assert_eq!(
+            latest(
+                &logging(&history),
+                Latest::SucceededUntil(RecordedAt::from(W1.1))
+            ),
+            [history[2].clone(), history[1].clone()]
+        );
+    }
+
+    #[test]
+    fn a_build_log_reads_no_more_the_name_a_table_was_renamed_away_from() {
+        let renamed = logged_across(
+            Some("customers"),
+            Some("clients"),
+            W2,
+            Status::Succeeded,
+            1790035300000,
+        );
+        let client = logging(&[
+            logged("customers", W1, Status::Succeeded, 1789949000000),
+            renamed.clone(),
+        ]);
+
+        assert_eq!(
+            latest(&client, Latest::Attempted),
+            std::slice::from_ref(&renamed)
+        );
+        assert_eq!(latest(&client, Latest::Succeeded), [renamed]);
+    }
+
+    #[test]
+    fn a_build_log_reads_a_name_again_once_a_table_is_created_under_it() {
+        let renamed = logged_across(
+            Some("customers"),
+            Some("clients"),
+            W2,
+            Status::Succeeded,
+            1790035300000,
+        );
+        let created = logged_across(
+            None,
+            Some("customers"),
+            W3,
+            Status::Succeeded,
+            1790121700000,
+        );
+        let client = logging(&[
+            logged("customers", W1, Status::Succeeded, 1789949000000),
+            renamed.clone(),
+            created.clone(),
+        ]);
+
+        assert_eq!(latest(&client, Latest::Succeeded), [renamed, created]);
+    }
+
+    #[test]
+    fn a_build_log_reads_the_base_of_a_window_under_the_name_it_closed_with_even_once_renamed_away()
+    {
+        let before = logged("customers", W1, Status::Succeeded, 1789949000000);
+        let client = logging(&[
+            before.clone(),
+            logged_across(
+                Some("customers"),
+                Some("clients"),
+                W2,
+                Status::Succeeded,
+                1790035300000,
+            ),
+        ]);
+
+        assert_eq!(
+            latest(&client, Latest::SucceededUntil(RecordedAt::from(W1.1))),
+            [before]
+        );
+    }
+
+    #[test]
+    fn a_build_log_still_reads_the_last_success_of_a_name_a_failed_build_renamed_away_from() {
+        let before = logged("customers", W1, Status::Succeeded, 1789949000000);
+        let renamed = logged_across(
+            Some("customers"),
+            Some("clients"),
+            W2,
+            Status::Failed("no era".to_owned()),
+            1790035300000,
+        );
+        let client = logging(&[before.clone(), renamed.clone()]);
+
+        assert_eq!(latest(&client, Latest::Attempted), [renamed]);
+        assert_eq!(latest(&client, Latest::Succeeded), [before]);
+    }
+
+    #[test]
+    fn a_build_log_reads_no_more_a_name_rebuilt_in_a_window_before_it_was_renamed_away_from() {
+        let renamed = logged_across(
+            Some("customers"),
+            Some("clients"),
+            W2,
+            Status::Succeeded,
+            1790035300000,
+        );
+        let client = logging(&[
+            logged("customers", W1, Status::Succeeded, 1789949000000),
+            renamed.clone(),
+            logged("customers", W1, Status::Succeeded, 1790121700000),
+        ]);
+
+        assert_eq!(latest(&client, Latest::Succeeded), [renamed]);
+    }
+
+    #[test]
+    fn a_build_log_reads_nothing_of_a_table_once_dropped() {
+        let client = logging(&[
+            logged("customers", W1, Status::Succeeded, 1789949000000),
+            logged_across(
+                Some("customers"),
+                None,
+                W2,
+                Status::Succeeded,
+                1790035300000,
+            ),
+        ]);
+
+        assert_eq!(latest(&client, Latest::Attempted), []);
+        assert_eq!(latest(&client, Latest::Succeeded), []);
+    }
+
+    #[test]
+    fn a_client_tells_whether_a_table_stands_in_its_warehouse() {
+        let client = logging(&[]);
+
+        assert!(
+            client
+                .exists(&TablePath::new("mysql_shop", "_lithify_log"))
+                .unwrap()
+        );
+        assert!(
+            !client
+                .exists(&TablePath::new("mysql_shop", "people_20260920"))
+                .unwrap()
+        );
+        assert!(
+            !client
+                .exists(&TablePath::new("elsewhere", "_lithify_log"))
+                .unwrap()
+        );
+    }
+
     #[test]
     fn a_window_without_a_statement_reads_nothing() {
         assert!(read(&window(0, 1789800000000)).is_empty());
@@ -337,6 +651,7 @@ mod tests {
                 Line(0),
                 RecordedAt::from(0),
                 &statement,
+                Vec::new(),
                 Vec::new(),
             ))
         }

@@ -2,65 +2,132 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 
-use google_cloud_bigquery::error::RowError;
-use google_cloud_bigquery::query::Row;
-use lithify_config::Pipeline;
 use lithify_config::infra::{Sink, Source};
-use lithify_core::listener::CatalogModel;
-use lithify_core::source::{ChangeLogs, SchemaChangeLog, SchemaChangeStream};
-use lithify_core::sql::SqlString;
-use lithify_core::window::Window;
+use lithify_config::{ArtifactKind, Pipeline};
+use lithify_core::position::RecordedAt;
 use lithify_protocol::sink::bigquery;
-use lithify_protocol::sink::bigquery::client::{
-    BigQueryCapture, BigQueryChangeLogsFn, BigQueryClient,
-};
-use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbChangeLogsFn, DuckDbClient};
-use lithify_protocol::sink::duckdb::config::Store;
+use lithify_protocol::sink::bigquery::client::{BigQueryCapture, BigQueryClient};
+use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbClient};
+use lithify_protocol::sink::duckdb::config::Config;
 use lithify_protocol::sink::duckdb::store::ObjectStore;
 
+use crate::check::{Expectation, Inspection};
+use crate::course::Course;
 use crate::credential::Credential;
 use crate::journal::Journal;
 use crate::pipeline::{Capture, Warehouse};
 use crate::plan::SnapshotPlan;
+use crate::settlement::{Build, DryRun, Settlement};
 use crate::unrunnable::Unrunnable;
 
 pub struct Run {
     directory: PathBuf,
-    window: Window,
     credential: Credential,
     sink: Option<String>,
-    onto: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
 }
 
 impl Run {
     pub fn new(
         directory: PathBuf,
-        window: Window,
         credential: Credential,
         sink: Option<String>,
-        onto: Option<DateTime<Utc>>,
+        now: DateTime<Utc>,
     ) -> Self {
         Self {
             directory,
-            window,
             credential,
             sink,
-            onto,
+            now,
         }
     }
 
-    pub fn report(&self) -> Result<Journal, Unrunnable> {
+    pub fn plan(&self, course: &Course, into: &Path) -> Result<Journal, Unrunnable> {
         self.each_sink(|sink, source, topic_prefix, journal| {
-            self.read(sink, source, topic_prefix, journal)
+            self.settle(
+                course,
+                sink,
+                source,
+                topic_prefix,
+                &DryRun::new(into, sink.name()),
+                journal,
+            )
         })
     }
 
-    pub fn plan(&self, into: &Path) -> Result<Journal, Unrunnable> {
+    pub fn build(&self, course: &Course) -> Result<Journal, Unrunnable> {
         self.each_sink(|sink, source, topic_prefix, journal| {
-            let statements = self.plan_statements(sink, source, topic_prefix)?;
-
-            Self::write_plan(into, sink, &statements, journal)
+            self.settle(
+                course,
+                sink,
+                source,
+                topic_prefix,
+                &Build::new(sink, source)?,
+                journal,
+            )
         })
+    }
+
+    pub fn check(&self) -> Result<Journal, Unrunnable> {
+        self.each_sink(|sink, source, _, journal| {
+            for discrepancy in self.inspection(sink, source)?.discrepancies() {
+                journal.discrepancy(discrepancy);
+            }
+
+            Ok(())
+        })
+    }
+
+    pub fn inspect(&self) -> Result<Vec<(String, Inspection)>, Unrunnable> {
+        let pipeline: Pipeline<Capture, Warehouse> = Pipeline::open(&self.directory)?;
+        let source = Self::source(&pipeline)?;
+
+        self.selected(&pipeline)?
+            .into_iter()
+            .map(|sink| Ok((sink.name().to_owned(), self.inspection(sink, source)?)))
+            .collect()
+    }
+
+    pub fn sinks(&self) -> Result<Vec<String>, Unrunnable> {
+        let pipeline: Pipeline<Capture, Warehouse> = Pipeline::open(&self.directory)?;
+
+        Ok(self
+            .selected(&pipeline)?
+            .into_iter()
+            .map(|sink| sink.name().to_owned())
+            .collect())
+    }
+
+    fn inspection(
+        &self,
+        sink: &Sink<Warehouse>,
+        source: &Source<Capture>,
+    ) -> Result<Inspection, Unrunnable> {
+        let expectation = Expectation::new(
+            sink.artifacts().schedule(),
+            source.since(),
+            &source.capture().to_json()?,
+            RecordedAt::from(self.now),
+        );
+        let namespace = sink.artifacts().namespace(ArtifactKind::Snapshot);
+
+        match sink.warehouse() {
+            Warehouse::DuckDb(config) => expectation.read(&self.duckdb(sink, config)?, namespace),
+            Warehouse::BigQuery(config) => {
+                expectation.read(&self.bigquery(sink, config)?, namespace)
+            }
+        }
+    }
+
+    fn source(pipeline: &Pipeline<Capture, Warehouse>) -> Result<&Source<Capture>, Unrunnable> {
+        let mut sources = pipeline.sources();
+        let source = sources.next().ok_or(Unrunnable::WithoutSource)?;
+
+        if sources.next().is_some() {
+            todo!("order the change log across the boundary between connection eras");
+        }
+
+        Ok(source)
     }
 
     fn each_sink(
@@ -73,16 +140,10 @@ impl Run {
         ) -> Result<(), Unrunnable>,
     ) -> Result<Journal, Unrunnable> {
         let pipeline: Pipeline<Capture, Warehouse> = Pipeline::open(&self.directory)?;
-        let mut sources = pipeline.sources();
-        let source = sources.next().ok_or(Unrunnable::WithoutSource)?;
-
-        if sources.next().is_some() {
-            todo!("order the change log across the boundary between connection eras");
-        }
-
+        let source = Self::source(&pipeline)?;
         let mut journal = Journal::default();
 
-        for sink in self.sinks(&pipeline)? {
+        for sink in self.selected(&pipeline)? {
             journal.sink(sink.name());
 
             let Some(topic_prefix) = source.topic_prefix() else {
@@ -102,53 +163,50 @@ impl Run {
         Ok(journal)
     }
 
-    fn plan_statements(
+    fn settle<S: Settlement>(
         &self,
+        course: &Course,
         sink: &Sink<Warehouse>,
         source: &Source<Capture>,
         topic_prefix: &str,
-    ) -> Result<Vec<SqlString>, Unrunnable> {
+        settlement: &S,
+        journal: &mut Journal,
+    ) -> Result<(), Unrunnable> {
         match sink.warehouse() {
-            Warehouse::DuckDb(store) => source.capture().with_duckdb_change_logs(
-                topic_prefix,
-                SnapshotPlan::new(&self.duckdb(sink, store)?, sink, &self.window, self.onto),
-            ),
-            Warehouse::BigQuery(config) => source.capture().with_bigquery_change_logs(
-                topic_prefix,
-                SnapshotPlan::new(&self.bigquery(sink, config)?, sink, &self.window, self.onto),
-            ),
+            Warehouse::DuckDb(config) => {
+                let client = self.duckdb(sink, config)?;
+
+                course.itinerary(sink, source, self.now, &client)?.settle(
+                    settlement,
+                    journal,
+                    |window, base, tables| {
+                        source.capture().with_duckdb_change_logs(
+                            topic_prefix,
+                            SnapshotPlan::new(&client, sink, window, base, tables, settlement),
+                        )
+                    },
+                )
+            }
+            Warehouse::BigQuery(config) => {
+                let client = self.bigquery(sink, config)?;
+
+                course.itinerary(sink, source, self.now, &client)?.settle(
+                    settlement,
+                    journal,
+                    |window, base, tables| {
+                        source.capture().with_bigquery_change_logs(
+                            topic_prefix,
+                            SnapshotPlan::new(&client, sink, window, base, tables, settlement),
+                        )
+                    },
+                )
+            }
         }
     }
 
-    fn write_plan(
-        into: &Path,
-        sink: &Sink<Warehouse>,
-        statements: &[SqlString],
-        journal: &mut Journal,
-    ) -> Result<(), Unrunnable> {
-        let path = into.join(format!("{}.sql", sink.name()));
-
-        std::fs::create_dir_all(into)?;
-        std::fs::write(
-            &path,
-            statements
-                .iter()
-                .map(|statement| format!("{statement};\n"))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        )?;
-        journal.note(&format!(
-            "wrote {} statements to {}",
-            statements.len(),
-            path.display()
-        ));
-
-        Ok(())
-    }
-
-    fn duckdb(&self, sink: &Sink<Warehouse>, store: &Store) -> Result<DuckDbClient, Unrunnable> {
+    fn duckdb(&self, sink: &Sink<Warehouse>, config: &Config) -> Result<DuckDbClient, Unrunnable> {
         Ok(
-            ObjectStore::open(store, self.credential.key_id(), self.credential.secret())
+            ObjectStore::open(config, self.credential.key_id(), self.credential.secret())
                 .client(sink.change_log())?,
         )
     }
@@ -161,48 +219,7 @@ impl Run {
         Ok(BigQueryClient::open(config, sink.change_log())?)
     }
 
-    fn read(
-        &self,
-        sink: &Sink<Warehouse>,
-        source: &Source<Capture>,
-        topic_prefix: &str,
-        journal: &mut Journal,
-    ) -> Result<(), Unrunnable> {
-        match sink.warehouse() {
-            Warehouse::DuckDb(store) => {
-                self.read_duckdb(&self.duckdb(sink, store)?, topic_prefix, source, journal)
-            }
-            Warehouse::BigQuery(config) => {
-                self.read_bigquery(&self.bigquery(sink, config)?, topic_prefix, source, journal)
-            }
-        }
-    }
-
-    fn read_duckdb(
-        &self,
-        client: &DuckDbClient,
-        topic_prefix: &str,
-        source: &Source<Capture>,
-        journal: &mut Journal,
-    ) -> Result<(), Unrunnable> {
-        source
-            .capture()
-            .with_duckdb_change_logs(topic_prefix, Catalog::new(client, &self.window, journal))
-    }
-
-    fn read_bigquery(
-        &self,
-        client: &BigQueryClient,
-        topic_prefix: &str,
-        source: &Source<Capture>,
-        journal: &mut Journal,
-    ) -> Result<(), Unrunnable> {
-        source
-            .capture()
-            .with_bigquery_change_logs(topic_prefix, Catalog::new(client, &self.window, journal))
-    }
-
-    fn sinks<'a>(
+    fn selected<'a>(
         &self,
         pipeline: &'a Pipeline<Capture, Warehouse>,
     ) -> Result<Vec<&'a Sink<Warehouse>>, Unrunnable> {
@@ -218,57 +235,5 @@ impl Run {
             (true, Some(named)) => Err(Unrunnable::UnknownSink(named.clone())),
             _ => Ok(sinks),
         }
-    }
-}
-
-struct Catalog<'a, C> {
-    reader: &'a C,
-    window: &'a Window,
-    journal: &'a mut Journal,
-}
-
-impl<'a, C> Catalog<'a, C> {
-    fn new(reader: &'a C, window: &'a Window, journal: &'a mut Journal) -> Self {
-        Self {
-            reader,
-            window,
-            journal,
-        }
-    }
-}
-
-impl DuckDbChangeLogsFn for Catalog<'_, DuckDbClient> {
-    type Output = Result<(), Unrunnable>;
-
-    fn call_duckdb<C>(self, logs: C) -> Self::Output
-    where
-        C: ChangeLogs,
-        <C::Schema as SchemaChangeLog>::Record: duckdb::types::FromSql,
-    {
-        self.reader.catalog::<Unrunnable, Journal>(
-            &(),
-            logs.schema_changes(),
-            self.window,
-            &mut CatalogModel::default(),
-            self.journal,
-        )
-    }
-}
-
-impl BigQueryChangeLogsFn for Catalog<'_, BigQueryClient> {
-    type Output = Result<(), Unrunnable>;
-
-    fn call_bigquery<C>(self, logs: C) -> Self::Output
-    where
-        C: ChangeLogs,
-        <C::Schema as SchemaChangeLog>::Record: TryFrom<Row, Error = RowError>,
-    {
-        self.reader.catalog::<Unrunnable, Journal>(
-            &(),
-            logs.schema_changes(),
-            self.window,
-            &mut CatalogModel::default(),
-            self.journal,
-        )
     }
 }

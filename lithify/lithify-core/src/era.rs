@@ -4,8 +4,8 @@ use std::marker::PhantomData;
 
 use crate::event::SchemaChange;
 use crate::listener::{
-    CatalogModel, ColumnAdded, ColumnDropped, ColumnRenamed, ColumnRetyped, PrimaryKeyChanged,
-    SchemaChangeListener, TableCreated, TableDropped, TableRenamed,
+    Alteration, Appearance, CatalogModel, SchemaChangeListener, TableAltered, TableCreated,
+    TableDropped, TableRenamed,
 };
 use crate::model::{TableId, TableModel};
 use crate::position::{Position, RecordedAt};
@@ -62,12 +62,14 @@ pub struct EraTracker<F, L, E, P> {
     at: Bound<P>,
     open: F,
     tables: BTreeMap<TableId, Track<L, P>>,
+    dropped: Vec<L>,
     error: PhantomData<fn() -> E>,
 }
 
 struct Track<L, P> {
     listener: L,
     since: Bound<P>,
+    appearance: Option<Appearance>,
 }
 
 impl<L, P: Position> Track<L, P> {
@@ -75,11 +77,18 @@ impl<L, P: Position> Track<L, P> {
         open: &mut impl FnMut(&TableId) -> Result<L, E>,
         table: &TableId,
         since: Bound<P>,
+        appearance: Option<Appearance>,
     ) -> Result<Self, E> {
         Ok(Self {
             listener: open(table)?,
             since,
+            appearance,
         })
+    }
+
+    fn is_created_within(&self) -> bool {
+        self.appearance
+            .is_some_and(|appearance| appearance.is_creation())
     }
 
     fn advance(
@@ -123,6 +132,7 @@ impl<F, L, E, P: Position> EraTracker<F, L, E, P> {
             window,
             open,
             tables: BTreeMap::new(),
+            dropped: Vec::new(),
             error: PhantomData,
         }
     }
@@ -133,26 +143,33 @@ impl<F, L, E, P: Position> EraTracker<F, L, E, P> {
         F: FnMut(&TableId) -> Result<L, E>,
         E: From<L::Error>,
     {
-        catalog
+        let standing = catalog
             .tables()
             .map(|table| {
                 let track = match self.tables.remove(table.id()) {
                     Some(track) => track,
-                    None => self.open(table.id(), Bound::Time(*self.window.from()))?,
+                    None => self.open(table.id(), Bound::Time(*self.window.from()), None)?,
                 };
 
                 Ok(track.finish(context, table, &Bound::Time(*self.window.to()))?)
             })
-            .collect()
+            .collect::<Result<Vec<_>, E>>()?;
+
+        Ok(self.dropped.into_iter().chain(standing).collect())
     }
 
-    fn open(&mut self, table: &TableId, since: Bound<P>) -> Result<Track<L, P>, E>
+    fn open(
+        &mut self,
+        table: &TableId,
+        since: Bound<P>,
+        appearance: Option<Appearance>,
+    ) -> Result<Track<L, P>, E>
     where
         L: SchemaChangeListener<P>,
         F: FnMut(&TableId) -> Result<L, E>,
         E: From<L::Error>,
     {
-        Track::open(&mut self.open, table, since)
+        Track::open(&mut self.open, table, since, appearance)
     }
 
     fn track(&mut self, table: &TableId) -> Result<&mut Track<L, P>, E>
@@ -166,7 +183,7 @@ impl<F, L, E, P: Position> EraTracker<F, L, E, P> {
 
         match tables.entry(table.clone()) {
             Entry::Occupied(track) => Ok(track.into_mut()),
-            Entry::Vacant(vacant) => Ok(vacant.insert(Track::open(open, table, from)?)),
+            Entry::Vacant(vacant) => Ok(vacant.insert(Track::open(open, table, from, None)?)),
         }
     }
 
@@ -224,7 +241,11 @@ where
         context: &Self::Context,
         event: &TableCreated<'_>,
     ) -> Result<(), Self::Error> {
-        let mut track = self.open(event.table().id(), self.at.clone())?;
+        let mut track = self.open(
+            event.table().id(),
+            self.at.clone(),
+            Some(event.appearance()),
+        )?;
 
         track.listener.table_created(context, event)?;
         self.tables.insert(event.table().id().clone(), track);
@@ -237,10 +258,18 @@ where
         context: &Self::Context,
         event: &TableDropped<'_>,
     ) -> Result<(), Self::Error> {
-        match self.tables.remove(event.table().id()) {
-            Some(mut track) => Ok(track.listener.table_dropped(context, event)?),
-            None => Ok(()),
+        let mut track = match self.tables.remove(event.table().id()) {
+            Some(track) => track,
+            None => self.open(event.table().id(), Bound::Time(*self.window.from()), None)?,
+        };
+
+        track.listener.table_dropped(context, event)?;
+        // A table created within the window and gone by its end left nothing to build or resume.
+        if !track.is_created_within() {
+            self.dropped.push(track.listener);
         }
+
+        Ok(())
     }
 
     fn table_renamed(
@@ -256,64 +285,26 @@ where
         Ok(())
     }
 
-    fn column_renamed(
+    fn table_altered(
         &mut self,
         context: &Self::Context,
-        event: &ColumnRenamed<'_>,
+        event: &TableAltered<'_>,
     ) -> Result<(), Self::Error> {
-        self.alter(context, event.before(), |listener| {
-            listener.column_renamed(context, event)
-        })
-    }
+        let visit = |listener: &mut L| listener.table_altered(context, event);
 
-    fn column_added(
-        &mut self,
-        context: &Self::Context,
-        event: &ColumnAdded<'_>,
-    ) -> Result<(), Self::Error> {
-        self.alter(context, event.before(), |listener| {
-            listener.column_added(context, event)
-        })
-    }
-
-    fn column_dropped(
-        &mut self,
-        context: &Self::Context,
-        event: &ColumnDropped<'_>,
-    ) -> Result<(), Self::Error> {
-        self.alter(context, event.before(), |listener| {
-            listener.column_dropped(context, event)
-        })
-    }
-
-    fn column_retyped(
-        &mut self,
-        context: &Self::Context,
-        event: &ColumnRetyped<'_>,
-    ) -> Result<(), Self::Error> {
-        self.alter(context, event.before(), |listener| {
-            listener.column_retyped(context, event)
-        })
-    }
-
-    fn primary_key_changed(
-        &mut self,
-        context: &Self::Context,
-        event: &PrimaryKeyChanged<'_>,
-    ) -> Result<(), Self::Error> {
-        self.alter(context, event.before(), |listener| {
-            listener.primary_key_changed(context, event)
-        })
+        match event.alterations().iter().all(Alteration::is_metadata_only) {
+            true => Ok(visit(&mut self.track(event.before().id())?.listener)?),
+            false => self.alter(context, event.before(), visit),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::{SchemaChange, TableChange};
+    use crate::event::{Hint, SchemaChange, TableChange};
     use crate::listener::{
-        ColumnAdded, ColumnDropped, ColumnRenamed, OutOfOrder, TableCreated, TableDropped,
-        TableRenamed,
+        Alteration, OutOfOrder, TableAltered, TableCreated, TableDropped, TableRenamed,
     };
     use crate::model::{ColumnModel, ColumnType, TableModel};
     use crate::position::Position;
@@ -392,24 +383,14 @@ mod tests {
             Ok(())
         }
 
-        fn column_renamed(&mut self, _: &(), event: &ColumnRenamed<'_>) -> Result<(), Untold> {
-            self.told.push(format!(
-                "renamed {} to {}",
-                event.previous().name(),
-                event.column().name()
-            ));
-
-            Ok(())
-        }
-
-        fn column_added(&mut self, _: &(), event: &ColumnAdded<'_>) -> Result<(), Untold> {
-            self.told.push(format!("added {}", event.column().name()));
-
-            Ok(())
-        }
-
-        fn column_dropped(&mut self, _: &(), event: &ColumnDropped<'_>) -> Result<(), Untold> {
-            self.told.push(format!("dropped {}", event.column().name()));
+        fn table_altered(&mut self, _: &(), event: &TableAltered<'_>) -> Result<(), Untold> {
+            let alterations: Vec<String> = event
+                .alterations()
+                .iter()
+                .map(Alteration::announcement)
+                .collect();
+            self.told
+                .push(format!("altered: {}", alterations.join(", ")));
 
             Ok(())
         }
@@ -435,7 +416,11 @@ mod tests {
     }
 
     fn change(at: i64, tables: Vec<TableChange>) -> SchemaChange<Offset> {
-        SchemaChange::new(Offset(at as u64), RecordedAt::from(at), "", tables)
+        hinted(at, Vec::new(), tables)
+    }
+
+    fn hinted(at: i64, hints: Vec<Hint>, tables: Vec<TableChange>) -> SchemaChange<Offset> {
+        SchemaChange::new(Offset(at as u64), RecordedAt::from(at), "", tables, hints)
     }
 
     fn stories(
@@ -502,7 +487,7 @@ mod tests {
                 people(),
                 vec![
                     "era [\"id\"] 10..15@15".to_owned(),
-                    "added name".to_owned(),
+                    "altered: added name".to_owned(),
                     "era [\"id\", \"name\"] 15@15..20".to_owned()
                 ]
             )]
@@ -521,14 +506,15 @@ mod tests {
                     Offset(99),
                     RecordedAt::from(15),
                     "",
-                    vec![TableChange::Altered(table(people(), &["id", "name"]))]
+                    vec![TableChange::Altered(table(people(), &["id", "name"]))],
+                    Vec::new(),
                 )],
             ),
             [(
                 people(),
                 vec![
                     "era [\"id\"] 10..15@99".to_owned(),
-                    "added name".to_owned(),
+                    "altered: added name".to_owned(),
                     "era [\"id\", \"name\"] 15@99..20".to_owned()
                 ]
             )]
@@ -536,7 +522,7 @@ mod tests {
     }
 
     #[test]
-    fn a_statement_that_changes_a_table_twice_ends_one_era() {
+    fn a_statement_that_changes_a_table_twice_ends_one_era_and_tells_both_changes_at_once() {
         assert_eq!(
             stories(
                 vec![change(
@@ -555,8 +541,7 @@ mod tests {
                 people(),
                 vec![
                     "era [\"id\"] 10..15@15".to_owned(),
-                    "added name".to_owned(),
-                    "added born".to_owned(),
+                    "altered: added name, added born".to_owned(),
                     "era [\"id\", \"name\", \"born\"] 15@15..20".to_owned()
                 ]
             )]
@@ -564,7 +549,7 @@ mod tests {
     }
 
     #[test]
-    fn a_statement_that_steps_through_several_changes_ends_the_era_of_the_schema_before_it() {
+    fn a_statement_that_drops_and_adds_columns_ends_the_era_of_the_schema_before_it() {
         assert_eq!(
             stories(
                 vec![change(
@@ -580,9 +565,37 @@ mod tests {
                 people(),
                 vec![
                     "era [\"id\", \"name\"] 10..15@15".to_owned(),
-                    "dropped name".to_owned(),
-                    "added born".to_owned(),
+                    "altered: dropped name, added born".to_owned(),
                     "era [\"id\", \"born\"] 15@15..20".to_owned()
+                ]
+            )]
+        );
+    }
+
+    #[test]
+    fn a_statement_that_only_describes_columns_ends_no_era() {
+        let described = TableModel::new(
+            people(),
+            vec![
+                ColumnModel::new("id", "BIGINT", ColumnType::Int64, false, None)
+                    .with_comment(Some("who they are")),
+            ],
+            vec!["id".to_owned()],
+        );
+
+        assert_eq!(
+            stories(
+                vec![change(
+                    1,
+                    vec![TableChange::Created(table(people(), &["id"]))]
+                )],
+                vec![change(15, vec![TableChange::Altered(described)])],
+            ),
+            [(
+                people(),
+                vec![
+                    "altered: described id".to_owned(),
+                    "era [\"id\"] 10..20".to_owned()
                 ]
             )]
         );
@@ -600,23 +613,21 @@ mod tests {
                     1,
                     vec![TableChange::Created(table(people(), &["id", "name"]))]
                 )],
-                vec![change(
+                vec![hinted(
                     15,
-                    vec![
-                        TableChange::ColumnRenamed {
-                            table: people(),
-                            from: "name".to_owned(),
-                            to: "full_name".to_owned(),
-                        },
-                        TableChange::Altered(table(people(), &["id", "full_name"])),
-                    ]
+                    vec![Hint::ColumnRename {
+                        table: people(),
+                        from: "name".to_owned(),
+                        to: "full_name".to_owned(),
+                    }],
+                    vec![TableChange::Altered(table(people(), &["id", "full_name"]))]
                 )],
             ),
             [(
                 people(),
                 vec![
                     "era [\"id\", \"name\"] 10..15@15".to_owned(),
-                    "renamed name to full_name".to_owned(),
+                    "altered: renamed name to full_name".to_owned(),
                     "era [\"id\", \"full_name\"] 15@15..20".to_owned()
                 ]
             )]
@@ -631,15 +642,13 @@ mod tests {
                     1,
                     vec![TableChange::Created(table(people(), &["id"]))]
                 )],
-                vec![change(
+                vec![hinted(
                     15,
-                    vec![
-                        TableChange::Renamed {
-                            from: people(),
-                            to: persons(),
-                        },
-                        TableChange::Altered(table(persons(), &["id"])),
-                    ]
+                    vec![Hint::TableRename {
+                        from: people(),
+                        to: persons(),
+                    }],
+                    vec![TableChange::Altered(table(persons(), &["id"]))]
                 )],
             ),
             [(
@@ -662,19 +671,21 @@ mod tests {
                     vec![TableChange::Created(table(people(), &["id"]))]
                 )],
                 vec![
-                    change(
+                    hinted(
                         12,
-                        vec![TableChange::Renamed {
+                        vec![Hint::TableRename {
                             from: people(),
                             to: persons(),
-                        }]
+                        }],
+                        vec![]
                     ),
-                    change(
+                    hinted(
                         15,
-                        vec![TableChange::Renamed {
+                        vec![Hint::TableRename {
                             from: persons(),
                             to: pets(),
-                        }]
+                        }],
+                        vec![]
                     ),
                 ],
             ),
@@ -712,21 +723,21 @@ mod tests {
     }
 
     #[test]
-    fn a_table_dropped_within_the_window_is_told_nothing_more() {
-        assert!(
+    fn a_table_dropped_within_the_window_is_told_its_drop() {
+        assert_eq!(
             stories(
                 vec![change(
                     1,
                     vec![TableChange::Created(table(people(), &["id"]))]
                 )],
                 vec![change(15, vec![TableChange::Dropped(people())])],
-            )
-            .is_empty()
+            ),
+            [(people(), vec!["dropped shop.people".to_owned()])]
         );
     }
 
     #[test]
-    fn a_table_dropped_and_created_again_lives_only_from_its_new_creation() {
+    fn a_table_dropped_and_created_again_is_told_its_drop_apart_from_its_new_creation() {
         assert_eq!(
             stories(
                 vec![change(
@@ -741,13 +752,30 @@ mod tests {
                     ),
                 ],
             ),
-            [(
-                people(),
+            [
+                (people(), vec!["dropped shop.people".to_owned()]),
+                (
+                    people(),
+                    vec![
+                        "created shop.people".to_owned(),
+                        "era [\"id\", \"name\"] 16@16..20".to_owned()
+                    ]
+                )
+            ]
+        );
+    }
+
+    #[test]
+    fn a_table_created_and_dropped_within_the_window_leaves_nothing_to_tell() {
+        assert!(
+            stories(
+                vec![],
                 vec![
-                    "created shop.people".to_owned(),
-                    "era [\"id\", \"name\"] 16@16..20".to_owned()
-                ]
-            )]
+                    change(12, vec![TableChange::Created(table(pets(), &["id"]))]),
+                    change(15, vec![TableChange::Dropped(pets())]),
+                ],
+            )
+            .is_empty()
         );
     }
 
@@ -808,7 +836,7 @@ mod tests {
                 people(),
                 vec![
                     "era [\"id\"] 10..10@10".to_owned(),
-                    "added name".to_owned(),
+                    "altered: added name".to_owned(),
                     "era [\"id\", \"name\"] 10@10..20".to_owned()
                 ]
             )]

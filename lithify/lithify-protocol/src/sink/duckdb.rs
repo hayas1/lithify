@@ -33,7 +33,7 @@ impl DuckDbWarehouse {
 }
 
 impl Warehouse for DuckDbWarehouse {
-    type Config = config::Store;
+    type Config = config::Config;
 
     fn identifier(&self, name: &str) -> SqlString {
         SqlString::from(format!("\"{name}\""))
@@ -83,6 +83,25 @@ impl Warehouse for DuckDbWarehouse {
             }
             unsupported @ ColumnType::Unsupported(_) => Err(UnsupportedColumn::new(unsupported)),
         }
+    }
+
+    fn unix_millis(&self, expression: &SqlString) -> SqlString {
+        SqlString::from(format!("epoch_ms({expression})"))
+    }
+
+    fn select_existence(&self, table: &TablePath) -> SqlString {
+        SqlString::from(format!(
+            "SELECT COUNT(*) AS {} FROM information_schema.tables WHERE table_schema = {} AND table_name = {}",
+            self.identifier("count"),
+            self.literal(table.namespace()),
+            self.literal(table.name())
+        ))
+    }
+
+    fn timestamp_millis(&self, milliseconds: i64) -> SqlString {
+        SqlString::from(format!(
+            "(TIMESTAMPTZ '1970-01-01 00:00:00+00' + INTERVAL ({milliseconds}) MILLISECOND)"
+        ))
     }
 
     fn cast_or_null(

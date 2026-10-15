@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use lithify_core::position::RecordedAt;
 
-use crate::ArtifactKind;
+use crate::{ArtifactKind, Schedule};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -289,6 +289,8 @@ pub struct ArtifactTargets {
     snapshot: String,
     history: String,
     shard: String,
+    #[serde(default)]
+    schedule: Schedule,
 }
 
 impl ArtifactTargets {
@@ -301,6 +303,10 @@ impl ArtifactTargets {
 
     pub fn shard(&self) -> &str {
         &self.shard
+    }
+
+    pub fn schedule(&self) -> Schedule {
+        self.schedule
     }
 }
 
@@ -498,6 +504,28 @@ mod tests {
             "mysql_shop_history"
         );
         assert_eq!(artifacts.shard(), "%Y%m%d");
+    }
+
+    #[test]
+    fn a_sink_builds_its_artifacts_daily_unless_the_pipeline_says_otherwise() {
+        let written = wiring(&format!(
+            "{SERVER}\n[[sink]]\n{NAMED}{WAREHOUSE}change_log = \"mysql_shop_cdc\"\n{ARTIFACTS}artifacts.schedule = \"daily\"\n"
+        ));
+
+        assert_eq!(sinks()[1].artifacts().schedule(), Schedule::Daily);
+        assert_eq!(
+            written.sinks().unwrap()[0].artifacts().schedule(),
+            Schedule::Daily
+        );
+    }
+
+    #[test]
+    fn a_schedule_this_program_does_not_keep_is_rejected() {
+        let unknown = toml::from_str::<Wiring<Captured, Sunk>>(&format!(
+            "{SERVER}\n[[sink]]\n{NAMED}{WAREHOUSE}{ARTIFACTS}artifacts.schedule = \"fortnightly\"\n"
+        ));
+
+        assert!(unknown.is_err());
     }
 
     #[test]
