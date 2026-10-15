@@ -119,8 +119,9 @@ impl Dialect for MySql {
 #[cfg(test)]
 mod tests {
     use super::super::Debezium;
+    use super::super::tests::described;
     use super::*;
-    use lithify_core::event::{Hint, MalformedEvent, TableChange};
+    use lithify_core::event::{Hint, MalformedEvent};
     use serde_json::{Value, json};
 
     fn source(source: Value) -> MySqlSource {
@@ -240,9 +241,10 @@ mod tests {
             }))
             .unwrap();
 
-        let TableChange::Created(table) = change.tables().next().unwrap() else {
-            panic!("expected a created table");
-        };
+        let created = change.tables().next().unwrap();
+        let table = created.table().unwrap();
+
+        assert!(created.is_initialization());
         assert_eq!(
             table.column("amount").unwrap().column_type(),
             &ColumnType::Decimal {
@@ -293,11 +295,7 @@ mod tests {
             Hint::TableRename { from, to } => format!("renamed {from} to {to}"),
             Hint::ColumnRename { table, from, to } => format!("renamed {table}.{from} to {to}"),
         });
-        let tables = change.tables().map(|table| match table {
-            TableChange::Altered(table) => format!("altered {}", table.id()),
-            TableChange::Created(table) => format!("created {}", table.id()),
-            TableChange::Dropped(id) => format!("dropped {id}"),
-        });
+        let tables = change.tables().map(described);
 
         hints.chain(tables).collect()
     }

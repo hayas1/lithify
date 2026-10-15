@@ -4,18 +4,47 @@ use crate::model::{TableId, TableModel};
 use crate::position::RecordedAt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TableChange {
-    Created(TableModel),
-    Altered(TableModel),
-    Dropped(TableId),
+pub struct TableChange {
+    id: TableId,
+    table: Option<TableModel>,
+    initialization: bool,
 }
 
 impl TableChange {
-    pub fn id(&self) -> &TableId {
-        match self {
-            Self::Created(table) | Self::Altered(table) => table.id(),
-            Self::Dropped(id) => id,
+    pub fn initialized(table: TableModel) -> Self {
+        Self {
+            id: table.id().clone(),
+            table: Some(table),
+            initialization: true,
         }
+    }
+
+    pub fn altered(table: TableModel) -> Self {
+        Self {
+            id: table.id().clone(),
+            table: Some(table),
+            initialization: false,
+        }
+    }
+
+    pub fn dropped(id: TableId) -> Self {
+        Self {
+            id,
+            table: None,
+            initialization: false,
+        }
+    }
+
+    pub fn id(&self) -> &TableId {
+        &self.id
+    }
+
+    pub fn table(&self) -> Option<&TableModel> {
+        self.table.as_ref()
+    }
+
+    pub fn is_initialization(&self) -> bool {
+        self.initialization
     }
 }
 
@@ -107,19 +136,16 @@ impl<P> SchemaChange<P> {
         recorded_at: RecordedAt,
         statement: &str,
         tables: Vec<TableChange>,
+        hints: Vec<Hint>,
     ) -> Self {
         Self {
             position,
             recorded_at,
             statement: statement.to_owned(),
             tables,
-            hints: Vec::new(),
+            hints,
             captured: false,
         }
-    }
-
-    pub fn with_hints(self, hints: Vec<Hint>) -> Self {
-        Self { hints, ..self }
     }
 
     pub fn captured(self) -> Self {
@@ -157,9 +183,52 @@ impl std::error::Error for MalformedEvent {}
 mod tests {
     use super::*;
 
+    use crate::model::{ColumnModel, ColumnType};
+
+    fn customers() -> TableModel {
+        TableModel::new(
+            TableId::new("shop", "customers"),
+            vec![ColumnModel::new(
+                "id",
+                "BIGINT",
+                ColumnType::Int64,
+                false,
+                None,
+            )],
+            vec!["id".to_owned()],
+        )
+    }
+
+    #[test]
+    fn an_initialized_table_carries_its_definition_and_is_an_initialization() {
+        let change = TableChange::initialized(customers());
+
+        assert_eq!(change.id(), &TableId::new("shop", "customers"));
+        assert_eq!(change.table(), Some(&customers()));
+        assert!(change.is_initialization());
+    }
+
+    #[test]
+    fn an_altered_table_is_defined_without_being_initialized() {
+        let change = TableChange::altered(customers());
+
+        assert_eq!(change.id(), &TableId::new("shop", "customers"));
+        assert_eq!(change.table(), Some(&customers()));
+        assert!(!change.is_initialization());
+    }
+
+    #[test]
+    fn a_dropped_table_is_left_without_a_definition() {
+        let change = TableChange::dropped(TableId::new("shop", "customers"));
+
+        assert_eq!(change.id(), &TableId::new("shop", "customers"));
+        assert_eq!(change.table(), None);
+        assert!(!change.is_initialization());
+    }
+
     #[test]
     fn a_schema_change_is_taken_at_the_source_unless_marked_captured() {
-        let change = SchemaChange::new(1, RecordedAt::from(1), "", Vec::new());
+        let change = SchemaChange::new(1, RecordedAt::from(1), "", Vec::new(), Vec::new());
 
         assert!(!change.is_captured());
         assert!(change.captured().is_captured());

@@ -160,9 +160,9 @@ impl<D: Dialect> Debezium<D> {
         };
 
         match change.r#type.as_str() {
-            "CREATE" => Ok(TableChange::Created(table(change.table)?)),
-            "ALTER" => Ok(TableChange::Altered(table(change.table)?)),
-            "DROP" => Ok(TableChange::Dropped(id)),
+            "CREATE" => Ok(TableChange::initialized(table(change.table)?)),
+            "ALTER" => Ok(TableChange::altered(table(change.table)?)),
+            "DROP" => Ok(TableChange::dropped(id)),
             _ => Err(MalformedEvent::UnknownTableChange(change.r#type)),
         }
     }
@@ -269,8 +269,8 @@ impl<D: Dialect> SchemaChangeLog for Debezium<D> {
             RecordedAt::from(statement.ts_ms),
             &statement.ddl,
             tables,
-        )
-        .with_hints(hints);
+            hints,
+        );
 
         match self.captured(&statement.source) {
             true => Ok(change.captured()),
@@ -298,10 +298,18 @@ impl<D: Dialect> RowChangeLog for Debezium<D> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::mysql::MySql;
     use super::*;
     use serde_json::json;
+
+    pub(crate) fn described(table: &TableChange) -> String {
+        match table.table() {
+            Some(_) if table.is_initialization() => format!("created {}", table.id()),
+            Some(_) => format!("altered {}", table.id()),
+            None => format!("dropped {}", table.id()),
+        }
+    }
 
     #[test]
     fn a_statement_survives_a_round_trip_through_its_payload() {
@@ -362,9 +370,10 @@ mod tests {
             }))
             .unwrap();
 
-        let Some(TableChange::Altered(table)) = statement.tables().next() else {
-            panic!("an alteration of one table");
-        };
+        let change = statement.tables().next().unwrap();
+        let table = change.table().unwrap();
+
+        assert!(!change.is_initialization());
 
         assert_eq!(
             table.columns().map(ColumnModel::name).collect::<Vec<_>>(),
