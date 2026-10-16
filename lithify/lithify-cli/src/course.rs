@@ -2,13 +2,14 @@ use chrono::{DateTime, NaiveDate, Utc};
 
 use lithify_config::ArtifactKind;
 use lithify_config::infra::{Sink, Source};
+use lithify_core::build_log::BuildLog;
 use lithify_core::sink::WarehouseClient;
 use lithify_core::window::Window;
 
 use crate::catch_up::CatchUp;
 use crate::journal::Journal;
 use crate::pipeline::{Capture, Warehouse};
-use crate::plan::{Base, Tables};
+use crate::plan::Tables;
 use crate::settlement::Settlement;
 use crate::shard::Shard;
 use crate::unrunnable::Unrunnable;
@@ -44,15 +45,15 @@ impl Course {
 
 pub struct Itinerary {
     windows: Vec<Window>,
-    base: Base,
+    previous: Vec<BuildLog>,
     tables: Tables,
 }
 
 impl Itinerary {
-    pub fn new(windows: Vec<Window>, base: Base, tables: Tables) -> Self {
+    pub fn new(windows: Vec<Window>, previous: Vec<BuildLog>, tables: Tables) -> Self {
         Self {
             windows,
-            base,
+            previous,
             tables,
         }
     }
@@ -61,16 +62,16 @@ impl Itinerary {
         self,
         settlement: &S,
         journal: &mut Journal,
-        mut plan: impl FnMut(&Window, &Base, &Tables) -> Result<S::Output, Unrunnable>,
+        mut plan: impl FnMut(&Window, &[BuildLog], &Tables) -> Result<S::Output, Unrunnable>,
     ) -> Result<(), Unrunnable> {
-        let mut base = self.base;
+        let mut previous = self.previous;
 
         for window in self.windows {
             journal.window(&window);
-            if !settlement.report(&window, plan(&window, &base, &self.tables)?, journal)? {
-                break;
+            match settlement.report(&window, plan(&window, &previous, &self.tables)?, journal)? {
+                Some(built) => previous = built,
+                None => break,
             }
-            base = Base::Shard(window);
         }
 
         Ok(())
@@ -200,10 +201,10 @@ pub(crate) mod tests {
         course.itinerary(sink, source, at(now), client)?.settle(
             &settlement,
             &mut journal,
-            |window, base, tables| {
+            |window, previous, tables| {
                 source.capture().with_duckdb_change_logs(
                     source.topic_prefix().unwrap(),
-                    SnapshotPlan::new(client, sink, window, base, tables, &settlement),
+                    SnapshotPlan::new(client, sink, window, previous, tables, &settlement),
                 )
             },
         )?;

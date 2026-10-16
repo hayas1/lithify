@@ -8,7 +8,7 @@ use lithify_core::sink::WarehouseClient;
 
 use crate::course::Itinerary;
 use crate::pipeline::{Capture, Warehouse};
-use crate::plan::{Base, Tables};
+use crate::plan::Tables;
 use crate::resumption::Resumption;
 use crate::unrunnable::Unrunnable;
 
@@ -29,15 +29,11 @@ impl<'a> CatchUp<'a> {
         Unrunnable: From<K::Error>,
     {
         // TODO: rebuild only the tables a window is missing rather than every table.
-        let start = self.resumption(client)?.start();
+        let resumption = self.resumption(client)?;
 
         Ok(Itinerary::new(
-            self.sink
-                .artifacts()
-                .schedule()
-                .windows(start, RecordedAt::from(self.now))
-                .collect(),
-            Base::recorded(client, self.namespace(), start, self.source.since())?,
+            resumption.windows(self.sink.artifacts().schedule(), RecordedAt::from(self.now)),
+            resumption.previous(client, self.namespace())?,
             Tables::Every,
         ))
     }
@@ -103,6 +99,42 @@ mod tests {
                 ("8".to_owned(), "kept".to_owned())
             ]
         );
+    }
+
+    #[test]
+    fn a_pipeline_built_for_the_first_time_builds_only_the_shard_closing_at_the_last_midnight() {
+        let pipeline = pipeline();
+        let client = logged(PEOPLE, &[]);
+
+        settle(&pipeline, &client, &Course::CatchUp, "2026-09-22T05:00:00Z").unwrap();
+
+        assert_eq!(
+            rows(
+                &client,
+                "SELECT target, strftime(window_from, '%Y-%m-%d') || '..' || strftime(window_to, '%Y-%m-%d') FROM mysql_shop._lithify_log WHERE status = 'succeeded' ORDER BY id"
+            ),
+            [(
+                "mysql_shop.people_20260921".to_owned(),
+                "1970-01-01..2026-09-22".to_owned()
+            )]
+        );
+        assert_eq!(
+            rows(
+                &client,
+                "SELECT id::VARCHAR, 'kept' FROM mysql_shop.people_20260921 ORDER BY id"
+            ),
+            [("8".to_owned(), "kept".to_owned())]
+        );
+    }
+
+    #[test]
+    fn a_pipeline_built_for_the_first_time_before_its_first_midnight_builds_nothing() {
+        let pipeline = pipeline();
+        let client = logged(PEOPLE, &[]);
+
+        let journal = settle(&pipeline, &client, &Course::CatchUp, "1970-01-01T23:00:00Z").unwrap();
+
+        assert_eq!(journal.entries().count(), 0);
     }
 
     #[test]

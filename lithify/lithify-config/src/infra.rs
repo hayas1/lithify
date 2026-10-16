@@ -133,9 +133,7 @@ impl<C: Clone> WiredSource<C> {
         let name = wired.name.ok_or(Miswiring::SourceWithoutName)?;
 
         Ok(Source {
-            since: wired
-                .since
-                .ok_or_else(|| Miswiring::SourceWithoutSince(name.clone()))?,
+            since: wired.since.unwrap_or(DateTime::UNIX_EPOCH),
             capture: wired
                 .capture
                 .ok_or_else(|| Miswiring::SourceWithoutCapture(name.clone()))?,
@@ -193,7 +191,6 @@ pub enum Miswiring {
     WithoutSources,
     WithoutSinks,
     SourceWithoutName,
-    SourceWithoutSince(String),
     SourceWithoutCapture(String),
     SourceNamedTwice(String),
     SourcesTakingOverTogether(String, String),
@@ -210,15 +207,15 @@ impl Display for Miswiring {
             Self::WithoutSources => write!(formatter, "no server is captured"),
             Self::WithoutSinks => write!(formatter, "nothing holds the change log"),
             Self::SourceWithoutName => write!(formatter, "a server is captured without a name"),
-            Self::SourceWithoutSince(name) => {
-                write!(formatter, "{name} does not say since when it is captured")
-            }
             Self::SourceWithoutCapture(name) => {
                 write!(formatter, "{name} does not say how it is captured")
             }
             Self::SourceNamedTwice(name) => write!(formatter, "{name} is captured twice"),
             Self::SourcesTakingOverTogether(taking, over) => {
-                write!(formatter, "{taking} and {over} take over at the same time")
+                write!(
+                    formatter,
+                    "{taking} and {over} take over at the same time; does one of them forget to say since when it is captured?"
+                )
             }
             Self::SinkWithoutName(at) => write!(formatter, "sink {} is not named", at + 1),
             Self::SinkWithoutChangeLog(name) => {
@@ -529,16 +526,13 @@ mod tests {
     }
 
     #[test]
-    fn a_source_that_says_since_when_nowhere_is_rejected() {
+    fn a_source_that_says_since_when_nowhere_is_captured_since_the_epoch() {
         let wiring = wired(
             "[[source]]\nname = \"primary\"\ncapture.debezium.dialect = \"mysql\"",
             &format!("change_log = \"mysql_shop_cdc\"\n{WAREHOUSE}{ARTIFACTS}"),
         );
 
-        assert_eq!(
-            wiring.sources().unwrap_err(),
-            Miswiring::SourceWithoutSince("primary".to_owned())
-        );
+        assert_eq!(wiring.sources().unwrap()[0].since(), RecordedAt::from(0));
     }
 
     #[test]
@@ -551,6 +545,27 @@ mod tests {
         assert_eq!(
             wiring.sources().unwrap_err(),
             Miswiring::SourceWithoutCapture("primary".to_owned())
+        );
+    }
+
+    #[test]
+    fn two_servers_that_say_since_when_nowhere_take_over_together() {
+        let sinceless = INFRA
+            .replace("since = \"1970-01-01T00:00:00Z\"\n", "")
+            .replace("since = \"2026-09-21T00:00:00Z\"\n", "");
+
+        assert_eq!(
+            wiring(&sinceless).sources().unwrap_err(),
+            Miswiring::SourcesTakingOverTogether("primary".to_owned(), "replica".to_owned())
+        );
+    }
+
+    #[test]
+    fn two_servers_taking_over_together_are_asked_whether_one_forgot_since_when() {
+        assert!(
+            Miswiring::SourcesTakingOverTogether("primary".to_owned(), "replica".to_owned())
+                .to_string()
+                .contains("since")
         );
     }
 

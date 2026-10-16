@@ -22,4 +22,20 @@ impl Window {
     pub fn to(&self) -> &RecordedAt {
         &self.to
     }
+
+    pub fn last(&self) -> RecordedAt {
+        RecordedAt::from(self.to.milliseconds_since_epoch() - 1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_window_last_holds_the_instant_before_it_closes() {
+        let window = Window::new(RecordedAt::from(100), RecordedAt::from(200));
+
+        assert_eq!(window.last(), RecordedAt::from(199));
+    }
 }

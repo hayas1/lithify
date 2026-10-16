@@ -179,10 +179,10 @@ impl Run {
                 course.itinerary(sink, source, self.now, &client)?.settle(
                     settlement,
                     journal,
-                    |window, base, tables| {
+                    |window, previous, tables| {
                         source.capture().with_duckdb_change_logs(
                             topic_prefix,
-                            SnapshotPlan::new(&client, sink, window, base, tables, settlement),
+                            SnapshotPlan::new(&client, sink, window, previous, tables, settlement),
                         )
                     },
                 )
@@ -193,10 +193,10 @@ impl Run {
                 course.itinerary(sink, source, self.now, &client)?.settle(
                     settlement,
                     journal,
-                    |window, base, tables| {
+                    |window, previous, tables| {
                         source.capture().with_bigquery_change_logs(
                             topic_prefix,
-                            SnapshotPlan::new(&client, sink, window, base, tables, settlement),
+                            SnapshotPlan::new(&client, sink, window, previous, tables, settlement),
                         )
                     },
                 )

@@ -1,21 +1,33 @@
-use lithify_core::build_log::BuildLog;
+use lithify_config::Schedule;
+use lithify_core::build_log::{BuildLog, Latest};
 use lithify_core::position::RecordedAt;
+use lithify_core::sink::WarehouseClient;
+use lithify_core::window::Window;
 
 use crate::unrunnable::Unrunnable;
 
-pub struct Resumption {
-    start: RecordedAt,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resumption {
+    FromOrigin(RecordedAt),
+    FromBuilt(RecordedAt),
 }
 
 impl Resumption {
+    pub fn at(start: RecordedAt, origin: RecordedAt) -> Self {
+        match start > origin {
+            true => Self::FromBuilt(start),
+            false => Self::FromOrigin(origin),
+        }
+    }
+
     pub fn read(
         latest: &[BuildLog],
         succeeded: &[BuildLog],
-        since: RecordedAt,
+        origin: RecordedAt,
         capture: &str,
     ) -> Result<Self, Unrunnable> {
         let Some(last_run) = latest.iter().map(BuildLog::run_id).max() else {
-            return Ok(Self { start: since });
+            return Ok(Self::FromOrigin(origin));
         };
         let built_last = latest.iter().filter(|log| log.run_id() == last_run);
 
@@ -26,23 +38,39 @@ impl Resumption {
             });
         }
 
-        // TODO: rewind to since for a table the catalog holds but the build log never saw, and stop
-        // waiting on one the build log holds but the catalog no longer does.
+        // TODO: rewind to the origin for a table the catalog holds but the build log never saw, and
+        // stop waiting on one the build log holds but the catalog no longer does.
         let start = latest
             .iter()
             .filter(|log| log.table_to().is_some())
             .map(|log| {
                 log.last_success(succeeded)
-                    .map_or(since, |built| *built.window().to())
+                    .map_or(origin, |built| *built.window().to())
             })
             .min()
-            .map_or(since, |start| start.max(since));
+            .unwrap_or(origin);
 
-        Ok(Self { start })
+        Ok(Self::at(start, origin))
     }
 
-    pub fn start(&self) -> RecordedAt {
-        self.start
+    pub fn windows(&self, schedule: Schedule, until: RecordedAt) -> Vec<Window> {
+        match self {
+            Self::FromOrigin(origin) => schedule.span(*origin, until).into_iter().collect(),
+            Self::FromBuilt(start) => schedule.windows(*start, until).collect(),
+        }
+    }
+
+    pub fn previous<K>(&self, client: &K, namespace: &str) -> Result<Vec<BuildLog>, Unrunnable>
+    where
+        K: WarehouseClient,
+        Unrunnable: From<K::Error>,
+    {
+        match self {
+            Self::FromOrigin(_) => Ok(Vec::new()),
+            Self::FromBuilt(start) => {
+                Ok(client.latest_build_logs(namespace, &Latest::SucceededUntil(*start))?)
+            }
+        }
     }
 }
 
@@ -60,7 +88,7 @@ mod tests {
     use super::*;
 
     const CAPTURE: &str = r#"{"debezium":{"dialect":"mysql"}}"#;
-    const SINCE: i64 = 0;
+    const ORIGIN: i64 = 0;
     const W1: (i64, i64) = (1789862400000, 1789948800000);
     const W2: (i64, i64) = (1789948800000, 1790035200000);
 
@@ -112,15 +140,16 @@ mod tests {
         )
     }
 
-    fn start(latest: &[BuildLog], succeeded: &[BuildLog]) -> RecordedAt {
-        Resumption::read(latest, succeeded, RecordedAt::from(SINCE), CAPTURE)
-            .unwrap()
-            .start()
+    fn resumed(latest: &[BuildLog], succeeded: &[BuildLog]) -> Resumption {
+        Resumption::read(latest, succeeded, RecordedAt::from(ORIGIN), CAPTURE).unwrap()
     }
 
     #[test]
-    fn a_pipeline_nothing_was_built_for_starts_from_when_its_source_is_captured_since() {
-        assert_eq!(start(&[], &[]), RecordedAt::from(SINCE));
+    fn a_pipeline_nothing_was_built_for_starts_from_its_origin() {
+        assert_eq!(
+            resumed(&[], &[]),
+            Resumption::FromOrigin(RecordedAt::from(ORIGIN))
+        );
     }
 
     #[test]
@@ -129,8 +158,8 @@ mod tests {
         let pets = logged(2, "pets", W2, Status::Succeeded);
 
         assert_eq!(
-            start(&[people.clone(), pets.clone()], &[people, pets]),
-            RecordedAt::from(W2.1)
+            resumed(&[people.clone(), pets.clone()], &[people, pets]),
+            Resumption::FromBuilt(RecordedAt::from(W2.1))
         );
     }
 
@@ -141,19 +170,19 @@ mod tests {
         let pets_before = logged(1, "pets", W1, Status::Succeeded);
 
         assert_eq!(
-            start(&[people.clone(), pets], &[people, pets_before]),
-            RecordedAt::from(W1.1)
+            resumed(&[people.clone(), pets], &[people, pets_before]),
+            Resumption::FromBuilt(RecordedAt::from(W1.1))
         );
     }
 
     #[test]
-    fn a_table_never_built_takes_the_pipeline_back_to_when_its_source_is_captured_since() {
+    fn a_table_never_built_takes_the_pipeline_back_to_its_origin() {
         let people = logged(2, "people", W2, Status::Succeeded);
         let pets = logged(2, "pets", W2, Status::Failed("no era".to_owned()));
 
         assert_eq!(
-            start(&[people.clone(), pets], &[people]),
-            RecordedAt::from(SINCE)
+            resumed(&[people.clone(), pets], &[people]),
+            Resumption::FromOrigin(RecordedAt::from(ORIGIN))
         );
     }
 
@@ -163,8 +192,8 @@ mod tests {
         let left = logged(1, "pets", W1, Status::Succeeded);
 
         assert_eq!(
-            start(&[left.clone(), people.clone()], &[left, people]),
-            RecordedAt::from(W1.1)
+            resumed(&[left.clone(), people.clone()], &[left, people]),
+            Resumption::FromBuilt(RecordedAt::from(W1.1))
         );
     }
 
@@ -179,7 +208,18 @@ mod tests {
             Status::Failed("no era".to_owned()),
         );
 
-        assert_eq!(start(&[renamed], &[before]), RecordedAt::from(W1.1));
+        assert_eq!(
+            resumed(&[renamed], &[before]),
+            Resumption::FromBuilt(RecordedAt::from(W1.1))
+        );
+    }
+
+    #[test]
+    fn a_pipeline_built_up_to_its_origin_starts_from_its_origin() {
+        assert_eq!(
+            Resumption::at(RecordedAt::from(ORIGIN), RecordedAt::from(ORIGIN)),
+            Resumption::FromOrigin(RecordedAt::from(ORIGIN))
+        );
     }
 
     #[test]
@@ -195,7 +235,7 @@ mod tests {
         let changed = Resumption::read(
             std::slice::from_ref(&people),
             std::slice::from_ref(&people),
-            RecordedAt::from(SINCE),
+            RecordedAt::from(ORIGIN),
             CAPTURE,
         );
 

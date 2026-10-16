@@ -46,6 +46,7 @@ Status is one of:
 | History across schema changes | Versions recorded in different eras share one table, as columns are added, dropped, renamed or retyped along the way | Not started | |
 | History appended per window | A window appends its versions and closes the ones the window before it left open, rather than rebuilding every version | Not started | |
 | Deletes in history | A deleted row closes its last version instead of disappearing | Not started | |
+| Naming template | Snapshot and history name their tables by one template that reads the schema, the table and the instant a window closes, written in the language of Expressions so it can say whether that instant is read as the end of its day, as 24:00:00, or the start of the next, as 00:00:00, and an hourly or daily shard is named after what it holds | Not started: a shard is named by formatting the last millisecond its window holds with `shard`, which is not checked against the schedule, so a daily schedule with `%Y%m` names every shard of a month alike | |
 | Views | Named by `artifacts` in `table.toml` and created within `lithify catch-up` and `lithify build`, such as a view over the shards of a table | Not started | |
 | Mask columns | `mask` keeps the values of a column out of the artifacts, such as a large document or a personal detail; further masks such as a hash come with the questions written on `Mask` | Partial: `mask` is read from `table.toml` but no artifact applies it | |
 
@@ -65,11 +66,11 @@ The change log only replays if the source and sink connectors write it the way a
 
 | Support | Why | Status | Target |
 | --- | --- | --- | --- |
-| Execute artifacts | `lithify catch-up` builds every window closed since the build log says it was last built, and `lithify build --snapshot <DATE> [--table]` rebuilds one shard onto the one the build log recorded before it, or writes its statements with `--dry-run` | Available | |
+| Execute artifacts | `lithify catch-up` builds every window closed since the build log says it was last built, or, when nothing was built yet, one shard spanning every window closed since the source's `since`, which defaults to the epoch; a shard is dated by the last day its window holds; and `lithify build --snapshot <DATE> [--table]` rebuilds one shard onto the one the build log recorded before it, or writes its statements with `--dry-run` | Available | |
 | Record runs as a table | Which window was built when, by which version, with what outcome, so the next run, a backfill and an audit read the same record | Available: `_lithify_log` per artifact namespace, with the names a table opens and closes each window with and whether it was created, renamed or dropped in it | |
 | Resume from the last built window | A daily run picks its window from what was built rather than from the clock, and a missed day is caught up | Partial: every table of a window is rebuilt rather than only the missing ones; a table the catalog holds but the build log never saw stops the build, and one the build log holds but the catalog dropped without a logged drop holds catch-up back | |
-| Backfill a range | Rebuild a range of windows in order, each on top of the one before it | Partial: `lithify build --snapshot` rebuilds one shard and the next catch-up rebuilds what folded onto it | |
-| Schedules beyond daily | A period and an offset, so a window can close every hour or at an hour other than midnight | Not started: `Schedule` only has `Daily` | |
+| Backfill a range | Rebuild a range of windows in order, each on top of the one before it | Partial: `lithify build --snapshot` rebuilds one shard and the next catch-up rebuilds what folded onto it, but a date inside the shard a first catch-up spanned has no shard to fold onto | |
+| Schedules beyond daily | A period and an offset, so a window can close every hour or at an hour other than midnight, such as an hourly snapshot | Not started: `Schedule` only has `Daily` | |
 | Stream the change log | `lithify stream` keeps the artifacts current as changes arrive rather than once a window closes | Not started | |
 | Wait for the change log to be complete | A window is built only once the sinks have written everything up to its end | Not started | |
 | Publish atomically | Consumers never see a window half built across tables | Not started | |
@@ -81,6 +82,7 @@ The change log only replays if the source and sink connectors write it the way a
 
 | Support | Why | Status | Target |
 | --- | --- | --- | --- |
+| Expressions | One small expression language shared by the naming template and the end-to-end scenarios, such as an instant reckoned from now that a scenario compares a shard with | Not started | |
 | Overview of the build log | `lithify serve` lists the latest build of each table and what `lithify check` finds, per sink | Available: behind the `serve` feature, rendered on the server | |
 | Assemble a rebuild | The build page assembles the `lithify build --snapshot` that rebuilds a shard, narrowed to the tables chosen | Available | |
 | Run a retry from the page | A failed build is rebuilt from the page rather than by copying the command it assembles | Not started | |
@@ -103,6 +105,7 @@ The change log only replays if the source and sink connectors write it the way a
 | Structured logs | Logs a platform can index and alert on | In progress: tracing | |
 | Exit status by cause | A scheduler retries what may pass next time and pages on what will not | Partial: success or failure only | |
 | Alert on check | `lithify check` lists what should have been built by now but was not, to be paged on | Partial: `lithify check` fails with a nonzero exit status on any discrepancy, but nothing hands it to an alerting platform, and a table the build log never saw is not expected | |
+| Watch for missing shards | A watcher names each shard that should stand by now through the naming template and logs the ones the warehouse does not hold, without trusting the build log to say what was built | Not started: `lithify check` only looks for the targets the build log recorded | |
 | Metrics | Duration, rows and bytes processed per table and window | Not started | |
 | Cost estimate | A dry run reports what a window would scan before it is paid for | Not started | |
 

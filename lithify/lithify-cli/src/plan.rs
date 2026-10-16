@@ -1,16 +1,14 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use duckdb::types::FromSql;
 use google_cloud_bigquery::error::RowError;
 use google_cloud_bigquery::query::Row;
 
 use lithify_config::infra::Sink;
-use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
-use lithify_core::build_log::Latest;
+use lithify_core::artifact::{Artifact, ArtifactBuilder};
+use lithify_core::build_log::BuildLog;
 use lithify_core::era::EraTracker;
 use lithify_core::model::TableId;
-use lithify_core::position::RecordedAt;
-use lithify_core::sink::TablePath;
 use lithify_core::sink::WarehouseClient;
 use lithify_core::source::{ChangeLogs, RowChangeLog, SchemaChangeLog, SchemaChangeStream};
 use lithify_core::window::Window;
@@ -25,74 +23,6 @@ use crate::unrunnable::Unrunnable;
 
 type BuilderOf<'b, C, K> =
     SnapshotBuilder<'b, <C as ChangeLogs>::Row, <K as WarehouseClient>::Warehouse>;
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum Base {
-    #[default]
-    Nothing,
-    Recorded(BTreeMap<TableId, TablePath>),
-    Shard(Window),
-}
-
-impl Base {
-    pub fn recorded<K>(
-        client: &K,
-        namespace: &str,
-        start: RecordedAt,
-        since: RecordedAt,
-    ) -> Result<Self, Unrunnable>
-    where
-        K: WarehouseClient,
-        Unrunnable: From<K::Error>,
-    {
-        if start <= since {
-            return Ok(Self::Nothing);
-        }
-
-        Ok(Self::Recorded(
-            client
-                .latest_build_logs(namespace, &Latest::SucceededUntil(start))?
-                .into_iter()
-                .filter_map(|log| Some((log.table_to()?.clone(), log.target()?.clone())))
-                .collect(),
-        ))
-    }
-
-    fn verify<L: RowChangeLog, W: lithify_core::sink::Warehouse>(
-        &self,
-        window: &Window,
-        builders: &[SnapshotBuilder<'_, L, W>],
-    ) -> Result<(), Unrunnable> {
-        let tables: Vec<_> = match self {
-            Self::Nothing | Self::Shard(_) => Vec::new(),
-            Self::Recorded(_) => builders
-                .iter()
-                .filter_map(SnapshotBuilder::missing_base)
-                .cloned()
-                .collect(),
-        };
-
-        match tables.is_empty() {
-            true => Ok(()),
-            false => Err(Unrunnable::Baseless {
-                window: window.clone(),
-                tables,
-            }),
-        }
-    }
-
-    fn of(
-        &self,
-        snapshot: &Snapshot,
-        table: &TableId,
-    ) -> Result<Option<TablePath>, UnbuildableArtifact> {
-        match self {
-            Self::Nothing => Ok(None),
-            Self::Recorded(targets) => Ok(targets.get(table).cloned()),
-            Self::Shard(window) => snapshot.target(table, window).map(Some),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Tables {
@@ -126,7 +56,7 @@ pub struct SnapshotPlan<'a, K, S> {
     client: &'a K,
     sink: &'a Sink<Warehouse>,
     window: &'a Window,
-    base: &'a Base,
+    previous: &'a [BuildLog],
     tables: &'a Tables,
     settlement: &'a S,
 }
@@ -136,7 +66,7 @@ impl<'a, K, S: Settlement> SnapshotPlan<'a, K, S> {
         client: &'a K,
         sink: &'a Sink<Warehouse>,
         window: &'a Window,
-        base: &'a Base,
+        previous: &'a [BuildLog],
         tables: &'a Tables,
         settlement: &'a S,
     ) -> Self {
@@ -144,7 +74,7 @@ impl<'a, K, S: Settlement> SnapshotPlan<'a, K, S> {
             client,
             sink,
             window,
-            base,
+            previous,
             tables,
             settlement,
         }
@@ -159,9 +89,28 @@ impl<'a, K, S: Settlement> SnapshotPlan<'a, K, S> {
     {
         let snapshot = self.sink.snapshot();
         let builders = self.tables.narrow(self.builders(&snapshot, &logs)?)?;
-        self.base.verify(self.window, &builders)?;
+        self.verify(&builders)?;
 
         self.settlement.settle(self.client, &builders)
+    }
+
+    fn verify<L: RowChangeLog, W: lithify_core::sink::Warehouse>(
+        &self,
+        builders: &[SnapshotBuilder<'_, L, W>],
+    ) -> Result<(), Unrunnable> {
+        let tables: Vec<_> = builders
+            .iter()
+            .filter_map(SnapshotBuilder::missing_base)
+            .cloned()
+            .collect();
+
+        match tables.is_empty() {
+            true => Ok(()),
+            false => Err(Unrunnable::Baseless {
+                window: self.window.clone(),
+                tables,
+            }),
+        }
     }
 
     fn builders<'b, C>(
@@ -181,7 +130,9 @@ impl<'a, K, S: Settlement> SnapshotPlan<'a, K, S> {
                 logs.row_changes(),
                 table.clone(),
                 window,
-                self.base.of(snapshot, table)?,
+                self.previous
+                    .iter()
+                    .find(|log| log.table_to() == Some(table)),
             )
         });
         let catalog = self.client.replay::<Unrunnable, _>(
@@ -227,7 +178,7 @@ pub(crate) mod tests {
 
     use lithify_config::Pipeline;
     use lithify_core::position::RecordedAt;
-    use lithify_core::sink::WarehouseClient;
+    use lithify_core::sink::{TablePath, WarehouseClient};
     use lithify_protocol::DuckDbWarehouse;
     use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbClient};
 
@@ -269,10 +220,7 @@ pub(crate) mod tests {
             DuckDbWarehouse::new(sink.change_log()),
         );
         client.execute(&SqlString::from(CHANGE_LOGS)).unwrap();
-        let window = Window::new(
-            RecordedAt::from(1789862400000),
-            RecordedAt::from(1789948800000),
-        );
+        let window = Window::new(RecordedAt::from(0), RecordedAt::from(1789948800000));
 
         let statements = source
             .capture()
@@ -282,7 +230,7 @@ pub(crate) mod tests {
                     &client,
                     sink,
                     &window,
-                    &Base::default(),
+                    &[],
                     &Tables::Every,
                     &DryRun::new(Path::new("plans"), "rustfs"),
                 ),
@@ -304,7 +252,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_plan_onto_an_earlier_window_folds_onto_the_snapshot_it_left() {
+    fn a_plan_nothing_was_built_before_finds_the_tables_standing_when_it_opens_baseless() {
         let pipeline = pipeline();
         let source = pipeline.sources().next().unwrap();
         let sink = pipeline
@@ -320,9 +268,43 @@ pub(crate) mod tests {
             RecordedAt::from(1789862400000),
             RecordedAt::from(1789948800000),
         );
-        let onto = DateTime::parse_from_rfc3339("2026-09-19T00:00:00Z")
-            .unwrap()
-            .to_utc();
+
+        let baseless = source.capture().with_duckdb_change_logs(
+            source.topic_prefix().unwrap(),
+            SnapshotPlan::new(
+                &client,
+                sink,
+                &window,
+                &[],
+                &Tables::Every,
+                &DryRun::new(Path::new("plans"), "rustfs"),
+            ),
+        );
+
+        assert!(matches!(
+            baseless,
+            Err(Unrunnable::Baseless { tables, .. }) if tables == [TableId::new("shop", "people")]
+        ));
+    }
+
+    #[test]
+    fn a_plan_folds_each_table_onto_the_shard_its_last_build_log_targeted() {
+        let pipeline = pipeline();
+        let source = pipeline.sources().next().unwrap();
+        let sink = pipeline
+            .sinks()
+            .find(|sink| sink.name() == "rustfs")
+            .unwrap();
+        let client = DuckDbClient::new(
+            Connection::open_in_memory().unwrap(),
+            DuckDbWarehouse::new(sink.change_log()),
+        );
+        client.execute(&SqlString::from(CHANGE_LOGS)).unwrap();
+        let window = Window::new(
+            RecordedAt::from(1789862400000),
+            RecordedAt::from(1789948800000),
+        );
+        let previous = [built_before("people", CAPTURE)];
 
         let statements = source
             .capture()
@@ -332,7 +314,7 @@ pub(crate) mod tests {
                     &client,
                     sink,
                     &window,
-                    &Base::Shard(Window::new(RecordedAt::from(onto), *window.from())),
+                    &previous,
                     &Tables::Every,
                     &DryRun::new(Path::new("plans"), "rustfs"),
                 ),
@@ -343,50 +325,6 @@ pub(crate) mod tests {
             statements[1]
                 .as_str()
                 .contains("  FROM \"mysql_shop\".\"people_20260919\"\n")
-        );
-    }
-
-    #[test]
-    fn a_plan_folds_each_table_onto_the_shard_the_build_log_recorded_for_it() {
-        let pipeline = pipeline();
-        let source = pipeline.sources().next().unwrap();
-        let sink = pipeline
-            .sinks()
-            .find(|sink| sink.name() == "rustfs")
-            .unwrap();
-        let client = DuckDbClient::new(
-            Connection::open_in_memory().unwrap(),
-            DuckDbWarehouse::new(sink.change_log()),
-        );
-        client.execute(&SqlString::from(CHANGE_LOGS)).unwrap();
-        let window = Window::new(
-            RecordedAt::from(1789862400000),
-            RecordedAt::from(1789948800000),
-        );
-        let recorded = Base::Recorded(BTreeMap::from([(
-            TableId::new("shop", "people"),
-            TablePath::new("mysql_shop", "people_recorded"),
-        )]));
-
-        let statements = source
-            .capture()
-            .with_duckdb_change_logs(
-                source.topic_prefix().unwrap(),
-                SnapshotPlan::new(
-                    &client,
-                    sink,
-                    &window,
-                    &recorded,
-                    &Tables::Every,
-                    &DryRun::new(Path::new("plans"), "rustfs"),
-                ),
-            )
-            .unwrap();
-
-        assert!(
-            statements[1]
-                .as_str()
-                .contains("  FROM \"mysql_shop\".\"people_recorded\"\n")
         );
     }
 
@@ -510,10 +448,7 @@ pub(crate) mod tests {
             .sinks()
             .find(|sink| sink.name() == "rustfs")
             .unwrap();
-        let window = Window::new(
-            RecordedAt::from(1789862400000),
-            RecordedAt::from(1789948800000),
-        );
+        let window = Window::new(RecordedAt::from(0), RecordedAt::from(1789948800000));
 
         source
             .capture()
@@ -523,7 +458,7 @@ pub(crate) mod tests {
                     client,
                     sink,
                     &window,
-                    &Base::default(),
+                    &[],
                     &Tables::Every,
                     &Build::new(sink, source).unwrap(),
                 ),

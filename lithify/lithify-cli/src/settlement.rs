@@ -29,7 +29,7 @@ pub trait Settlement {
         window: &Window,
         output: Self::Output,
         journal: &mut Journal,
-    ) -> Result<bool, Unrunnable>;
+    ) -> Result<Option<Vec<BuildLog>>, Unrunnable>;
 }
 
 pub struct DryRun {
@@ -67,7 +67,7 @@ impl Settlement for DryRun {
         window: &Window,
         output: Self::Output,
         journal: &mut Journal,
-    ) -> Result<bool, Unrunnable> {
+    ) -> Result<Option<Vec<BuildLog>>, Unrunnable> {
         let path = self.into.join(format!(
             "{}_{}.sql",
             self.sink,
@@ -89,7 +89,7 @@ impl Settlement for DryRun {
             path.display()
         ));
 
-        Ok(true)
+        Ok(None)
     }
 }
 
@@ -156,11 +156,14 @@ impl Settlement for Build {
         _: &Window,
         output: Self::Output,
         journal: &mut Journal,
-    ) -> Result<bool, Unrunnable> {
+    ) -> Result<Option<Vec<BuildLog>>, Unrunnable> {
         for log in &output {
             journal.built(log);
         }
 
-        Ok(output.iter().all(|log| !log.status().failed()))
+        Ok(output
+            .iter()
+            .all(|log| !log.status().failed())
+            .then_some(output))
     }
 }

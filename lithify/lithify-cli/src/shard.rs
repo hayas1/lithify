@@ -7,7 +7,8 @@ use lithify_core::sink::WarehouseClient;
 
 use crate::course::Itinerary;
 use crate::pipeline::{Capture, Warehouse};
-use crate::plan::{Base, Tables};
+use crate::plan::Tables;
+use crate::resumption::Resumption;
 use crate::unrunnable::Unrunnable;
 
 pub struct Shard<'a> {
@@ -40,14 +41,10 @@ impl<'a> Shard<'a> {
         if *window.to() > RecordedAt::from(self.now) {
             return Err(Unrunnable::Unclosed(window));
         }
-        let base = Base::recorded(
-            client,
-            self.namespace(),
-            *window.from(),
-            self.source.since(),
-        )?;
+        let previous = Resumption::at(*window.from(), self.source.since())
+            .previous(client, self.namespace())?;
 
-        Ok(Itinerary::new(vec![window], base, tables.clone()))
+        Ok(Itinerary::new(vec![window], previous, tables.clone()))
     }
 
     fn namespace(&self) -> &str {

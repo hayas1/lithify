@@ -41,7 +41,7 @@ impl Artifact for Snapshot {
 
     fn target(&self, table: &TableId, window: &Window) -> Result<TablePath, UnbuildableArtifact> {
         let at =
-            DateTime::<Utc>::try_from(*window.from()).map_err(UnbuildableArtifact::Unshardable)?;
+            DateTime::<Utc>::try_from(window.last()).map_err(UnbuildableArtifact::Unshardable)?;
 
         Ok(TablePath::new(
             &self.namespace,
@@ -54,9 +54,15 @@ impl Artifact for Snapshot {
         log: &'a L,
         table: TableId,
         window: &'a Window,
-        base: Option<TablePath>,
+        previous: Option<&BuildLog>,
     ) -> Result<Self::Builder<'a, L, W>, UnbuildableArtifact> {
-        SnapshotBuilder::new(self, log, table, window.clone(), base)
+        SnapshotBuilder::new(
+            self,
+            log,
+            table,
+            window.clone(),
+            previous.and_then(BuildLog::target).cloned(),
+        )
     }
 }
 
@@ -1487,30 +1493,30 @@ mod tests {
     }
 
     #[test]
-    fn a_snapshot_is_named_after_its_table_and_the_day_its_window_opens() {
+    fn a_snapshot_is_named_after_its_table_and_the_last_day_its_window_holds() {
         let snapshot = Snapshot::new("mysql_shop", "%Y%m%d");
-        let window = Window::new(
-            RecordedAt::from(1789862400000),
-            RecordedAt::from(1789948800000),
-        );
 
-        assert_eq!(
-            snapshot
-                .target(&TableId::new("shop", "customers"), &window)
-                .unwrap(),
-            TablePath::new("mysql_shop", "customers_20260920")
-        );
+        for opened in [0, 1789862400000] {
+            let window = Window::new(RecordedAt::from(opened), RecordedAt::from(1789948800000));
+
+            assert_eq!(
+                snapshot
+                    .target(&TableId::new("shop", "customers"), &window)
+                    .unwrap(),
+                TablePath::new("mysql_shop", "customers_20260920")
+            );
+        }
     }
 
     #[test]
-    fn a_window_opening_at_no_instant_a_day_can_hold_names_no_snapshot() {
+    fn a_window_holding_no_instant_a_day_can_hold_names_no_snapshot() {
         let window = Window::new(RecordedAt::from(i64::MAX), RecordedAt::from(i64::MAX));
 
         assert_eq!(
             Snapshot::new("mysql_shop", "%Y%m%d")
                 .target(&TableId::new("shop", "customers"), &window)
                 .unwrap_err(),
-            UnbuildableArtifact::Unshardable(RecordedAt::from(i64::MAX))
+            UnbuildableArtifact::Unshardable(RecordedAt::from(i64::MAX - 1))
         );
     }
 
@@ -1523,7 +1529,7 @@ mod tests {
                 .builder::<Log, Engine>(&Log, TableId::new("shop", "customers"), &window, None)
                 .map(drop)
                 .unwrap_err(),
-            UnbuildableArtifact::Unshardable(RecordedAt::from(i64::MAX))
+            UnbuildableArtifact::Unshardable(RecordedAt::from(i64::MAX - 1))
         );
     }
 
@@ -1552,7 +1558,7 @@ mod tests {
     }
 
     #[test]
-    fn a_snapshot_is_logged_with_the_shard_it_folds_onto_and_the_one_it_builds() {
+    fn a_snapshot_is_logged_folding_onto_the_shard_its_table_was_last_built_into() {
         let window = window();
         let base = TablePath::new("mysql_shop", "customers_20260919");
         let run = Run::new(
@@ -1564,12 +1570,21 @@ mod tests {
             "0.1.0",
         );
         let finished_at = DateTime::from_timestamp_millis(1789949000000).unwrap();
+        let previous = BuildLog::new(
+            &run,
+            Some(TableId::new("shop", "customers")),
+            Some(TableId::new("shop", "customers")),
+            None,
+            Some(base.clone()),
+            Window::new(RecordedAt::from(0), RecordedAt::from(100)),
+            Outcome::new(Status::Succeeded, finished_at),
+        );
         let builder = shop()
             .builder::<Log, Engine>(
                 &Log,
                 TableId::new("shop", "customers"),
                 &window,
-                Some(base.clone()),
+                Some(&previous),
             )
             .unwrap();
 

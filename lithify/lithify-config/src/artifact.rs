@@ -36,6 +36,12 @@ impl Schedule {
             .take_while(move |window| *window.to() <= until)
     }
 
+    pub fn span(self, from: RecordedAt, until: RecordedAt) -> Option<Window> {
+        self.windows(from, until)
+            .last()
+            .map(|last| Window::new(from, *last.to()))
+    }
+
     pub fn shard(self, since: RecordedAt, date: NaiveDate) -> Option<Window> {
         match date.cmp(&DateTime::<Utc>::try_from(since).ok()?.date_naive()) {
             Ordering::Less => None,
@@ -45,10 +51,10 @@ impl Schedule {
     }
 
     pub fn date(self, shard: &Window) -> Option<NaiveDate> {
-        let opened = DateTime::<Utc>::try_from(*shard.from()).ok()?;
+        let held = DateTime::<Utc>::try_from(shard.last()).ok()?;
 
         match self {
-            Self::Daily => Some(opened.date_naive()),
+            Self::Daily => Some(held.date_naive()),
         }
     }
 
@@ -117,6 +123,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_daily_schedule_spans_every_window_closed_since_it_opened_as_one() {
+        assert_eq!(
+            Schedule::Daily.span(at("1970-01-01T00:00:00Z"), at("2026-09-22T05:00:00Z")),
+            Some(Window::new(
+                at("1970-01-01T00:00:00Z"),
+                at("2026-09-22T00:00:00Z")
+            ))
+        );
+        assert_eq!(
+            Schedule::Daily.span(at("2026-09-22T00:00:00Z"), at("2026-09-22T05:00:00Z")),
+            None
+        );
+    }
+
     fn date(iso: &str) -> NaiveDate {
         iso.parse().unwrap()
     }
@@ -153,6 +174,13 @@ mod tests {
 
             assert_eq!(Schedule::Daily.date(&window), Some(self::date(date)));
         }
+    }
+
+    #[test]
+    fn a_daily_shard_spanning_many_days_is_dated_by_the_last_day_it_holds() {
+        let window = Window::new(at("1970-01-01T00:00:00Z"), at("2026-09-21T00:00:00Z"));
+
+        assert_eq!(Schedule::Daily.date(&window), Some(date("2026-09-20")));
     }
 
     #[test]
