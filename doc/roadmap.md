@@ -83,7 +83,7 @@ The change log only replays if the source and sink connectors write it the way a
 | Support | Why | Status | Target |
 | --- | --- | --- | --- |
 | Expressions | One small expression language shared by the naming template and the end-to-end scenarios, such as an instant reckoned from now that a scenario compares a shard with | Not started | |
-| Overview of the build log | `lithify serve` lists the latest build of each table and what `lithify check` finds, per sink | Available: behind the `serve` feature, rendered on the server | |
+| Overview of the build log | `lithify serve` lists the latest build of each table and what `lithify check` finds for every source of every pipeline under the directory it is given, with a tab for each sink, saying in place of the build log why a sink could not be read or that nothing was logged in it | Available: behind the `serve` feature, rendered on the server; a pipeline of several sources shows the same build log under each, as the build log is kept per sink | |
 | Assemble a rebuild | The build page assembles the `lithify build --snapshot` that rebuilds a shard, narrowed to the tables chosen | Available | |
 | Run a retry from the page | A failed build is rebuilt from the page rather than by copying the command it assembles | Not started | |
 | List dropped tables | The overview lists the latest build of each table still standing, so a dropped table needs its own read of the build log | Not started | |

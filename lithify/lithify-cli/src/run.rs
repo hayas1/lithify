@@ -19,6 +19,8 @@ use crate::pipeline::{Capture, Warehouse};
 use crate::plan::SnapshotPlan;
 use crate::settlement::{Build, DryRun, Settlement};
 use crate::unrunnable::Unrunnable;
+#[cfg(feature = "serve")]
+use lithify_ui::overview::{PipelineOverview, SinkInspection, SinkOverview, SourceOverview};
 
 pub struct Run {
     directory: PathBuf,
@@ -78,14 +80,42 @@ impl Run {
         })
     }
 
-    pub fn inspect(&self) -> Result<Vec<(String, Inspection)>, Unrunnable> {
-        let pipeline: Pipeline<Capture, Warehouse> = Pipeline::open(&self.directory)?;
-        let source = Self::source(&pipeline)?;
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
 
-        self.selected(&pipeline)?
-            .into_iter()
-            .map(|sink| Ok((sink.name().to_owned(), self.inspection(sink, source)?)))
-            .collect()
+    #[cfg(feature = "serve")]
+    pub fn overview(&self) -> PipelineOverview {
+        PipelineOverview::new(
+            &self.directory.display().to_string(),
+            self.sources().map_err(|unrunnable| unrunnable.to_string()),
+        )
+    }
+
+    #[cfg(feature = "serve")]
+    fn sources(&self) -> Result<Vec<SourceOverview>, Unrunnable> {
+        let pipeline: Pipeline<Capture, Warehouse> = Pipeline::open(&self.directory)?;
+        let sinks = self.selected(&pipeline)?;
+
+        Ok(pipeline
+            .sources()
+            .map(|source| {
+                SourceOverview::new(
+                    source.name(),
+                    sinks
+                        .iter()
+                        .map(|sink| {
+                            SinkOverview::new(
+                                sink.name(),
+                                self.inspection(sink, source)
+                                    .map(SinkInspection::from)
+                                    .map_err(|unrunnable| unrunnable.to_string()),
+                            )
+                        })
+                        .collect(),
+                )
+            })
+            .collect())
     }
 
     pub fn sinks(&self) -> Result<Vec<String>, Unrunnable> {

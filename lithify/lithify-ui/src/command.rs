@@ -87,6 +87,7 @@ impl Display for BuildCommand {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct BuildForm {
+    pub pipeline: Option<String>,
     pub sink: Option<String>,
     pub snapshot: Option<String>,
     pub tables: Option<String>,
@@ -94,10 +95,11 @@ pub struct BuildForm {
 }
 
 impl BuildForm {
-    pub fn command(&self, directory: &str) -> Result<Option<BuildCommand>, String> {
+    pub fn command(&self, fallback: &str) -> Result<Option<BuildCommand>, String> {
         let Some(snapshot) = Self::filled(&self.snapshot) else {
             return Ok(None);
         };
+        let directory = Self::filled(&self.pipeline).unwrap_or(fallback);
         let snapshot = snapshot
             .parse()
             .map_err(|_| format!("{snapshot} is not a date such as 2026-09-20"))?;
@@ -190,6 +192,7 @@ mod tests {
 
     fn form(snapshot: &str, tables: &str, dry_run: &str) -> BuildForm {
         BuildForm {
+            pipeline: None,
             sink: Some("rustfs".to_owned()),
             snapshot: Some(snapshot.to_owned()),
             tables: Some(tables.to_owned()),
@@ -207,6 +210,21 @@ mod tests {
                     .table(TableId::new("shop", "people"))
                     .table(TableId::new("shop", "pets"))
                     .dry_run("plans")
+            ))
+        );
+    }
+
+    #[test]
+    fn a_form_builds_the_pipeline_it_names_rather_than_the_one_it_falls_back_on() {
+        let named = BuildForm {
+            pipeline: Some("postgres".to_owned()),
+            ..form("2026-09-20", "", "")
+        };
+
+        assert_eq!(
+            named.command("mysql"),
+            Ok(Some(
+                BuildCommand::new("postgres", date("2026-09-20")).sink("rustfs")
             ))
         );
     }

@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
 
@@ -17,10 +17,13 @@ pub struct Pipeline<C, W> {
 }
 
 impl<C: Clone + DeserializeOwned, W: Clone + DeserializeOwned> Pipeline<C, W> {
+    const WIRING: &str = "infra.toml";
+    const LISTING: &str = "table.toml";
+
     pub fn open(directory: impl AsRef<Path>) -> Result<Self, Unreadable> {
         let directory = directory.as_ref();
-        let wiring = directory.join("infra.toml");
-        let listing = directory.join("table.toml");
+        let wiring = directory.join(Self::WIRING);
+        let listing = directory.join(Self::LISTING);
         let written: infra::Wiring<C, W> = Self::read(&wiring)?;
         let miswired = |miswiring| Unreadable::at(&wiring, miswiring);
 
@@ -31,6 +34,28 @@ impl<C: Clone + DeserializeOwned, W: Clone + DeserializeOwned> Pipeline<C, W> {
             tables: Tables::try_from(Self::read::<table::Listing>(&listing)?)
                 .map_err(|mislisting| Unreadable::at(&listing, mislisting))?,
         })
+    }
+
+    pub fn directories(root: impl AsRef<Path>) -> Result<Vec<PathBuf>, Unreadable> {
+        let root = root.as_ref();
+
+        if Self::configures(root) {
+            return Ok(vec![root.to_owned()]);
+        }
+
+        let mut directories = std::fs::read_dir(root)
+            .map_err(|unlisted| Unreadable::at(root, unlisted))?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|unlisted| Unreadable::at(root, unlisted))?;
+        directories.retain(|directory| Self::configures(directory));
+        directories.sort();
+
+        Ok(directories)
+    }
+
+    fn configures(directory: &Path) -> bool {
+        directory.join(Self::WIRING).is_file()
     }
 
     pub fn name(&self) -> &str {
@@ -67,8 +92,6 @@ impl<C: Clone + DeserializeOwned, W: Clone + DeserializeOwned> Pipeline<C, W> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
     use crate::ArtifactKind;
     use crate::infra::Miswiring;
@@ -111,6 +134,31 @@ mod tests {
     fn a_pipeline_is_named_after_the_directory_that_configures_it() {
         assert_eq!(pipeline("mysql").name(), "mysql");
         assert_eq!(pipeline("postgres").name(), "postgres");
+    }
+
+    #[test]
+    fn a_directory_that_configures_a_pipeline_is_the_one_pipeline_it_holds() {
+        let mysql = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compose/lithify/mysql");
+
+        assert_eq!(
+            Pipeline::<Capture, Sunk>::directories(&mysql).unwrap(),
+            [mysql]
+        );
+    }
+
+    #[test]
+    fn a_directory_holding_pipelines_holds_each_one_configured_in_it_in_the_order_of_their_names() {
+        let root = scratch("pipelines");
+        for configured in ["postgres", "mysql"] {
+            std::fs::create_dir_all(root.join(configured)).unwrap();
+            std::fs::write(root.join(configured).join("infra.toml"), "").unwrap();
+        }
+        std::fs::create_dir_all(root.join("plans")).unwrap();
+
+        assert_eq!(
+            Pipeline::<Capture, Sunk>::directories(&root).unwrap(),
+            [root.join("mysql"), root.join("postgres")]
+        );
     }
 
     #[test]

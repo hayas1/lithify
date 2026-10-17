@@ -2,6 +2,7 @@ use std::convert::Infallible;
 use std::fmt::{self, Debug, Formatter};
 use std::str::FromStr;
 
+#[derive(Clone)]
 pub struct Credential {
     key_id: String,
     secret: Secret,

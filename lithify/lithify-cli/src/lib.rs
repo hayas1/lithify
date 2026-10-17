@@ -10,4 +10,6 @@ pub mod resumption;
 pub mod run;
 pub mod settlement;
 pub mod shard;
+#[cfg(feature = "serve")]
+pub mod survey;
 pub mod unrunnable;

@@ -16,6 +16,7 @@ lithify-config = { workspace = true }
 lithify-core = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "net"] }
+tracing = { workspace = true }
 
 [dev-dependencies]
 http-body-util = "0.1"

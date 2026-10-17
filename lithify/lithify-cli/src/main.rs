@@ -11,12 +11,12 @@ use lithify_cli::credential::{Credential, Secret};
 use lithify_cli::journal::Journal;
 use lithify_cli::plan::Tables;
 use lithify_cli::run::Run;
+#[cfg(feature = "serve")]
+use lithify_cli::survey::Pipelines;
 use lithify_cli::unrunnable::Unrunnable;
 use lithify_core::model::TableId;
 #[cfg(feature = "serve")]
-use lithify_ui::overview::SinkOverview;
-#[cfg(feature = "serve")]
-use lithify_ui::server::{Board, Survey};
+use lithify_ui::server::Board;
 
 #[derive(Parser)]
 #[command(
@@ -80,12 +80,7 @@ impl Command {
 }
 
 #[derive(clap::Args)]
-struct PipelineArguments {
-    #[arg(
-        value_name = "DIRECTORY",
-        help = "The directory holding the infra.toml and table.toml of one pipeline"
-    )]
-    directory: PathBuf,
+struct CredentialArguments {
     #[arg(
         long,
         env = "S3_ACCESS_KEY_ID",
@@ -102,6 +97,23 @@ struct PipelineArguments {
         help = "The secret the object storage holding the change log is read with"
     )]
     secret_access_key: Secret,
+}
+
+impl CredentialArguments {
+    fn credential(&self) -> Credential {
+        Credential::new(self.access_key_id.clone(), self.secret_access_key.clone())
+    }
+}
+
+#[derive(clap::Args)]
+struct PipelineArguments {
+    #[arg(
+        value_name = "DIRECTORY",
+        help = "The directory holding the infra.toml and table.toml of one pipeline"
+    )]
+    directory: PathBuf,
+    #[command(flatten)]
+    credential: CredentialArguments,
     #[arg(
         long,
         value_name = "NAME",
@@ -114,44 +126,10 @@ impl PipelineArguments {
     fn run(&self) -> Run {
         Run::new(
             self.directory.clone(),
-            Credential::new(self.access_key_id.clone(), self.secret_access_key.clone()),
+            self.credential.credential(),
             self.sink.clone(),
             Utc::now(),
         )
-    }
-}
-
-#[cfg(feature = "serve")]
-impl Survey for PipelineArguments {
-    fn directory(&self) -> String {
-        self.directory.display().to_string()
-    }
-
-    fn sinks(&self) -> Result<Vec<String>, String> {
-        self.run()
-            .sinks()
-            .map_err(|unrunnable| unrunnable.to_string())
-    }
-
-    fn inspect(&self) -> Result<Vec<SinkOverview>, String> {
-        Ok(self
-            .run()
-            .inspect()
-            .map_err(|unrunnable| unrunnable.to_string())?
-            .into_iter()
-            .map(|(sink, inspection)| {
-                SinkOverview::new(
-                    &sink,
-                    inspection.schedule(),
-                    inspection.latest().to_vec(),
-                    inspection
-                        .discrepancies()
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect(),
-                )
-            })
-            .collect())
     }
 }
 
@@ -225,8 +203,13 @@ impl CheckArguments {
 #[cfg(feature = "serve")]
 #[derive(clap::Args)]
 struct ServeArguments {
+    #[arg(
+        value_name = "DIRECTORY",
+        help = "The directory of one pipeline, or the directory holding the directories of several"
+    )]
+    directory: PathBuf,
     #[command(flatten)]
-    pipeline: PipelineArguments,
+    credential: CredentialArguments,
     #[arg(
         long,
         value_name = "ADDRESS",
@@ -239,7 +222,8 @@ struct ServeArguments {
 #[cfg(feature = "serve")]
 impl ServeArguments {
     fn journal(self) -> Result<Journal, Unrunnable> {
-        Board::new(self.pipeline).serve(self.address)?;
+        Board::new(Pipelines::new(self.directory, self.credential.credential()))
+            .serve(self.address)?;
 
         Ok(Journal::default())
     }
@@ -350,6 +334,12 @@ mod tests {
 
         assert_eq!(served.address, "127.0.0.1:3000".parse().unwrap());
         assert_eq!(addressed.address, "0.0.0.0:8080".parse().unwrap());
+    }
+
+    #[cfg(feature = "serve")]
+    #[test]
+    fn a_board_surveys_every_sink_rather_than_one_it_is_told_of() {
+        assert!(parsed("serve", &["--sink", "rustfs"]).is_err());
     }
 
     #[cfg(feature = "serve")]

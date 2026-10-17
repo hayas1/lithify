@@ -1,39 +1,51 @@
 use leptos::prelude::*;
 
 use crate::command::{BuildCommand, BuildForm};
-use crate::overview::{SinkOverview, TableRow};
+use crate::overview::{PipelineOverview, SinkInspection, SinkOverview, SourceOverview, TableRow};
 
 pub enum Page {
     Overview {
-        directory: String,
-        sinks: Vec<SinkOverview>,
+        pipelines: Vec<PipelineOverview>,
     },
     Unsurveyed {
         cause: String,
     },
     Build {
+        pipelines: Vec<String>,
         sinks: Vec<String>,
-        form: BuildForm,
+        form: Box<BuildForm>,
         command: Result<Option<BuildCommand>, String>,
     },
 }
 
 impl Page {
+    const STYLE: &str = "
+        .tabs { display: flex; flex-wrap: wrap; }
+        .tabs > input { display: none; }
+        .tabs > label { padding: 0.25em 0.75em; border: 1px solid #ccc; cursor: pointer; }
+        .tabs > input:checked + label { font-weight: bold; background: #eee; }
+        .tabs > .panel { display: none; order: 1; width: 100%; }
+        .tabs > input:checked + label + .panel { display: block; }
+        .error { color: #b00; }
+    ";
+
     pub fn render(self) -> String {
         let body = match self {
-            Self::Overview { directory, sinks } => Self::overview(&directory, sinks).into_any(),
+            Self::Overview { pipelines } => Self::overview(pipelines).into_any(),
             Self::Unsurveyed { cause } => view! { <p class="error">{cause}</p> }.into_any(),
             Self::Build {
+                pipelines,
                 sinks,
                 form,
                 command,
-            } => Self::build(sinks, form, command).into_any(),
+            } => Self::build(pipelines, sinks, *form, command).into_any(),
         };
         let document = view! {
             <html>
                 <head>
                     <meta charset="utf-8" />
                     <title>"lithify"</title>
+                    <style>{Self::STYLE}</style>
                 </head>
                 <body>
                     <nav>
@@ -49,49 +61,123 @@ impl Page {
         format!("<!DOCTYPE html>{}", document.to_html())
     }
 
-    fn overview(directory: &str, sinks: Vec<SinkOverview>) -> impl IntoView + use<> {
-        sinks
+    fn overview(pipelines: Vec<PipelineOverview>) -> impl IntoView {
+        pipelines
             .iter()
-            .map(|sink| Self::section(directory, sink))
+            .enumerate()
+            .map(|(at, pipeline)| Self::pipeline(at, pipeline))
             .collect_view()
     }
 
-    fn section(directory: &str, sink: &SinkOverview) -> impl IntoView + use<> {
-        let rows = sink
-            .rows()
-            .into_iter()
-            .map(|row| {
-                let rebuild = row.rebuild(directory, sink.name());
+    fn pipeline(at: usize, pipeline: &PipelineOverview) -> AnyView {
+        let directory = pipeline.directory().to_owned();
 
-                Self::row(row, rebuild)
-            })
+        match pipeline.sources() {
+            Ok(sources) => sources
+                .iter()
+                .enumerate()
+                .map(|(within, source)| {
+                    Self::source(&format!("{at}-{within}"), pipeline.directory(), source)
+                })
+                .collect_view()
+                .into_any(),
+            Err(cause) => view! {
+                <section>
+                    <h2>{directory}</h2>
+                    <p class="error">{cause.to_owned()}</p>
+                </section>
+            }
+            .into_any(),
+        }
+    }
+
+    fn source(id: &str, directory: &str, source: &SourceOverview) -> impl IntoView + use<> {
+        let tabs = source
+            .sinks()
+            .iter()
+            .enumerate()
+            .map(|(at, sink)| Self::tab(id, at, directory, sink))
             .collect_view();
-        let discrepancies = sink
+
+        view! {
+            <section>
+                <h2>{source.name().to_owned()} " (" {directory.to_owned()} ")"</h2>
+                <div class="tabs">{tabs}</div>
+            </section>
+        }
+    }
+
+    fn tab(id: &str, at: usize, directory: &str, sink: &SinkOverview) -> impl IntoView + use<> {
+        let tab = format!("tab-{id}-{at}");
+
+        view! {
+            <input type="radio" name=format!("tabs-{id}") id=tab.clone() checked=at == 0 />
+            <label for=tab>{sink.name().to_owned()}</label>
+            <div class="panel">{Self::panel(directory, sink)}</div>
+        }
+    }
+
+    fn panel(directory: &str, sink: &SinkOverview) -> AnyView {
+        match sink.inspection() {
+            Ok(inspection) => Self::inspected(directory, sink.name(), inspection).into_any(),
+            Err(cause) => view! {
+                <p class="error">{format!("{} could not be read: {cause}", sink.name())}</p>
+            }
+            .into_any(),
+        }
+    }
+
+    fn inspected(
+        directory: &str,
+        sink: &str,
+        inspection: &SinkInspection,
+    ) -> impl IntoView + use<> {
+        let discrepancies = inspection
             .discrepancies()
             .iter()
             .map(|discrepancy| view! { <li>{discrepancy.clone()}</li> })
             .collect_view();
 
         view! {
-            <section>
-                <h2>{sink.name().to_owned()}</h2>
-                <table>
-                    <tr>
-                        <th>"Table"</th>
-                        <th>"Lifecycle"</th>
-                        <th>"Status"</th>
-                        <th>"Window"</th>
-                        <th>"Base"</th>
-                        <th>"Target"</th>
-                        <th>"Error"</th>
-                        <th>"Rebuild"</th>
-                    </tr>
-                    {rows}
-                </table>
-                <h3>"Discrepancies"</h3>
-                <ul>{discrepancies}</ul>
-            </section>
+            {Self::build_log(directory, sink, inspection)}
+            <h3>"Discrepancies"</h3>
+            <ul>{discrepancies}</ul>
         }
+    }
+
+    fn build_log(directory: &str, sink: &str, inspection: &SinkInspection) -> AnyView {
+        let rows = inspection.rows();
+
+        if rows.is_empty() {
+            return view! { <p class="error">{format!("No build log in {sink} yet")}</p> }
+                .into_any();
+        }
+
+        let rows = rows
+            .into_iter()
+            .map(|row| {
+                let rebuild = row.rebuild(directory, sink);
+
+                Self::row(row, rebuild)
+            })
+            .collect_view();
+
+        view! {
+            <table>
+                <tr>
+                    <th>"Table"</th>
+                    <th>"Lifecycle"</th>
+                    <th>"Status"</th>
+                    <th>"Window"</th>
+                    <th>"Base"</th>
+                    <th>"Target"</th>
+                    <th>"Error"</th>
+                    <th>"Rebuild"</th>
+                </tr>
+                {rows}
+            </table>
+        }
+        .into_any()
     }
 
     fn row(row: TableRow, rebuild: Option<BuildCommand>) -> impl IntoView {
@@ -110,13 +196,20 @@ impl Page {
     }
 
     fn build(
+        pipelines: Vec<String>,
         sinks: Vec<String>,
         form: BuildForm,
         command: Result<Option<BuildCommand>, String>,
     ) -> impl IntoView {
         view! {
             <form method="get" action="/build">
-                <label>"Sink " <select name="sink">{Self::options(sinks, &form)}</select></label>
+                <label>
+                    "Pipeline "
+                    <select name="pipeline">{Self::options(pipelines, form.pipeline.as_deref())}</select>
+                </label>
+                <label>
+                    "Sink " <select name="sink">{Self::options(sinks, form.sink.as_deref())}</select>
+                </label>
                 <label>
                     "Snapshot "
                     <input type="date" name="snapshot" value=form.snapshot.unwrap_or_default() />
@@ -139,14 +232,14 @@ impl Page {
         }
     }
 
-    fn options(sinks: Vec<String>, form: &BuildForm) -> impl IntoView + use<> {
-        sinks
+    fn options(choices: Vec<String>, chosen: Option<&str>) -> impl IntoView + use<> {
+        choices
             .into_iter()
-            .map(|sink| {
-                let selected = form.sink.as_deref() == Some(sink.as_str());
-                let label = sink.clone();
+            .map(|choice| {
+                let selected = chosen == Some(choice.as_str());
+                let label = choice.clone();
 
-                view! { <option value=sink selected=selected>{label}</option> }
+                view! { <option value=choice selected=selected>{label}</option> }
             })
             .collect_view()
     }

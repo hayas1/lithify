@@ -8,30 +8,88 @@ use lithify_core::sink::TablePath;
 use crate::command::BuildCommand;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SinkOverview {
-    name: String,
-    schedule: Schedule,
-    latest: Vec<BuildLog>,
-    discrepancies: Vec<String>,
+pub struct PipelineOverview {
+    directory: String,
+    sources: Result<Vec<SourceOverview>, String>,
 }
 
-impl SinkOverview {
-    pub fn new(
-        name: &str,
-        schedule: Schedule,
-        latest: Vec<BuildLog>,
-        discrepancies: Vec<String>,
-    ) -> Self {
+impl PipelineOverview {
+    pub fn new(directory: &str, sources: Result<Vec<SourceOverview>, String>) -> Self {
+        Self {
+            directory: directory.to_owned(),
+            sources,
+        }
+    }
+
+    pub fn directory(&self) -> &str {
+        &self.directory
+    }
+
+    pub fn sources(&self) -> Result<&[SourceOverview], &str> {
+        self.sources.as_deref().map_err(String::as_str)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceOverview {
+    name: String,
+    sinks: Vec<SinkOverview>,
+}
+
+impl SourceOverview {
+    pub fn new(name: &str, sinks: Vec<SinkOverview>) -> Self {
         Self {
             name: name.to_owned(),
-            schedule,
-            latest,
-            discrepancies,
+            sinks,
         }
     }
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn sinks(&self) -> &[SinkOverview] {
+        &self.sinks
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SinkOverview {
+    name: String,
+    inspection: Result<SinkInspection, String>,
+}
+
+impl SinkOverview {
+    pub fn new(name: &str, inspection: Result<SinkInspection, String>) -> Self {
+        Self {
+            name: name.to_owned(),
+            inspection,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn inspection(&self) -> Result<&SinkInspection, &str> {
+        self.inspection.as_ref().map_err(String::as_str)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SinkInspection {
+    schedule: Schedule,
+    latest: Vec<BuildLog>,
+    discrepancies: Vec<String>,
+}
+
+impl SinkInspection {
+    pub fn new(schedule: Schedule, latest: Vec<BuildLog>, discrepancies: Vec<String>) -> Self {
+        Self {
+            schedule,
+            latest,
+            discrepancies,
+        }
     }
 
     pub fn rows(&self) -> Vec<TableRow> {
@@ -128,9 +186,8 @@ pub(crate) mod tests {
         )
     }
 
-    pub(crate) fn overview() -> SinkOverview {
-        SinkOverview::new(
-            "rustfs",
+    pub(crate) fn inspection() -> SinkInspection {
+        SinkInspection::new(
             Schedule::Daily,
             vec![
                 logged("pets", None, Status::Failed("no such column".to_owned())),
@@ -140,10 +197,32 @@ pub(crate) mod tests {
         )
     }
 
+    pub(crate) fn overview() -> PipelineOverview {
+        PipelineOverview::new(
+            "mysql",
+            Ok(vec![SourceOverview::new(
+                "primary",
+                vec![
+                    SinkOverview::new("rustfs", Ok(inspection())),
+                    SinkOverview::new("warehouse", Err("JobCreationMode".to_owned())),
+                ],
+            )]),
+        )
+    }
+
+    #[test]
+    fn a_pipeline_holds_each_source_and_each_sink_it_is_sunk_into_whether_or_not_it_was_read() {
+        let overview = overview();
+        let sinks = overview.sources().unwrap()[0].sinks();
+
+        assert_eq!(sinks[0].inspection(), Ok(&inspection()));
+        assert_eq!(sinks[1].inspection(), Err("JobCreationMode"));
+    }
+
     #[test]
     fn a_sink_lists_the_latest_build_of_each_table_in_the_order_of_their_names() {
         assert_eq!(
-            overview().rows(),
+            inspection().rows(),
             [
                 TableRow {
                     table: TableId::new("shop", "people"),
@@ -188,7 +267,7 @@ pub(crate) mod tests {
             ),
             Outcome::new(Status::Succeeded, at("2026-09-21T00:10:00Z")),
         );
-        let rows = SinkOverview::new("rustfs", Schedule::Daily, vec![renamed], vec![]).rows();
+        let rows = SinkInspection::new(Schedule::Daily, vec![renamed], vec![]).rows();
 
         assert_eq!(rows[0].table, TableId::new("shop", "persons"));
         assert_eq!(rows[0].lifecycle, Some(Lifecycle::Renamed));
@@ -196,12 +275,12 @@ pub(crate) mod tests {
 
     #[test]
     fn a_sink_lists_what_check_finds_wrong_with_it() {
-        assert_eq!(overview().discrepancies(), ["shop.pets failed to build"]);
+        assert_eq!(inspection().discrepancies(), ["shop.pets failed to build"]);
     }
 
     #[test]
     fn a_table_is_rebuilt_by_building_its_shard_narrowed_to_it() {
-        let rows = overview().rows();
+        let rows = inspection().rows();
 
         assert_eq!(
             rows[1].rebuild("mysql", "rustfs"),

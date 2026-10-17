@@ -90,6 +90,21 @@ impl Inspection {
     }
 }
 
+#[cfg(feature = "serve")]
+impl From<Inspection> for lithify_ui::overview::SinkInspection {
+    fn from(inspection: Inspection) -> Self {
+        Self::new(
+            inspection.schedule,
+            inspection.latest,
+            inspection
+                .discrepancies
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+        )
+    }
+}
+
 pub struct Expectation {
     schedule: Schedule,
     since: RecordedAt,

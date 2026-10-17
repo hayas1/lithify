@@ -8,15 +8,15 @@ use axum::response::Html;
 use axum::routing::get;
 
 use crate::command::BuildForm;
-use crate::overview::SinkOverview;
+use crate::overview::PipelineOverview;
 use crate::page::Page;
 
 pub trait Survey: Send + Sync + 'static {
-    fn directory(&self) -> String;
+    fn pipelines(&self) -> Result<Vec<String>, String>;
 
     fn sinks(&self) -> Result<Vec<String>, String>;
 
-    fn inspect(&self) -> Result<Vec<SinkOverview>, String>;
+    fn inspect(&self) -> Result<Vec<PipelineOverview>, String>;
 }
 
 pub struct Board<S> {
@@ -40,6 +40,13 @@ impl<S: Survey> Board<S> {
     pub fn serve(self, address: SocketAddr) -> std::io::Result<()> {
         tokio::runtime::Runtime::new()?.block_on(async {
             let listener = tokio::net::TcpListener::bind(address).await?;
+            let pipelines = Self::blocking(self.survey.clone(), S::pipelines).await;
+
+            tracing::info!("serving on http://{}", listener.local_addr()?);
+            match pipelines {
+                Ok(pipelines) => tracing::info!("surveying {}", pipelines.join(", ")),
+                Err(cause) => tracing::warn!("surveying no pipeline: {cause}"),
+            }
 
             axum::serve(listener, self.router()).await
         })
@@ -64,13 +71,8 @@ impl<S: Survey> Board<S> {
     }
 
     async fn overview(State(survey): State<Arc<S>>) -> (StatusCode, Html<String>) {
-        let directory = survey.directory();
-
         match Self::blocking(survey, S::inspect).await {
-            Ok(sinks) => (
-                StatusCode::OK,
-                Html(Page::Overview { directory, sinks }.render()),
-            ),
+            Ok(pipelines) => (StatusCode::OK, Html(Page::Overview { pipelines }.render())),
             Err(cause) => Self::unsurveyed(cause),
         }
     }
@@ -79,26 +81,30 @@ impl<S: Survey> Board<S> {
         State(survey): State<Arc<S>>,
         Query(form): Query<BuildForm>,
     ) -> (StatusCode, Html<String>) {
-        let command = form.command(&survey.directory());
+        let configured =
+            Self::blocking(survey, |survey| Ok((survey.pipelines()?, survey.sinks()?))).await;
+        let (pipelines, sinks) = match configured {
+            Ok(configured) => configured,
+            Err(cause) => return Self::unsurveyed(cause),
+        };
+        let command = form.command(pipelines.first().map_or("", String::as_str));
         let status = match command {
             Ok(_) => StatusCode::OK,
             Err(_) => StatusCode::BAD_REQUEST,
         };
 
-        match Self::blocking(survey, S::sinks).await {
-            Ok(sinks) => (
-                status,
-                Html(
-                    Page::Build {
-                        sinks,
-                        form,
-                        command,
-                    }
-                    .render(),
-                ),
+        (
+            status,
+            Html(
+                Page::Build {
+                    pipelines,
+                    sinks,
+                    form: Box::new(form),
+                    command,
+                }
+                .render(),
             ),
-            Err(cause) => Self::unsurveyed(cause),
-        }
+        )
     }
 }
 
@@ -109,21 +115,24 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
+    use lithify_config::Schedule;
+
     use super::*;
     use crate::overview::tests::overview;
+    use crate::overview::{SinkInspection, SinkOverview, SourceOverview};
 
-    struct Surveyed(Result<Vec<SinkOverview>, String>);
+    struct Surveyed(Result<Vec<PipelineOverview>, String>);
 
     impl Survey for Surveyed {
-        fn directory(&self) -> String {
-            "mysql".to_owned()
+        fn pipelines(&self) -> Result<Vec<String>, String> {
+            Ok(vec!["mysql".to_owned(), "postgres".to_owned()])
         }
 
         fn sinks(&self) -> Result<Vec<String>, String> {
             Ok(vec!["rustfs".to_owned()])
         }
 
-        fn inspect(&self) -> Result<Vec<SinkOverview>, String> {
+        fn inspect(&self) -> Result<Vec<PipelineOverview>, String> {
             self.0.clone()
         }
     }
@@ -141,11 +150,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_overview_lists_each_table_and_discrepancy_of_each_sink() {
+    async fn the_overview_lists_each_source_with_a_tab_for_each_sink_it_is_sunk_into() {
         let (status, page) = get(Surveyed(Ok(vec![overview()])), "/").await;
 
         assert_eq!(status, StatusCode::OK);
+        assert!(page.contains("primary"));
         assert!(page.contains("rustfs"));
+        assert!(page.contains("warehouse"));
         assert!(page.contains("mysql_shop.people_20260920"));
         assert!(page.contains("no such column"));
         assert!(page.contains("shop.pets failed to build"));
@@ -157,29 +168,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_sink_that_could_not_be_read_says_why_where_its_build_log_would_be() {
+        let (status, page) = get(Surveyed(Ok(vec![overview()])), "/").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(page.contains("JobCreationMode"));
+    }
+
+    #[tokio::test]
+    async fn a_sink_nothing_was_logged_in_says_so_where_its_build_log_would_be() {
+        let unbuilt = PipelineOverview::new(
+            "postgres",
+            Ok(vec![SourceOverview::new(
+                "primary",
+                vec![SinkOverview::new(
+                    "rustfs",
+                    Ok(SinkInspection::new(Schedule::Daily, vec![], vec![])),
+                )],
+            )]),
+        );
+
+        let (_, page) = get(Surveyed(Ok(vec![unbuilt])), "/").await;
+
+        assert!(page.contains("No build log"));
+        assert!(!page.contains("<th>Target</th>"));
+    }
+
+    #[tokio::test]
+    async fn a_pipeline_that_could_not_be_opened_says_why_beside_the_ones_that_were() {
+        let unopened = PipelineOverview::new("postgres", Err("no infra.toml".to_owned()));
+
+        let (status, page) = get(Surveyed(Ok(vec![overview(), unopened])), "/").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(page.contains("no infra.toml"));
+        assert!(page.contains("mysql_shop.people_20260920"));
+    }
+
+    #[tokio::test]
     async fn the_overview_says_why_it_could_not_survey() {
-        let (status, page) = get(Surveyed(Err("no warehouse".to_owned())), "/").await;
+        let (status, page) = get(Surveyed(Err("no pipelines".to_owned())), "/").await;
 
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(page.contains("no warehouse"));
+        assert!(page.contains("no pipelines"));
     }
 
     #[tokio::test]
     async fn the_build_page_assembles_the_command_its_form_was_filled_with() {
         let (status, page) = get(
             Surveyed(Ok(vec![overview()])),
-            "/build?sink=rustfs&snapshot=2026-09-20&tables=shop.pets&dry_run=plans",
+            "/build?pipeline=postgres&sink=rustfs&snapshot=2026-09-20&tables=shop.pets&dry_run=plans",
         )
         .await;
 
         assert_eq!(status, StatusCode::OK);
         assert!(page.contains(
-            "lithify build mysql --snapshot 2026-09-20 --sink rustfs --table shop.pets --dry-run plans"
+            "lithify build postgres --snapshot 2026-09-20 --sink rustfs --table shop.pets --dry-run plans"
         ));
     }
 
     #[tokio::test]
-    async fn the_build_page_is_assembled_from_the_configuration_alone() {
+    async fn the_build_page_builds_the_first_pipeline_unless_its_form_names_one() {
         let (status, page) = get(
             Surveyed(Err("no warehouse".to_owned())),
             "/build?snapshot=2026-09-20",
@@ -188,6 +237,7 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert!(page.contains("rustfs"));
+        assert!(page.contains("postgres"));
         assert!(page.contains("lithify build mysql --snapshot 2026-09-20"));
     }
 
