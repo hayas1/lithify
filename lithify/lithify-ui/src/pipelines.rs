@@ -10,7 +10,9 @@ use lithify_core::check::{Expectation, Inspection};
 use lithify_core::position::RecordedAt;
 use lithify_core::sink::{SinkWarehouse, WarehouseClient, WarehouseFn};
 
-use crate::overview::{PipelineOverview, SinkInspection, SinkOverview, SourceOverview};
+use crate::overview::{
+    PipelineLocation, PipelineOverview, SinkInspection, SinkOverview, SourceOverview,
+};
 use crate::server::Survey;
 
 pub struct Pipelines<C, W: SinkWarehouse> {
@@ -42,6 +44,15 @@ where
         }
     }
 
+    fn location(directory: &Path) -> PipelineLocation {
+        let name = directory
+            .file_name()
+            .unwrap_or(directory.as_os_str())
+            .to_string_lossy();
+
+        PipelineLocation::new(&name, &directory.display().to_string())
+    }
+
     fn overview(&self, directory: &Path) -> PipelineOverview {
         let sources = Pipeline::<C, W>::open(directory)
             .map_err(|unreadable| unreadable.to_string())
@@ -52,7 +63,7 @@ where
                     .collect()
             });
 
-        PipelineOverview::new(&directory.display().to_string(), sources)
+        PipelineOverview::new(Self::location(directory), sources)
     }
 
     fn source(
@@ -105,37 +116,20 @@ where
     W: Clone + DeserializeOwned + SinkWarehouse + Send + Sync + 'static,
     W::Credential: Send + Sync,
 {
-    fn pipelines(&self) -> Result<Vec<String>, String> {
+    fn pipelines(&self) -> Result<Vec<PipelineLocation>, String> {
         Ok(self
             .directories()?
             .iter()
-            .map(|directory| directory.display().to_string())
+            .map(|directory| Self::location(directory))
             .collect())
     }
 
-    fn sinks(&self) -> Result<Vec<String>, String> {
-        let mut sinks = Vec::new();
-
-        for directory in self.directories()? {
-            let pipeline =
-                Pipeline::<C, W>::open(&directory).map_err(|unreadable| unreadable.to_string())?;
-
-            for sink in pipeline.sinks() {
-                if !sinks.iter().any(|named| named == sink.name()) {
-                    sinks.push(sink.name().to_owned());
-                }
-            }
-        }
-
-        Ok(sinks)
-    }
-
-    fn inspect(&self) -> Result<Vec<PipelineOverview>, String> {
+    fn inspect(&self, name: &str) -> Result<Option<PipelineOverview>, String> {
         Ok(self
             .directories()?
             .iter()
-            .map(|directory| self.overview(directory))
-            .collect())
+            .find(|directory| Self::location(directory).name() == name)
+            .map(|directory| self.overview(directory)))
     }
 }
 
@@ -258,11 +252,10 @@ mod tests {
         assert_eq!(
             surveyed(&root).pipelines().unwrap(),
             [
-                root.join("mysql").display().to_string(),
-                root.join("postgres").display().to_string()
+                PipelineLocation::new("mysql", &root.join("mysql").display().to_string()),
+                PipelineLocation::new("postgres", &root.join("postgres").display().to_string())
             ]
         );
-        assert_eq!(surveyed(&root).sinks().unwrap(), ["rustfs", "warehouse"]);
     }
 
     #[test]
@@ -270,8 +263,8 @@ mod tests {
         let root = scratch("inspected");
         configure(&root.join("mysql"), INFRA);
 
-        let pipelines = surveyed(&root).inspect().unwrap();
-        let sources = pipelines[0].sources().unwrap();
+        let pipeline = surveyed(&root).inspect("mysql").unwrap().unwrap();
+        let sources = pipeline.sources().unwrap();
         let sinks = sources[0].sinks();
 
         assert_eq!(sources[0].name(), "primary");
@@ -289,14 +282,29 @@ mod tests {
         configure(&root.join("mysql"), INFRA);
         configure(&root.join("postgres"), "[[source]]\nname = \"primary\"");
 
-        let pipelines = surveyed(&root).inspect().unwrap();
+        let surveyed = surveyed(&root);
 
-        assert!(pipelines[0].sources().is_ok());
-        assert!(pipelines[1].sources().is_err());
+        assert!(
+            surveyed
+                .inspect("mysql")
+                .unwrap()
+                .unwrap()
+                .sources()
+                .is_ok()
+        );
+        assert!(
+            surveyed
+                .inspect("postgres")
+                .unwrap()
+                .unwrap()
+                .sources()
+                .is_err()
+        );
+        assert_eq!(surveyed.inspect("oracle").unwrap(), None);
     }
 
     #[test]
     fn a_directory_configuring_no_pipeline_is_not_surveyed() {
-        assert!(surveyed(&scratch("empty")).inspect().is_err());
+        assert!(surveyed(&scratch("empty")).pipelines().is_err());
     }
 }

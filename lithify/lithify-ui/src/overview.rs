@@ -1,29 +1,52 @@
 use chrono::NaiveDate;
 
-use lithify_core::build_log::{BuildLog, Lifecycle, Status};
+use lithify_core::build_log::{BuildLog, Status};
 use lithify_core::check::Inspection;
 use lithify_core::model::TableId;
 use lithify_core::schedule::Schedule;
-use lithify_core::sink::TablePath;
 
 use crate::command::BuildCommand;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PipelineOverview {
+pub struct PipelineLocation {
+    name: String,
     directory: String,
-    sources: Result<Vec<SourceOverview>, String>,
 }
 
-impl PipelineOverview {
-    pub fn new(directory: &str, sources: Result<Vec<SourceOverview>, String>) -> Self {
+impl PipelineLocation {
+    pub fn new(name: &str, directory: &str) -> Self {
         Self {
+            name: name.to_owned(),
             directory: directory.to_owned(),
-            sources,
         }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     pub fn directory(&self) -> &str {
         &self.directory
+    }
+
+    pub fn href(&self) -> String {
+        format!("/pipelines/{}", self.name)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipelineOverview {
+    location: PipelineLocation,
+    sources: Result<Vec<SourceOverview>, String>,
+}
+
+impl PipelineOverview {
+    pub fn new(location: PipelineLocation, sources: Result<Vec<SourceOverview>, String>) -> Self {
+        Self { location, sources }
+    }
+
+    pub fn location(&self) -> &PipelineLocation {
+        &self.location
     }
 
     pub fn sources(&self) -> Result<&[SourceOverview], &str> {
@@ -126,27 +149,26 @@ impl From<Inspection> for SinkInspection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableRow {
     pub table: TableId,
-    pub lifecycle: Option<Lifecycle>,
     pub status: Status,
-    pub window: String,
-    pub base: Option<TablePath>,
-    pub target: Option<TablePath>,
+    pub values: [Option<String>; 16],
     pub shard: Option<NaiveDate>,
 }
 
 impl TableRow {
     fn new(log: &BuildLog, schedule: Schedule) -> Option<Self> {
-        let window = log.window();
-
         Some(Self {
             table: log.table()?.clone(),
-            lifecycle: log.lifecycle(),
             status: log.status().clone(),
-            window: format!("{} .. {}", window.from(), window.to()),
-            base: log.base().cloned(),
-            target: log.target().cloned(),
-            shard: schedule.date(window),
+            values: log.values(),
+            shard: schedule.date(log.window()),
         })
+    }
+
+    pub fn value(&self, column: &str) -> Option<&str> {
+        BuildLog::COLUMNS
+            .iter()
+            .position(|(name, _)| *name == column)
+            .and_then(|at| self.values[at].as_deref())
     }
 
     // TODO: run the rebuild from the page rather than only assembling the command to run it with.
@@ -164,7 +186,7 @@ pub(crate) mod tests {
     use chrono::{DateTime, Utc};
     use ulid::Ulid;
 
-    use lithify_core::build_log::{BuildLog, Lifecycle, Outcome, Run, Status};
+    use lithify_core::build_log::{BuildLog, Outcome, Run, Status};
     use lithify_core::model::TableId;
     use lithify_core::position::RecordedAt;
     use lithify_core::sink::TablePath;
@@ -214,7 +236,7 @@ pub(crate) mod tests {
 
     pub(crate) fn overview() -> PipelineOverview {
         PipelineOverview::new(
-            "mysql",
+            PipelineLocation::new("mysql", "mysql"),
             Ok(vec![SourceOverview::new(
                 "primary",
                 vec![
@@ -236,29 +258,29 @@ pub(crate) mod tests {
 
     #[test]
     fn a_sink_lists_the_latest_build_of_each_table_in_the_order_of_their_names() {
+        let rows = inspection().rows();
+
         assert_eq!(
-            inspection().rows(),
-            [
-                TableRow {
-                    table: TableId::new("shop", "people"),
-                    lifecycle: None,
-                    status: Status::Succeeded,
-                    window: "2026-09-20T00:00:00+00:00 .. 2026-09-21T00:00:00+00:00".to_owned(),
-                    base: Some(TablePath::new("mysql_shop", "people_20260919")),
-                    target: Some(TablePath::new("mysql_shop", "people_20260920")),
-                    shard: Some("2026-09-20".parse().unwrap()),
-                },
-                TableRow {
-                    table: TableId::new("shop", "pets"),
-                    lifecycle: None,
-                    status: Status::Failed("no such column".to_owned()),
-                    window: "2026-09-20T00:00:00+00:00 .. 2026-09-21T00:00:00+00:00".to_owned(),
-                    base: None,
-                    target: Some(TablePath::new("mysql_shop", "pets_20260920")),
-                    shard: Some("2026-09-20".parse().unwrap()),
-                },
-            ]
+            rows.iter().map(|row| row.table.clone()).collect::<Vec<_>>(),
+            [TableId::new("shop", "people"), TableId::new("shop", "pets")]
         );
+        assert_eq!(rows[1].status, Status::Failed("no such column".to_owned()));
+        assert_eq!(rows[0].shard, Some("2026-09-20".parse().unwrap()));
+    }
+
+    #[test]
+    fn a_row_holds_what_each_column_of_the_build_log_holds() {
+        let rows = inspection().rows();
+        assert_eq!(
+            rows[0].value("window_from"),
+            Some("2026-09-20T00:00:00+00:00")
+        );
+        assert_eq!(
+            rows[0].value("window_to"),
+            Some("2026-09-21T00:00:00+00:00")
+        );
+        assert_eq!(rows[1].value("base"), None);
+        assert_eq!(rows[1].value("error"), Some("no such column"));
     }
 
     #[test]
@@ -285,7 +307,7 @@ pub(crate) mod tests {
         let rows = SinkInspection::new(Schedule::Daily, vec![renamed], vec![]).rows();
 
         assert_eq!(rows[0].table, TableId::new("shop", "persons"));
-        assert_eq!(rows[0].lifecycle, Some(Lifecycle::Renamed));
+        assert_eq!(rows[0].value("lifecycle"), Some("renamed"));
     }
 
     #[test]

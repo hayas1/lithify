@@ -254,6 +254,27 @@ impl BuildLog {
         ]
     }
 
+    pub fn values(&self) -> [Option<String>; 16] {
+        [
+            Some(self.run.run_id.to_string()),
+            Some(self.run.artifact.clone()),
+            Some(self.run.schedule.clone()),
+            Some(self.run.source.clone()),
+            Some(self.run.capture.clone()),
+            self.table_from.as_ref().map(ToString::to_string),
+            self.table_to.as_ref().map(ToString::to_string),
+            self.lifecycle().as_ref().map(ToString::to_string),
+            self.base.as_ref().map(ToString::to_string),
+            self.target.as_ref().map(ToString::to_string),
+            Some(self.window.from().to_string()),
+            Some(self.window.to().to_string()),
+            Some(self.outcome.status.to_string()),
+            Some(self.outcome.finished_at.to_rfc3339()),
+            self.outcome.status.error().map(str::to_owned),
+            Some(self.run.version.clone()),
+        ]
+    }
+
     fn nullable<W: WarehouseSql + ?Sized>(
         warehouse: &W,
         value: Option<&impl Display>,
@@ -575,6 +596,37 @@ mod tests {
                 DateTime::from_timestamp_millis(1).unwrap(),
             ),
         )
+    }
+
+    #[test]
+    fn a_build_log_reads_as_what_each_of_its_columns_holds() {
+        let values = logged(Some("people"), Some("people")).values();
+
+        assert_eq!(
+            BuildLog::COLUMNS
+                .iter()
+                .map(|(name, _)| *name)
+                .zip(values.iter().map(Option::as_deref))
+                .collect::<Vec<_>>(),
+            [
+                ("run_id", Some("00000000000000000000000000")),
+                ("artifact", Some("snapshot")),
+                ("schedule", Some("daily")),
+                ("source", Some("primary")),
+                ("capture", Some("{}")),
+                ("table_from", Some("shop.people")),
+                ("table_to", Some("shop.people")),
+                ("lifecycle", None),
+                ("base", None),
+                ("target", Some("mysql_shop.people_20260920")),
+                ("window_from", Some("1970-01-01T00:00:00+00:00")),
+                ("window_to", Some("1970-01-01T00:00:00.001+00:00")),
+                ("status", Some("succeeded")),
+                ("finished_at", Some("1970-01-01T00:00:00.001+00:00")),
+                ("error", None),
+                ("version", Some("0.1.0")),
+            ]
+        );
     }
 
     #[test]
