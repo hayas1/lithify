@@ -2,7 +2,7 @@ use duckdb::types::{FromSql, Type};
 use duckdb::{Connection, Error, Statement};
 
 use lithify_core::build_log::{BuildLog, BuildLogRow, Latest};
-use lithify_core::sink::{TablePath, Warehouse, WarehouseClient};
+use lithify_core::sink::{ChangeLogSql, TablePath, WarehouseClient, WarehouseSql};
 use lithify_core::source::{
     ChangeLogs, SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed,
 };
@@ -71,11 +71,7 @@ impl WarehouseClient for DuckDbClient {
         latest: &Latest,
     ) -> Result<Vec<BuildLog>, Self::Error> {
         self.connection
-            .prepare(
-                self.warehouse
-                    .select_latest_build_logs(namespace, latest)
-                    .as_str(),
-            )?
+            .prepare(latest.select(&self.warehouse, namespace).as_str())?
             .query_map([], |row| {
                 Ok(BuildLogRow {
                     run_id: row.get("run_id")?,

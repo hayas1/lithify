@@ -65,9 +65,7 @@ impl fmt::Display for TablePath {
     }
 }
 
-pub trait Warehouse {
-    type Config;
-
+pub trait WarehouseSql {
     fn identifier(&self, name: &str) -> SqlString;
 
     fn namespace_ref(&self, namespace: &str) -> SqlString {
@@ -75,16 +73,6 @@ pub trait Warehouse {
     }
 
     fn table_ref(&self, table: &TablePath) -> SqlString;
-
-    fn change_log_namespace(&self) -> &str;
-
-    fn change_log(&self, topic: &str) -> TablePath {
-        TablePath::new(self.change_log_namespace(), topic)
-    }
-
-    fn change_log_ref(&self, topic: &str) -> SqlString {
-        self.table_ref(&self.change_log(topic))
-    }
 
     fn column_type(&self, column_type: &ColumnType) -> Result<SqlString, UnsupportedColumn>;
 
@@ -135,67 +123,17 @@ pub trait Warehouse {
     fn unix_millis(&self, expression: &SqlString) -> SqlString;
 
     fn select_existence(&self, table: &TablePath) -> SqlString;
+}
 
-    fn create_build_log(&self, namespace: &str) -> Result<SqlString, UnsupportedColumn> {
-        let columns = std::iter::once(&(BuildLog::ID, ColumnType::Int64))
-            .chain(BuildLog::COLUMNS.iter())
-            .map(|(name, column_type)| {
-                Ok(format!(
-                    "{} {}",
-                    self.identifier(name),
-                    self.column_type(column_type)?
-                ))
-            })
-            .collect::<Result<Vec<_>, UnsupportedColumn>>()?;
+pub trait ChangeLogSql: WarehouseSql {
+    fn change_log_namespace(&self) -> &str;
 
-        Ok(SqlString::from(format!(
-            "CREATE TABLE IF NOT EXISTS {} ({})",
-            self.table_ref(&BuildLog::path(namespace)),
-            columns.join(", ")
-        )))
+    fn change_log(&self, topic: &str) -> TablePath {
+        TablePath::new(self.change_log_namespace(), topic)
     }
 
-    fn append_build_log(&self, namespace: &str, log: &BuildLog) -> SqlString {
-        let id = self.identifier(BuildLog::ID);
-        let columns = BuildLog::COLUMNS
-            .iter()
-            .map(|(name, _)| self.identifier(name))
-            .collect::<Vec<_>>();
-        let table = self.table_ref(&BuildLog::path(namespace));
-
-        SqlString::from(format!(
-            "INSERT INTO {table} ({id}, {})\nSELECT COALESCE(MAX({id}), 0) + 1, {}\nFROM {table}",
-            columns.join(", "),
-            log.cells(self).join(", ")
-        ))
-    }
-
-    fn select_latest_build_logs(&self, namespace: &str, latest: &Latest) -> SqlString {
-        let columns = BuildLog::COLUMNS
-            .iter()
-            .map(|(name, column_type)| {
-                let column = self.identifier(name);
-
-                match column_type {
-                    ColumnType::ZonedTimestamp => {
-                        format!("{} AS {column}", self.unix_millis(&column))
-                    }
-                    _ => column.to_string(),
-                }
-            })
-            .collect::<Vec<_>>();
-        let partition = ["artifact", "schedule", "table_to"]
-            .map(|name| self.identifier(name))
-            .join(", ");
-        let log = self.table_ref(&BuildLog::path(namespace));
-
-        SqlString::from(format!(
-            "SELECT {}\nFROM {log} AS {}\nWHERE {}\nQUALIFY ROW_NUMBER() OVER (PARTITION BY {partition} ORDER BY {} DESC) = 1\nORDER BY {partition}",
-            columns.join(", "),
-            self.identifier(Latest::ALIAS),
-            latest.condition(self, &log),
-            self.identifier(BuildLog::ID),
-        ))
+    fn change_log_ref(&self, topic: &str) -> SqlString {
+        self.table_ref(&self.change_log(topic))
     }
 
     fn select_schema_changes(&self, log: &impl SchemaChangeLog, window: &Window) -> SqlString {
@@ -220,14 +158,19 @@ pub trait Warehouse {
     }
 }
 
+pub trait Warehouse: ChangeLogSql + OpenWarehouse {}
+
+impl<W: ChangeLogSql + OpenWarehouse> Warehouse for W {}
+
 pub trait WarehouseFn {
     type Output;
 
     fn call<K: WarehouseClient>(self, client: &K) -> Self::Output;
 }
 
-pub trait OpenWarehouse: Warehouse {
-    type Client: WarehouseClient<Warehouse = Self>;
+pub trait OpenWarehouse {
+    type Config;
+    type Client: WarehouseClient;
     type Credential;
     type Error: std::error::Error;
 
@@ -275,9 +218,7 @@ pub trait WarehouseClient {
 
         self.execute(&warehouse.create_namespace(namespace))?;
         self.execute(
-            &warehouse
-                .create_build_log(namespace)
-                .map_err(UnbuildableArtifact::from)?,
+            &BuildLog::create_table(warehouse, namespace).map_err(UnbuildableArtifact::from)?,
         )?;
 
         Ok(())
@@ -286,7 +227,7 @@ pub trait WarehouseClient {
     fn exists(&self, table: &TablePath) -> Result<bool, Self::Error>;
 
     fn append_build_log(&self, namespace: &str, log: &BuildLog) -> Result<(), Self::Error> {
-        self.execute(&self.warehouse().append_build_log(namespace, log))
+        self.execute(&log.insert(self.warehouse(), namespace))
     }
 
     fn build<E>(&self, builder: &impl ArtifactBuilder) -> Result<(), E>
@@ -302,91 +243,12 @@ pub trait WarehouseClient {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
-    use std::cell::RefCell;
-
+mod tests {
     use super::*;
     use crate::build_log::{Outcome, Run};
     use crate::model::TableId;
     use crate::position::RecordedAt;
-
-    pub(crate) struct Engine;
-
-    impl Warehouse for Engine {
-        type Config = ();
-
-        fn timestamp_millis(&self, milliseconds: i64) -> SqlString {
-            SqlString::from(milliseconds.to_string())
-        }
-
-        fn unix_millis(&self, expression: &SqlString) -> SqlString {
-            expression.clone()
-        }
-
-        fn select_existence(&self, table: &TablePath) -> SqlString {
-            SqlString::from(format!("SELECT COUNT(*) FROM {table}"))
-        }
-
-        fn change_log_namespace(&self) -> &str {
-            "cdc"
-        }
-
-        fn identifier(&self, name: &str) -> SqlString {
-            SqlString::from(format!("\"{name}\""))
-        }
-
-        fn table_ref(&self, table: &TablePath) -> SqlString {
-            SqlString::from(format!("{}.{}", table.namespace(), table.name()))
-        }
-
-        fn column_type(&self, column_type: &ColumnType) -> Result<SqlString, UnsupportedColumn> {
-            Err(UnsupportedColumn::new(column_type))
-        }
-
-        fn read(
-            &self,
-            _: &SqlString,
-            column_type: &ColumnType,
-        ) -> Result<SqlString, UnsupportedColumn> {
-            Err(UnsupportedColumn::new(column_type))
-        }
-
-        fn cast_or_null(
-            &self,
-            _: &SqlString,
-            column_type: &ColumnType,
-        ) -> Result<SqlString, UnsupportedColumn> {
-            Err(UnsupportedColumn::new(column_type))
-        }
-    }
-
-    #[derive(Default)]
-    struct Recorder {
-        executed: RefCell<Vec<String>>,
-    }
-
-    impl WarehouseClient for Recorder {
-        type Warehouse = Engine;
-        type Error = std::fmt::Error;
-
-        fn warehouse(&self) -> &Self::Warehouse {
-            &Engine
-        }
-
-        fn execute(&self, statement: &SqlString) -> Result<(), Self::Error> {
-            self.executed.borrow_mut().push(statement.to_string());
-
-            Ok(())
-        }
-
-        fn latest_build_logs(&self, _: &str, _: &Latest) -> Result<Vec<BuildLog>, Self::Error> {
-            Ok(vec![])
-        }
-
-        fn exists(&self, _: &TablePath) -> Result<bool, Self::Error> {
-            Ok(false)
-        }
-    }
+    use crate::testing::{Engine, Recorder};
 
     struct Namespaced(TableId);
 
@@ -439,14 +301,14 @@ pub(crate) mod tests {
 
     #[test]
     fn a_client_builds_an_artifact_by_running_its_statements_in_order() {
-        let client = Recorder::default();
+        let client = Recorder::new(Engine);
 
         client
             .build::<Unbuilt>(&Namespaced(TableId::new("shop", "people")))
             .unwrap();
 
         assert_eq!(
-            client.executed.into_inner(),
+            client.executed(),
             [
                 "CREATE SCHEMA IF NOT EXISTS \"shop\"",
                 "CREATE TABLE shop.people (id BIGINT)"
@@ -458,7 +320,7 @@ pub(crate) mod tests {
     fn a_change_log_is_read_from_the_topic_it_landed_on_in_the_namespace_of_the_warehouse() {
         assert_eq!(
             Engine.change_log_ref("mysql.shop.people"),
-            Engine.table_ref(&TablePath::new("cdc", "mysql.shop.people"))
+            Engine.table_ref(&TablePath::new("mysql_shop_cdc", "mysql.shop.people"))
         );
     }
 }

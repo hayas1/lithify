@@ -15,5 +15,8 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 ulid = { workspace = true }
 
+[features]
+testing = []
+
 [dev-dependencies]
 tracing-subscriber = { workspace = true }

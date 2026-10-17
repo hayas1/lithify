@@ -54,6 +54,7 @@ impl FromStr for Secret {
 }
 
 impl OpenWarehouse for DuckDbWarehouse {
+    type Config = Config;
     type Client = DuckDbClient;
     type Credential = S3Credential;
     type Error = duckdb::Error;

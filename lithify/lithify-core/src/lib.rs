@@ -10,4 +10,6 @@ pub mod schedule;
 pub mod sink;
 pub mod source;
 pub mod sql;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 pub mod window;

@@ -9,7 +9,7 @@ use tokio::runtime::Runtime;
 
 use lithify_core::build_log::{BuildLog, Latest, UnreadableBuildLog};
 use lithify_core::event::MalformedEvent;
-use lithify_core::sink::{OpenWarehouse, TablePath, Warehouse, WarehouseClient};
+use lithify_core::sink::{ChangeLogSql, OpenWarehouse, TablePath, WarehouseClient, WarehouseSql};
 use lithify_core::source::{
     ChangeLogs, SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed,
 };
@@ -82,6 +82,7 @@ impl BigQueryClient {
 }
 
 impl OpenWarehouse for BigQueryWarehouse {
+    type Config = Config;
     type Client = BigQueryClient;
     type Credential = ();
     type Error = Unqueryable;
@@ -118,12 +119,10 @@ impl WarehouseClient for BigQueryClient {
         namespace: &str,
         latest: &Latest,
     ) -> Result<Vec<BuildLog>, Self::Error> {
-        self.records::<BigQueryBuildLogRow>(
-            &self.warehouse.select_latest_build_logs(namespace, latest),
-        )?
-        .into_iter()
-        .map(|row| BuildLog::try_from(row.0).map_err(Unqueryable::Misrecorded))
-        .collect()
+        self.records::<BigQueryBuildLogRow>(&latest.select(&self.warehouse, namespace))?
+            .into_iter()
+            .map(|row| BuildLog::try_from(row.0).map_err(Unqueryable::Misrecorded))
+            .collect()
     }
 }
 

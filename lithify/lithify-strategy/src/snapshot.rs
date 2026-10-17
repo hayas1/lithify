@@ -377,8 +377,11 @@ mod tests {
     use lithify_core::listener::{CatalogModel, OutOfOrder};
     use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
     use lithify_core::position::{Coordinate, Position, RecordedAt};
-    use lithify_core::sink::{TablePath, UnsupportedColumn, Warehouse};
+    use lithify_core::sink::{
+        ChangeLogSql, OpenWarehouse, TablePath, UnsupportedColumn, WarehouseSql,
+    };
     use lithify_core::source::{ChangeLog, ColumnPath, RowChangeLog};
+    use lithify_core::testing::{Engine, Recorder};
     use lithify_core::window::Window;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -426,75 +429,8 @@ mod tests {
         }
     }
 
-    struct Engine;
-
-    impl Warehouse for Engine {
-        type Config = ();
-
-        fn timestamp_millis(&self, milliseconds: i64) -> SqlString {
-            SqlString::from(milliseconds.to_string())
-        }
-
-        fn unix_millis(&self, expression: &SqlString) -> SqlString {
-            expression.clone()
-        }
-
-        fn select_existence(&self, table: &TablePath) -> SqlString {
-            SqlString::from(format!("SELECT COUNT(*) FROM {table}"))
-        }
-
-        fn change_log_namespace(&self) -> &str {
-            "mysql_shop_cdc"
-        }
-
-        fn identifier(&self, name: &str) -> SqlString {
-            SqlString::from(format!("\"{name}\""))
-        }
-
-        fn table_ref(&self, table: &TablePath) -> SqlString {
-            SqlString::from(format!(
-                "{}.{}",
-                self.identifier(table.namespace()),
-                self.identifier(table.name())
-            ))
-        }
-
-        fn column_type(&self, column_type: &ColumnType) -> Result<SqlString, UnsupportedColumn> {
-            match column_type {
-                ColumnType::Int64 => Ok(SqlString::from("BIGINT")),
-                ColumnType::Text => Ok(SqlString::from("TEXT")),
-                unsupported => Err(UnsupportedColumn::new(unsupported)),
-            }
-        }
-
-        fn read(
-            &self,
-            expression: &SqlString,
-            column_type: &ColumnType,
-        ) -> Result<SqlString, UnsupportedColumn> {
-            Ok(SqlString::from(format!(
-                "CAST({expression} AS {})",
-                self.column_type(column_type)?
-            )))
-        }
-
-        fn cast_or_null(
-            &self,
-            expression: &SqlString,
-            column_type: &ColumnType,
-        ) -> Result<SqlString, UnsupportedColumn> {
-            Ok(SqlString::from(format!(
-                "TRY_CAST({expression} AS {})",
-                self.column_type(column_type)?
-            )))
-        }
-    }
-
     struct Lake;
-
-    impl Warehouse for Lake {
-        type Config = ();
-
+    impl WarehouseSql for Lake {
         fn timestamp_millis(&self, milliseconds: i64) -> SqlString {
             SqlString::from(milliseconds.to_string())
         }
@@ -515,17 +451,6 @@ mod tests {
             Engine.table_ref(table)
         }
 
-        fn change_log_namespace(&self) -> &str {
-            Engine.change_log_namespace()
-        }
-
-        fn change_log_ref(&self, topic: &str) -> SqlString {
-            SqlString::from(format!(
-                "read_parquet('{}/{topic}/*.parquet')",
-                self.change_log_namespace()
-            ))
-        }
-
         fn column_type(&self, column_type: &ColumnType) -> Result<SqlString, UnsupportedColumn> {
             Engine.column_type(column_type)
         }
@@ -544,6 +469,30 @@ mod tests {
             column_type: &ColumnType,
         ) -> Result<SqlString, UnsupportedColumn> {
             Engine.cast_or_null(expression, column_type)
+        }
+    }
+
+    impl OpenWarehouse for Lake {
+        type Config = ();
+        type Client = Recorder<Lake>;
+        type Credential = ();
+        type Error = std::convert::Infallible;
+
+        fn open(_: &(), _: &(), _: &str) -> Result<Recorder<Lake>, Self::Error> {
+            Ok(Recorder::new(Lake))
+        }
+    }
+
+    impl ChangeLogSql for Lake {
+        fn change_log_namespace(&self) -> &str {
+            Engine.change_log_namespace()
+        }
+
+        fn change_log_ref(&self, topic: &str) -> SqlString {
+            SqlString::from(format!(
+                "read_parquet('{}/{topic}/*.parquet')",
+                self.change_log_namespace()
+            ))
         }
     }
     fn column(name: &str, column_type: ColumnType) -> ColumnModel {

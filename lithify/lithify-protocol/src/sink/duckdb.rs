@@ -7,7 +7,7 @@ pub mod from_sql;
 pub mod store;
 
 use lithify_core::model::ColumnType;
-use lithify_core::sink::{TablePath, UnsupportedColumn, Warehouse};
+use lithify_core::sink::{ChangeLogSql, TablePath, UnsupportedColumn, WarehouseSql};
 use lithify_core::sql::SqlString;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,10 +31,7 @@ impl DuckDbWarehouse {
         }
     }
 }
-
-impl Warehouse for DuckDbWarehouse {
-    type Config = config::Config;
-
+impl WarehouseSql for DuckDbWarehouse {
     fn identifier(&self, name: &str) -> SqlString {
         SqlString::from(format!("\"{name}\""))
     }
@@ -45,19 +42,6 @@ impl Warehouse for DuckDbWarehouse {
             self.namespace_ref(table.namespace()),
             self.identifier(table.name())
         ))
-    }
-
-    fn change_log_namespace(&self) -> &str {
-        &self.change_log
-    }
-
-    fn change_log_ref(&self, topic: &str) -> SqlString {
-        let table = self.change_log(topic);
-
-        match &self.store {
-            Some(store) => store.scan(&table),
-            None => self.table_ref(&table),
-        }
     }
 
     fn column_type(&self, column_type: &ColumnType) -> Result<SqlString, UnsupportedColumn> {
@@ -134,6 +118,21 @@ impl Warehouse for DuckDbWarehouse {
                 "CAST({expression} AS {})",
                 self.column_type(other)?
             ))),
+        }
+    }
+}
+
+impl ChangeLogSql for DuckDbWarehouse {
+    fn change_log_namespace(&self) -> &str {
+        &self.change_log
+    }
+
+    fn change_log_ref(&self, topic: &str) -> SqlString {
+        let table = self.change_log(topic);
+
+        match &self.store {
+            Some(store) => store.scan(&table),
+            None => self.table_ref(&table),
         }
     }
 }

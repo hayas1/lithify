@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use lithify_core::sink::{self, OpenWarehouse, SinkWarehouse, WarehouseFn};
+use lithify_core::sink::{OpenWarehouse, SinkWarehouse, WarehouseFn};
 use lithify_core::source::CdcFormat;
 use lithify_protocol::sink::bigquery::client::{BigQueryCapture, BigQueryChangeLogsFn};
 use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbChangeLogsFn};
@@ -48,8 +48,8 @@ impl BigQueryCapture for Capture {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "lowercase")]
 pub enum WarehouseConfig {
-    DuckDb(<DuckDbWarehouse as sink::Warehouse>::Config),
-    BigQuery(<BigQueryWarehouse as sink::Warehouse>::Config),
+    DuckDb(<DuckDbWarehouse as OpenWarehouse>::Config),
+    BigQuery(<BigQueryWarehouse as OpenWarehouse>::Config),
 }
 
 impl SinkWarehouse for WarehouseConfig {

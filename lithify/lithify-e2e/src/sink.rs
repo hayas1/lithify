@@ -9,7 +9,7 @@ use lithify_core::era::EraTracker;
 use lithify_core::listener::OutOfOrder;
 use lithify_core::model::{TableId, TableModel};
 use lithify_core::position::RecordedAt;
-use lithify_core::sink::{TablePath, Warehouse, WarehouseClient};
+use lithify_core::sink::{ChangeLogSql, TablePath, WarehouseClient, WarehouseSql};
 use lithify_core::source::{
     ChangeLog, ChangeLogs, ColumnPath, RowChangeLog, SchemaChangeLog, SchemaChangeStream,
 };

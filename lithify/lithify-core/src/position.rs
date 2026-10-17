@@ -2,7 +2,7 @@ use std::fmt;
 
 use chrono::{DateTime, Utc};
 
-use crate::sink::Warehouse;
+use crate::sink::WarehouseSql;
 use crate::sql::SqlString;
 
 pub trait Position: PartialOrd + Clone + fmt::Debug {}
@@ -14,7 +14,7 @@ pub enum Coordinate {
 }
 
 impl Coordinate {
-    pub fn sql<W: Warehouse>(&self, warehouse: &W) -> SqlString {
+    pub fn sql<W: WarehouseSql>(&self, warehouse: &W) -> SqlString {
         match self {
             Self::Text(text) => warehouse.literal(text),
             Self::Number(number) => SqlString::from(number.to_string()),

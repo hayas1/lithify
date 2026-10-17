@@ -5,7 +5,7 @@ use ulid::Ulid;
 
 use crate::model::{ColumnType, TableId};
 use crate::position::RecordedAt;
-use crate::sink::{TablePath, Warehouse};
+use crate::sink::{TablePath, UnsupportedColumn, WarehouseSql};
 use crate::sql::SqlString;
 use crate::window::Window;
 
@@ -133,6 +133,43 @@ impl BuildLog {
         }
     }
 
+    pub fn create_table<W: WarehouseSql + ?Sized>(
+        warehouse: &W,
+        namespace: &str,
+    ) -> Result<SqlString, UnsupportedColumn> {
+        let columns = std::iter::once(&(Self::ID, ColumnType::Int64))
+            .chain(Self::COLUMNS.iter())
+            .map(|(name, column_type)| {
+                Ok(format!(
+                    "{} {}",
+                    warehouse.identifier(name),
+                    warehouse.column_type(column_type)?
+                ))
+            })
+            .collect::<Result<Vec<_>, UnsupportedColumn>>()?;
+
+        Ok(SqlString::from(format!(
+            "CREATE TABLE IF NOT EXISTS {} ({})",
+            warehouse.table_ref(&Self::path(namespace)),
+            columns.join(", ")
+        )))
+    }
+
+    pub fn insert<W: WarehouseSql + ?Sized>(&self, warehouse: &W, namespace: &str) -> SqlString {
+        let id = warehouse.identifier(Self::ID);
+        let columns = Self::COLUMNS
+            .iter()
+            .map(|(name, _)| warehouse.identifier(name))
+            .collect::<Vec<_>>();
+        let table = warehouse.table_ref(&Self::path(namespace));
+
+        SqlString::from(format!(
+            "INSERT INTO {table} ({id}, {})\nSELECT COALESCE(MAX({id}), 0) + 1, {}\nFROM {table}",
+            columns.join(", "),
+            self.cells(warehouse).join(", ")
+        ))
+    }
+
     pub fn path(namespace: &str) -> TablePath {
         TablePath::new(namespace, "_lithify_log")
     }
@@ -197,7 +234,7 @@ impl BuildLog {
         &self.outcome.status
     }
 
-    pub fn cells<W: Warehouse + ?Sized>(&self, warehouse: &W) -> [SqlString; 16] {
+    pub fn cells<W: WarehouseSql + ?Sized>(&self, warehouse: &W) -> [SqlString; 16] {
         [
             warehouse.literal(&self.run.run_id.to_string()),
             warehouse.literal(&self.run.artifact),
@@ -221,7 +258,10 @@ impl BuildLog {
         ]
     }
 
-    fn nullable<W: Warehouse + ?Sized>(warehouse: &W, value: Option<&impl Display>) -> SqlString {
+    fn nullable<W: WarehouseSql + ?Sized>(
+        warehouse: &W,
+        value: Option<&impl Display>,
+    ) -> SqlString {
         value.map_or_else(
             || SqlString::from("NULL"),
             |value| warehouse.literal(&value.to_string()),
@@ -305,7 +345,35 @@ impl Latest {
     pub const ALIAS: &str = "latest";
     const DEPARTED: &str = "departed";
 
-    pub fn condition<W: Warehouse + ?Sized>(&self, warehouse: &W, log: &SqlString) -> SqlString {
+    pub fn select<W: WarehouseSql + ?Sized>(&self, warehouse: &W, namespace: &str) -> SqlString {
+        let columns = BuildLog::COLUMNS
+            .iter()
+            .map(|(name, column_type)| {
+                let column = warehouse.identifier(name);
+
+                match column_type {
+                    ColumnType::ZonedTimestamp => {
+                        format!("{} AS {column}", warehouse.unix_millis(&column))
+                    }
+                    _ => column.to_string(),
+                }
+            })
+            .collect::<Vec<_>>();
+        let partition = ["artifact", "schedule", "table_to"]
+            .map(|name| warehouse.identifier(name))
+            .join(", ");
+        let log = warehouse.table_ref(&BuildLog::path(namespace));
+
+        SqlString::from(format!(
+            "SELECT {}\nFROM {log} AS {}\nWHERE {}\nQUALIFY ROW_NUMBER() OVER (PARTITION BY {partition} ORDER BY {} DESC) = 1\nORDER BY {partition}",
+            columns.join(", "),
+            warehouse.identifier(Self::ALIAS),
+            self.condition(warehouse, &log),
+            warehouse.identifier(BuildLog::ID),
+        ))
+    }
+
+    pub fn condition<W: WarehouseSql + ?Sized>(&self, warehouse: &W, log: &SqlString) -> SqlString {
         let latest = warehouse.identifier(Self::ALIAS);
         let succeeded = Self::succeeded(warehouse, &latest);
 
@@ -327,7 +395,7 @@ impl Latest {
         })
     }
 
-    fn undeparted<W: Warehouse + ?Sized>(
+    fn undeparted<W: WarehouseSql + ?Sized>(
         warehouse: &W,
         log: &SqlString,
         succeeded_only: bool,
@@ -371,11 +439,11 @@ impl Latest {
         )
     }
 
-    fn standing<W: Warehouse + ?Sized>(warehouse: &W, alias: &SqlString) -> String {
+    fn standing<W: WarehouseSql + ?Sized>(warehouse: &W, alias: &SqlString) -> String {
         format!("{} IS NOT NULL", Self::column(warehouse, alias, "table_to"))
     }
 
-    fn succeeded<W: Warehouse + ?Sized>(warehouse: &W, alias: &SqlString) -> String {
+    fn succeeded<W: WarehouseSql + ?Sized>(warehouse: &W, alias: &SqlString) -> String {
         format!(
             "{} = {}",
             Self::column(warehouse, alias, "status"),
@@ -383,7 +451,7 @@ impl Latest {
         )
     }
 
-    fn column<W: Warehouse + ?Sized>(warehouse: &W, alias: &SqlString, column: &str) -> String {
+    fn column<W: WarehouseSql + ?Sized>(warehouse: &W, alias: &SqlString, column: &str) -> String {
         format!("{alias}.{}", warehouse.identifier(column))
     }
 }

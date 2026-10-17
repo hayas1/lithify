@@ -239,8 +239,8 @@ mod tests {
 
     use super::*;
     use crate::build_log::{Outcome, Run, Status};
-    use crate::sink::tests::Engine;
     use crate::sql::SqlString;
+    use crate::testing::Engine;
 
     fn at(rfc3339: &str) -> RecordedAt {
         RecordedAt::from(rfc3339.parse::<DateTime<Utc>>().unwrap())
