@@ -123,6 +123,36 @@ pub trait WarehouseSql {
     fn unix_millis(&self, expression: &SqlString) -> SqlString;
 
     fn select_existence(&self, table: &TablePath) -> SqlString;
+
+    fn create_table(&self, table: &TablePath, columns: &[(SqlString, SqlString)]) -> SqlString {
+        let columns: Vec<_> = columns
+            .iter()
+            .map(|(name, column_type)| format!("{name} {column_type}"))
+            .collect();
+
+        SqlString::from(format!(
+            "CREATE TABLE IF NOT EXISTS {} ({})",
+            self.table_ref(table),
+            columns.join(", ")
+        ))
+    }
+
+    fn create_table_as(&self, table: &TablePath, select: &SqlString) -> SqlString {
+        SqlString::from(format!(
+            "CREATE OR REPLACE TABLE {} AS\n{select}",
+            self.table_ref(table)
+        ))
+    }
+
+    fn insert(&self, table: &TablePath, columns: &[SqlString], select: &SqlString) -> SqlString {
+        let columns: Vec<_> = columns.iter().map(SqlString::to_string).collect();
+
+        SqlString::from(format!(
+            "INSERT INTO {} ({})\n{select}",
+            self.table_ref(table),
+            columns.join(", ")
+        ))
+    }
 }
 
 pub trait ChangeLogSql: WarehouseSql {
@@ -234,7 +264,7 @@ pub trait WarehouseClient {
     where
         E: From<Self::Error> + From<UnbuildableArtifact>,
     {
-        for statement in builder.create()? {
+        for statement in builder.create(self.warehouse())? {
             self.execute(&statement)?;
         }
 
@@ -261,9 +291,12 @@ mod tests {
             Ok(SqlString::from("SELECT 1 AS id"))
         }
 
-        fn create(&self) -> Result<Vec<SqlString>, UnbuildableArtifact> {
+        fn create<W: Warehouse>(
+            &self,
+            warehouse: &W,
+        ) -> Result<Vec<SqlString>, UnbuildableArtifact> {
             Ok(vec![
-                Engine::default().create_namespace("shop"),
+                warehouse.create_namespace("shop"),
                 SqlString::from("CREATE TABLE shop.people (id BIGINT)"),
             ])
         }
@@ -313,6 +346,31 @@ mod tests {
                 "CREATE SCHEMA IF NOT EXISTS \"shop\"",
                 "CREATE TABLE shop.people (id BIGINT)"
             ]
+        );
+    }
+
+    #[test]
+    fn a_table_is_created_whole_from_what_a_select_reads_unless_the_warehouse_says_otherwise() {
+        let people = TablePath::new("shop", "people");
+
+        assert_eq!(
+            Engine::default().create_table_as(&people, &SqlString::from("SELECT 1 AS id")),
+            "CREATE OR REPLACE TABLE \"shop\".\"people\" AS\nSELECT 1 AS id"
+        );
+        assert_eq!(
+            Engine::default().create_table(
+                &people,
+                &[(SqlString::from("\"id\""), SqlString::from("BIGINT"))]
+            ),
+            "CREATE TABLE IF NOT EXISTS \"shop\".\"people\" (\"id\" BIGINT)"
+        );
+        assert_eq!(
+            Engine::default().insert(
+                &people,
+                &[SqlString::from("\"id\"")],
+                &SqlString::from("SELECT 1")
+            ),
+            "INSERT INTO \"shop\".\"people\" (\"id\")\nSELECT 1"
         );
     }
 

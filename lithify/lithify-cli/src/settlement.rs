@@ -49,7 +49,7 @@ impl DryRun {
 impl Settlement for DryRun {
     type Output = Vec<SqlString>;
 
-    fn settle<K, B>(&self, _: &K, builders: &[B]) -> Result<Self::Output, Unrunnable>
+    fn settle<K, B>(&self, client: &K, builders: &[B]) -> Result<Self::Output, Unrunnable>
     where
         K: WarehouseClient,
         Unrunnable: From<K::Error>,
@@ -57,7 +57,7 @@ impl Settlement for DryRun {
     {
         Ok(builders
             .iter()
-            .map(ArtifactBuilder::create)
+            .map(|builder| builder.create(client.warehouse()))
             .collect::<Result<Vec<_>, _>>()?
             .concat())
     }

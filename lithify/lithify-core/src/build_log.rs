@@ -140,34 +140,30 @@ impl BuildLog {
         let columns = std::iter::once(&(Self::ID, ColumnType::Int64))
             .chain(Self::COLUMNS.iter())
             .map(|(name, column_type)| {
-                Ok(format!(
-                    "{} {}",
+                Ok((
                     warehouse.identifier(name),
-                    warehouse.column_type(column_type)?
+                    warehouse.column_type(column_type)?,
                 ))
             })
             .collect::<Result<Vec<_>, UnsupportedColumn>>()?;
 
-        Ok(SqlString::from(format!(
-            "CREATE TABLE IF NOT EXISTS {} ({})",
-            warehouse.table_ref(&Self::path(namespace)),
-            columns.join(", ")
-        )))
+        Ok(warehouse.create_table(&Self::path(namespace), &columns))
     }
 
     pub fn insert<W: WarehouseSql + ?Sized>(&self, warehouse: &W, namespace: &str) -> SqlString {
         let id = warehouse.identifier(Self::ID);
-        let columns = Self::COLUMNS
-            .iter()
-            .map(|(name, _)| warehouse.identifier(name))
-            .collect::<Vec<_>>();
-        let table = warehouse.table_ref(&Self::path(namespace));
+        let path = Self::path(namespace);
+        let columns: Vec<_> = std::iter::once(Self::ID)
+            .chain(Self::COLUMNS.iter().map(|(name, _)| *name))
+            .map(|name| warehouse.identifier(name))
+            .collect();
+        let select = SqlString::from(format!(
+            "SELECT COALESCE(MAX({id}), 0) + 1, {}\nFROM {}",
+            self.cells(warehouse).join(", "),
+            warehouse.table_ref(&path)
+        ));
 
-        SqlString::from(format!(
-            "INSERT INTO {table} ({id}, {})\nSELECT COALESCE(MAX({id}), 0) + 1, {}\nFROM {table}",
-            columns.join(", "),
-            self.cells(warehouse).join(", ")
-        ))
+        warehouse.insert(&path, &columns, &select)
     }
 
     pub fn path(namespace: &str) -> TablePath {

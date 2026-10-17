@@ -75,14 +75,9 @@ pub struct SnapshotBuilder<'a, L, W> {
     window: Window,
     base: Option<TablePath>,
     target: Option<TablePath>,
-    rendered: Option<Target>,
+    begun: bool,
     fold: Fold,
     warehouse: PhantomData<fn(&W)>,
-}
-
-struct Target {
-    namespace: SqlString,
-    table: SqlString,
 }
 
 impl<'a, L: RowChangeLog, W: Warehouse> SnapshotBuilder<'a, L, W> {
@@ -102,7 +97,7 @@ impl<'a, L: RowChangeLog, W: Warehouse> SnapshotBuilder<'a, L, W> {
             appearance: None,
             window,
             base,
-            rendered: None,
+            begun: false,
             fold: Fold::default(),
             warehouse: PhantomData,
         })
@@ -120,7 +115,7 @@ impl<'a, L: RowChangeLog, W: Warehouse> SnapshotBuilder<'a, L, W> {
     }
 
     fn begin(&mut self, warehouse: &W, table: &TableModel) -> Result<(), UnbuildableArtifact> {
-        if self.rendered.is_some() {
+        if self.begun {
             return Ok(());
         }
         if table.primary_key().next().is_none() {
@@ -130,16 +125,9 @@ impl<'a, L: RowChangeLog, W: Warehouse> SnapshotBuilder<'a, L, W> {
         let base = self.select_base(warehouse, table)?;
 
         self.fold.push(warehouse.identifier("base"), base);
-        self.rendered = self.render_target(warehouse);
+        self.begun = true;
 
         Ok(())
-    }
-
-    fn render_target(&self, warehouse: &W) -> Option<Target> {
-        self.target.as_ref().map(|target| Target {
-            namespace: warehouse.create_namespace(target.namespace()),
-            table: warehouse.table_ref(target),
-        })
     }
 
     fn select_base(
@@ -298,7 +286,6 @@ impl<L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Position>
         self.begin(warehouse, event.before())?;
         self.table = event.after().id().clone();
         self.target = Some(self.snapshot.target(&self.table, &self.window)?);
-        self.rendered = self.render_target(warehouse);
 
         Ok(())
     }
@@ -334,24 +321,21 @@ impl<L: RowChangeLog, W: Warehouse> ArtifactBuilder for SnapshotBuilder<'_, L, W
     }
 
     fn select(&self) -> Result<SqlString, UnbuildableArtifact> {
-        match &self.rendered {
-            Some(_) => Ok(self.fold.select()),
-            None => Err(self.without_era()),
+        match self.begun {
+            true => Ok(self.fold.select()),
+            false => Err(self.without_era()),
         }
     }
 
-    fn create(&self) -> Result<Vec<SqlString>, UnbuildableArtifact> {
-        if self.target.is_none() {
+    fn create<V: Warehouse>(&self, warehouse: &V) -> Result<Vec<SqlString>, UnbuildableArtifact> {
+        let Some(target) = &self.target else {
             return Ok(Vec::new());
-        }
+        };
 
-        match &self.rendered {
-            Some(target) => Ok(vec![
-                target.namespace.clone(),
-                self.fold.create(&target.table),
-            ]),
-            None => Err(self.without_era()),
-        }
+        Ok(vec![
+            warehouse.create_namespace(target.namespace()),
+            warehouse.create_table_as(target, &self.select()?),
+        ])
     }
 
     fn build_log(&self, run: &Run, outcome: Outcome) -> BuildLog {
@@ -543,7 +527,7 @@ mod tests {
         snapshots: Result<Vec<SnapshotBuilder<'static, Log, W>>, Untold>,
     ) -> String {
         snapshots.unwrap()[0]
-            .create()
+            .create(&Engine::default())
             .unwrap()
             .remove(1)
             .to_string()
@@ -563,7 +547,7 @@ mod tests {
     #[test]
     fn a_snapshot_is_built_into_a_namespace_made_for_it() {
         let statements = snapshots(customers(), vec![], || None).unwrap()[0]
-            .create()
+            .create(&Engine::default())
             .unwrap();
 
         assert_eq!(statements[0], "CREATE SCHEMA IF NOT EXISTS \"mysql_shop\"");
@@ -664,7 +648,7 @@ mod tests {
             .iter()
             .find(|snapshot| snapshot.table() == &TableId::new("shop", "orders"))
             .unwrap()
-            .create()
+            .create(&Engine::default())
             .unwrap()
             .remove(1)
             .to_string();
@@ -701,7 +685,7 @@ mod tests {
                 .iter()
                 .find(|snapshot| snapshot.table() == &TableId::new("shop", table))
                 .unwrap()
-                .create()
+                .create(&Engine::default())
                 .unwrap()
                 .remove(1)
                 .to_string()
@@ -1270,7 +1254,7 @@ mod tests {
     #[test]
     fn a_table_renamed_within_the_window_is_snapshotted_under_its_last_name() {
         let snapshots = renamed_to_clients(|| None);
-        let statements = snapshots[0].create().unwrap();
+        let statements = snapshots[0].create(&Engine::default()).unwrap();
 
         assert_eq!(snapshots[0].table(), &TableId::new("shop", "clients"));
         assert!(
@@ -1370,7 +1354,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            snapshot.create().unwrap_err(),
+            snapshot.create(&Engine::default()).unwrap_err(),
             UnbuildableArtifact::WithoutEra(TableId::new("shop", "customers"))
         );
     }
@@ -1434,7 +1418,7 @@ mod tests {
         .unwrap();
 
         assert!(
-            fold.create().unwrap()[1]
+            fold.create(&Engine::default()).unwrap()[1]
                 .as_str()
                 .starts_with("CREATE OR REPLACE TABLE \"mysql_shop\".\"customers_20260920\" AS\n")
         );
@@ -1620,7 +1604,10 @@ mod tests {
         .unwrap()
         .remove(0);
 
-        assert_eq!(dropped.create().unwrap(), Vec::<SqlString>::new());
+        assert_eq!(
+            dropped.create(&Engine::default()).unwrap(),
+            Vec::<SqlString>::new()
+        );
         assert_eq!(
             dropped.build_log(&run, outcome.clone()),
             BuildLog::new(
@@ -1705,7 +1692,7 @@ mod tests {
 
         assert!(select.as_str().starts_with("WITH \"base\" AS (\n"));
         assert_eq!(
-            snapshot.create().unwrap()[1],
+            snapshot.create(&Engine::default()).unwrap()[1],
             format!("CREATE OR REPLACE TABLE \"mysql_shop\".\"customers_20260920\" AS\n{select}")
                 .as_str()
         );

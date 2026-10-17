@@ -37,11 +37,68 @@ impl WarehouseSql for DuckDbWarehouse {
     }
 
     fn table_ref(&self, table: &TablePath) -> SqlString {
-        SqlString::from(format!(
-            "{}.{}",
-            self.namespace_ref(table.namespace()),
-            self.identifier(table.name())
-        ))
+        match &self.store {
+            Some(store) => store.scan(table),
+            None => SqlString::from(format!(
+                "{}.{}",
+                self.namespace_ref(table.namespace()),
+                self.identifier(table.name())
+            )),
+        }
+    }
+
+    fn create_table(&self, table: &TablePath, columns: &[(SqlString, SqlString)]) -> SqlString {
+        let Some(store) = &self.store else {
+            let columns: Vec<_> = columns
+                .iter()
+                .map(|(name, column_type)| format!("{name} {column_type}"))
+                .collect();
+
+            return SqlString::from(format!(
+                "CREATE TABLE IF NOT EXISTS {} ({})",
+                self.table_ref(table),
+                columns.join(", ")
+            ));
+        };
+        let nulls: Vec<_> = columns
+            .iter()
+            .map(|(name, column_type)| format!("CAST(NULL AS {column_type}) AS {name}"))
+            .collect();
+
+        store.replace(
+            table,
+            &SqlString::from(format!("SELECT {} LIMIT 0", nulls.join(", "))),
+        )
+    }
+
+    fn create_table_as(&self, table: &TablePath, select: &SqlString) -> SqlString {
+        match &self.store {
+            Some(store) => store.replace(table, select),
+            None => SqlString::from(format!(
+                "CREATE OR REPLACE TABLE {} AS\n{select}",
+                self.table_ref(table)
+            )),
+        }
+    }
+
+    fn insert(&self, table: &TablePath, columns: &[SqlString], select: &SqlString) -> SqlString {
+        let columns: Vec<_> = columns.iter().map(SqlString::to_string).collect();
+
+        match &self.store {
+            Some(store) => store.append(
+                table,
+                &SqlString::from(format!(
+                    "SELECT * FROM (\n{select}\n) AS {}({})",
+                    self.identifier("inserted"),
+                    columns.join(", ")
+                )),
+            ),
+            None => SqlString::from(format!(
+                "INSERT INTO {} ({})\n{select}",
+                self.table_ref(table),
+                columns.join(", ")
+            )),
+        }
     }
 
     fn column_type(&self, column_type: &ColumnType) -> Result<SqlString, UnsupportedColumn> {
@@ -74,6 +131,10 @@ impl WarehouseSql for DuckDbWarehouse {
     }
 
     fn select_existence(&self, table: &TablePath) -> SqlString {
+        if let Some(store) = &self.store {
+            return store.existence(table);
+        }
+
         SqlString::from(format!(
             "SELECT COUNT(*) AS {} FROM information_schema.tables WHERE table_schema = {} AND table_name = {}",
             self.identifier("count"),
@@ -125,15 +186,6 @@ impl WarehouseSql for DuckDbWarehouse {
 impl ChangeLogSql for DuckDbWarehouse {
     fn change_log_namespace(&self) -> &str {
         &self.change_log
-    }
-
-    fn change_log_ref(&self, topic: &str) -> SqlString {
-        let table = self.change_log(topic);
-
-        match &self.store {
-            Some(store) => store.scan(&table),
-            None => self.table_ref(&table),
-        }
     }
 }
 
@@ -321,12 +373,66 @@ mod tests {
         );
     }
 
+    fn lake() -> DuckDbWarehouse {
+        DuckDbWarehouse::over("mysql_shop_cdc", s3("http://rustfs:9000"))
+    }
+
     #[test]
-    fn what_was_built_lives_in_the_database_even_when_the_change_log_does_not() {
+    fn what_is_built_lives_beside_the_change_log_in_object_storage_once_one_is_named() {
+        let customers = TablePath::new("mysql_shop", "customers");
+
         assert_eq!(
-            DuckDbWarehouse::over("mysql_shop_cdc", s3("http://rustfs:9000"))
-                .table_ref(&TablePath::new("mysql_shop", "customers")),
+            DuckDbWarehouse::new("mysql_shop_cdc").table_ref(&customers),
             "\"mysql_shop\".\"customers\""
+        );
+        assert_eq!(
+            lake().table_ref(&customers),
+            "read_parquet('s3://lithify/mysql_shop/customers/*.parquet', union_by_name = true)"
+        );
+    }
+
+    #[test]
+    fn a_table_built_into_object_storage_is_one_file_replaced_whole() {
+        assert_eq!(
+            lake().create_table_as(
+                &TablePath::new("mysql_shop", "customers_20260920"),
+                &SqlString::from("SELECT 1 AS id")
+            ),
+            "COPY (\nSELECT 1 AS id\n) TO 's3://lithify/mysql_shop/customers_20260920/customers_20260920.parquet' (FORMAT parquet)"
+        );
+    }
+
+    #[test]
+    fn a_table_created_in_object_storage_is_a_file_holding_its_columns_alone() {
+        assert_eq!(
+            lake().create_table(
+                &TablePath::new("mysql_shop", "_lithify_log"),
+                &[
+                    (SqlString::from("\"id\""), SqlString::from("BIGINT")),
+                    (SqlString::from("\"run_id\""), SqlString::from("VARCHAR"))
+                ]
+            ),
+            "COPY (\nSELECT CAST(NULL AS BIGINT) AS \"id\", CAST(NULL AS VARCHAR) AS \"run_id\" LIMIT 0\n) TO 's3://lithify/mysql_shop/_lithify_log/_lithify_log.parquet' (FORMAT parquet)"
+        );
+    }
+
+    #[test]
+    fn rows_inserted_into_object_storage_are_appended_as_a_file_of_their_own() {
+        assert_eq!(
+            lake().insert(
+                &TablePath::new("mysql_shop", "_lithify_log"),
+                &[SqlString::from("\"id\""), SqlString::from("\"run_id\"")],
+                &SqlString::from("SELECT 1, 'run'")
+            ),
+            "COPY (\nSELECT * FROM (\nSELECT 1, 'run'\n) AS \"inserted\"(\"id\", \"run_id\")\n) TO 's3://lithify/mysql_shop/_lithify_log' (FORMAT parquet, FILENAME_PATTERN '_lithify_log_{uuid}', PER_THREAD_OUTPUT true, APPEND true)"
+        );
+    }
+
+    #[test]
+    fn a_table_in_object_storage_exists_once_a_file_of_it_does() {
+        assert_eq!(
+            lake().select_existence(&TablePath::new("mysql_shop", "customers")),
+            "SELECT COUNT(*) AS \"count\" FROM glob('s3://lithify/mysql_shop/customers/*.parquet')"
         );
     }
 }

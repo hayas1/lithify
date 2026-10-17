@@ -31,13 +31,6 @@ impl Fold {
 
         SqlString::from(format!("WITH {}\nSELECT * FROM {last}", ctes.join(",\n")))
     }
-
-    pub(super) fn create(&self, target: &SqlString) -> SqlString {
-        SqlString::from(format!(
-            "CREATE OR REPLACE TABLE {target} AS\n{}",
-            self.select()
-        ))
-    }
 }
 
 #[cfg(test)]
@@ -78,26 +71,6 @@ mod tests {
         assert_eq!(
             fold.select(),
             concat!(
-                "WITH base AS (\n  SELECT 1\n),\n",
-                "era_1 AS (\n  SELECT * FROM base\n)\n",
-                "SELECT * FROM era_1"
-            )
-        );
-    }
-
-    #[test]
-    fn a_creation_builds_the_target_from_the_select() {
-        let mut fold = Fold::default();
-        fold.push(SqlString::from("base"), SqlString::from("  SELECT 1"));
-        fold.push(
-            SqlString::from("era_1"),
-            SqlString::from("  SELECT * FROM base"),
-        );
-
-        assert_eq!(
-            fold.create(&SqlString::from("target")),
-            concat!(
-                "CREATE OR REPLACE TABLE target AS\n",
                 "WITH base AS (\n  SELECT 1\n),\n",
                 "era_1 AS (\n  SELECT * FROM base\n)\n",
                 "SELECT * FROM era_1"

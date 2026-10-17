@@ -69,7 +69,7 @@ fn statements<W: Warehouse>(warehouse: &W) -> String {
     )
     .unwrap();
 
-    snapshot.create().unwrap().join(";\n")
+    snapshot.create(warehouse).unwrap().join(";\n")
 }
 
 fn main() {

@@ -76,7 +76,7 @@ pub trait ArtifactBuilder {
 
     fn select(&self) -> Result<SqlString, UnbuildableArtifact>;
 
-    fn create(&self) -> Result<Vec<SqlString>, UnbuildableArtifact>;
+    fn create<W: Warehouse>(&self, warehouse: &W) -> Result<Vec<SqlString>, UnbuildableArtifact>;
 
     fn build_log(&self, run: &Run, outcome: Outcome) -> BuildLog;
 }
