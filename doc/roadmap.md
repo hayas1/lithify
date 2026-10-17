@@ -133,7 +133,8 @@ Status reads as in [Operations](#operations).
 | Refactoring | Why | Into | Status | Target |
 | --- | --- | --- | --- | --- |
 | Replay a window into the artifacts of every table | Opening a builder per table on an `EraTracker`, replaying the schema changes through it and finishing it on the tables left standing is spelled out in `SnapshotPlan::builders`, again in `SnapshotBuild` of the end-to-end crate and again in the snapshot tests | core | Not started | |
-| Choose the shard a window builds on | `Base` in the command line crate reads the shards a window folds onto from the build log, which a scheduled run, a resume and a backfill all need | core or strategy | Not started | |
+| Choose the shard a window builds on | `Resumption` in the command line crate reads the build logs a window folds onto, which a scheduled run, a resume and a backfill all need, alongside `Schedule` and the check already in core | core | Not started | |
 | Choose the source a window reads | `Run::source` takes the only source and leaves ordering the change log across sources to a `todo!` | core | Not started | |
+| Open the warehouse a sink names | `OpenWarehouse` hands a `WarehouseFn` the client of whatever warehouse a sink is configured with, so the overview reads every sink without knowing which warehouses there are, but `Run` still matches on `Warehouse` to open the clients it builds and checks with | core | Partial: the overview opens warehouses through it | |
 | Call a fn with the change logs of any warehouse | Every caller implements `DuckDbChangeLogsFn` and `BigQueryChangeLogsFn` with the same body, as `Catalog` and `SnapshotPlan` do | protocol | Not started | |
 | Name the artifacts a sink builds | `Artifacts` is implemented for `Sink<Warehouse>` but reads nothing of the warehouse, and the end-to-end crate reaches into the command line crate for it | config or strategy | Not started | |

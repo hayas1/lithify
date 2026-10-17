@@ -12,7 +12,7 @@ use lithify_core::sql::SqlString;
 use lithify_core::window::Window;
 
 use crate::journal::Journal;
-use crate::pipeline::{Capture, Warehouse};
+use crate::pipeline::{Capture, WarehouseConfig};
 use crate::unrunnable::Unrunnable;
 
 pub trait Settlement {
@@ -99,7 +99,7 @@ pub struct Build {
 }
 
 impl Build {
-    pub fn new(sink: &Sink<Warehouse>, source: &Source<Capture>) -> Result<Self, Unrunnable> {
+    pub fn new(sink: &Sink<WarehouseConfig>, source: &Source<Capture>) -> Result<Self, Unrunnable> {
         let artifacts = sink.artifacts();
 
         Ok(Self {

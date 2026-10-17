@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 
 use lithify_core::position::RecordedAt;
 
-use crate::{ArtifactKind, Schedule};
+use lithify_core::schedule::Schedule;
+
+use crate::ArtifactKind;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

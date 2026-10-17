@@ -55,17 +55,17 @@ pub trait Sink {
 
 impl dyn Sink {
     pub fn connect(
-        warehouse: &pipeline::Warehouse,
+        warehouse: &pipeline::WarehouseConfig,
         change_log: &str,
         key_id: &str,
         secret: &str,
     ) -> Result<Box<Self>, Unbuildable> {
         match warehouse {
-            pipeline::Warehouse::DuckDb(store) => Ok(Box::new(DuckDb::connect(
+            pipeline::WarehouseConfig::DuckDb(store) => Ok(Box::new(DuckDb::connect(
                 &ObjectStore::open(store, key_id, secret),
                 change_log,
             )?)),
-            pipeline::Warehouse::BigQuery(_) => Err(Unbuildable::Unverified("bigquery")),
+            pipeline::WarehouseConfig::BigQuery(_) => Err(Unbuildable::Unverified("bigquery")),
         }
     }
 }

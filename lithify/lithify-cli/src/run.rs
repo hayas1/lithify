@@ -5,26 +5,25 @@ use chrono::{DateTime, Utc};
 use lithify_config::infra::{Sink, Source};
 use lithify_config::{ArtifactKind, Pipeline};
 use lithify_core::position::RecordedAt;
+use lithify_core::sink::OpenWarehouse;
 use lithify_protocol::sink::bigquery;
 use lithify_protocol::sink::bigquery::client::{BigQueryCapture, BigQueryClient};
 use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbClient};
 use lithify_protocol::sink::duckdb::config::Config;
-use lithify_protocol::sink::duckdb::store::ObjectStore;
+use lithify_protocol::{BigQueryWarehouse, DuckDbWarehouse};
 
-use crate::check::{Expectation, Inspection};
 use crate::course::Course;
-use crate::credential::Credential;
+use crate::credential::Credentials;
 use crate::journal::Journal;
-use crate::pipeline::{Capture, Warehouse};
+use crate::pipeline::{Capture, WarehouseConfig};
 use crate::plan::SnapshotPlan;
 use crate::settlement::{Build, DryRun, Settlement};
 use crate::unrunnable::Unrunnable;
-#[cfg(feature = "serve")]
-use lithify_ui::overview::{PipelineOverview, SinkInspection, SinkOverview, SourceOverview};
+use lithify_core::check::{Expectation, Inspection};
 
 pub struct Run {
     directory: PathBuf,
-    credential: Credential,
+    credentials: Credentials,
     sink: Option<String>,
     now: DateTime<Utc>,
 }
@@ -32,13 +31,13 @@ pub struct Run {
 impl Run {
     pub fn new(
         directory: PathBuf,
-        credential: Credential,
+        credentials: Credentials,
         sink: Option<String>,
         now: DateTime<Utc>,
     ) -> Self {
         Self {
             directory,
-            credential,
+            credentials,
             sink,
             now,
         }
@@ -80,57 +79,9 @@ impl Run {
         })
     }
 
-    pub fn directory(&self) -> &Path {
-        &self.directory
-    }
-
-    #[cfg(feature = "serve")]
-    pub fn overview(&self) -> PipelineOverview {
-        PipelineOverview::new(
-            &self.directory.display().to_string(),
-            self.sources().map_err(|unrunnable| unrunnable.to_string()),
-        )
-    }
-
-    #[cfg(feature = "serve")]
-    fn sources(&self) -> Result<Vec<SourceOverview>, Unrunnable> {
-        let pipeline: Pipeline<Capture, Warehouse> = Pipeline::open(&self.directory)?;
-        let sinks = self.selected(&pipeline)?;
-
-        Ok(pipeline
-            .sources()
-            .map(|source| {
-                SourceOverview::new(
-                    source.name(),
-                    sinks
-                        .iter()
-                        .map(|sink| {
-                            SinkOverview::new(
-                                sink.name(),
-                                self.inspection(sink, source)
-                                    .map(SinkInspection::from)
-                                    .map_err(|unrunnable| unrunnable.to_string()),
-                            )
-                        })
-                        .collect(),
-                )
-            })
-            .collect())
-    }
-
-    pub fn sinks(&self) -> Result<Vec<String>, Unrunnable> {
-        let pipeline: Pipeline<Capture, Warehouse> = Pipeline::open(&self.directory)?;
-
-        Ok(self
-            .selected(&pipeline)?
-            .into_iter()
-            .map(|sink| sink.name().to_owned())
-            .collect())
-    }
-
     fn inspection(
         &self,
-        sink: &Sink<Warehouse>,
+        sink: &Sink<WarehouseConfig>,
         source: &Source<Capture>,
     ) -> Result<Inspection, Unrunnable> {
         let expectation = Expectation::new(
@@ -142,14 +93,18 @@ impl Run {
         let namespace = sink.artifacts().namespace(ArtifactKind::Snapshot);
 
         match sink.warehouse() {
-            Warehouse::DuckDb(config) => expectation.read(&self.duckdb(sink, config)?, namespace),
-            Warehouse::BigQuery(config) => {
-                expectation.read(&self.bigquery(sink, config)?, namespace)
+            WarehouseConfig::DuckDb(config) => {
+                Ok(expectation.read(&self.duckdb(sink, config)?, namespace)?)
+            }
+            WarehouseConfig::BigQuery(config) => {
+                Ok(expectation.read(&self.bigquery(sink, config)?, namespace)?)
             }
         }
     }
 
-    fn source(pipeline: &Pipeline<Capture, Warehouse>) -> Result<&Source<Capture>, Unrunnable> {
+    fn source(
+        pipeline: &Pipeline<Capture, WarehouseConfig>,
+    ) -> Result<&Source<Capture>, Unrunnable> {
         let mut sources = pipeline.sources();
         let source = sources.next().ok_or(Unrunnable::WithoutSource)?;
 
@@ -163,13 +118,13 @@ impl Run {
     fn each_sink(
         &self,
         mut act: impl FnMut(
-            &Sink<Warehouse>,
+            &Sink<WarehouseConfig>,
             &Source<Capture>,
             &str,
             &mut Journal,
         ) -> Result<(), Unrunnable>,
     ) -> Result<Journal, Unrunnable> {
-        let pipeline: Pipeline<Capture, Warehouse> = Pipeline::open(&self.directory)?;
+        let pipeline: Pipeline<Capture, WarehouseConfig> = Pipeline::open(&self.directory)?;
         let source = Self::source(&pipeline)?;
         let mut journal = Journal::default();
 
@@ -196,14 +151,14 @@ impl Run {
     fn settle<S: Settlement>(
         &self,
         course: &Course,
-        sink: &Sink<Warehouse>,
+        sink: &Sink<WarehouseConfig>,
         source: &Source<Capture>,
         topic_prefix: &str,
         settlement: &S,
         journal: &mut Journal,
     ) -> Result<(), Unrunnable> {
         match sink.warehouse() {
-            Warehouse::DuckDb(config) => {
+            WarehouseConfig::DuckDb(config) => {
                 let client = self.duckdb(sink, config)?;
 
                 course.itinerary(sink, source, self.now, &client)?.settle(
@@ -217,7 +172,7 @@ impl Run {
                     },
                 )
             }
-            Warehouse::BigQuery(config) => {
+            WarehouseConfig::BigQuery(config) => {
                 let client = self.bigquery(sink, config)?;
 
                 course.itinerary(sink, source, self.now, &client)?.settle(
@@ -234,25 +189,30 @@ impl Run {
         }
     }
 
-    fn duckdb(&self, sink: &Sink<Warehouse>, config: &Config) -> Result<DuckDbClient, Unrunnable> {
-        Ok(
-            ObjectStore::open(config, self.credential.key_id(), self.credential.secret())
-                .client(sink.change_log())?,
-        )
+    fn duckdb(
+        &self,
+        sink: &Sink<WarehouseConfig>,
+        config: &Config,
+    ) -> Result<DuckDbClient, Unrunnable> {
+        Ok(DuckDbWarehouse::open(
+            config,
+            self.credentials.duckdb()?,
+            sink.change_log(),
+        )?)
     }
 
     fn bigquery(
         &self,
-        sink: &Sink<Warehouse>,
+        sink: &Sink<WarehouseConfig>,
         config: &bigquery::config::Config,
     ) -> Result<BigQueryClient, Unrunnable> {
-        Ok(BigQueryClient::open(config, sink.change_log())?)
+        Ok(BigQueryWarehouse::open(config, &(), sink.change_log())?)
     }
 
     fn selected<'a>(
         &self,
-        pipeline: &'a Pipeline<Capture, Warehouse>,
-    ) -> Result<Vec<&'a Sink<Warehouse>>, Unrunnable> {
+        pipeline: &'a Pipeline<Capture, WarehouseConfig>,
+    ) -> Result<Vec<&'a Sink<WarehouseConfig>>, Unrunnable> {
         let sinks: Vec<_> = pipeline
             .sinks()
             .filter(|sink| match &self.sink {

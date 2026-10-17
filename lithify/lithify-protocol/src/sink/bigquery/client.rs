@@ -9,7 +9,7 @@ use tokio::runtime::Runtime;
 
 use lithify_core::build_log::{BuildLog, Latest, UnreadableBuildLog};
 use lithify_core::event::MalformedEvent;
-use lithify_core::sink::{TablePath, Warehouse, WarehouseClient};
+use lithify_core::sink::{OpenWarehouse, TablePath, Warehouse, WarehouseClient};
 use lithify_core::source::{
     ChangeLogs, SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed,
 };
@@ -78,6 +78,16 @@ impl BigQueryClient {
 
             Ok(records)
         })
+    }
+}
+
+impl OpenWarehouse for BigQueryWarehouse {
+    type Client = BigQueryClient;
+    type Credential = ();
+    type Error = Unqueryable;
+
+    fn open(config: &Config, _: &(), change_log: &str) -> Result<BigQueryClient, Unqueryable> {
+        BigQueryClient::open(config, change_log)
     }
 }
 

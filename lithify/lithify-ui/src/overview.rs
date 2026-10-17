@@ -1,8 +1,9 @@
 use chrono::NaiveDate;
 
-use lithify_config::Schedule;
 use lithify_core::build_log::{BuildLog, Lifecycle, Status};
+use lithify_core::check::Inspection;
 use lithify_core::model::TableId;
+use lithify_core::schedule::Schedule;
 use lithify_core::sink::TablePath;
 
 use crate::command::BuildCommand;
@@ -108,6 +109,20 @@ impl SinkInspection {
     }
 }
 
+impl From<Inspection> for SinkInspection {
+    fn from(inspection: Inspection) -> Self {
+        Self::new(
+            inspection.schedule(),
+            inspection.latest().to_vec(),
+            inspection
+                .discrepancies()
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableRow {
     pub table: TableId,
@@ -155,7 +170,7 @@ pub(crate) mod tests {
     use lithify_core::sink::TablePath;
     use lithify_core::window::Window;
 
-    use lithify_config::Schedule;
+    use lithify_core::schedule::Schedule;
 
     use super::*;
     use crate::command::BuildCommand;

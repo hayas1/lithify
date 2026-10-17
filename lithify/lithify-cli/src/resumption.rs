@@ -1,6 +1,6 @@
-use lithify_config::Schedule;
 use lithify_core::build_log::{BuildLog, Latest};
 use lithify_core::position::RecordedAt;
+use lithify_core::schedule::Schedule;
 use lithify_core::sink::WarehouseClient;
 use lithify_core::window::Window;
 

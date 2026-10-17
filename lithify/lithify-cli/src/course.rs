@@ -8,7 +8,7 @@ use lithify_core::window::Window;
 
 use crate::catch_up::CatchUp;
 use crate::journal::Journal;
-use crate::pipeline::{Capture, Warehouse};
+use crate::pipeline::{Capture, WarehouseConfig};
 use crate::plan::Tables;
 use crate::settlement::Settlement;
 use crate::shard::Shard;
@@ -22,7 +22,7 @@ pub enum Course {
 impl Course {
     pub fn itinerary<K>(
         &self,
-        sink: &Sink<Warehouse>,
+        sink: &Sink<WarehouseConfig>,
         source: &Source<Capture>,
         now: DateTime<Utc>,
         client: &K,
@@ -86,15 +86,15 @@ pub(crate) mod tests {
     use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbClient};
 
     use super::*;
-    use lithify_config::Schedule;
     use lithify_core::position::RecordedAt;
+    use lithify_core::schedule::Schedule;
 
-    use crate::check::Expectation;
     use crate::plan::SnapshotPlan;
     use crate::plan::tests::{
         BUILT_CHANGE_LOGS, CAPTURE, PEOPLE, at, built_before, logged, pipeline, rows,
     };
     use crate::settlement::Build;
+    use lithify_core::check::Expectation;
 
     const NOW: &str = "2026-09-22T05:00:00Z";
 
@@ -185,7 +185,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn settle(
-        pipeline: &Pipeline<Capture, Warehouse>,
+        pipeline: &Pipeline<Capture, WarehouseConfig>,
         client: &DuckDbClient,
         course: &Course,
         now: &str,

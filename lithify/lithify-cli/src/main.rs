@@ -7,14 +7,17 @@ use chrono::{NaiveDate, Utc};
 use clap::{Parser, Subcommand};
 
 use lithify_cli::course::Course;
-use lithify_cli::credential::{Credential, Secret};
+use lithify_cli::credential::Credentials;
 use lithify_cli::journal::Journal;
+#[cfg(feature = "serve")]
+use lithify_cli::pipeline::{Capture, WarehouseConfig};
 use lithify_cli::plan::Tables;
 use lithify_cli::run::Run;
-#[cfg(feature = "serve")]
-use lithify_cli::survey::Pipelines;
 use lithify_cli::unrunnable::Unrunnable;
 use lithify_core::model::TableId;
+use lithify_protocol::sink::duckdb::store::{S3Credential, Secret};
+#[cfg(feature = "serve")]
+use lithify_ui::pipelines::Pipelines;
 #[cfg(feature = "serve")]
 use lithify_ui::server::Board;
 
@@ -86,22 +89,29 @@ struct CredentialArguments {
         env = "S3_ACCESS_KEY_ID",
         hide_env_values = true,
         value_name = "KEY",
+        requires = "secret_access_key",
         help = "The key the object storage holding the change log is read with"
     )]
-    access_key_id: String,
+    access_key_id: Option<String>,
     #[arg(
         long,
         env = "S3_SECRET_ACCESS_KEY",
         hide_env_values = true,
         value_name = "SECRET",
+        requires = "access_key_id",
         help = "The secret the object storage holding the change log is read with"
     )]
-    secret_access_key: Secret,
+    secret_access_key: Option<Secret>,
 }
 
 impl CredentialArguments {
-    fn credential(&self) -> Credential {
-        Credential::new(self.access_key_id.clone(), self.secret_access_key.clone())
+    fn credentials(&self) -> Credentials {
+        Credentials::new(
+            self.access_key_id
+                .clone()
+                .zip(self.secret_access_key.clone())
+                .map(|(key_id, secret)| S3Credential::new(key_id, secret)),
+        )
     }
 }
 
@@ -126,7 +136,7 @@ impl PipelineArguments {
     fn run(&self) -> Run {
         Run::new(
             self.directory.clone(),
-            self.credential.credential(),
+            self.credential.credentials(),
             self.sink.clone(),
             Utc::now(),
         )
@@ -222,8 +232,11 @@ struct ServeArguments {
 #[cfg(feature = "serve")]
 impl ServeArguments {
     fn journal(self) -> Result<Journal, Unrunnable> {
-        Board::new(Pipelines::new(self.directory, self.credential.credential()))
-            .serve(self.address)?;
+        Board::new(Pipelines::<Capture, WarehouseConfig>::new(
+            self.directory,
+            self.credential.credentials(),
+        ))
+        .serve(self.address)?;
 
         Ok(Journal::default())
     }
@@ -264,6 +277,21 @@ mod tests {
             Command::Build(arguments) => arguments,
             _ => unreachable!("build was named"),
         }
+    }
+
+    #[test]
+    fn a_pipeline_is_read_without_a_credential_unless_one_is_given_whole() {
+        assert!(Arguments::try_parse_from(["lithify", "catch-up", "mysql"]).is_ok());
+        assert!(
+            Arguments::try_parse_from([
+                "lithify",
+                "catch-up",
+                "mysql",
+                "--access-key-id",
+                "rustfsadmin"
+            ])
+            .is_err()
+        );
     }
 
     #[test]

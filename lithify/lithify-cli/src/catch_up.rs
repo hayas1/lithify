@@ -7,19 +7,23 @@ use lithify_core::position::RecordedAt;
 use lithify_core::sink::WarehouseClient;
 
 use crate::course::Itinerary;
-use crate::pipeline::{Capture, Warehouse};
+use crate::pipeline::{Capture, WarehouseConfig};
 use crate::plan::Tables;
 use crate::resumption::Resumption;
 use crate::unrunnable::Unrunnable;
 
 pub struct CatchUp<'a> {
-    sink: &'a Sink<Warehouse>,
+    sink: &'a Sink<WarehouseConfig>,
     source: &'a Source<Capture>,
     now: DateTime<Utc>,
 }
 
 impl<'a> CatchUp<'a> {
-    pub fn new(sink: &'a Sink<Warehouse>, source: &'a Source<Capture>, now: DateTime<Utc>) -> Self {
+    pub fn new(
+        sink: &'a Sink<WarehouseConfig>,
+        source: &'a Source<Capture>,
+        now: DateTime<Utc>,
+    ) -> Self {
         Self { sink, source, now }
     }
 

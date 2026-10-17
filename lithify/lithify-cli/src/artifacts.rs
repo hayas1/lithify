@@ -2,13 +2,13 @@ use lithify_config::ArtifactKind;
 use lithify_config::infra::Sink;
 use lithify_strategy::snapshot::Snapshot;
 
-use crate::pipeline::Warehouse;
+use crate::pipeline::WarehouseConfig;
 
 pub trait Artifacts {
     fn snapshot(&self) -> Snapshot;
 }
 
-impl Artifacts for Sink<Warehouse> {
+impl Artifacts for Sink<WarehouseConfig> {
     fn snapshot(&self) -> Snapshot {
         let artifacts = self.artifacts();
 
@@ -35,7 +35,7 @@ mod tests {
 
     #[test]
     fn a_sink_builds_its_snapshots_in_the_namespace_and_shards_the_pipeline_names() {
-        let pipeline: Pipeline<Capture, Warehouse> = Pipeline::open(
+        let pipeline: Pipeline<Capture, WarehouseConfig> = Pipeline::open(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compose/lithify/mysql"),
         )
         .unwrap();

@@ -32,6 +32,7 @@ pub enum Unrunnable {
         tables: Vec<TableId>,
     },
     UnknownTables(Vec<TableId>),
+    Uncredentialed(&'static str),
 }
 
 impl Display for Unrunnable {
@@ -70,6 +71,10 @@ impl Display for Unrunnable {
                 window.from(),
                 window.to()
             ),
+            Self::Uncredentialed(warehouse) => write!(
+                formatter,
+                "a {warehouse} sink is read with a credential, but none was given"
+            ),
             Self::UnknownTables(tables) => write!(
                 formatter,
                 "the window holds no table named {}",
@@ -99,7 +104,8 @@ impl std::error::Error for Unrunnable {
             | Self::Unsharded(_)
             | Self::Unclosed(_)
             | Self::Baseless { .. }
-            | Self::UnknownTables(_) => None,
+            | Self::UnknownTables(_)
+            | Self::Uncredentialed(_) => None,
         }
     }
 }

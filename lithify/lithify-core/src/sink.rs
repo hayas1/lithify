@@ -220,6 +220,36 @@ pub trait Warehouse {
     }
 }
 
+pub trait WarehouseFn {
+    type Output;
+
+    fn call<K: WarehouseClient>(self, client: &K) -> Self::Output;
+}
+
+pub trait OpenWarehouse: Warehouse {
+    type Client: WarehouseClient<Warehouse = Self>;
+    type Credential;
+    type Error: std::error::Error;
+
+    fn open(
+        config: &Self::Config,
+        credential: &Self::Credential,
+        change_log: &str,
+    ) -> Result<Self::Client, Self::Error>;
+}
+
+pub trait SinkWarehouse {
+    type Credential;
+    type Error: std::error::Error;
+
+    fn with_client<F: WarehouseFn>(
+        &self,
+        change_log: &str,
+        credential: &Self::Credential,
+        f: F,
+    ) -> Result<F::Output, Self::Error>;
+}
+
 pub trait WarehouseClient {
     type Warehouse: Warehouse;
     type Error: std::error::Error;
@@ -272,7 +302,7 @@ pub trait WarehouseClient {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::cell::RefCell;
 
     use super::*;
@@ -280,7 +310,7 @@ mod tests {
     use crate::model::TableId;
     use crate::position::RecordedAt;
 
-    struct Engine;
+    pub(crate) struct Engine;
 
     impl Warehouse for Engine {
         type Config = ();

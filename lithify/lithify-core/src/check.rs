@@ -1,14 +1,12 @@
 use std::collections::BTreeSet;
 use std::fmt::{self, Display, Formatter};
 
-use lithify_config::Schedule;
-use lithify_core::build_log::{BuildLog, Latest};
-use lithify_core::model::TableId;
-use lithify_core::position::RecordedAt;
-use lithify_core::sink::{TablePath, WarehouseClient};
-use lithify_core::window::Window;
-
-use crate::unrunnable::Unrunnable;
+use crate::build_log::{BuildLog, Latest};
+use crate::model::TableId;
+use crate::position::RecordedAt;
+use crate::schedule::Schedule;
+use crate::sink::{TablePath, WarehouseClient};
+use crate::window::Window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Discrepancy {
@@ -90,21 +88,6 @@ impl Inspection {
     }
 }
 
-#[cfg(feature = "serve")]
-impl From<Inspection> for lithify_ui::overview::SinkInspection {
-    fn from(inspection: Inspection) -> Self {
-        Self::new(
-            inspection.schedule,
-            inspection.latest,
-            inspection
-                .discrepancies
-                .iter()
-                .map(ToString::to_string)
-                .collect(),
-        )
-    }
-}
-
 pub struct Expectation {
     schedule: Schedule,
     since: RecordedAt,
@@ -122,11 +105,11 @@ impl Expectation {
         }
     }
 
-    pub fn read<K>(&self, client: &K, namespace: &str) -> Result<Inspection, Unrunnable>
-    where
-        K: WarehouseClient,
-        Unrunnable: From<K::Error>,
-    {
+    pub fn read<K: WarehouseClient>(
+        &self,
+        client: &K,
+        namespace: &str,
+    ) -> Result<Inspection, K::Error> {
         if !client.exists(&BuildLog::path(namespace))? {
             return Ok(Inspection {
                 schedule: self.schedule,
@@ -254,14 +237,10 @@ mod tests {
 
     use chrono::{DateTime, Utc};
 
-    use duckdb::Connection;
-
-    use lithify_core::build_log::{Outcome, Run, Status};
-    use lithify_core::sql::SqlString;
-    use lithify_protocol::DuckDbWarehouse;
-    use lithify_protocol::sink::duckdb::client::DuckDbClient;
-
     use super::*;
+    use crate::build_log::{Outcome, Run, Status};
+    use crate::sink::tests::Engine;
+    use crate::sql::SqlString;
 
     fn at(rfc3339: &str) -> RecordedAt {
         RecordedAt::from(rfc3339.parse::<DateTime<Utc>>().unwrap())
@@ -433,30 +412,63 @@ mod tests {
         );
     }
 
-    fn logging(logs: &[BuildLog]) -> DuckDbClient {
-        let client = DuckDbClient::new(
-            Connection::open_in_memory().unwrap(),
-            DuckDbWarehouse::new("mysql_shop_cdc"),
-        );
-        client.create_build_log::<Unrunnable>("mysql_shop").unwrap();
-        for log in logs {
-            client.append_build_log("mysql_shop", log).unwrap();
+    struct Logged {
+        latest: Vec<BuildLog>,
+        present: BTreeSet<TablePath>,
+    }
+
+    impl Logged {
+        fn holding(latest: &[BuildLog], present: &[&BuildLog]) -> Option<Self> {
+            Some(Self {
+                latest: latest.to_vec(),
+                present: present
+                    .iter()
+                    .filter_map(|log| log.target())
+                    .cloned()
+                    .collect(),
+            })
+        }
+    }
+
+    impl WarehouseClient for Option<Logged> {
+        type Warehouse = Engine;
+        type Error = std::fmt::Error;
+
+        fn warehouse(&self) -> &Engine {
+            &Engine
         }
 
-        client
+        fn execute(&self, _: &SqlString) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn latest_build_logs(
+            &self,
+            _: &str,
+            latest: &Latest,
+        ) -> Result<Vec<BuildLog>, Self::Error> {
+            let logged = self.iter().flat_map(|logged| logged.latest.iter()).cloned();
+
+            Ok(match latest {
+                Latest::Attempted => logged.collect(),
+                Latest::Succeeded | Latest::SucceededUntil(_) => {
+                    logged.filter(|log| !log.status().failed()).collect()
+                }
+            })
+        }
+
+        fn exists(&self, table: &TablePath) -> Result<bool, Self::Error> {
+            Ok(self.as_ref().is_some_and(|logged| {
+                *table == BuildLog::path(table.namespace()) || logged.present.contains(table)
+            }))
+        }
     }
 
     #[test]
     fn a_warehouse_is_checked_against_the_tables_it_holds() {
         let people = logged(2, "people", day("2026-09-20"), Status::Succeeded);
         let pets = logged(2, "pets", day("2026-09-20"), Status::Succeeded);
-        let client = logging(&[people.clone(), pets.clone()]);
-        client
-            .execute(&SqlString::from(format!(
-                "CREATE TABLE \"mysql_shop\".\"{}\" AS SELECT 1 AS id",
-                people.target().unwrap().name()
-            )))
-            .unwrap();
+        let client = Logged::holding(&[people.clone(), pets.clone()], &[&people]);
 
         assert_eq!(
             expected("2026-09-21T05:00:00Z")
@@ -472,14 +484,9 @@ mod tests {
 
     #[test]
     fn a_warehouse_holding_no_build_log_was_never_built() {
-        let client = DuckDbClient::new(
-            Connection::open_in_memory().unwrap(),
-            DuckDbWarehouse::new("mysql_shop_cdc"),
-        );
-
         assert_eq!(
             expected("2026-09-21T05:00:00Z")
-                .read(&client, "mysql_shop")
+                .read(&None::<Logged>, "mysql_shop")
                 .unwrap()
                 .discrepancies(),
             [Discrepancy::NeverBuilt {
@@ -496,14 +503,13 @@ mod tests {
             day("2026-09-20"),
             Status::Failed("no such column".to_owned()),
         );
-        let client = logging(&[
-            logged(2, "people", day("2026-09-20"), Status::Succeeded),
-            failed.clone(),
-        ]);
 
         assert_eq!(
             expected("2026-09-21T05:00:00Z")
-                .read(&client, "mysql_shop")
+                .read(
+                    &Logged::holding(std::slice::from_ref(&failed), &[]),
+                    "mysql_shop"
+                )
                 .unwrap()
                 .latest(),
             [failed]

@@ -3,7 +3,7 @@ use std::fmt::Display;
 use lithify_core::build_log::BuildLog;
 use lithify_core::window::Window;
 
-use crate::check::Discrepancy;
+use lithify_core::check::Discrepancy;
 
 #[derive(Debug, Default)]
 pub struct Journal {

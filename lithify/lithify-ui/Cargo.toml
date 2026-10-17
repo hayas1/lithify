@@ -15,10 +15,13 @@ leptos = { workspace = true }
 lithify-config = { workspace = true }
 lithify-core = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "net"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
+duckdb = { workspace = true }
+lithify-protocol = { workspace = true, features = ["duckdb"] }
 http-body-util = "0.1"
 tokio = { workspace = true, features = ["macros"] }
 tower = { version = "0.5", features = ["util"] }

@@ -17,7 +17,7 @@ use lithify_protocol::sink::duckdb::client::{DuckDbChangeLogsFn, DuckDbClient};
 use lithify_strategy::snapshot::{Snapshot, SnapshotBuilder};
 
 use crate::artifacts::Artifacts;
-use crate::pipeline::Warehouse;
+use crate::pipeline::WarehouseConfig;
 use crate::settlement::Settlement;
 use crate::unrunnable::Unrunnable;
 
@@ -54,7 +54,7 @@ impl Tables {
 
 pub struct SnapshotPlan<'a, K, S> {
     client: &'a K,
-    sink: &'a Sink<Warehouse>,
+    sink: &'a Sink<WarehouseConfig>,
     window: &'a Window,
     previous: &'a [BuildLog],
     tables: &'a Tables,
@@ -64,7 +64,7 @@ pub struct SnapshotPlan<'a, K, S> {
 impl<'a, K, S: Settlement> SnapshotPlan<'a, K, S> {
     pub fn new(
         client: &'a K,
-        sink: &'a Sink<Warehouse>,
+        sink: &'a Sink<WarehouseConfig>,
         window: &'a Window,
         previous: &'a [BuildLog],
         tables: &'a Tables,
@@ -202,7 +202,7 @@ pub(crate) mod tests {
                  'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]})
         ) AS t(value)";
 
-    pub(crate) fn pipeline() -> Pipeline<Capture, Warehouse> {
+    pub(crate) fn pipeline() -> Pipeline<Capture, WarehouseConfig> {
         Pipeline::open(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compose/lithify/mysql"))
             .unwrap()
     }
@@ -427,7 +427,7 @@ pub(crate) mod tests {
             .unwrap()
     }
 
-    fn built() -> (Pipeline<Capture, Warehouse>, DuckDbClient) {
+    fn built() -> (Pipeline<Capture, WarehouseConfig>, DuckDbClient) {
         let pipeline = pipeline();
         let sink = pipeline
             .sinks()
@@ -442,7 +442,10 @@ pub(crate) mod tests {
         (pipeline, client)
     }
 
-    fn build(pipeline: &Pipeline<Capture, Warehouse>, client: &DuckDbClient) -> Vec<BuildLog> {
+    fn build(
+        pipeline: &Pipeline<Capture, WarehouseConfig>,
+        client: &DuckDbClient,
+    ) -> Vec<BuildLog> {
         let source = pipeline.sources().next().unwrap();
         let sink = pipeline
             .sinks()

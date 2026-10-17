@@ -115,7 +115,7 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    use lithify_config::Schedule;
+    use lithify_core::schedule::Schedule;
 
     use super::*;
     use crate::overview::tests::overview;
