@@ -239,8 +239,7 @@ mod tests {
 
     use super::*;
     use crate::build_log::{Outcome, Run, Status};
-    use crate::sql::SqlString;
-    use crate::testing::Engine;
+    use crate::testing::{Engine, Recorder};
 
     fn at(rfc3339: &str) -> RecordedAt {
         RecordedAt::from(rfc3339.parse::<DateTime<Utc>>().unwrap())
@@ -412,63 +411,13 @@ mod tests {
         );
     }
 
-    struct Logged {
-        latest: Vec<BuildLog>,
-        present: BTreeSet<TablePath>,
-    }
-
-    impl Logged {
-        fn holding(latest: &[BuildLog], present: &[&BuildLog]) -> Option<Self> {
-            Some(Self {
-                latest: latest.to_vec(),
-                present: present
-                    .iter()
-                    .filter_map(|log| log.target())
-                    .cloned()
-                    .collect(),
-            })
-        }
-    }
-
-    impl WarehouseClient for Option<Logged> {
-        type Warehouse = Engine;
-        type Error = std::fmt::Error;
-
-        fn warehouse(&self) -> &Engine {
-            &Engine
-        }
-
-        fn execute(&self, _: &SqlString) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
-        fn latest_build_logs(
-            &self,
-            _: &str,
-            latest: &Latest,
-        ) -> Result<Vec<BuildLog>, Self::Error> {
-            let logged = self.iter().flat_map(|logged| logged.latest.iter()).cloned();
-
-            Ok(match latest {
-                Latest::Attempted => logged.collect(),
-                Latest::Succeeded | Latest::SucceededUntil(_) => {
-                    logged.filter(|log| !log.status().failed()).collect()
-                }
-            })
-        }
-
-        fn exists(&self, table: &TablePath) -> Result<bool, Self::Error> {
-            Ok(self.as_ref().is_some_and(|logged| {
-                *table == BuildLog::path(table.namespace()) || logged.present.contains(table)
-            }))
-        }
-    }
-
     #[test]
     fn a_warehouse_is_checked_against_the_tables_it_holds() {
         let people = logged(2, "people", day("2026-09-20"), Status::Succeeded);
         let pets = logged(2, "pets", day("2026-09-20"), Status::Succeeded);
-        let client = Logged::holding(&[people.clone(), pets.clone()], &[&people]);
+        let client = Recorder::new(Engine::default())
+            .logging("mysql_shop", &[people.clone(), pets.clone()])
+            .holding(&[people.target().unwrap().clone()]);
 
         assert_eq!(
             expected("2026-09-21T05:00:00Z")
@@ -486,7 +435,7 @@ mod tests {
     fn a_warehouse_holding_no_build_log_was_never_built() {
         assert_eq!(
             expected("2026-09-21T05:00:00Z")
-                .read(&None::<Logged>, "mysql_shop")
+                .read(&Recorder::new(Engine::default()), "mysql_shop")
                 .unwrap()
                 .discrepancies(),
             [Discrepancy::NeverBuilt {
@@ -507,7 +456,8 @@ mod tests {
         assert_eq!(
             expected("2026-09-21T05:00:00Z")
                 .read(
-                    &Logged::holding(std::slice::from_ref(&failed), &[]),
+                    &Recorder::new(Engine::default())
+                        .logging("mysql_shop", std::slice::from_ref(&failed)),
                     "mysql_shop"
                 )
                 .unwrap()

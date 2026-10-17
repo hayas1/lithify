@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 
 use crate::build_log::{BuildLog, Latest};
@@ -9,7 +10,19 @@ use crate::sink::{
 };
 use crate::sql::SqlString;
 
-pub struct Engine;
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Engine {
+    change_logs: BTreeMap<String, SqlString>,
+}
+
+impl Engine {
+    pub fn reading_change_log(mut self, topic: &str, from: &str) -> Self {
+        self.change_logs
+            .insert(topic.to_owned(), SqlString::from(from));
+
+        self
+    }
+}
 
 impl WarehouseSql for Engine {
     fn identifier(&self, name: &str) -> SqlString {
@@ -71,6 +84,13 @@ impl ChangeLogSql for Engine {
     fn change_log_namespace(&self) -> &str {
         "mysql_shop_cdc"
     }
+
+    fn change_log_ref(&self, topic: &str) -> SqlString {
+        match self.change_logs.get(topic) {
+            Some(from) => from.clone(),
+            None => self.table_ref(&self.change_log(topic)),
+        }
+    }
 }
 
 impl OpenWarehouse for Engine {
@@ -80,12 +100,14 @@ impl OpenWarehouse for Engine {
     type Error = Infallible;
 
     fn open(_: &(), _: &(), _: &str) -> Result<Recorder<Engine>, Infallible> {
-        Ok(Recorder::new(Engine))
+        Ok(Recorder::new(Engine::default()))
     }
 }
 
 pub struct Recorder<W> {
     warehouse: W,
+    logged: Vec<BuildLog>,
+    present: BTreeSet<TablePath>,
     executed: RefCell<Vec<String>>,
 }
 
@@ -93,8 +115,23 @@ impl<W> Recorder<W> {
     pub fn new(warehouse: W) -> Self {
         Self {
             warehouse,
+            logged: Vec::new(),
+            present: BTreeSet::new(),
             executed: RefCell::default(),
         }
+    }
+
+    pub fn logging(mut self, namespace: &str, logs: &[BuildLog]) -> Self {
+        self.logged.extend_from_slice(logs);
+        self.present.insert(BuildLog::path(namespace));
+
+        self
+    }
+
+    pub fn holding(mut self, tables: &[TablePath]) -> Self {
+        self.present.extend(tables.iter().cloned());
+
+        self
     }
 
     pub fn executed(&self) -> Vec<String> {
@@ -116,11 +153,19 @@ impl<W: Warehouse> WarehouseClient for Recorder<W> {
         Ok(())
     }
 
-    fn latest_build_logs(&self, _: &str, _: &Latest) -> Result<Vec<BuildLog>, Self::Error> {
-        Ok(vec![])
+    fn latest_build_logs(&self, _: &str, latest: &Latest) -> Result<Vec<BuildLog>, Self::Error> {
+        let logged = self.logged.iter().cloned();
+
+        Ok(match latest {
+            Latest::Attempted => logged.collect(),
+            Latest::Succeeded => logged.filter(|log| !log.status().failed()).collect(),
+            Latest::SucceededUntil(to) => logged
+                .filter(|log| !log.status().failed() && log.window().to() == to)
+                .collect(),
+        })
     }
 
-    fn exists(&self, _: &TablePath) -> Result<bool, Self::Error> {
-        Ok(false)
+    fn exists(&self, table: &TablePath) -> Result<bool, Self::Error> {
+        Ok(self.present.contains(table))
     }
 }

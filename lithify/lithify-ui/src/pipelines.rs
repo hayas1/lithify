@@ -158,12 +158,10 @@ impl WarehouseFn for Reading<'_> {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use duckdb::Connection;
     use serde::{Deserialize, Serialize};
 
     use lithify_core::sink::{SinkWarehouse, WarehouseFn};
-    use lithify_protocol::DuckDbWarehouse;
-    use lithify_protocol::sink::duckdb::client::DuckDbClient;
+    use lithify_core::testing::{Engine, Recorder};
 
     use super::*;
     use crate::server::Survey;
@@ -198,15 +196,12 @@ mod tests {
 
         fn with_client<F: WarehouseFn>(
             &self,
-            change_log: &str,
+            _: &str,
             _: &(),
             f: F,
         ) -> Result<F::Output, Unreached> {
             match self {
-                Self::Memory {} => Ok(f.call(&DuckDbClient::new(
-                    Connection::open_in_memory().unwrap(),
-                    DuckDbWarehouse::new(change_log),
-                ))),
+                Self::Memory {} => Ok(f.call(&Recorder::new(Engine::default()))),
                 Self::Unreachable { cause } => Err(Unreached(cause.clone())),
             }
         }

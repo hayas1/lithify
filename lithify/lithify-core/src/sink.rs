@@ -263,7 +263,7 @@ mod tests {
 
         fn create(&self) -> Result<Vec<SqlString>, UnbuildableArtifact> {
             Ok(vec![
-                Engine.create_namespace("shop"),
+                Engine::default().create_namespace("shop"),
                 SqlString::from("CREATE TABLE shop.people (id BIGINT)"),
             ])
         }
@@ -301,7 +301,7 @@ mod tests {
 
     #[test]
     fn a_client_builds_an_artifact_by_running_its_statements_in_order() {
-        let client = Recorder::new(Engine);
+        let client = Recorder::new(Engine::default());
 
         client
             .build::<Unbuilt>(&Namespaced(TableId::new("shop", "people")))
@@ -319,8 +319,8 @@ mod tests {
     #[test]
     fn a_change_log_is_read_from_the_topic_it_landed_on_in_the_namespace_of_the_warehouse() {
         assert_eq!(
-            Engine.change_log_ref("mysql.shop.people"),
-            Engine.table_ref(&TablePath::new("mysql_shop_cdc", "mysql.shop.people"))
+            Engine::default().change_log_ref("mysql.shop.people"),
+            Engine::default().table_ref(&TablePath::new("mysql_shop_cdc", "mysql.shop.people"))
         );
     }
 }

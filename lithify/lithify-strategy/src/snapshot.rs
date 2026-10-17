@@ -377,11 +377,9 @@ mod tests {
     use lithify_core::listener::{CatalogModel, OutOfOrder};
     use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
     use lithify_core::position::{Coordinate, Position, RecordedAt};
-    use lithify_core::sink::{
-        ChangeLogSql, OpenWarehouse, TablePath, UnsupportedColumn, WarehouseSql,
-    };
+    use lithify_core::sink::{TablePath, UnsupportedColumn};
     use lithify_core::source::{ChangeLog, ColumnPath, RowChangeLog};
-    use lithify_core::testing::{Engine, Recorder};
+    use lithify_core::testing::Engine;
     use lithify_core::window::Window;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -429,72 +427,6 @@ mod tests {
         }
     }
 
-    struct Lake;
-    impl WarehouseSql for Lake {
-        fn timestamp_millis(&self, milliseconds: i64) -> SqlString {
-            SqlString::from(milliseconds.to_string())
-        }
-
-        fn unix_millis(&self, expression: &SqlString) -> SqlString {
-            expression.clone()
-        }
-
-        fn select_existence(&self, table: &TablePath) -> SqlString {
-            SqlString::from(format!("SELECT COUNT(*) FROM {table}"))
-        }
-
-        fn identifier(&self, name: &str) -> SqlString {
-            Engine.identifier(name)
-        }
-
-        fn table_ref(&self, table: &TablePath) -> SqlString {
-            Engine.table_ref(table)
-        }
-
-        fn column_type(&self, column_type: &ColumnType) -> Result<SqlString, UnsupportedColumn> {
-            Engine.column_type(column_type)
-        }
-
-        fn read(
-            &self,
-            expression: &SqlString,
-            column_type: &ColumnType,
-        ) -> Result<SqlString, UnsupportedColumn> {
-            Engine.read(expression, column_type)
-        }
-
-        fn cast_or_null(
-            &self,
-            expression: &SqlString,
-            column_type: &ColumnType,
-        ) -> Result<SqlString, UnsupportedColumn> {
-            Engine.cast_or_null(expression, column_type)
-        }
-    }
-
-    impl OpenWarehouse for Lake {
-        type Config = ();
-        type Client = Recorder<Lake>;
-        type Credential = ();
-        type Error = std::convert::Infallible;
-
-        fn open(_: &(), _: &(), _: &str) -> Result<Recorder<Lake>, Self::Error> {
-            Ok(Recorder::new(Lake))
-        }
-    }
-
-    impl ChangeLogSql for Lake {
-        fn change_log_namespace(&self) -> &str {
-            Engine.change_log_namespace()
-        }
-
-        fn change_log_ref(&self, topic: &str) -> SqlString {
-            SqlString::from(format!(
-                "read_parquet('{}/{topic}/*.parquet')",
-                self.change_log_namespace()
-            ))
-        }
-    }
     fn column(name: &str, column_type: ColumnType) -> ColumnModel {
         let type_name = format!("{column_type:?}");
 
@@ -604,7 +536,7 @@ mod tests {
         within: Vec<SchemaChange<Offset>>,
         base: impl Fn() -> Option<TablePath>,
     ) -> Result<Vec<SnapshotBuilder<'static, Log, Engine>>, Untold> {
-        snapshots_in(&Engine, created, within, base)
+        snapshots_in(&Engine::default(), created, within, base)
     }
 
     fn statement<W: Warehouse>(
@@ -639,12 +571,14 @@ mod tests {
 
     #[test]
     fn a_snapshot_reads_the_change_log_where_the_warehouse_reads_change_logs() {
-        let statement = statement(snapshots_in(&Lake, customers(), vec![], || None));
+        let statement = statement(snapshots_in(
+            &Engine::default().reading_change_log("mysql_shop_customers", "changes_of_customers"),
+            customers(),
+            vec![],
+            || None,
+        ));
 
-        assert!(
-            statement
-                .contains("FROM read_parquet('mysql_shop_cdc/mysql_shop_customers/*.parquet')")
-        );
+        assert!(statement.contains("FROM changes_of_customers"));
         assert!(!statement.contains("\"mysql_shop_cdc\".\"mysql_shop_customers\""));
     }
 
@@ -1490,7 +1424,7 @@ mod tests {
             .unwrap();
 
         fold.era_boundary(
-            &Engine,
+            &Engine::default(),
             &Era::new(
                 customers(),
                 Bound::Time(RecordedAt::from(100)),
