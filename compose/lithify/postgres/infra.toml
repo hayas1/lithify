@@ -8,6 +8,7 @@ sink.artifacts.shard = "%Y%m%d"
 [[source]]
 name = "primary"
 since = "1970-01-01T00:00:00Z"
+topic_prefix = "postgres"
 
 [[sink]]
 name = "warehouse"
