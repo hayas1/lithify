@@ -11,7 +11,7 @@ use lithify_core::window::Window;
 use lithify_config::infra::Sink;
 
 use crate::artifacts::{
-    ArtifactConfig, DeclaredInstant, DeclaredMasked, DeclaredScd1, DeclaredSnapshot,
+    ArtifactConfig, DeclaredInstant, DeclaredMasked, DeclaredScd1, DeclaredScd2, DeclaredSnapshot,
 };
 use crate::course::Itinerary;
 use crate::journal::Journal;
@@ -82,6 +82,27 @@ impl<'a> Derivation<'a> {
             for window in &self.windows {
                 let previous = self.built(planner, &snapshot, *window.to())?;
                 self.derive(planner, &masked, window, &previous, &settlement, journal)?;
+            }
+        }
+
+        if let Some(declared) = DeclaredScd2::of(self.sink)? {
+            let scd2 = declared.artifact();
+            let settlement = settlement.advancing(declared.namespace(), &declared.series());
+            planner
+                .client()
+                .create_build_log::<Unrunnable>(declared.namespace())?;
+
+            for window in &self.windows {
+                let previous = planner
+                    .client()
+                    .build_logs(
+                        declared.namespace(),
+                        &Latest::SucceededUntil(*window.from()).into(),
+                    )?
+                    .into_iter()
+                    .filter(|log| log.advances(&declared.series()))
+                    .collect::<Vec<_>>();
+                self.derive(planner, &scd2, window, &previous, &settlement, journal)?;
             }
         }
 
@@ -213,6 +234,42 @@ mod tests {
                 ("7".to_owned(), "people".to_owned()),
                 ("8".to_owned(), "people".to_owned())
             ]
+        );
+    }
+
+    #[test]
+    fn a_catch_up_keeps_every_version_of_each_window_it_builds() {
+        let client = logged(PEOPLE, &[]);
+        let pipeline = derived(
+            "scd2",
+            "[sink.artifact.scd2]\nshard = \"%Y%m%d\"\nplace = [{ duckdb.prefix = \"mysql_shop_scd2\" }]\n",
+            "[default]\nartifacts = [\"snapshot\", \"scd2\"]\n",
+        );
+
+        settle(
+            &pipeline,
+            &client,
+            &Course::CatchUp { to: None },
+            "2026-09-22T05:00:00Z",
+        )
+        .unwrap();
+
+        assert_eq!(
+            rows(
+                &client,
+                "SELECT target, COALESCE(base, '') FROM mysql_shop_scd2._lithify_log WHERE status = 'succeeded' ORDER BY id"
+            ),
+            [(
+                "mysql_shop_scd2.people_open_20260921".to_owned(),
+                String::new()
+            )]
+        );
+        assert_eq!(
+            rows(
+                &client,
+                "SELECT id::VARCHAR, _valid_from::VARCHAR FROM mysql_shop_scd2.people_open_20260921"
+            ),
+            [("8".to_owned(), "1789948800001".to_owned())]
         );
     }
 

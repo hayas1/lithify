@@ -6,6 +6,7 @@ use serde::Deserialize;
 use lithify_artifact::instant::{self, Instant};
 use lithify_artifact::masked::{self, Masked};
 use lithify_artifact::scd1::{self, Scd1};
+use lithify_artifact::scd2::{self, Scd2};
 use lithify_artifact::snapshot::{self, Snapshot};
 use lithify_config::Declaration;
 use lithify_config::infra::Sink;
@@ -25,34 +26,42 @@ pub enum ArtifactConfig {
     Instant(instant::Config<LocationConfig>),
     Masked(masked::Config<LocationConfig>),
     Scd1(scd1::Config<LocationConfig>),
+    Scd2(scd2::Config<LocationConfig>),
 }
 
 impl ArtifactConfig {
     pub fn as_snapshot(&self) -> Option<&snapshot::Config<LocationConfig>> {
         match self {
             Self::Snapshot(config) => Some(config),
-            Self::Instant(_) | Self::Masked(_) | Self::Scd1(_) => None,
+            Self::Instant(_) | Self::Masked(_) | Self::Scd1(_) | Self::Scd2(_) => None,
         }
     }
 
     pub fn as_instant(&self) -> Option<&instant::Config<LocationConfig>> {
         match self {
             Self::Instant(config) => Some(config),
-            Self::Snapshot(_) | Self::Masked(_) | Self::Scd1(_) => None,
+            Self::Snapshot(_) | Self::Masked(_) | Self::Scd1(_) | Self::Scd2(_) => None,
         }
     }
 
     pub fn as_masked(&self) -> Option<&masked::Config<LocationConfig>> {
         match self {
             Self::Masked(config) => Some(config),
-            Self::Snapshot(_) | Self::Instant(_) | Self::Scd1(_) => None,
+            Self::Snapshot(_) | Self::Instant(_) | Self::Scd1(_) | Self::Scd2(_) => None,
         }
     }
 
     pub fn as_scd1(&self) -> Option<&scd1::Config<LocationConfig>> {
         match self {
             Self::Scd1(config) => Some(config),
-            Self::Snapshot(_) | Self::Instant(_) | Self::Masked(_) => None,
+            Self::Snapshot(_) | Self::Instant(_) | Self::Masked(_) | Self::Scd2(_) => None,
+        }
+    }
+
+    pub fn as_scd2(&self) -> Option<&scd2::Config<LocationConfig>> {
+        match self {
+            Self::Scd2(config) => Some(config),
+            Self::Snapshot(_) | Self::Instant(_) | Self::Masked(_) | Self::Scd1(_) => None,
         }
     }
 }
@@ -62,7 +71,7 @@ impl Declaration for ArtifactConfig {
 
     fn source(&self) -> Option<&'static str> {
         match self {
-            Self::Snapshot(_) => None,
+            Self::Snapshot(_) | Self::Scd2(_) => None,
             Self::Instant(_) => Some(<Instant as Artifact>::From::KIND),
             Self::Masked(_) => Some(<Masked as Artifact>::From::KIND),
             Self::Scd1(_) => Some(<Scd1 as Artifact>::From::KIND),
@@ -75,6 +84,7 @@ impl Declaration for ArtifactConfig {
             Self::Instant(cuts) => cuts.iter().flat_map(|cut| cut.place()).collect(),
             Self::Masked(config) => config.place().iter().collect(),
             Self::Scd1(config) => config.place().iter().collect(),
+            Self::Scd2(config) => config.place().iter().collect(),
         }
         .into_iter()
     }
@@ -82,7 +92,7 @@ impl Declaration for ArtifactConfig {
     fn schedule(&self, time_zone: Tz) -> Option<Schedule> {
         match self {
             Self::Snapshot(config) => Some(config.schedule(time_zone)),
-            Self::Instant(_) | Self::Masked(_) | Self::Scd1(_) => None,
+            Self::Instant(_) | Self::Masked(_) | Self::Scd1(_) | Self::Scd2(_) => None,
         }
     }
 }
@@ -282,6 +292,43 @@ impl<'a> DeclaredScd1<'a> {
 
     pub fn artifact(&self) -> Scd1 {
         Scd1::new(self.placement.current())
+    }
+}
+
+pub struct DeclaredScd2<'a> {
+    config: &'a scd2::Config<LocationConfig>,
+    placement: Placement<'a>,
+}
+
+impl<'a> DeclaredScd2<'a> {
+    pub const ARTIFACT: &'static str = Scd2::KIND;
+
+    pub fn of(sink: &'a Sink<WarehouseConfig, ArtifactConfig>) -> Result<Option<Self>, Unrunnable> {
+        sink.artifact(Self::ARTIFACT)
+            .and_then(ArtifactConfig::as_scd2)
+            .map(|config| {
+                Ok(Self {
+                    config,
+                    placement: Placement::of(sink, Self::ARTIFACT, config.place())?,
+                })
+            })
+            .transpose()
+    }
+
+    pub fn namespace(&self) -> &Namespace {
+        self.placement.namespace()
+    }
+
+    pub fn series(&self) -> Series {
+        self.artifact().series()
+    }
+
+    pub fn artifact(&self) -> Scd2 {
+        Scd2::new(
+            self.placement.namespace.clone(),
+            self.config.shard(),
+            self.placement.time_zone,
+        )
     }
 }
 
