@@ -10,6 +10,10 @@ use crate::sink::{
 };
 use crate::sql::SqlString;
 
+pub use replica::{Mutation, Replica, Row};
+
+mod replica;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Engine {
     change_log: Namespace,

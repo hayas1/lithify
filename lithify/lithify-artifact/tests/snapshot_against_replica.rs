@@ -1,0 +1,208 @@
+use chrono::DateTime;
+use duckdb::Connection;
+use ulid::Ulid;
+
+use lithify_artifact::snapshot::Snapshot;
+use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
+use lithify_core::build_log::{BuildLog, Outcome, Run, Status};
+use lithify_core::era::{Bound, Era};
+use lithify_core::listener::SchemaChangeListener;
+use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
+use lithify_core::sink::WarehouseClient;
+use lithify_core::sql::SqlString;
+use lithify_core::testing::{Mutation, Replica, Row};
+use lithify_core::ts::Ts;
+use lithify_core::window::Window;
+use lithify_protocol::sink::duckdb::client::DuckDbClient;
+use lithify_protocol::{Debezium, DuckDbWarehouse, MySql, MySqlPosition};
+
+const DAY: i64 = 86_400_000;
+
+#[derive(Debug)]
+struct Unbuilt;
+
+impl From<duckdb::Error> for Unbuilt {
+    fn from(_: duckdb::Error) -> Self {
+        Self
+    }
+}
+
+impl From<UnbuildableArtifact> for Unbuilt {
+    fn from(_: UnbuildableArtifact) -> Self {
+        Self
+    }
+}
+
+fn people() -> TableModel {
+    TableModel::new(
+        TableId::new("shop", "people"),
+        vec![
+            ColumnModel::new("id", "BIGINT", ColumnType::Int64, false, None),
+            ColumnModel::new("name", "VARCHAR", ColumnType::Text, true, None),
+        ],
+        vec!["id".to_owned()],
+    )
+}
+
+struct ChangeLog<'a>(&'a Replica);
+
+impl ChangeLog<'_> {
+    const AFTER: &'static str = "STRUCT(id BIGINT, name VARCHAR)";
+
+    fn create(&self) -> SqlString {
+        let values: Vec<String> = self
+            .0
+            .mutations()
+            .iter()
+            .enumerate()
+            .map(|(position, (at, mutation))| {
+                let at = at.milliseconds_since_epoch();
+                let (op, before, after) = match mutation {
+                    Mutation::Upsert(row) => ("u", Self::null(), Self::image(row)),
+                    Mutation::Delete(row) => ("d", Self::image(row), Self::null()),
+                    other => panic!("{other:?} is not a change of a row"),
+                };
+
+                format!(
+                    "({{'op': '{op}', 'ts_ms': {at}::BIGINT, 'source': {{'file': 'binlog.000001', 'pos': {}::BIGINT, 'ts_ms': {at}::BIGINT}}, 'before': {before}, 'after': {after}}})",
+                    position + 1
+                )
+            })
+            .collect();
+
+        SqlString::from(format!(
+            "CREATE SCHEMA IF NOT EXISTS cdc;\nCREATE TABLE cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES\n{}\n) AS t(value)",
+            values.join(",\n")
+        ))
+    }
+
+    fn null() -> String {
+        format!("NULL::{}", Self::AFTER)
+    }
+
+    fn image(row: &Row) -> String {
+        let cell = |column: &str| match row.get(column).cloned().flatten() {
+            Some(value) if column == "id" => value,
+            Some(value) => format!("'{value}'"),
+            None => "NULL".to_owned(),
+        };
+
+        format!(
+            "{{'id': {}::BIGINT, 'name': {}::VARCHAR}}",
+            cell("id"),
+            cell("name")
+        )
+    }
+}
+
+struct Shards {
+    client: DuckDbClient,
+    artifact: Snapshot,
+}
+
+impl Shards {
+    fn over(replica: &Replica) -> Self {
+        let client = DuckDbClient::new(
+            Connection::open_in_memory().unwrap(),
+            DuckDbWarehouse::new("cdc"),
+        );
+        client.execute(&ChangeLog(replica).create()).unwrap();
+
+        Self {
+            client,
+            artifact: Snapshot::new("shop_snapshot", "%Y%m%d"),
+        }
+    }
+
+    fn build(&self, window: &Window, previous: Option<&BuildLog>) -> BuildLog {
+        let log = Debezium::under("value", "mysql", MySql);
+        let mut snapshot = self
+            .artifact
+            .builder::<_, DuckDbWarehouse>(&log, people().id().clone(), window, previous)
+            .unwrap();
+        SchemaChangeListener::<MySqlPosition>::era_boundary(
+            &mut snapshot,
+            self.client.warehouse(),
+            &Era::new(
+                people(),
+                Bound::EventTime(*window.from()),
+                Bound::EventTime(*window.to()),
+            ),
+        )
+        .unwrap();
+        self.client.build::<Unbuilt>(&snapshot).unwrap();
+
+        snapshot.build_log(
+            &Run::new(
+                Ulid::nil(),
+                DateTime::UNIX_EPOCH,
+                "snapshot",
+                "daily",
+                "primary",
+                "{}",
+                "0.1.0",
+            ),
+            Outcome::new(Status::Succeeded, DateTime::UNIX_EPOCH),
+        )
+    }
+
+    fn rows(&self, built: &BuildLog) -> Vec<Row> {
+        let target = built.target().unwrap();
+
+        self.client
+            .connection()
+            .prepare(&format!(
+                "SELECT id::VARCHAR, name FROM \"{}\".\"{}\" ORDER BY id",
+                target.namespace(),
+                target.name()
+            ))
+            .unwrap()
+            .query_map([], |row| {
+                Ok(Row::from([
+                    ("id".to_owned(), row.get::<_, Option<String>>(0)?),
+                    ("name".to_owned(), row.get::<_, Option<String>>(1)?),
+                ]))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+}
+
+fn day(from: i64) -> Window {
+    Window::new(
+        Ts::try_from(from * DAY).unwrap(),
+        Ts::try_from((from + 1) * DAY).unwrap(),
+    )
+}
+
+fn replica() -> Replica {
+    Replica::keyed_by(&["id"])
+        .upsert(1_000, &[("id", Some("1")), ("name", Some("Alice"))])
+        .upsert(2_000, &[("id", Some("2")), ("name", Some("Bob"))])
+        .upsert(3_000, &[("id", Some("1")), ("name", Some("Alicia"))])
+        .delete(DAY + 1_000, &[("id", Some("2"))])
+        .upsert(DAY + 2_000, &[("id", Some("3")), ("name", None)])
+        .upsert(DAY + 3_000, &[("id", Some("1")), ("name", Some("Ally"))])
+}
+
+#[test]
+fn a_snapshot_holds_what_the_source_held_as_its_window_closed() {
+    let replica = replica();
+    let shards = Shards::over(&replica);
+
+    let built = shards.build(&day(0), None);
+
+    assert_eq!(shards.rows(&built), replica.at(*day(0).to()));
+}
+
+#[test]
+fn a_snapshot_folded_onto_the_one_before_holds_what_the_source_held_as_its_window_closed() {
+    let replica = replica();
+    let shards = Shards::over(&replica);
+
+    let first = shards.build(&day(0), None);
+    let second = shards.build(&day(1), Some(&first));
+
+    assert_eq!(shards.rows(&second), replica.at(*day(1).to()));
+}
