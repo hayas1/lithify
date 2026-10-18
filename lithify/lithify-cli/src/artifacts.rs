@@ -5,6 +5,7 @@ use serde::Deserialize;
 
 use lithify_artifact::instant::{self, Instant};
 use lithify_artifact::masked::{self, Masked};
+use lithify_artifact::scd1::{self, Scd1};
 use lithify_artifact::snapshot::{self, Snapshot};
 use lithify_config::Declaration;
 use lithify_config::infra::Sink;
@@ -23,27 +24,35 @@ pub enum ArtifactConfig {
     Snapshot(snapshot::Config<LocationConfig>),
     Instant(instant::Config<LocationConfig>),
     Masked(masked::Config<LocationConfig>),
+    Scd1(scd1::Config<LocationConfig>),
 }
 
 impl ArtifactConfig {
     pub fn as_snapshot(&self) -> Option<&snapshot::Config<LocationConfig>> {
         match self {
             Self::Snapshot(config) => Some(config),
-            Self::Instant(_) | Self::Masked(_) => None,
+            Self::Instant(_) | Self::Masked(_) | Self::Scd1(_) => None,
         }
     }
 
     pub fn as_instant(&self) -> Option<&instant::Config<LocationConfig>> {
         match self {
             Self::Instant(config) => Some(config),
-            Self::Snapshot(_) | Self::Masked(_) => None,
+            Self::Snapshot(_) | Self::Masked(_) | Self::Scd1(_) => None,
         }
     }
 
     pub fn as_masked(&self) -> Option<&masked::Config<LocationConfig>> {
         match self {
             Self::Masked(config) => Some(config),
-            Self::Snapshot(_) | Self::Instant(_) => None,
+            Self::Snapshot(_) | Self::Instant(_) | Self::Scd1(_) => None,
+        }
+    }
+
+    pub fn as_scd1(&self) -> Option<&scd1::Config<LocationConfig>> {
+        match self {
+            Self::Scd1(config) => Some(config),
+            Self::Snapshot(_) | Self::Instant(_) | Self::Masked(_) => None,
         }
     }
 }
@@ -56,6 +65,7 @@ impl Declaration for ArtifactConfig {
             Self::Snapshot(_) => None,
             Self::Instant(_) => Some(<Instant as Artifact>::From::KIND),
             Self::Masked(_) => Some(<Masked as Artifact>::From::KIND),
+            Self::Scd1(_) => Some(<Scd1 as Artifact>::From::KIND),
         }
     }
 
@@ -64,6 +74,7 @@ impl Declaration for ArtifactConfig {
             Self::Snapshot(config) => config.place().iter().collect::<Vec<_>>(),
             Self::Instant(cuts) => cuts.iter().flat_map(|cut| cut.place()).collect(),
             Self::Masked(config) => config.place().iter().collect(),
+            Self::Scd1(config) => config.place().iter().collect(),
         }
         .into_iter()
     }
@@ -71,13 +82,12 @@ impl Declaration for ArtifactConfig {
     fn schedule(&self, time_zone: Tz) -> Option<Schedule> {
         match self {
             Self::Snapshot(config) => Some(config.schedule(time_zone)),
-            Self::Instant(_) | Self::Masked(_) => None,
+            Self::Instant(_) | Self::Masked(_) | Self::Scd1(_) => None,
         }
     }
 }
 
 pub struct Placement<'a> {
-    shard: &'a str,
     places: &'a [LocationConfig],
     namespace: Namespace,
     time_zone: Tz,
@@ -87,7 +97,6 @@ impl<'a> Placement<'a> {
     fn of(
         sink: &Sink<WarehouseConfig, ArtifactConfig>,
         artifact: &'static str,
-        shard: &'a str,
         places: &'a [LocationConfig],
     ) -> Result<Self, Unrunnable> {
         let place = places.first().ok_or_else(|| Unrunnable::Undeclared {
@@ -96,7 +105,6 @@ impl<'a> Placement<'a> {
         })?;
 
         Ok(Self {
-            shard,
             places,
             namespace: place.clone().into(),
             time_zone: sink.time_zone(),
@@ -107,16 +115,22 @@ impl<'a> Placement<'a> {
         &self.namespace
     }
 
-    fn snapshot(&self) -> Snapshot {
-        Snapshot::new(self.namespace.clone(), self.shard)
-            .named_in(self.time_zone)
-            .copied_into(
-                self.places
-                    .iter()
-                    .skip(1)
-                    .map(|place| place.clone().into())
-                    .collect(),
-            )
+    fn dated(&self, shard: &str) -> Snapshot {
+        self.placed(Snapshot::new(self.namespace.clone(), shard))
+    }
+
+    fn current(&self) -> Snapshot {
+        self.placed(Snapshot::current(self.namespace.clone()))
+    }
+
+    fn placed(&self, snapshot: Snapshot) -> Snapshot {
+        snapshot.named_in(self.time_zone).copied_into(
+            self.places
+                .iter()
+                .skip(1)
+                .map(|place| place.clone().into())
+                .collect(),
+        )
     }
 }
 
@@ -139,7 +153,7 @@ impl<'a> DeclaredSnapshot<'a> {
 
         Ok(Self {
             config,
-            placement: Placement::of(sink, Self::ARTIFACT, config.shard(), config.place())?,
+            placement: Placement::of(sink, Self::ARTIFACT, config.place())?,
         })
     }
 
@@ -156,7 +170,7 @@ impl<'a> DeclaredSnapshot<'a> {
     }
 
     pub fn artifact(&self) -> Snapshot {
-        self.placement.snapshot()
+        self.placement.dated(self.config.shard())
     }
 }
 
@@ -176,7 +190,7 @@ impl<'a> DeclaredInstant<'a> {
             .map(|config| {
                 Ok(Self {
                     config,
-                    placement: Placement::of(sink, Self::ARTIFACT, config.shard(), config.place())?,
+                    placement: Placement::of(sink, Self::ARTIFACT, config.place())?,
                 })
             })
             .collect()
@@ -194,12 +208,13 @@ impl<'a> DeclaredInstant<'a> {
         Instant::new(
             self.config.at(),
             self.placement.time_zone,
-            self.placement.snapshot(),
+            self.placement.dated(self.config.shard()),
         )
     }
 }
 
 pub struct DeclaredMasked<'a> {
+    config: &'a masked::Config<LocationConfig>,
     placement: Placement<'a>,
     masks: &'a BTreeMap<TableId, BTreeMap<String, Mask>>,
 }
@@ -215,7 +230,8 @@ impl<'a> DeclaredMasked<'a> {
             .and_then(ArtifactConfig::as_masked)
             .map(|config| {
                 Ok(Self {
-                    placement: Placement::of(sink, Self::ARTIFACT, config.shard(), config.place())?,
+                    config,
+                    placement: Placement::of(sink, Self::ARTIFACT, config.place())?,
                     masks,
                 })
             })
@@ -231,7 +247,41 @@ impl<'a> DeclaredMasked<'a> {
     }
 
     pub fn artifact(&self) -> Masked {
-        Masked::new(self.placement.snapshot(), self.masks.clone())
+        Masked::new(
+            self.placement.dated(self.config.shard()),
+            self.masks.clone(),
+        )
+    }
+}
+
+pub struct DeclaredScd1<'a> {
+    placement: Placement<'a>,
+}
+
+impl<'a> DeclaredScd1<'a> {
+    pub const ARTIFACT: &'static str = Scd1::KIND;
+
+    pub fn of(sink: &'a Sink<WarehouseConfig, ArtifactConfig>) -> Result<Option<Self>, Unrunnable> {
+        sink.artifact(Self::ARTIFACT)
+            .and_then(ArtifactConfig::as_scd1)
+            .map(|config| {
+                Ok(Self {
+                    placement: Placement::of(sink, Self::ARTIFACT, config.place())?,
+                })
+            })
+            .transpose()
+    }
+
+    pub fn namespace(&self) -> &Namespace {
+        self.placement.namespace()
+    }
+
+    pub fn series(&self) -> Series {
+        self.artifact().series()
+    }
+
+    pub fn artifact(&self) -> Scd1 {
+        Scd1::new(self.placement.current())
     }
 }
 

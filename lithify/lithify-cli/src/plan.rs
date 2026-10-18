@@ -117,7 +117,7 @@ impl<'a, K, S: Settlement, A: Artifact> Plan<'a, K, S, A> {
     {
         let window: &'b Window = self.window;
         let artifact: &'b A = self.artifact;
-        let mut tracker = EraTracker::new(window.clone(), |table: &TableId| {
+        let tracker = EraTracker::new(window.clone(), |table: &TableId| {
             artifact.builder::<_, K::Warehouse>(
                 logs.row_changes(),
                 table.clone(),
@@ -125,6 +125,10 @@ impl<'a, K, S: Settlement, A: Artifact> Plan<'a, K, S, A> {
                 artifact.base(self.previous, table, window),
             )
         });
+        let mut tracker = match artifact.open_ended() {
+            true => tracker.open_ended(),
+            false => tracker,
+        };
         let catalog = self.client.replay::<Unrunnable, _>(
             self.client.warehouse(),
             logs.schema_changes(),

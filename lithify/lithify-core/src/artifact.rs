@@ -87,6 +87,10 @@ pub trait Artifact {
 
     fn windows(&self, daily: &Window) -> Vec<Window>;
 
+    fn open_ended(&self) -> bool {
+        false
+    }
+
     fn base<'b>(
         &self,
         built: &'b [BuildLog],

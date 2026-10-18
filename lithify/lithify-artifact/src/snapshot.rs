@@ -71,8 +71,35 @@ impl<L> Config<L> {
 pub struct Snapshot {
     namespace: Namespace,
     copies: Vec<Namespace>,
-    shard: String,
+    shard: Shard,
     zone: Tz,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Shard {
+    Dated(String),
+    Current,
+}
+
+impl Shard {
+    fn name(&self, table: &TableId, at: DateTime<Tz>) -> String {
+        match self {
+            Self::Dated(format) => format!("{}_{}", table.table(), at.format(format)),
+            Self::Current => table.table().to_owned(),
+        }
+    }
+
+    fn create<W: Warehouse>(
+        &self,
+        warehouse: &W,
+        target: &TablePath,
+        select: &SqlString,
+    ) -> SqlString {
+        match self {
+            Self::Dated(_) => warehouse.create_table_as(target, select),
+            Self::Current => warehouse.create_view(target, select),
+        }
+    }
 }
 
 impl Snapshot {
@@ -80,7 +107,16 @@ impl Snapshot {
         Self {
             namespace: namespace.into(),
             copies: Vec::new(),
-            shard: shard.to_owned(),
+            shard: Shard::Dated(shard.to_owned()),
+            zone: Tz::UTC,
+        }
+    }
+
+    pub fn current(namespace: impl Into<Namespace>) -> Self {
+        Self {
+            namespace: namespace.into(),
+            copies: Vec::new(),
+            shard: Shard::Current,
             zone: Tz::UTC,
         }
     }
@@ -121,13 +157,14 @@ impl Snapshot {
 
         [
             warehouse.create_namespace(target.namespace()),
-            warehouse.create_table_as(target, select),
+            self.shard.create(warehouse, target, select),
         ]
         .into_iter()
         .chain(self.copies.iter().flat_map(|copy| {
             [
                 warehouse.create_namespace(copy),
-                warehouse.create_table_as(&self.named(copy, table, window), &copied),
+                self.shard
+                    .create(warehouse, &self.named(copy, table, window), &copied),
             ]
         }))
         .collect()
@@ -136,10 +173,7 @@ impl Snapshot {
     fn named(&self, namespace: &Namespace, table: &TableId, window: &Window) -> TablePath {
         let at = DateTime::<Utc>::from(window.last()).with_timezone(&self.zone);
 
-        TablePath::new(
-            namespace.clone(),
-            &format!("{}_{}", table.table(), at.format(&self.shard)),
-        )
+        TablePath::new(namespace.clone(), &self.shard.name(table, at))
     }
 }
 

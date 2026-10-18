@@ -81,6 +81,16 @@ impl WarehouseSql for DuckDbWarehouse {
         }
     }
 
+    fn create_view(&self, view: &TablePath, select: &SqlString) -> SqlString {
+        match &self.store {
+            Some(store) => store.replace(view, select),
+            None => SqlString::from(format!(
+                "CREATE OR REPLACE VIEW {} AS\n{select}",
+                self.table_ref(view)
+            )),
+        }
+    }
+
     fn insert(&self, table: &TablePath, columns: &[SqlString], select: &SqlString) -> SqlString {
         let columns: Vec<_> = columns.iter().map(SqlString::to_string).collect();
 
@@ -192,6 +202,24 @@ impl ChangeLogSql for DuckDbWarehouse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_view_over_a_store_is_written_as_a_table_since_a_store_keeps_no_view() {
+        let warehouse = DuckDbWarehouse::over("cdc", s3("http://rustfs:9000"));
+        let view = TablePath::new("mysql_shop_scd1", "people");
+        let select = SqlString::from("SELECT 1");
+
+        assert_eq!(
+            warehouse.create_view(&view, &select),
+            warehouse.create_table_as(&view, &select)
+        );
+        assert!(
+            DuckDbWarehouse::new("cdc")
+                .create_view(&view, &select)
+                .as_str()
+                .starts_with("CREATE OR REPLACE VIEW")
+        );
+    }
     use crate::sink::duckdb::config::tests::s3;
     use crate::source::debezium::Debezium;
     use crate::source::debezium::mysql::MySql;

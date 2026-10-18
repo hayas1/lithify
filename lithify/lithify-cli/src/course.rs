@@ -7,7 +7,7 @@ use lithify_core::build_log::BuildLog;
 use lithify_core::model::{Mask, TableId};
 use lithify_core::schedule::Schedule;
 use lithify_core::sink::WarehouseClient;
-use lithify_core::ts::Ts;
+use lithify_core::ts::{Event, Ts};
 use lithify_core::window::Window;
 
 use crate::artifacts::{ArtifactConfig, DeclaredSnapshot};
@@ -132,13 +132,17 @@ impl Itinerary {
             .iter()
             .filter(|window| schedule.window(*window.from()).as_ref() == Some(*window));
         let opened = self
-            .windows
-            .last()
-            .map(|window| *window.to())
-            .or_else(|| self.previous.first().map(|log| *log.window().to()))
+            .built_until()
             .and_then(|opened| schedule.window(opened));
 
         closed.cloned().chain(opened).collect()
+    }
+
+    pub fn built_until(&self) -> Option<Ts<Event>> {
+        self.windows
+            .last()
+            .map(|window| *window.to())
+            .or_else(|| self.previous.first().map(|log| *log.window().to()))
     }
 
     pub fn settle<S: Settlement>(

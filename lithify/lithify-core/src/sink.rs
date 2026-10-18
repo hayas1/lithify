@@ -186,6 +186,13 @@ pub trait WarehouseSql {
             columns.join(", ")
         ))
     }
+
+    fn create_view(&self, view: &TablePath, select: &SqlString) -> SqlString {
+        SqlString::from(format!(
+            "CREATE OR REPLACE VIEW {} AS\n{select}",
+            self.table_ref(view)
+        ))
+    }
 }
 
 pub trait ChangeLogSql: WarehouseSql {

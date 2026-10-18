@@ -17,6 +17,7 @@ use crate::window::Window;
 pub enum Bound<P> {
     EventTime(Ts<Event>),
     Position { at: Ts<Processing>, position: P },
+    Open,
 }
 
 impl<P> Bound<P> {
@@ -28,6 +29,7 @@ impl<P> Bound<P> {
                 .into_iter()
                 .zip(std::iter::once(Coordinate::from(*at)).chain(log.coordinates(position)))
                 .collect(),
+            Self::Open => Vec::new(),
         }
     }
 }
@@ -59,6 +61,7 @@ impl<P> Era<P> {
 
 pub struct EraTracker<F, L, E, P> {
     window: Window,
+    end: Bound<P>,
     at: Bound<P>,
     open: F,
     tables: BTreeMap<TableId, Track<L, P>>,
@@ -129,11 +132,19 @@ impl<F, L, E, P: Position> EraTracker<F, L, E, P> {
     pub fn new(window: Window, open: F) -> Self {
         Self {
             at: Bound::EventTime(*window.from()),
+            end: Bound::EventTime(*window.to()),
             window,
             open,
             tables: BTreeMap::new(),
             dropped: Vec::new(),
             error: PhantomData,
+        }
+    }
+
+    pub fn open_ended(self) -> Self {
+        Self {
+            end: Bound::Open,
+            ..self
         }
     }
 
@@ -151,7 +162,7 @@ impl<F, L, E, P: Position> EraTracker<F, L, E, P> {
                     None => self.open(table.id(), Bound::EventTime(*self.window.from()), None)?,
                 };
 
-                Ok(track.finish(context, table, &Bound::EventTime(*self.window.to()))?)
+                Ok(track.finish(context, table, &self.end)?)
             })
             .collect::<Result<Vec<_>, E>>()?;
 
@@ -325,6 +336,7 @@ mod tests {
                 at,
                 position: Offset(offset),
             } => format!("{}@{offset}", at.milliseconds_since_epoch()),
+            Bound::Open => "open".to_owned(),
         }
     }
 
@@ -464,6 +476,33 @@ mod tests {
             .into_iter()
             .map(|story| (story.table, story.told))
             .collect()
+    }
+
+    #[test]
+    fn an_open_ended_tracker_leaves_the_last_era_of_each_table_open() {
+        let mut catalog = CatalogModel::default();
+        catalog
+            .accept::<OutOfOrder, _>(
+                &(),
+                &change(1, vec![TableChange::Created(table(people(), &["id"]))]),
+                &mut (),
+            )
+            .unwrap();
+        let tracker = EraTracker::new(
+            Window::new(Ts::try_from(10).unwrap(), Ts::try_from(20).unwrap()),
+            |table: &TableId| {
+                Ok::<_, Untold>(Story {
+                    table: table.clone(),
+                    told: Vec::new(),
+                })
+            },
+        )
+        .open_ended();
+
+        assert_eq!(
+            tracker.finish(&(), &catalog).unwrap()[0].told,
+            ["era [\"id\"] 10..open"]
+        );
     }
 
     #[test]

@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 
 use lithify_artifact::instant::Instant;
 use lithify_artifact::masked::Masked;
+use lithify_artifact::scd1::Scd1;
 use lithify_artifact::snapshot::Snapshot;
 use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
 use lithify_core::build_log::{BuildLog, Outcome, Run, Status};
@@ -139,7 +140,10 @@ impl Shards {
                 &Era::new(
                     people(),
                     Bound::EventTime(*window.from()),
-                    Bound::EventTime(*window.to()),
+                    match artifact.open_ended() {
+                        true => Bound::Open,
+                        false => Bound::EventTime(*window.to()),
+                    },
                 ),
             )
             .unwrap();
@@ -270,5 +274,25 @@ fn a_masked_snapshot_holds_the_snapshot_of_its_window_with_its_masked_columns_le
                 row
             })
             .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn an_scd1_holds_what_the_source_holds_now_onto_the_last_daily_snapshot() {
+    let replica = replica();
+    let shards = Shards::over(&replica);
+    let scd1 = Scd1::new(Snapshot::current("shop_scd1"));
+    let first = shards.build(&day(0), None);
+    let opened = Window::new(*day(1).from(), Ts::try_from(DAY + 1_500).unwrap());
+
+    let current = shards.build_into(
+        &scd1,
+        &opened,
+        scd1.base(std::slice::from_ref(&first), people().id(), &opened),
+    );
+
+    assert_eq!(
+        shards.rows(&current),
+        replica.at(Ts::try_from(i64::from(i32::MAX)).unwrap())
     );
 }

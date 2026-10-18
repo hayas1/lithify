@@ -10,7 +10,9 @@ use lithify_core::window::Window;
 
 use lithify_config::infra::Sink;
 
-use crate::artifacts::{ArtifactConfig, DeclaredInstant, DeclaredMasked, DeclaredSnapshot};
+use crate::artifacts::{
+    ArtifactConfig, DeclaredInstant, DeclaredMasked, DeclaredScd1, DeclaredSnapshot,
+};
 use crate::course::Itinerary;
 use crate::journal::Journal;
 use crate::pipeline::WarehouseConfig;
@@ -22,6 +24,7 @@ pub struct Derivation<'a> {
     sink: &'a Sink<WarehouseConfig, ArtifactConfig>,
     windows: Vec<Window>,
     days: Vec<Window>,
+    built_until: Option<Ts<Event>>,
     now: Ts<Event>,
     masks: &'a BTreeMap<TableId, BTreeMap<String, Mask>>,
 }
@@ -38,6 +41,7 @@ impl<'a> Derivation<'a> {
             sink,
             windows: itinerary.windows().to_vec(),
             days: itinerary.days(schedule),
+            built_until: itinerary.built_until(),
             now,
             masks,
         }
@@ -79,6 +83,17 @@ impl<'a> Derivation<'a> {
                 let previous = self.built(planner, &snapshot, *window.to())?;
                 self.derive(planner, &masked, window, &previous, &settlement, journal)?;
             }
+        }
+
+        if let Some(declared) = DeclaredScd1::of(self.sink)?
+            && let Some(built_until) = self.built_until.filter(|built| *built < self.now)
+        {
+            let scd1 = declared.artifact();
+            let settlement = settlement.advancing(declared.namespace(), &declared.series());
+            let window = Window::new(built_until, self.now);
+            let previous = self.built(planner, &snapshot, built_until)?;
+
+            self.derive(planner, &scd1, &window, &previous, &settlement, journal)?;
         }
 
         Ok(())
@@ -160,6 +175,45 @@ mod tests {
             "[[sink.artifact.instant]]\nat = \"06:00\"\nshard = \"%Y%m%d%H\"\nplace = [{ duckdb.prefix = \"mysql_shop_instant\" }]\n",
             "[default]\nartifacts = [\"snapshot\", \"instant\"]\n",
         )
+    }
+
+    #[test]
+    fn a_catch_up_folds_the_change_log_after_the_last_daily_snapshot_into_the_current_state() {
+        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]);
+        let pipeline = derived(
+            "scd1",
+            "[sink.artifact.scd1]\nplace = [{ duckdb.prefix = \"mysql_shop_scd1\" }]\n",
+            "[default]\nartifacts = [\"snapshot\", \"scd1\"]\n",
+        );
+
+        settle(
+            &pipeline,
+            &client,
+            &Course::CatchUp { to: None },
+            "2026-09-21T05:00:00Z",
+        )
+        .unwrap();
+
+        assert_eq!(
+            rows(
+                &client,
+                "SELECT target, base FROM mysql_shop_scd1._lithify_log WHERE status = 'succeeded' ORDER BY id"
+            ),
+            [(
+                "mysql_shop_scd1.people".to_owned(),
+                "mysql_shop.people_20260920".to_owned()
+            )]
+        );
+        assert_eq!(
+            rows(
+                &client,
+                "SELECT id::VARCHAR, 'people' FROM mysql_shop_scd1.people ORDER BY id"
+            ),
+            [
+                ("7".to_owned(), "people".to_owned()),
+                ("8".to_owned(), "people".to_owned())
+            ]
+        );
     }
 
     #[test]
