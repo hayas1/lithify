@@ -43,6 +43,29 @@ impl Run {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Series {
+    artifact: String,
+    schedule: String,
+}
+
+impl Series {
+    pub fn new(artifact: &str, schedule: &str) -> Self {
+        Self {
+            artifact: artifact.to_owned(),
+            schedule: schedule.to_owned(),
+        }
+    }
+
+    pub fn artifact(&self) -> &str {
+        &self.artifact
+    }
+
+    pub fn schedule(&self) -> &str {
+        &self.schedule
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
     Succeeded,
     Failed(String),
@@ -202,6 +225,10 @@ impl BuildLog {
 
     pub fn capture(&self) -> &str {
         &self.run.capture
+    }
+
+    pub fn advances(&self, series: &Series) -> bool {
+        self.run.artifact == series.artifact && self.run.schedule == series.schedule
     }
 
     pub fn table_from(&self) -> Option<&TableId> {
@@ -700,6 +727,15 @@ mod tests {
             BuildLogRow::path("analytics-project.shop.people_20260920").unwrap(),
             TablePath::new("analytics-project.shop", "people_20260920")
         );
+    }
+
+    #[test]
+    fn a_build_log_advances_the_series_of_the_artifact_and_schedule_it_was_run_for() {
+        let logged = logged(Some("people"), Some("people"));
+
+        assert!(logged.advances(&Series::new("snapshot", "daily")));
+        assert!(!logged.advances(&Series::new("instant", "daily")));
+        assert!(!logged.advances(&Series::new("snapshot", "09:00")));
     }
 
     #[test]

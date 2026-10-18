@@ -111,8 +111,8 @@ impl Build {
             run: Run::new(
                 Ulid::from_datetime(now.into()),
                 now,
-                DeclaredSnapshot::ARTIFACT,
-                &snapshot.schedule().to_string(),
+                snapshot.series().artifact(),
+                snapshot.series().schedule(),
                 source.name(),
                 &source.capture().to_json()?,
                 env!("CARGO_PKG_VERSION"),

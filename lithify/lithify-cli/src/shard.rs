@@ -38,8 +38,11 @@ impl<'a> Shard<'a> {
         Unrunnable: From<K::Error>,
     {
         let window = self.closed(date)?;
-        let previous = Resumption::at(*window.from(), self.source.since())
-            .previous(client, &self.namespace()?)?;
+        let previous = Resumption::at(*window.from(), self.source.since()).previous(
+            client,
+            &self.namespace()?,
+            &DeclaredSnapshot::of(self.sink)?.series(),
+        )?;
 
         Ok(Itinerary::new(vec![window], previous, tables.clone()))
     }

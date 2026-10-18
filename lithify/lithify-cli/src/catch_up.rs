@@ -1,7 +1,7 @@
 use chrono::{DateTime, NaiveDate, Utc};
 
 use lithify_config::infra::{Sink, Source};
-use lithify_core::build_log::Latest;
+use lithify_core::build_log::{Latest, Series};
 use lithify_core::sink::{Namespace, WarehouseClient};
 use lithify_core::ts::{Event, Ts};
 
@@ -48,7 +48,7 @@ impl<'a> CatchUp<'a> {
                 DeclaredSnapshot::of(self.sink)?.schedule(),
                 self.until(&resumption)?,
             ),
-            resumption.previous(client, &self.namespace()?)?,
+            resumption.previous(client, &self.namespace()?, &self.series()?)?,
             Tables::Every,
         ))
     }
@@ -71,6 +71,10 @@ impl<'a> CatchUp<'a> {
         Ok(DeclaredSnapshot::of(self.sink)?.namespace().clone())
     }
 
+    fn series(&self) -> Result<Series, Unrunnable> {
+        Ok(DeclaredSnapshot::of(self.sink)?.series())
+    }
+
     fn resumption<K>(&self, client: &K) -> Result<Resumption, Unrunnable>
     where
         K: WarehouseClient,
@@ -81,6 +85,7 @@ impl<'a> CatchUp<'a> {
             &client.build_logs(&self.namespace()?, &Latest::Succeeded.into())?,
             self.source.since(),
             &self.source.capture().to_json()?,
+            &self.series()?,
         )
     }
 }

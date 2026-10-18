@@ -1,4 +1,4 @@
-use lithify_core::build_log::{BuildLog, Latest};
+use lithify_core::build_log::{BuildLog, Latest, Series};
 use lithify_core::schedule::Schedule;
 use lithify_core::sink::{Namespace, WarehouseClient};
 use lithify_core::ts::{Event, Ts};
@@ -25,8 +25,15 @@ impl Resumption {
         succeeded: &[BuildLog],
         origin: Ts<Event>,
         capture: &str,
+        series: &Series,
     ) -> Result<Self, Unrunnable> {
-        let Some(last_run) = latest.iter().map(BuildLog::run_id).max() else {
+        let latest: Vec<_> = latest.iter().filter(|log| log.advances(series)).collect();
+        let succeeded: Vec<_> = succeeded
+            .iter()
+            .filter(|log| log.advances(series))
+            .cloned()
+            .collect();
+        let Some(last_run) = latest.iter().map(|log| log.run_id()).max() else {
             return Ok(Self::FromOrigin(origin));
         };
         let built_last = latest.iter().filter(|log| log.run_id() == last_run);
@@ -44,7 +51,7 @@ impl Resumption {
             .iter()
             .filter(|log| log.table_to().is_some())
             .map(|log| {
-                log.last_success(succeeded)
+                log.last_success(&succeeded)
                     .map_or(origin, |built| *built.window().to())
             })
             .min()
@@ -71,6 +78,7 @@ impl Resumption {
         &self,
         client: &K,
         namespace: &Namespace,
+        series: &Series,
     ) -> Result<Vec<BuildLog>, Unrunnable>
     where
         K: WarehouseClient,
@@ -78,9 +86,11 @@ impl Resumption {
     {
         match self {
             Self::FromOrigin(_) => Ok(Vec::new()),
-            Self::FromBuilt(start) => {
-                Ok(client.build_logs(namespace, &Latest::SucceededUntil(*start).into())?)
-            }
+            Self::FromBuilt(start) => Ok(client
+                .build_logs(namespace, &Latest::SucceededUntil(*start).into())?
+                .into_iter()
+                .filter(|log| log.advances(series))
+                .collect()),
         }
     }
 }
@@ -156,8 +166,56 @@ mod tests {
         )
     }
 
+    fn daily() -> Series {
+        Series::new("snapshot", "daily")
+    }
+
     fn resumed(latest: &[BuildLog], succeeded: &[BuildLog]) -> Resumption {
-        Resumption::read(latest, succeeded, Ts::try_from(ORIGIN).unwrap(), CAPTURE).unwrap()
+        Resumption::read(
+            latest,
+            succeeded,
+            Ts::try_from(ORIGIN).unwrap(),
+            CAPTURE,
+            &daily(),
+        )
+        .unwrap()
+    }
+
+    fn cut_at_nine(run: u64, table: &str, (from, to): (i64, i64)) -> BuildLog {
+        BuildLog::new(
+            &Run::new(
+                Ulid::from_parts(run, 0),
+                DateTime::UNIX_EPOCH,
+                "instant",
+                "09:00",
+                "primary",
+                CAPTURE,
+                "0.1.0",
+            ),
+            Some(TableId::new("shop", table)),
+            Some(TableId::new("shop", table)),
+            None,
+            Some(TablePath::new(
+                "mysql_shop_instant",
+                &format!("{table}_{from}"),
+            )),
+            Window::new(Ts::try_from(from).unwrap(), Ts::try_from(to).unwrap()),
+            Outcome::new(
+                Status::Succeeded,
+                DateTime::from_timestamp_millis(to).unwrap(),
+            ),
+        )
+    }
+
+    #[test]
+    fn a_pipeline_resumes_its_series_apart_from_the_others_its_build_log_holds() {
+        let people = logged(1, "people", W1, Status::Succeeded);
+        let instant = cut_at_nine(2, "people", (W2.0, W2.0 + 32_400_000));
+
+        assert_eq!(
+            resumed(&[people.clone(), instant.clone()], &[people, instant]),
+            Resumption::FromBuilt(Ts::try_from(W1.1).unwrap())
+        );
     }
 
     #[test]
@@ -265,6 +323,7 @@ mod tests {
             std::slice::from_ref(&people),
             Ts::try_from(ORIGIN).unwrap(),
             CAPTURE,
+            &daily(),
         );
 
         assert!(matches!(changed, Err(Unrunnable::CaptureChanged { .. })));

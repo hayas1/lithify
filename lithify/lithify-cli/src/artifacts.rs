@@ -3,6 +3,7 @@ use serde::Deserialize;
 use lithify_artifact::snapshot::{self, Snapshot};
 use lithify_config::Declaration;
 use lithify_config::infra::Sink;
+use lithify_core::build_log::Series;
 use lithify_core::schedule::Schedule;
 use lithify_core::sink::Namespace;
 
@@ -70,6 +71,10 @@ impl<'a> DeclaredSnapshot<'a> {
 
     pub fn schedule(&self) -> Schedule {
         self.config.schedule()
+    }
+
+    pub fn series(&self) -> Series {
+        Series::new(Self::ARTIFACT, &self.schedule().to_string())
     }
 
     pub fn artifact(&self) -> Snapshot {
