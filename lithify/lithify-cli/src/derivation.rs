@@ -1,0 +1,270 @@
+use std::collections::BTreeMap;
+
+use lithify_core::artifact::Artifact;
+use lithify_core::build_log::{BuildLog, Latest};
+use lithify_core::model::{Mask, TableId};
+use lithify_core::schedule::Schedule;
+use lithify_core::sink::WarehouseClient;
+use lithify_core::ts::{Event, Ts};
+use lithify_core::window::Window;
+
+use lithify_config::infra::Sink;
+
+use crate::artifacts::{ArtifactConfig, DeclaredInstant, DeclaredMasked, DeclaredSnapshot};
+use crate::course::Itinerary;
+use crate::journal::Journal;
+use crate::pipeline::WarehouseConfig;
+use crate::plan::{Planner, Tables};
+use crate::settlement::Settlement;
+use crate::unrunnable::Unrunnable;
+
+pub struct Derivation<'a> {
+    sink: &'a Sink<WarehouseConfig, ArtifactConfig>,
+    windows: Vec<Window>,
+    days: Vec<Window>,
+    now: Ts<Event>,
+    masks: &'a BTreeMap<TableId, BTreeMap<String, Mask>>,
+}
+
+impl<'a> Derivation<'a> {
+    pub fn new(
+        sink: &'a Sink<WarehouseConfig, ArtifactConfig>,
+        itinerary: &Itinerary,
+        schedule: Schedule,
+        now: Ts<Event>,
+        masks: &'a BTreeMap<TableId, BTreeMap<String, Mask>>,
+    ) -> Self {
+        Self {
+            sink,
+            windows: itinerary.windows().to_vec(),
+            days: itinerary.days(schedule),
+            now,
+            masks,
+        }
+    }
+
+    pub fn settle<P, S>(
+        &self,
+        planner: &P,
+        settlement: &S,
+        journal: &mut Journal,
+    ) -> Result<(), Unrunnable>
+    where
+        P: Planner,
+        Unrunnable: From<<P::Client as WarehouseClient>::Error>,
+        S: Settlement,
+    {
+        let snapshot = DeclaredSnapshot::of(self.sink)?;
+
+        for declared in DeclaredInstant::of(self.sink)? {
+            let instant = declared.artifact();
+            let settlement = settlement.advancing(declared.namespace(), &declared.series());
+            let cuts = self
+                .days
+                .iter()
+                .flat_map(|day| instant.windows(day))
+                .filter(|window| *window.to() <= self.now);
+
+            for window in cuts {
+                let previous = self.built(planner, &snapshot, *window.from())?;
+                self.derive(planner, &instant, &window, &previous, &settlement, journal)?;
+            }
+        }
+
+        if let Some(declared) = DeclaredMasked::of(self.sink, self.masks)? {
+            let masked = declared.artifact();
+            let settlement = settlement.advancing(declared.namespace(), &declared.series());
+
+            for window in &self.windows {
+                let previous = self.built(planner, &snapshot, *window.to())?;
+                self.derive(planner, &masked, window, &previous, &settlement, journal)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn built<P>(
+        &self,
+        planner: &P,
+        snapshot: &DeclaredSnapshot,
+        until: Ts<Event>,
+    ) -> Result<Vec<BuildLog>, Unrunnable>
+    where
+        P: Planner,
+        Unrunnable: From<<P::Client as WarehouseClient>::Error>,
+    {
+        Ok(planner
+            .client()
+            .build_logs(snapshot.namespace(), &Latest::SucceededUntil(until).into())?
+            .into_iter()
+            .filter(|log| log.advances(&snapshot.series()))
+            .collect())
+    }
+
+    fn derive<P: Planner, A: Artifact, S: Settlement>(
+        &self,
+        planner: &P,
+        artifact: &A,
+        window: &Window,
+        previous: &[BuildLog],
+        settlement: &S,
+        journal: &mut Journal,
+    ) -> Result<(), Unrunnable> {
+        journal.window(window);
+        match planner.plan(artifact, window, previous, &Tables::Every, settlement) {
+            Ok(output) => {
+                settlement.report(window, output, journal)?;
+            }
+            Err(unrunnable) => journal.failed(self.sink.name(), &unrunnable),
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use lithify_config::Pipeline;
+
+    use crate::course::Course;
+    use crate::course::tests::settle;
+    use crate::pipeline::CaptureConfig;
+    use crate::plan::tests::{CAPTURE, PEOPLE, built_before, logged, rows};
+
+    use super::*;
+
+    fn derived(
+        name: &str,
+        declared: &str,
+        listed: &str,
+    ) -> Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig> {
+        let directory =
+            std::env::temp_dir().join(format!("lithify-cli-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let compose = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compose/lithify/mysql");
+        let infra = std::fs::read_to_string(compose.join("infra.toml")).unwrap();
+        std::fs::write(directory.join("infra.toml"), format!("{infra}\n{declared}")).unwrap();
+        std::fs::write(directory.join("table.toml"), listed).unwrap();
+        let pipeline = Pipeline::open(&directory).unwrap();
+        std::fs::remove_dir_all(&directory).unwrap();
+
+        pipeline
+    }
+
+    fn cut_at_six(name: &str) -> Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig> {
+        derived(
+            name,
+            "[[sink.artifact.instant]]\nat = \"06:00\"\nshard = \"%Y%m%d%H\"\nplace = [{ duckdb.prefix = \"mysql_shop_instant\" }]\n",
+            "[default]\nartifacts = [\"snapshot\", \"instant\"]\n",
+        )
+    }
+
+    #[test]
+    fn a_catch_up_masks_each_window_it_builds_from_the_snapshot_of_that_window() {
+        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]);
+        let pipeline = derived(
+            "masked",
+            "[sink.artifact.masked]\nshard = \"%Y%m%d\"\nplace = [{ duckdb.prefix = \"mysql_shop_masked\" }]\n",
+            "[default]\nartifacts = [\"snapshot\", \"masked\"]\n\n[[table]]\nschema = \"shop\"\nname = \"people\"\nartifacts = [\"snapshot\", \"masked\"]\ncolumn.id.mask = \"null\"\n",
+        );
+
+        settle(
+            &pipeline,
+            &client,
+            &Course::CatchUp { to: None },
+            "2026-09-22T05:00:00Z",
+        )
+        .unwrap();
+
+        assert_eq!(
+            rows(
+                &client,
+                "SELECT target, base FROM mysql_shop_masked._lithify_log WHERE status = 'succeeded' ORDER BY id"
+            ),
+            [
+                (
+                    "mysql_shop_masked.people_20260920".to_owned(),
+                    "mysql_shop.people_20260920".to_owned()
+                ),
+                (
+                    "mysql_shop_masked.people_20260921".to_owned(),
+                    "mysql_shop.people_20260921".to_owned()
+                ),
+            ]
+        );
+        assert_eq!(
+            rows(
+                &client,
+                "SELECT COALESCE(id::VARCHAR, 'null'), 'people' FROM mysql_shop_masked.people_20260921"
+            ),
+            [
+                ("null".to_owned(), "people".to_owned()),
+                ("null".to_owned(), "people".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    fn a_catch_up_cuts_each_day_it_builds_at_the_instants_a_sink_declares_onto_the_day_before() {
+        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]);
+
+        settle(
+            &cut_at_six("cut-each-day"),
+            &client,
+            &Course::CatchUp { to: None },
+            "2026-09-22T05:00:00Z",
+        )
+        .unwrap();
+
+        assert_eq!(
+            rows(
+                &client,
+                "SELECT target, base FROM mysql_shop_instant._lithify_log WHERE status = 'succeeded' ORDER BY id"
+            ),
+            [
+                (
+                    "mysql_shop_instant.people_2026092005".to_owned(),
+                    "mysql_shop.people_20260919".to_owned()
+                ),
+                (
+                    "mysql_shop_instant.people_2026092105".to_owned(),
+                    "mysql_shop.people_20260920".to_owned()
+                ),
+            ]
+        );
+        assert_eq!(
+            rows(
+                &client,
+                "SELECT id::VARCHAR, 'people' FROM mysql_shop_instant.people_2026092105 ORDER BY id"
+            ),
+            [
+                ("7".to_owned(), "people".to_owned()),
+                ("8".to_owned(), "people".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    fn an_instant_not_yet_reached_is_not_cut() {
+        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]);
+
+        settle(
+            &cut_at_six("not-yet-cut"),
+            &client,
+            &Course::CatchUp { to: None },
+            "2026-09-22T05:00:00Z",
+        )
+        .unwrap();
+
+        assert_eq!(
+            rows(
+                &client,
+                "SELECT target, '' FROM mysql_shop_instant._lithify_log WHERE target LIKE '%20260922%'"
+            ),
+            []
+        );
+    }
+}

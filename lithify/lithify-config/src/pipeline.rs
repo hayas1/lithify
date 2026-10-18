@@ -1,8 +1,9 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
 
-use lithify_core::model::TableId;
+use lithify_core::model::{Mask, TableId};
 use lithify_core::sink::SinkWarehouse;
 
 use crate::artifact::Declaration;
@@ -109,6 +110,10 @@ where
 
     pub fn table(&self, id: &TableId) -> &Table {
         self.tables.table(id)
+    }
+
+    pub fn masks(&self) -> BTreeMap<TableId, BTreeMap<String, Mask>> {
+        self.tables.masks()
     }
 
     fn named(directory: &Path) -> String {

@@ -77,6 +77,14 @@ impl Tables {
         self.tables.get(id).unwrap_or(&self.default)
     }
 
+    pub fn masks(&self) -> BTreeMap<TableId, BTreeMap<String, Mask>> {
+        self.tables
+            .iter()
+            .filter(|(_, table)| !table.masks.is_empty())
+            .map(|(id, table)| (id.clone(), table.masks.clone()))
+            .collect()
+    }
+
     pub fn listed(&self) -> impl Iterator<Item = (Option<&TableId>, &Table)> {
         std::iter::once((None, &self.default))
             .chain(self.tables.iter().map(|(id, table)| (Some(id), table)))
@@ -232,6 +240,17 @@ mod tests {
         let table = table("shop", "orders");
 
         assert_eq!(table.mask("attributes"), Mask::Null);
+    }
+
+    #[test]
+    fn the_masks_of_every_listed_table_are_read_together() {
+        assert_eq!(
+            tables(TABLES).masks(),
+            BTreeMap::from([(
+                TableId::new("shop", "orders"),
+                BTreeMap::from([("attributes".to_owned(), Mask::Null)])
+            )])
+        );
     }
 
     #[test]

@@ -6,19 +6,18 @@ use lithify_config::Pipeline;
 use lithify_config::infra::{Sink, Source};
 use lithify_core::sink::OpenWarehouse;
 use lithify_core::ts::Ts;
-use lithify_protocol::sink::bigquery::client::{BigQueryCapture, BigQueryClient};
-use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbClient};
+use lithify_protocol::sink::bigquery::client::BigQueryClient;
+use lithify_protocol::sink::duckdb::client::DuckDbClient;
 use lithify_protocol::sink::duckdb::config::Config;
 use lithify_protocol::sink::{bigquery, duckdb};
 use lithify_protocol::{BigQueryWarehouse, DuckDbWarehouse};
 
 use crate::artifacts::{ArtifactConfig, DeclaredSnapshot};
-use crate::course::Course;
+use crate::course::{Course, Leg};
 use crate::credential::Credentials;
-use crate::intraday::Intraday;
 use crate::journal::Journal;
 use crate::pipeline::{CaptureConfig, Reached, WarehouseConfig};
-use crate::plan::{Plan, Tables};
+use crate::plan::Planning;
 use crate::settlement::{Build, DryRun, Settlement};
 use crate::unrunnable::Unrunnable;
 use lithify_core::check::{Expectation, Inspection};
@@ -46,11 +45,10 @@ impl Run {
     }
 
     pub fn plan(&self, course: &Course, into: &Path) -> Result<Journal, Unrunnable> {
-        self.each_sink(|sink, source, topic_prefix, journal| {
+        self.each_sink(|pipeline, sink, source, topic_prefix, journal| {
             self.settle(
                 course,
-                sink,
-                source,
+                &Leg::new(sink, source, &pipeline.masks()),
                 topic_prefix,
                 &DryRun::new(into, sink.name()),
                 journal,
@@ -59,11 +57,10 @@ impl Run {
     }
 
     pub fn build(&self, course: &Course) -> Result<Journal, Unrunnable> {
-        self.each_sink(|sink, source, topic_prefix, journal| {
+        self.each_sink(|pipeline, sink, source, topic_prefix, journal| {
             self.settle(
                 course,
-                sink,
-                source,
+                &Leg::new(sink, source, &pipeline.masks()),
                 topic_prefix,
                 &Build::new(sink, source, self.now)?,
                 journal,
@@ -72,7 +69,7 @@ impl Run {
     }
 
     pub fn check(&self) -> Result<Journal, Unrunnable> {
-        self.each_sink(|sink, source, _, journal| {
+        self.each_sink(|_, sink, source, _, journal| {
             for discrepancy in self.inspection(sink, source)?.discrepancies() {
                 journal.discrepancy(discrepancy);
             }
@@ -121,6 +118,7 @@ impl Run {
     fn each_sink(
         &self,
         mut act: impl FnMut(
+            &Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig>,
             &Sink<WarehouseConfig, ArtifactConfig>,
             &Source<CaptureConfig>,
             &str,
@@ -144,7 +142,7 @@ impl Run {
                 continue;
             };
 
-            if let Err(unrunnable) = act(sink, source, topic_prefix, &mut journal) {
+            if let Err(unrunnable) = act(&pipeline, sink, source, topic_prefix, &mut journal) {
                 journal.failed(sink.name(), &unrunnable);
             }
         }
@@ -155,75 +153,32 @@ impl Run {
     fn settle<S: Settlement>(
         &self,
         course: &Course,
-        sink: &Sink<WarehouseConfig, ArtifactConfig>,
-        source: &Source<CaptureConfig>,
+        leg: &Leg,
         topic_prefix: &str,
         settlement: &S,
         journal: &mut Journal,
     ) -> Result<(), Unrunnable> {
-        let declared = DeclaredSnapshot::of(sink)?;
-        let snapshot = declared.artifact();
-        let schedule = declared.schedule();
-
-        match Self::reach(sink)? {
+        match Self::reach(leg.sink())? {
             Reached::DuckDb(config, change_log) => {
                 let client = self.duckdb(config, change_log)?;
-                let itinerary = course.itinerary(sink, source, self.now, &client)?;
-                let days = itinerary.days(schedule);
 
-                itinerary.settle(settlement, journal, |window, previous, tables| {
-                    source.capture().with_duckdb_change_logs(
-                        topic_prefix,
-                        Plan::new(&client, &snapshot, window, previous, tables, settlement),
-                    )
-                })?;
-                Intraday::new(sink, days, Ts::from(self.now)).settle(
-                    &client,
+                course.settle(
+                    leg,
+                    self.now,
+                    &Planning::new(&client, leg.source().capture(), topic_prefix),
                     settlement,
                     journal,
-                    |instant, window, previous, settlement| {
-                        source.capture().with_duckdb_change_logs(
-                            topic_prefix,
-                            Plan::new(
-                                &client,
-                                instant,
-                                window,
-                                previous,
-                                &Tables::Every,
-                                settlement,
-                            ),
-                        )
-                    },
                 )
             }
             Reached::BigQuery(config, change_log) => {
                 let client = self.bigquery(config, change_log)?;
-                let itinerary = course.itinerary(sink, source, self.now, &client)?;
-                let days = itinerary.days(schedule);
 
-                itinerary.settle(settlement, journal, |window, previous, tables| {
-                    source.capture().with_bigquery_change_logs(
-                        topic_prefix,
-                        Plan::new(&client, &snapshot, window, previous, tables, settlement),
-                    )
-                })?;
-                Intraday::new(sink, days, Ts::from(self.now)).settle(
-                    &client,
+                course.settle(
+                    leg,
+                    self.now,
+                    &Planning::new(&client, leg.source().capture(), topic_prefix),
                     settlement,
                     journal,
-                    |instant, window, previous, settlement| {
-                        source.capture().with_bigquery_change_logs(
-                            topic_prefix,
-                            Plan::new(
-                                &client,
-                                instant,
-                                window,
-                                previous,
-                                &Tables::Every,
-                                settlement,
-                            ),
-                        )
-                    },
                 )
             }
         }

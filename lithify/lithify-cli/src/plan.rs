@@ -11,9 +11,12 @@ use lithify_core::model::TableId;
 use lithify_core::sink::WarehouseClient;
 use lithify_core::source::{ChangeLogs, SchemaChangeLog, SchemaChangeStream};
 use lithify_core::window::Window;
-use lithify_protocol::sink::bigquery::client::{BigQueryChangeLogsFn, BigQueryClient};
-use lithify_protocol::sink::duckdb::client::{DuckDbChangeLogsFn, DuckDbClient};
+use lithify_protocol::sink::bigquery::client::{
+    BigQueryCapture, BigQueryChangeLogsFn, BigQueryClient,
+};
+use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbChangeLogsFn, DuckDbClient};
 
+use crate::pipeline::CaptureConfig;
 use crate::settlement::Settlement;
 use crate::unrunnable::Unrunnable;
 
@@ -130,6 +133,81 @@ impl<'a, K, S: Settlement, A: Artifact> Plan<'a, K, S, A> {
         )?;
 
         Ok(tracker.finish(self.client.warehouse(), &catalog)?)
+    }
+}
+
+pub trait Planner {
+    type Client: WarehouseClient;
+
+    fn client(&self) -> &Self::Client;
+
+    fn plan<A: Artifact, S: Settlement>(
+        &self,
+        artifact: &A,
+        window: &Window,
+        previous: &[BuildLog],
+        tables: &Tables,
+        settlement: &S,
+    ) -> Result<S::Output, Unrunnable>;
+}
+
+pub struct Planning<'a, K> {
+    client: &'a K,
+    capture: &'a CaptureConfig,
+    topic_prefix: &'a str,
+}
+
+impl<'a, K> Planning<'a, K> {
+    pub fn new(client: &'a K, capture: &'a CaptureConfig, topic_prefix: &'a str) -> Self {
+        Self {
+            client,
+            capture,
+            topic_prefix,
+        }
+    }
+}
+
+impl Planner for Planning<'_, DuckDbClient> {
+    type Client = DuckDbClient;
+
+    fn client(&self) -> &DuckDbClient {
+        self.client
+    }
+
+    fn plan<A: Artifact, S: Settlement>(
+        &self,
+        artifact: &A,
+        window: &Window,
+        previous: &[BuildLog],
+        tables: &Tables,
+        settlement: &S,
+    ) -> Result<S::Output, Unrunnable> {
+        self.capture.with_duckdb_change_logs(
+            self.topic_prefix,
+            Plan::new(self.client, artifact, window, previous, tables, settlement),
+        )
+    }
+}
+
+impl Planner for Planning<'_, BigQueryClient> {
+    type Client = BigQueryClient;
+
+    fn client(&self) -> &BigQueryClient {
+        self.client
+    }
+
+    fn plan<A: Artifact, S: Settlement>(
+        &self,
+        artifact: &A,
+        window: &Window,
+        previous: &[BuildLog],
+        tables: &Tables,
+        settlement: &S,
+    ) -> Result<S::Output, Unrunnable> {
+        self.capture.with_bigquery_change_logs(
+            self.topic_prefix,
+            Plan::new(self.client, artifact, window, previous, tables, settlement),
+        )
     }
 }
 

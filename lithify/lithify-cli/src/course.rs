@@ -1,16 +1,21 @@
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, NaiveDate, Utc};
 
 use lithify_config::infra::{Sink, Source};
 use lithify_core::build_log::BuildLog;
+use lithify_core::model::{Mask, TableId};
 use lithify_core::schedule::Schedule;
 use lithify_core::sink::WarehouseClient;
+use lithify_core::ts::Ts;
 use lithify_core::window::Window;
 
 use crate::artifacts::{ArtifactConfig, DeclaredSnapshot};
 use crate::catch_up::CatchUp;
+use crate::derivation::Derivation;
 use crate::journal::Journal;
 use crate::pipeline::{CaptureConfig, WarehouseConfig};
-use crate::plan::Tables;
+use crate::plan::{Planner, Tables};
 use crate::settlement::Settlement;
 use crate::shard::Shard;
 use crate::unrunnable::Unrunnable;
@@ -21,6 +26,37 @@ pub enum Course {
 }
 
 impl Course {
+    pub fn settle<P, S>(
+        &self,
+        leg: &Leg,
+        now: DateTime<Utc>,
+        planner: &P,
+        settlement: &S,
+        journal: &mut Journal,
+    ) -> Result<(), Unrunnable>
+    where
+        P: Planner,
+        Unrunnable: From<<P::Client as WarehouseClient>::Error>,
+        S: Settlement,
+    {
+        let declared = DeclaredSnapshot::of(leg.sink)?;
+        let snapshot = declared.artifact();
+        let itinerary = self.itinerary(leg.sink, leg.source, now, planner.client())?;
+        let derivation = Derivation::new(
+            leg.sink,
+            &itinerary,
+            declared.schedule(),
+            Ts::from(now),
+            leg.masks,
+        );
+
+        itinerary.settle(settlement, journal, |window, previous, tables| {
+            planner.plan(&snapshot, window, previous, tables, settlement)
+        })?;
+
+        derivation.settle(planner, settlement, journal)
+    }
+
     pub fn itinerary<K>(
         &self,
         sink: &Sink<WarehouseConfig, ArtifactConfig>,
@@ -43,6 +79,34 @@ impl Course {
     }
 }
 
+pub struct Leg<'a> {
+    sink: &'a Sink<WarehouseConfig, ArtifactConfig>,
+    source: &'a Source<CaptureConfig>,
+    masks: &'a BTreeMap<TableId, BTreeMap<String, Mask>>,
+}
+
+impl<'a> Leg<'a> {
+    pub fn new(
+        sink: &'a Sink<WarehouseConfig, ArtifactConfig>,
+        source: &'a Source<CaptureConfig>,
+        masks: &'a BTreeMap<TableId, BTreeMap<String, Mask>>,
+    ) -> Self {
+        Self {
+            sink,
+            source,
+            masks,
+        }
+    }
+
+    pub fn sink(&self) -> &'a Sink<WarehouseConfig, ArtifactConfig> {
+        self.sink
+    }
+
+    pub fn source(&self) -> &'a Source<CaptureConfig> {
+        self.source
+    }
+}
+
 pub struct Itinerary {
     windows: Vec<Window>,
     previous: Vec<BuildLog>,
@@ -56,6 +120,10 @@ impl Itinerary {
             previous,
             tables,
         }
+    }
+
+    pub fn windows(&self) -> &[Window] {
+        &self.windows
     }
 
     pub fn days(&self, schedule: Schedule) -> Vec<Window> {
@@ -99,13 +167,12 @@ pub(crate) mod tests {
     use lithify_core::model::TableId;
     use lithify_core::sink::Namespace;
     use lithify_core::sql::SqlString;
-    use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbClient};
+    use lithify_protocol::sink::duckdb::client::DuckDbClient;
 
     use super::*;
     use lithify_core::ts::Ts;
 
-    use crate::intraday::Intraday;
-    use crate::plan::Plan;
+    use crate::plan::Planning;
     use crate::plan::tests::{
         BUILT_CHANGE_LOGS, CAPTURE, PEOPLE, at, built_before, logged, pipeline, rows,
     };
@@ -212,35 +279,14 @@ pub(crate) mod tests {
             .find(|sink| sink.name() == "duckdb_s3")
             .unwrap();
         let settlement = Build::new(sink, source, at(now)).unwrap();
-        let declared = DeclaredSnapshot::of(sink).unwrap();
-        let snapshot = declared.artifact();
         let mut journal = Journal::default();
-        let itinerary = course.itinerary(sink, source, at(now), client)?;
-        let days = itinerary.days(declared.schedule());
 
-        itinerary.settle(&settlement, &mut journal, |window, previous, tables| {
-            source.capture().with_duckdb_change_logs(
-                source.topic_prefix().unwrap(),
-                Plan::new(client, &snapshot, window, previous, tables, &settlement),
-            )
-        })?;
-        Intraday::new(sink, days, Ts::from(at(now))).settle(
-            client,
+        course.settle(
+            &Leg::new(sink, source, &pipeline.masks()),
+            at(now),
+            &Planning::new(client, source.capture(), source.topic_prefix().unwrap()),
             &settlement,
             &mut journal,
-            |instant, window, previous, settlement| {
-                source.capture().with_duckdb_change_logs(
-                    source.topic_prefix().unwrap(),
-                    Plan::new(
-                        client,
-                        instant,
-                        window,
-                        previous,
-                        &Tables::Every,
-                        settlement,
-                    ),
-                )
-            },
         )?;
 
         Ok(journal)

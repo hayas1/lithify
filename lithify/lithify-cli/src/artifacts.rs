@@ -1,12 +1,16 @@
+use std::collections::BTreeMap;
+
 use chrono_tz::Tz;
 use serde::Deserialize;
 
 use lithify_artifact::instant::{self, Instant};
+use lithify_artifact::masked::{self, Masked};
 use lithify_artifact::snapshot::{self, Snapshot};
 use lithify_config::Declaration;
 use lithify_config::infra::Sink;
 use lithify_core::artifact::Artifact;
 use lithify_core::build_log::Series;
+use lithify_core::model::{Mask, TableId};
 use lithify_core::schedule::Schedule;
 use lithify_core::sink::Namespace;
 
@@ -18,20 +22,28 @@ use crate::unrunnable::Unrunnable;
 pub enum ArtifactConfig {
     Snapshot(snapshot::Config<LocationConfig>),
     Instant(instant::Config<LocationConfig>),
+    Masked(masked::Config<LocationConfig>),
 }
 
 impl ArtifactConfig {
     pub fn as_snapshot(&self) -> Option<&snapshot::Config<LocationConfig>> {
         match self {
             Self::Snapshot(config) => Some(config),
-            Self::Instant(_) => None,
+            Self::Instant(_) | Self::Masked(_) => None,
         }
     }
 
     pub fn as_instant(&self) -> Option<&instant::Config<LocationConfig>> {
         match self {
-            Self::Snapshot(_) => None,
             Self::Instant(config) => Some(config),
+            Self::Snapshot(_) | Self::Masked(_) => None,
+        }
+    }
+
+    pub fn as_masked(&self) -> Option<&masked::Config<LocationConfig>> {
+        match self {
+            Self::Masked(config) => Some(config),
+            Self::Snapshot(_) | Self::Instant(_) => None,
         }
     }
 }
@@ -43,6 +55,7 @@ impl Declaration for ArtifactConfig {
         match self {
             Self::Snapshot(_) => None,
             Self::Instant(_) => Some(<Instant as Artifact>::From::KIND),
+            Self::Masked(_) => Some(<Masked as Artifact>::From::KIND),
         }
     }
 
@@ -50,6 +63,7 @@ impl Declaration for ArtifactConfig {
         match self {
             Self::Snapshot(config) => config.place().iter().collect::<Vec<_>>(),
             Self::Instant(cuts) => cuts.iter().flat_map(|cut| cut.place()).collect(),
+            Self::Masked(config) => config.place().iter().collect(),
         }
         .into_iter()
     }
@@ -57,15 +71,58 @@ impl Declaration for ArtifactConfig {
     fn schedule(&self, time_zone: Tz) -> Option<Schedule> {
         match self {
             Self::Snapshot(config) => Some(config.schedule(time_zone)),
-            Self::Instant(_) => None,
+            Self::Instant(_) | Self::Masked(_) => None,
         }
+    }
+}
+
+pub struct Placement<'a> {
+    shard: &'a str,
+    places: &'a [LocationConfig],
+    namespace: Namespace,
+    time_zone: Tz,
+}
+
+impl<'a> Placement<'a> {
+    fn of(
+        sink: &Sink<WarehouseConfig, ArtifactConfig>,
+        artifact: &'static str,
+        shard: &'a str,
+        places: &'a [LocationConfig],
+    ) -> Result<Self, Unrunnable> {
+        let place = places.first().ok_or_else(|| Unrunnable::Undeclared {
+            sink: sink.name().to_owned(),
+            artifact,
+        })?;
+
+        Ok(Self {
+            shard,
+            places,
+            namespace: place.clone().into(),
+            time_zone: sink.time_zone(),
+        })
+    }
+
+    pub fn namespace(&self) -> &Namespace {
+        &self.namespace
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        Snapshot::new(self.namespace.clone(), self.shard)
+            .named_in(self.time_zone)
+            .copied_into(
+                self.places
+                    .iter()
+                    .skip(1)
+                    .map(|place| place.clone().into())
+                    .collect(),
+            )
     }
 }
 
 pub struct DeclaredSnapshot<'a> {
     config: &'a snapshot::Config<LocationConfig>,
-    namespace: Namespace,
-    time_zone: Tz,
+    placement: Placement<'a>,
 }
 
 impl<'a> DeclaredSnapshot<'a> {
@@ -75,44 +132,23 @@ impl<'a> DeclaredSnapshot<'a> {
         let config = sink
             .artifact(Self::ARTIFACT)
             .and_then(ArtifactConfig::as_snapshot)
-            .ok_or_else(|| Self::undeclared(sink, Self::ARTIFACT))?;
-
-        Self::placed(sink, config, Self::ARTIFACT)
-    }
-
-    fn placed(
-        sink: &Sink<WarehouseConfig, ArtifactConfig>,
-        config: &'a snapshot::Config<LocationConfig>,
-        artifact: &'static str,
-    ) -> Result<Self, Unrunnable> {
-        let place = config
-            .place()
-            .first()
-            .ok_or_else(|| Self::undeclared(sink, artifact))?;
+            .ok_or_else(|| Unrunnable::Undeclared {
+                sink: sink.name().to_owned(),
+                artifact: Self::ARTIFACT,
+            })?;
 
         Ok(Self {
             config,
-            namespace: place.clone().into(),
-            time_zone: sink.time_zone(),
+            placement: Placement::of(sink, Self::ARTIFACT, config.shard(), config.place())?,
         })
     }
 
-    fn undeclared(
-        sink: &Sink<WarehouseConfig, ArtifactConfig>,
-        artifact: &'static str,
-    ) -> Unrunnable {
-        Unrunnable::Undeclared {
-            sink: sink.name().to_owned(),
-            artifact,
-        }
-    }
-
     pub fn namespace(&self) -> &Namespace {
-        &self.namespace
+        self.placement.namespace()
     }
 
     pub fn schedule(&self) -> Schedule {
-        self.config.schedule(self.time_zone)
+        self.config.schedule(self.placement.time_zone)
     }
 
     pub fn series(&self) -> Series {
@@ -120,21 +156,13 @@ impl<'a> DeclaredSnapshot<'a> {
     }
 
     pub fn artifact(&self) -> Snapshot {
-        Snapshot::new(self.namespace.clone(), self.config.shard())
-            .named_in(self.time_zone)
-            .copied_into(
-                self.config
-                    .place()
-                    .iter()
-                    .skip(1)
-                    .map(|place| place.clone().into())
-                    .collect(),
-            )
+        self.placement.snapshot()
     }
 }
 
 pub struct DeclaredInstant<'a> {
-    cut: DeclaredSnapshot<'a>,
+    config: &'a snapshot::Config<LocationConfig>,
+    placement: Placement<'a>,
 }
 
 impl<'a> DeclaredInstant<'a> {
@@ -147,14 +175,15 @@ impl<'a> DeclaredInstant<'a> {
             .flatten()
             .map(|config| {
                 Ok(Self {
-                    cut: DeclaredSnapshot::placed(sink, config, Self::ARTIFACT)?,
+                    config,
+                    placement: Placement::of(sink, Self::ARTIFACT, config.shard(), config.place())?,
                 })
             })
             .collect()
     }
 
     pub fn namespace(&self) -> &Namespace {
-        self.cut.namespace()
+        self.placement.namespace()
     }
 
     pub fn series(&self) -> Series {
@@ -163,10 +192,46 @@ impl<'a> DeclaredInstant<'a> {
 
     pub fn artifact(&self) -> Instant {
         Instant::new(
-            self.cut.config.at(),
-            self.cut.time_zone,
-            self.cut.artifact(),
+            self.config.at(),
+            self.placement.time_zone,
+            self.placement.snapshot(),
         )
+    }
+}
+
+pub struct DeclaredMasked<'a> {
+    placement: Placement<'a>,
+    masks: &'a BTreeMap<TableId, BTreeMap<String, Mask>>,
+}
+
+impl<'a> DeclaredMasked<'a> {
+    pub const ARTIFACT: &'static str = Masked::KIND;
+
+    pub fn of(
+        sink: &'a Sink<WarehouseConfig, ArtifactConfig>,
+        masks: &'a BTreeMap<TableId, BTreeMap<String, Mask>>,
+    ) -> Result<Option<Self>, Unrunnable> {
+        sink.artifact(Self::ARTIFACT)
+            .and_then(ArtifactConfig::as_masked)
+            .map(|config| {
+                Ok(Self {
+                    placement: Placement::of(sink, Self::ARTIFACT, config.shard(), config.place())?,
+                    masks,
+                })
+            })
+            .transpose()
+    }
+
+    pub fn namespace(&self) -> &Namespace {
+        self.placement.namespace()
+    }
+
+    pub fn series(&self) -> Series {
+        self.artifact().series()
+    }
+
+    pub fn artifact(&self) -> Masked {
+        Masked::new(self.placement.snapshot(), self.masks.clone())
     }
 }
 

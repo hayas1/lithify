@@ -2,7 +2,7 @@ pub mod artifacts;
 pub mod catch_up;
 pub mod course;
 pub mod credential;
-pub mod intraday;
+pub mod derivation;
 pub mod journal;
 pub mod pipeline;
 pub mod plan;
