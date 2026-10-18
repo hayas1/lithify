@@ -68,6 +68,7 @@ pub struct Snapshot {
     namespace: Namespace,
     copies: Vec<Namespace>,
     shard: String,
+    zone: Tz,
 }
 
 impl Snapshot {
@@ -76,6 +77,7 @@ impl Snapshot {
             namespace: namespace.into(),
             copies: Vec::new(),
             shard: shard.to_owned(),
+            zone: Tz::UTC,
         }
     }
 
@@ -83,8 +85,28 @@ impl Snapshot {
         Self { copies, ..self }
     }
 
+    pub fn named_in(self, zone: Tz) -> Self {
+        Self { zone, ..self }
+    }
+
+    pub fn days() -> Series {
+        Series::new(Self::KIND, &Schedule::default().to_string())
+    }
+
+    pub fn shard_before<'b>(
+        built: &'b [BuildLog],
+        table: &TableId,
+        window: &Window,
+    ) -> Option<&'b BuildLog> {
+        built.iter().find(|log| {
+            log.advances(&Self::days())
+                && log.table_to() == Some(table)
+                && log.window().to() == window.from()
+        })
+    }
+
     fn named(&self, namespace: &Namespace, table: &TableId, window: &Window) -> TablePath {
-        let at = DateTime::<Utc>::from(window.last());
+        let at = DateTime::<Utc>::from(window.last()).with_timezone(&self.zone);
 
         TablePath::new(
             namespace.clone(),
@@ -101,7 +123,7 @@ impl Artifact for Snapshot {
     type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = SnapshotBuilder<'a, L, W>;
 
     fn series(&self) -> Series {
-        Series::new(Self::KIND, &Schedule::default().to_string())
+        Self::days()
     }
 
     fn windows(&self, daily: &Window) -> Vec<Window> {
@@ -114,11 +136,7 @@ impl Artifact for Snapshot {
         table: &TableId,
         window: &Window,
     ) -> Option<&'b BuildLog> {
-        built.iter().find(|log| {
-            log.advances(&self.series())
-                && log.table_to() == Some(table)
-                && log.window().to() == window.from()
-        })
+        Self::shard_before(built, table, window)
     }
 
     fn target(&self, table: &TableId, window: &Window) -> Result<TablePath, UnbuildableArtifact> {
@@ -157,7 +175,7 @@ pub struct SnapshotBuilder<'a, L, W> {
 }
 
 impl<'a, L: RowChangeLog, W: Warehouse> SnapshotBuilder<'a, L, W> {
-    fn new(
+    pub(crate) fn new(
         snapshot: &'a Snapshot,
         log: &'a L,
         table: TableId,
@@ -1903,6 +1921,22 @@ mod tests {
                 "CREATE SCHEMA IF NOT EXISTS \"analytics\".\"shop\"",
                 "CREATE OR REPLACE TABLE \"analytics\".\"shop\".\"customers_20260920\" AS\nSELECT * FROM \"mysql_shop\".\"customers_20260920\""
             ]
+        );
+    }
+
+    #[test]
+    fn a_snapshot_names_its_shard_after_the_last_instant_it_holds_in_its_time_zone() {
+        let window = Window::new(
+            Ts::try_from(1789945200000).unwrap(),
+            Ts::try_from(1790031600000).unwrap(),
+        );
+
+        assert_eq!(
+            Snapshot::new("mysql_shop", "%Y%m%d")
+                .named_in(chrono_tz::Asia::Tokyo)
+                .target(&TableId::new("shop", "people"), &window)
+                .unwrap(),
+            TablePath::new("mysql_shop", "people_20260922")
         );
     }
 }

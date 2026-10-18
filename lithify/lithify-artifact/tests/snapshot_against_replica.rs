@@ -2,6 +2,8 @@ use chrono::DateTime;
 use duckdb::Connection;
 use ulid::Ulid;
 
+use chrono::NaiveTime;
+use lithify_artifact::instant::Instant;
 use lithify_artifact::snapshot::Snapshot;
 use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
 use lithify_core::build_log::{BuildLog, Outcome, Run, Status};
@@ -14,7 +16,7 @@ use lithify_core::testing::{Mutation, Replica, Row};
 use lithify_core::ts::Ts;
 use lithify_core::window::Window;
 use lithify_protocol::sink::duckdb::client::DuckDbClient;
-use lithify_protocol::{Debezium, DuckDbWarehouse, MySql, MySqlPosition};
+use lithify_protocol::{Debezium, DuckDbWarehouse, MySql};
 
 const DAY: i64 = 86_400_000;
 
@@ -115,21 +117,29 @@ impl Shards {
     }
 
     fn build(&self, window: &Window, previous: Option<&BuildLog>) -> BuildLog {
+        self.build_into(&self.artifact, window, previous)
+    }
+
+    fn build_into<A: Artifact>(
+        &self,
+        artifact: &A,
+        window: &Window,
+        previous: Option<&BuildLog>,
+    ) -> BuildLog {
         let log = Debezium::under("value", "mysql", MySql);
-        let mut snapshot = self
-            .artifact
+        let mut snapshot = artifact
             .builder::<_, DuckDbWarehouse>(&log, people().id().clone(), window, previous)
             .unwrap();
-        SchemaChangeListener::<MySqlPosition>::era_boundary(
-            &mut snapshot,
-            self.client.warehouse(),
-            &Era::new(
-                people(),
-                Bound::EventTime(*window.from()),
-                Bound::EventTime(*window.to()),
-            ),
-        )
-        .unwrap();
+        snapshot
+            .era_boundary(
+                self.client.warehouse(),
+                &Era::new(
+                    people(),
+                    Bound::EventTime(*window.from()),
+                    Bound::EventTime(*window.to()),
+                ),
+            )
+            .unwrap();
         self.client.build::<Unbuilt>(&snapshot).unwrap();
 
         snapshot.build_log(
@@ -205,4 +215,25 @@ fn a_snapshot_folded_onto_the_one_before_holds_what_the_source_held_as_its_windo
     let second = shards.build(&day(1), Some(&first));
 
     assert_eq!(shards.rows(&second), replica.at(*day(1).to()));
+}
+
+#[test]
+fn an_instant_holds_what_the_source_held_as_it_was_cut() {
+    let replica = replica();
+    let shards = Shards::over(&replica);
+    let six = Instant::new(
+        NaiveTime::from_hms_opt(6, 0, 0).unwrap(),
+        chrono_tz::Tz::UTC,
+        Snapshot::new("shop_instant", "%Y%m%d%H"),
+    );
+    let first = shards.build(&day(0), None);
+    let cut = &six.windows(&day(1))[0];
+
+    let instant = shards.build_into(
+        &six,
+        cut,
+        six.base(std::slice::from_ref(&first), people().id(), cut),
+    );
+
+    assert_eq!(shards.rows(&instant), replica.at(*cut.to()));
 }

@@ -88,14 +88,16 @@ impl<'a> DeclaredSnapshot<'a> {
     }
 
     pub fn artifact(&self) -> Snapshot {
-        Snapshot::new(self.namespace.clone(), self.config.shard()).copied_into(
-            self.config
-                .place()
-                .iter()
-                .skip(1)
-                .map(|place| place.clone().into())
-                .collect(),
-        )
+        Snapshot::new(self.namespace.clone(), self.config.shard())
+            .named_in(self.time_zone)
+            .copied_into(
+                self.config
+                    .place()
+                    .iter()
+                    .skip(1)
+                    .map(|place| place.clone().into())
+                    .collect(),
+            )
     }
 }
 
