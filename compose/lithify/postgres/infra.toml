@@ -11,13 +11,13 @@ since = "1970-01-01T00:00:00Z"
 topic_prefix = "postgres"
 
 [[sink]]
-name = "warehouse"
+name = "bigquery"
 warehouse.bigquery.project = "local-project"
 warehouse.bigquery.endpoint = "http://bigquery-emulator:9050"
 warehouse.bigquery.credentials = "anonymous"
 
 [[sink]]
-name = "rustfs"
+name = "duckdb_s3"
 warehouse.duckdb.s3.endpoint = "http://rustfs:9000"
 warehouse.duckdb.s3.region = "us-east-1"
 warehouse.duckdb.s3.bucket = "lithify"
