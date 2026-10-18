@@ -4,6 +4,7 @@ use duckdb::types::FromSql;
 use google_cloud_bigquery::error::RowError;
 use google_cloud_bigquery::query::Row;
 
+use lithify_artifact::snapshot::{Snapshot, SnapshotBuilder};
 use lithify_config::infra::Sink;
 use lithify_core::artifact::{Artifact, ArtifactBuilder};
 use lithify_core::build_log::BuildLog;
@@ -14,7 +15,6 @@ use lithify_core::source::{ChangeLogs, RowChangeLog, SchemaChangeLog, SchemaChan
 use lithify_core::window::Window;
 use lithify_protocol::sink::bigquery::client::{BigQueryChangeLogsFn, BigQueryClient};
 use lithify_protocol::sink::duckdb::client::{DuckDbChangeLogsFn, DuckDbClient};
-use lithify_strategy::snapshot::{Snapshot, SnapshotBuilder};
 
 use crate::artifacts::Artifacts;
 use crate::pipeline::WarehouseConfig;

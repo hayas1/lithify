@@ -3,6 +3,7 @@ use std::fmt::{self, Display, Formatter};
 use chrono::DateTime;
 use duckdb::types::{FromSql, TimeUnit, Value};
 
+use lithify_artifact::snapshot::Snapshot;
 use lithify_cli::pipeline::{self, CaptureConfig};
 use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
 use lithify_core::era::EraTracker;
@@ -18,7 +19,6 @@ use lithify_core::window::Window;
 use lithify_protocol::DuckDbWarehouse;
 use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbChangeLogsFn, DuckDbClient};
 use lithify_protocol::sink::duckdb::store::ObjectStore;
-use lithify_strategy::snapshot::Snapshot;
 
 use crate::row::{Cell, Row, Rows};
 

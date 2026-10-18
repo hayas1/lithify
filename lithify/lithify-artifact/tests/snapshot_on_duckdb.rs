@@ -1,5 +1,6 @@
 use duckdb::Connection;
 
+use lithify_artifact::snapshot::Snapshot;
 use lithify_core::artifact::{Artifact, UnbuildableArtifact};
 use lithify_core::era::{Bound, Era, EraTracker};
 use lithify_core::listener::OutOfOrder;
@@ -12,7 +13,6 @@ use lithify_core::ts::Ts;
 use lithify_core::window::Window;
 use lithify_protocol::sink::duckdb::client::DuckDbClient;
 use lithify_protocol::{Debezium, DuckDbWarehouse, MySql, MySqlPosition};
-use lithify_strategy::snapshot::Snapshot;
 
 const CHANGE_LOG: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
     CREATE TABLE cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES

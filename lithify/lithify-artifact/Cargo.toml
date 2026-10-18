@@ -1,5 +1,5 @@
 [package]
-name = "lithify-strategy"
+name = "lithify-artifact"
 version.workspace = true
 description.workspace = true
 authors.workspace = true

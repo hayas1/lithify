@@ -23,7 +23,7 @@ duckdb = { workspace = true }
 lithify-config = { workspace = true }
 lithify-core = { workspace = true }
 lithify-protocol = { workspace = true, features = ["bigquery", "duckdb"] }
-lithify-strategy = { workspace = true }
+lithify-artifact = { workspace = true }
 lithify-ui = { workspace = true, optional = true }
 google-cloud-bigquery = { workspace = true }
 serde = { workspace = true }

@@ -1,6 +1,6 @@
+use lithify_artifact::snapshot::Snapshot;
 use lithify_config::ArtifactKind;
 use lithify_config::infra::Sink;
-use lithify_strategy::snapshot::Snapshot;
 
 use crate::pipeline::WarehouseConfig;
 

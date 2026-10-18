@@ -1,6 +1,7 @@
 use chrono::DateTime;
 use ulid::Ulid;
 
+use lithify_artifact::snapshot::Snapshot;
 use lithify_core::artifact::{Artifact, ArtifactBuilder};
 use lithify_core::build_log::{BuildLog, Outcome, Run, Status};
 use lithify_core::era::{Bound, Era};
@@ -10,7 +11,6 @@ use lithify_core::sink::{TablePath, Warehouse};
 use lithify_core::ts::Ts;
 use lithify_core::window::Window;
 use lithify_protocol::{BigQueryWarehouse, Debezium, DuckDbWarehouse, MySql, MySqlPosition};
-use lithify_strategy::snapshot::Snapshot;
 
 fn column(name: &str, type_name: &str, column_type: ColumnType) -> ColumnModel {
     ColumnModel::new(name, type_name, column_type, false, None)

@@ -14,7 +14,7 @@ members = [
     "lithify-config",
     "lithify-core",
     "lithify-protocol",
-    "lithify-strategy",
+    "lithify-artifact",
     "lithify-ui",
 ]
 resolver = "3"
@@ -24,7 +24,7 @@ lithify-cli = { version = "0.1.0", path = "lithify-cli" }
 lithify-config = { version = "0.1.0", path = "lithify-config" }
 lithify-core = { version = "0.1.0", path = "lithify-core" }
 lithify-protocol = { version = "0.1.0", path = "lithify-protocol" }
-lithify-strategy = { version = "0.1.0", path = "lithify-strategy" }
+lithify-artifact = { version = "0.1.0", path = "lithify-artifact" }
 lithify-ui = { version = "0.1.0", path = "lithify-ui" }
 
 axum = "0.8.9"
