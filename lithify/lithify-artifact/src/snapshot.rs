@@ -1,7 +1,9 @@
 use std::marker::PhantomData;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveTime, Utc};
+use chrono_tz::Tz;
 use serde::Deserialize;
+use serde::de::{self, Deserializer};
 
 use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
 use lithify_core::build_log::{BuildLog, Outcome, Run, Series};
@@ -26,11 +28,28 @@ mod query;
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config<L> {
+    #[serde(
+        default = "Config::<L>::midnight",
+        deserialize_with = "Config::<L>::time"
+    )]
+    at: NaiveTime,
     shard: String,
     place: Vec<L>,
 }
 
 impl<L> Config<L> {
+    fn midnight() -> NaiveTime {
+        NaiveTime::MIN
+    }
+
+    fn time<'de, D: Deserializer<'de>>(deserializer: D) -> Result<NaiveTime, D::Error> {
+        let written = String::deserialize(deserializer)?;
+
+        NaiveTime::parse_from_str(&written, "%H:%M")
+            .or_else(|_| NaiveTime::parse_from_str(&written, "%H:%M:%S"))
+            .map_err(de::Error::custom)
+    }
+
     pub fn shard(&self) -> &str {
         &self.shard
     }
@@ -39,8 +58,8 @@ impl<L> Config<L> {
         &self.place
     }
 
-    pub fn schedule(&self) -> Schedule {
-        Schedule::Daily
+    pub fn schedule(&self, zone: Tz) -> Schedule {
+        Schedule::daily(self.at, zone)
     }
 }
 
@@ -67,7 +86,7 @@ impl Artifact for Snapshot {
     type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = SnapshotBuilder<'a, L, W>;
 
     fn series(&self) -> Series {
-        Series::new(Self::KIND, &Schedule::Daily.to_string())
+        Series::new(Self::KIND, &Schedule::default().to_string())
     }
 
     fn windows(&self, daily: &Window) -> Vec<Window> {
@@ -462,7 +481,25 @@ mod tests {
 
         assert_eq!(config.shard(), "%Y%m%d");
         assert_eq!(config.place(), ["mysql_shop", "analytics.shop"]);
-        assert_eq!(config.schedule(), Schedule::Daily);
+        assert_eq!(config.schedule(Tz::UTC), Schedule::default());
+    }
+
+    #[test]
+    fn a_snapshot_is_cut_at_the_instant_of_the_day_it_is_declared_with() {
+        let config: Config<String> = serde_json::from_value(serde_json::json!({
+            "at": "09:00",
+            "shard": "%Y%m%d",
+            "place": ["mysql_shop"]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            config.schedule(chrono_tz::Asia::Tokyo),
+            Schedule::daily(
+                NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
+                chrono_tz::Asia::Tokyo
+            )
+        );
     }
 
     #[test]

@@ -12,6 +12,7 @@ use lithify_core::ts::Ts;
 use lithify_core::window::Window;
 
 use lithify_config::Declaration;
+use lithify_core::schedule::Schedule;
 
 use crate::pipelines::Pipelines;
 
@@ -58,6 +59,10 @@ impl Declaration for Made {
         match self {
             Self::Snapshot { place } => place.iter(),
         }
+    }
+
+    fn schedule(&self, time_zone: chrono_tz::Tz) -> Option<Schedule> {
+        Some(Schedule::daily(chrono::NaiveTime::MIN, time_zone))
     }
 }
 

@@ -614,7 +614,7 @@ mod tests {
     use crate::testing::Kept;
 
     fn listed(logs: Vec<BuildLog>) -> Vec<TableRow> {
-        TableRow::listed(&SinkInspection::new(Schedule::Daily, logs, vec![]))
+        TableRow::listed(&SinkInspection::new(Schedule::default(), logs, vec![]))
     }
 
     #[test]

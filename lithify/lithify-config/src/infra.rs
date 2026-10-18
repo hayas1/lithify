@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use semigroup::Semigroup;
 use serde::{Deserialize, Serialize};
 
+use chrono_tz::Tz;
 use serde::de::DeserializeOwned;
 
 use lithify_core::sink::SinkWarehouse;
@@ -18,6 +19,8 @@ use crate::artifact::{Declaration, Declarations};
     deserialize = "C: Deserialize<'de>, W: Deserialize<'de>, W::Location: Deserialize<'de>, A: DeserializeOwned"
 ))]
 pub(crate) struct Wiring<C, W: SinkWarehouse, A> {
+    #[serde(default)]
+    time_zone: Option<Tz>,
     #[serde(default)]
     default: Defaults<C, W, A>,
     #[serde(default, rename = "source")]
@@ -72,7 +75,11 @@ where
             .sinks
             .iter()
             .enumerate()
-            .map(|(at, wired)| wired.clone().sink(at, &self.default.sink))
+            .map(|(at, wired)| {
+                wired
+                    .clone()
+                    .sink(at, &self.default.sink, self.time_zone.unwrap_or(Tz::UTC))
+            })
             .collect::<Result<Vec<_>, _>>()?;
 
         Self::named_once(sinks.iter().map(Sink::name))
@@ -182,7 +189,7 @@ where
     W: Clone + SinkWarehouse,
     A: Clone + Declaration<Location = W::Location>,
 {
-    fn sink(mut self, at: usize, default: &Self) -> Result<Sink<W, A>, Miswiring> {
+    fn sink(mut self, at: usize, default: &Self, time_zone: Tz) -> Result<Sink<W, A>, Miswiring> {
         self.artifact = match (self.artifact.take(), &default.artifact) {
             (Some(declared), Some(by_default)) => Some(declared.over(by_default)),
             (declared, by_default) => declared.or_else(|| by_default.clone()),
@@ -209,6 +216,7 @@ where
             change_log,
             warehouse,
             artifacts,
+            time_zone,
             name,
         })
     }
@@ -341,6 +349,7 @@ pub struct Sink<W: SinkWarehouse, A> {
     change_log: W::Location,
     warehouse: W,
     artifacts: Declarations<A>,
+    time_zone: Tz,
 }
 
 impl<W: SinkWarehouse, A> Sink<W, A> {
@@ -362,6 +371,10 @@ impl<W: SinkWarehouse, A> Sink<W, A> {
 
     pub fn artifact(&self, artifact: &str) -> Option<&A> {
         self.artifacts.get(artifact)
+    }
+
+    pub fn time_zone(&self) -> Tz {
+        self.time_zone
     }
 }
 
@@ -620,6 +633,28 @@ mod tests {
     fn a_source_says_the_topic_prefix_of_its_connector_unless_it_captures_none() {
         assert_eq!(sources()[0].topic_prefix(), Some("mysql"));
         assert_eq!(sources()[1].topic_prefix(), None);
+    }
+
+    #[test]
+    fn a_sink_reads_the_instants_of_a_day_in_the_time_zone_of_the_pipeline() {
+        let zoned = format!("time_zone = \"Asia/Tokyo\"\n{INFRA}");
+
+        assert_eq!(
+            wiring(&zoned).sinks().unwrap()[0].time_zone(),
+            chrono_tz::Asia::Tokyo
+        );
+    }
+
+    #[test]
+    fn a_pipeline_that_names_no_time_zone_reads_the_instants_of_a_day_in_utc() {
+        assert_eq!(sinks()[0].time_zone(), Tz::UTC);
+    }
+
+    #[test]
+    fn a_time_zone_nobody_keeps_is_rejected() {
+        let unknown = format!("time_zone = \"Mars/Olympus\"\n{INFRA}");
+
+        assert!(toml::from_str::<Wiring<Captured, Sunk, Made>>(&unknown).is_err());
     }
 
     #[test]

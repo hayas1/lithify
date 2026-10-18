@@ -11,6 +11,7 @@ readme.workspace = true
 [dependencies]
 axum = { workspace = true }
 chrono = { workspace = true, features = ["clock"] }
+chrono-tz = { workspace = true }
 leptos = { workspace = true }
 lithify-config = { workspace = true }
 lithify-core = { workspace = true }

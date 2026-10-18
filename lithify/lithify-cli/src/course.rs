@@ -636,7 +636,7 @@ pub(crate) mod tests {
         ));
         assert_eq!(
             Expectation::new(
-                Schedule::Daily,
+                Schedule::default(),
                 pipeline.sources().next().unwrap().since(),
                 CAPTURE,
                 Ts::from(at(NOW)),

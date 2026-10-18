@@ -278,7 +278,12 @@ mod tests {
     }
 
     fn expected(now: &str) -> Expectation {
-        Expectation::new(Schedule::Daily, at("2026-09-19T00:00:00Z"), "{}", at(now))
+        Expectation::new(
+            Schedule::default(),
+            at("2026-09-19T00:00:00Z"),
+            "{}",
+            at(now),
+        )
     }
 
     fn present(logs: &[BuildLog]) -> BTreeSet<TablePath> {
@@ -356,7 +361,7 @@ mod tests {
 
         assert_eq!(
             Expectation::new(
-                Schedule::Daily,
+                Schedule::default(),
                 at("2026-09-19T00:00:00Z"),
                 r#"{"debezium":{"dialect":"postgres"}}"#,
                 at("2026-09-21T05:00:00Z")

@@ -10,6 +10,7 @@ readme.workspace = true
 
 [dependencies]
 chrono = { workspace = true, features = ["serde"] }
+chrono-tz = { workspace = true }
 lithify-core = { workspace = true }
 semigroup = { workspace = true }
 serde = { workspace = true }

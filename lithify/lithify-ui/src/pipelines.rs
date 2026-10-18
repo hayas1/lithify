@@ -10,7 +10,7 @@ use lithify_core::build_log::{BuildLog, BuildLogQuery, Latest};
 use lithify_core::check::{Expectation, Inspection};
 use lithify_core::schedule::Schedule;
 use lithify_core::sink::{Namespace, SinkWarehouse, WarehouseClient, WarehouseFn};
-use lithify_core::ts::Ts;
+use lithify_core::ts::{Event, Ts};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PipelineLocation {
@@ -276,10 +276,10 @@ where
             pipeline
                 .sinks()
                 .map(|sink| {
-                    let expectation =
-                        Expectation::new(Schedule::Daily, source.since(), &capture, now);
-
-                    SinkOverview::new(sink.name(), self.inspection(sink, &expectation, view))
+                    SinkOverview::new(
+                        sink.name(),
+                        self.inspection(sink, source, &capture, now, view),
+                    )
                 })
                 .collect(),
         ))
@@ -288,16 +288,22 @@ where
     fn inspection(
         &self,
         sink: &Sink<W, A>,
-        expectation: &Expectation,
+        source: &Source<C>,
+        capture: &str,
+        now: Ts<Event>,
         view: BuildLogView,
     ) -> Result<SinkInspection, String> {
+        let undeclared = || format!("{} declares no snapshot placed anywhere", sink.name());
+        let snapshot = sink.artifact(Self::SNAPSHOT).ok_or_else(undeclared)?;
+        let schedule = snapshot.schedule(sink.time_zone()).ok_or_else(undeclared)?;
+        let expectation = Expectation::new(schedule, source.since(), capture, now);
         let reading = Reading {
-            expectation,
-            namespace: sink
-                .artifact(Self::SNAPSHOT)
-                .and_then(|declared| declared.places().next())
+            expectation: &expectation,
+            namespace: snapshot
+                .places()
+                .next()
                 .map(|place| place.clone().into())
-                .ok_or_else(|| format!("{} declares no snapshot placed anywhere", sink.name()))?,
+                .ok_or_else(undeclared)?,
             view,
         };
 

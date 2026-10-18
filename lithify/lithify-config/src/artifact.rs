@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
 
+use chrono_tz::Tz;
 use serde::Deserialize;
+
+use lithify_core::schedule::Schedule;
 use serde::de::{self, DeserializeOwned, Deserializer};
 
 pub trait Declaration {
@@ -9,6 +12,12 @@ pub trait Declaration {
     fn source(&self) -> Option<&'static str>;
 
     fn places(&self) -> impl Iterator<Item = &Self::Location>;
+
+    fn schedule(&self, time_zone: Tz) -> Option<Schedule> {
+        let _ = time_zone;
+
+        None
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,3 +1,4 @@
+use chrono_tz::Tz;
 use serde::Deserialize;
 
 use lithify_artifact::snapshot::{self, Snapshot};
@@ -39,11 +40,18 @@ impl Declaration for ArtifactConfig {
             Self::Snapshot(config) => config.place().iter(),
         }
     }
+
+    fn schedule(&self, time_zone: Tz) -> Option<Schedule> {
+        match self {
+            Self::Snapshot(config) => Some(config.schedule(time_zone)),
+        }
+    }
 }
 
 pub struct DeclaredSnapshot<'a> {
     config: &'a snapshot::Config<LocationConfig>,
     namespace: Namespace,
+    time_zone: Tz,
 }
 
 impl<'a> DeclaredSnapshot<'a> {
@@ -63,6 +71,7 @@ impl<'a> DeclaredSnapshot<'a> {
         Ok(Self {
             config,
             namespace: place.clone().into(),
+            time_zone: sink.time_zone(),
         })
     }
 
@@ -71,7 +80,7 @@ impl<'a> DeclaredSnapshot<'a> {
     }
 
     pub fn schedule(&self) -> Schedule {
-        self.config.schedule()
+        self.config.schedule(self.time_zone)
     }
 
     pub fn series(&self) -> Series {
@@ -116,6 +125,44 @@ mod tests {
                 .target(&TableId::new("shop", "customers"), &window)
                 .unwrap(),
             TablePath::new("mysql_shop", "customers_20260920")
+        );
+    }
+
+    #[test]
+    fn a_sink_cuts_its_snapshot_at_the_instant_it_declares_in_the_time_zone_of_the_pipeline() {
+        let directory =
+            std::env::temp_dir().join(format!("lithify-cli-zoned-snapshot-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let infra = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compose/lithify/mysql/infra.toml"),
+        )
+        .unwrap();
+        std::fs::write(
+            directory.join("infra.toml"),
+            format!(
+                "time_zone = \"Asia/Tokyo\"\n{}",
+                infra.replacen("shard = ", "at = \"09:00\"\nshard = ", 1)
+            ),
+        )
+        .unwrap();
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compose/lithify/mysql/table.toml"),
+            directory.join("table.toml"),
+        )
+        .unwrap();
+
+        let pipeline: Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig> =
+            Pipeline::open(&directory).unwrap();
+        std::fs::remove_dir_all(&directory).unwrap();
+
+        assert_eq!(
+            DeclaredSnapshot::of(pipeline.sinks().next().unwrap())
+                .unwrap()
+                .schedule(),
+            Schedule::daily(
+                chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
+                chrono_tz::Asia::Tokyo
+            )
         );
     }
 }
