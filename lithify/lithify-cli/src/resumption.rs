@@ -60,6 +60,13 @@ impl Resumption {
         }
     }
 
+    pub fn built_past(&self, until: Ts<Event>) -> Option<Ts<Event>> {
+        match self {
+            Self::FromOrigin(_) => None,
+            Self::FromBuilt(start) => (*start > until).then_some(*start),
+        }
+    }
+
     pub fn previous<K>(&self, client: &K, namespace: &str) -> Result<Vec<BuildLog>, Unrunnable>
     where
         K: WarehouseClient,
@@ -147,6 +154,18 @@ mod tests {
 
     fn resumed(latest: &[BuildLog], succeeded: &[BuildLog]) -> Resumption {
         Resumption::read(latest, succeeded, Ts::try_from(ORIGIN).unwrap(), CAPTURE).unwrap()
+    }
+
+    #[test]
+    fn a_pipeline_built_past_an_instant_says_how_far_it_was_built() {
+        let at = |millis: i64| Ts::try_from(millis).unwrap();
+
+        assert_eq!(
+            Resumption::FromBuilt(at(20)).built_past(at(10)),
+            Some(at(20))
+        );
+        assert_eq!(Resumption::FromBuilt(at(20)).built_past(at(20)), None);
+        assert_eq!(Resumption::FromOrigin(at(20)).built_past(at(10)), None);
     }
 
     #[test]

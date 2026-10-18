@@ -44,18 +44,23 @@ impl<'a> CatchUp<'a> {
         let resumption = self.resumption(client)?;
 
         Ok(Itinerary::new(
-            resumption.windows(self.sink.artifacts().schedule(), self.until()?),
+            resumption.windows(self.sink.artifacts().schedule(), self.until(&resumption)?),
             resumption.previous(client, self.namespace())?,
             Tables::Every,
         ))
     }
 
-    fn until(&self) -> Result<Ts<Event>, Unrunnable> {
-        match self.to {
-            Some(date) => Ok(*Shard::new(self.sink, self.source, self.now)
-                .closed(date)?
-                .to()),
-            None => Ok(Ts::from(self.now)),
+    fn until(&self, resumption: &Resumption) -> Result<Ts<Event>, Unrunnable> {
+        let Some(date) = self.to else {
+            return Ok(Ts::from(self.now));
+        };
+        let until = *Shard::new(self.sink, self.source, self.now)
+            .closed(date)?
+            .to();
+
+        match resumption.built_past(until) {
+            Some(built_until) => Err(Unrunnable::Overtaken { date, built_until }),
+            None => Ok(until),
         }
     }
 
@@ -254,6 +259,54 @@ mod tests {
         );
 
         assert!(matches!(unsharded, Err(Unrunnable::Unsharded(_))));
+    }
+
+    #[test]
+    fn a_pipeline_is_not_caught_up_to_a_date_the_build_log_has_already_built_past() {
+        let pipeline = pipeline();
+        let client = logged(PEOPLE, &[]);
+        settle(
+            &pipeline,
+            &client,
+            &caught_up_to("2026-09-20"),
+            "2026-09-22T05:00:00Z",
+        )
+        .unwrap();
+
+        let overtaken = settle(
+            &pipeline,
+            &client,
+            &caught_up_to("2026-09-19"),
+            "2026-09-22T05:00:00Z",
+        );
+
+        assert!(matches!(
+            overtaken,
+            Err(Unrunnable::Overtaken { date, .. }) if date == "2026-09-19".parse().unwrap()
+        ));
+    }
+
+    #[test]
+    fn a_pipeline_caught_up_to_the_date_it_was_last_built_to_builds_nothing() {
+        let pipeline = pipeline();
+        let client = logged(PEOPLE, &[]);
+        settle(
+            &pipeline,
+            &client,
+            &caught_up_to("2026-09-20"),
+            "2026-09-22T05:00:00Z",
+        )
+        .unwrap();
+
+        let journal = settle(
+            &pipeline,
+            &client,
+            &caught_up_to("2026-09-20"),
+            "2026-09-22T05:00:00Z",
+        )
+        .unwrap();
+
+        assert_eq!(journal.entries().count(), 0);
     }
 
     fn caught_up_to(date: &str) -> Course {
