@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 
 use lithify_config::ArtifactKind;
 use lithify_config::infra::{Sink, Source};
@@ -10,12 +10,14 @@ use crate::course::Itinerary;
 use crate::pipeline::{Capture, WarehouseConfig};
 use crate::plan::Tables;
 use crate::resumption::Resumption;
+use crate::shard::Shard;
 use crate::unrunnable::Unrunnable;
 
 pub struct CatchUp<'a> {
     sink: &'a Sink<WarehouseConfig>,
     source: &'a Source<Capture>,
     now: DateTime<Utc>,
+    to: Option<NaiveDate>,
 }
 
 impl<'a> CatchUp<'a> {
@@ -23,8 +25,14 @@ impl<'a> CatchUp<'a> {
         sink: &'a Sink<WarehouseConfig>,
         source: &'a Source<Capture>,
         now: DateTime<Utc>,
+        to: Option<NaiveDate>,
     ) -> Self {
-        Self { sink, source, now }
+        Self {
+            sink,
+            source,
+            now,
+            to,
+        }
     }
 
     pub fn itinerary<K>(&self, client: &K) -> Result<Itinerary, Unrunnable>
@@ -36,10 +44,19 @@ impl<'a> CatchUp<'a> {
         let resumption = self.resumption(client)?;
 
         Ok(Itinerary::new(
-            resumption.windows(self.sink.artifacts().schedule(), RecordedAt::from(self.now)),
+            resumption.windows(self.sink.artifacts().schedule(), self.until()?),
             resumption.previous(client, self.namespace())?,
             Tables::Every,
         ))
+    }
+
+    fn until(&self) -> Result<RecordedAt, Unrunnable> {
+        match self.to {
+            Some(date) => Ok(*Shard::new(self.sink, self.source, self.now)
+                .closed(date)?
+                .to()),
+            None => Ok(RecordedAt::from(self.now)),
+        }
     }
 
     fn namespace(&self) -> &str {
@@ -74,7 +91,13 @@ mod tests {
         let pipeline = pipeline();
         let client = logged(PEOPLE, &[built_before("people", CAPTURE)]);
 
-        settle(&pipeline, &client, &Course::CatchUp, "2026-09-22T05:00:00Z").unwrap();
+        settle(
+            &pipeline,
+            &client,
+            &Course::CatchUp { to: None },
+            "2026-09-22T05:00:00Z",
+        )
+        .unwrap();
 
         assert_eq!(
             rows(
@@ -110,7 +133,13 @@ mod tests {
         let pipeline = pipeline();
         let client = logged(PEOPLE, &[]);
 
-        settle(&pipeline, &client, &Course::CatchUp, "2026-09-22T05:00:00Z").unwrap();
+        settle(
+            &pipeline,
+            &client,
+            &Course::CatchUp { to: None },
+            "2026-09-22T05:00:00Z",
+        )
+        .unwrap();
 
         assert_eq!(
             rows(
@@ -132,11 +161,119 @@ mod tests {
     }
 
     #[test]
+    fn a_pipeline_caught_up_to_a_date_builds_no_shard_dated_after_it() {
+        let pipeline = pipeline();
+        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]);
+
+        settle(
+            &pipeline,
+            &client,
+            &caught_up_to("2026-09-20"),
+            "2026-09-22T05:00:00Z",
+        )
+        .unwrap();
+
+        assert_eq!(
+            rows(
+                &client,
+                "SELECT target, COALESCE(base, '') FROM mysql_shop._lithify_log WHERE status = 'succeeded' ORDER BY id"
+            ),
+            [
+                ("mysql_shop.people_20260919".to_owned(), String::new()),
+                (
+                    "mysql_shop.people_20260920".to_owned(),
+                    "mysql_shop.people_20260919".to_owned()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_pipeline_built_for_the_first_time_up_to_a_date_is_caught_up_from_there_after() {
+        let pipeline = pipeline();
+        let client = logged(PEOPLE, &[]);
+
+        settle(
+            &pipeline,
+            &client,
+            &caught_up_to("2026-09-20"),
+            "2026-09-22T05:00:00Z",
+        )
+        .unwrap();
+        settle(
+            &pipeline,
+            &client,
+            &Course::CatchUp { to: None },
+            "2026-09-22T05:00:00Z",
+        )
+        .unwrap();
+
+        assert_eq!(
+            rows(
+                &client,
+                "SELECT target, strftime(window_from, '%Y-%m-%d') || '..' || strftime(window_to, '%Y-%m-%d') FROM mysql_shop._lithify_log WHERE status = 'succeeded' ORDER BY id"
+            ),
+            [
+                (
+                    "mysql_shop.people_20260920".to_owned(),
+                    "1970-01-01..2026-09-21".to_owned()
+                ),
+                (
+                    "mysql_shop.people_20260921".to_owned(),
+                    "2026-09-21..2026-09-22".to_owned()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_not_caught_up_to_a_date_whose_shard_has_not_closed() {
+        let pipeline = pipeline();
+        let client = logged(PEOPLE, &[]);
+
+        let unclosed = settle(
+            &pipeline,
+            &client,
+            &caught_up_to("2026-09-22"),
+            "2026-09-22T05:00:00Z",
+        );
+
+        assert!(matches!(unclosed, Err(Unrunnable::Unclosed(_))));
+    }
+
+    #[test]
+    fn a_pipeline_is_not_caught_up_to_a_date_before_its_source_began() {
+        let pipeline = pipeline();
+        let client = logged(PEOPLE, &[]);
+
+        let unsharded = settle(
+            &pipeline,
+            &client,
+            &caught_up_to("1969-12-31"),
+            "2026-09-22T05:00:00Z",
+        );
+
+        assert!(matches!(unsharded, Err(Unrunnable::Unsharded(_))));
+    }
+
+    fn caught_up_to(date: &str) -> Course {
+        Course::CatchUp {
+            to: Some(date.parse().unwrap()),
+        }
+    }
+
+    #[test]
     fn a_pipeline_built_for_the_first_time_before_its_first_midnight_builds_nothing() {
         let pipeline = pipeline();
         let client = logged(PEOPLE, &[]);
 
-        let journal = settle(&pipeline, &client, &Course::CatchUp, "1970-01-01T23:00:00Z").unwrap();
+        let journal = settle(
+            &pipeline,
+            &client,
+            &Course::CatchUp { to: None },
+            "1970-01-01T23:00:00Z",
+        )
+        .unwrap();
 
         assert_eq!(journal.entries().count(), 0);
     }
@@ -146,7 +283,13 @@ mod tests {
         let pipeline = pipeline();
         let client = logged(PEOPLE, &[built_before("people", CAPTURE)]);
 
-        let journal = settle(&pipeline, &client, &Course::CatchUp, "2026-09-20T23:00:00Z").unwrap();
+        let journal = settle(
+            &pipeline,
+            &client,
+            &Course::CatchUp { to: None },
+            "2026-09-20T23:00:00Z",
+        )
+        .unwrap();
 
         assert_eq!(journal.entries().count(), 0);
     }
@@ -162,7 +305,13 @@ mod tests {
             ],
         );
 
-        let journal = settle(&pipeline, &client, &Course::CatchUp, "2026-09-22T05:00:00Z").unwrap();
+        let journal = settle(
+            &pipeline,
+            &client,
+            &Course::CatchUp { to: None },
+            "2026-09-22T05:00:00Z",
+        )
+        .unwrap();
 
         assert!(!journal.complete());
         assert_eq!(
@@ -188,7 +337,12 @@ mod tests {
             )],
         );
 
-        let changed = settle(&pipeline, &client, &Course::CatchUp, "2026-09-22T05:00:00Z");
+        let changed = settle(
+            &pipeline,
+            &client,
+            &Course::CatchUp { to: None },
+            "2026-09-22T05:00:00Z",
+        );
 
         assert!(matches!(changed, Err(Unrunnable::CaptureChanged { .. })));
     }

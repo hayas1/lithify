@@ -147,11 +147,17 @@ impl PipelineArguments {
 struct CatchUpArguments {
     #[command(flatten)]
     pipeline: PipelineArguments,
+    #[arg(
+        long,
+        value_name = "DATE",
+        help = "The date of the last shard to build, rather than the latest one that has closed"
+    )]
+    to: Option<NaiveDate>,
 }
 
 impl CatchUpArguments {
     fn journal(self) -> Result<Journal, Unrunnable> {
-        self.pipeline.run().build(&Course::CatchUp)
+        self.pipeline.run().build(&Course::CatchUp { to: self.to })
     }
 }
 
@@ -295,8 +301,16 @@ mod tests {
     }
 
     #[test]
-    fn a_catch_up_is_given_nothing_but_the_pipeline() {
-        assert!(matches!(parsed("catch-up", &[]), Ok(Command::CatchUp(_))));
+    fn a_catch_up_is_given_the_pipeline_and_the_date_of_the_last_shard_it_builds() {
+        let Ok(Command::CatchUp(latest)) = parsed("catch-up", &[]) else {
+            panic!("catch-up was named");
+        };
+        let Ok(Command::CatchUp(past)) = parsed("catch-up", &["--to", "2026-09-20"]) else {
+            panic!("catch-up was named");
+        };
+
+        assert_eq!(latest.to, None);
+        assert_eq!(past.to, Some("2026-09-20".parse::<NaiveDate>().unwrap()));
         assert!(parsed("catch-up", &["--from", "2026-09-20T00:00:00Z"]).is_err());
         assert!(parsed("catch-up", &["--onto", "2026-09-19T00:00:00Z"]).is_err());
         assert!(parsed("catch-up", &["--dry-run", "plans"]).is_err());

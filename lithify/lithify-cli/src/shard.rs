@@ -4,6 +4,7 @@ use lithify_config::ArtifactKind;
 use lithify_config::infra::{Sink, Source};
 use lithify_core::position::RecordedAt;
 use lithify_core::sink::WarehouseClient;
+use lithify_core::window::Window;
 
 use crate::course::Itinerary;
 use crate::pipeline::{Capture, WarehouseConfig};
@@ -36,19 +37,25 @@ impl<'a> Shard<'a> {
         K: WarehouseClient,
         Unrunnable: From<K::Error>,
     {
+        let window = self.closed(date)?;
+        let previous = Resumption::at(*window.from(), self.source.since())
+            .previous(client, self.namespace())?;
+
+        Ok(Itinerary::new(vec![window], previous, tables.clone()))
+    }
+
+    pub fn closed(&self, date: NaiveDate) -> Result<Window, Unrunnable> {
         let window = self
             .sink
             .artifacts()
             .schedule()
             .shard(self.source.since(), date)
             .ok_or(Unrunnable::Unsharded(date))?;
-        if *window.to() > RecordedAt::from(self.now) {
-            return Err(Unrunnable::Unclosed(window));
-        }
-        let previous = Resumption::at(*window.from(), self.source.since())
-            .previous(client, self.namespace())?;
 
-        Ok(Itinerary::new(vec![window], previous, tables.clone()))
+        match *window.to() > RecordedAt::from(self.now) {
+            true => Err(Unrunnable::Unclosed(window)),
+            false => Ok(window),
+        }
     }
 
     fn namespace(&self) -> &str {

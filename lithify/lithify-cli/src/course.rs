@@ -15,7 +15,7 @@ use crate::shard::Shard;
 use crate::unrunnable::Unrunnable;
 
 pub enum Course {
-    CatchUp,
+    CatchUp { to: Option<NaiveDate> },
     Shard { date: NaiveDate, tables: Tables },
 }
 
@@ -35,7 +35,7 @@ impl Course {
             .create_build_log::<Unrunnable>(sink.artifacts().namespace(ArtifactKind::Snapshot))?;
 
         match self {
-            Self::CatchUp => CatchUp::new(sink, source, now).itinerary(client),
+            Self::CatchUp { to } => CatchUp::new(sink, source, now, *to).itinerary(client),
             Self::Shard { date, tables } => {
                 Shard::new(sink, source, now).itinerary(client, *date, tables)
             }
@@ -323,7 +323,7 @@ pub(crate) mod tests {
 
     fn caught_up(changes: &str, now: &str) -> DuckDbClient {
         let client = logged(changes, &[built_before("people", CAPTURE)]);
-        settle(&pipeline(), &client, &Course::CatchUp, now).unwrap();
+        settle(&pipeline(), &client, &Course::CatchUp { to: None }, now).unwrap();
 
         client
     }
@@ -348,7 +348,7 @@ pub(crate) mod tests {
             NOW,
         )
         .unwrap();
-        settle(&pipeline, &client, &Course::CatchUp, NOW).unwrap();
+        settle(&pipeline, &client, &Course::CatchUp { to: None }, NOW).unwrap();
 
         assert_eq!(
             built(&client),
@@ -370,7 +370,7 @@ pub(crate) mod tests {
         let rewound = caught_up(PETS_CREATED_ON_20260920, NOW);
 
         settle(&pipeline, &rewound, &shard("2026-09-20", &[]), NOW).unwrap();
-        let rebuilt = settle(&pipeline, &rewound, &Course::CatchUp, NOW).unwrap();
+        let rebuilt = settle(&pipeline, &rewound, &Course::CatchUp { to: None }, NOW).unwrap();
 
         assert_eq!(
             windows(rebuilt),
@@ -401,7 +401,7 @@ pub(crate) mod tests {
         assert_eq!(ids(&client, "people_20260920"), ["7", "8"]);
         assert_eq!(ids(&client, "pets_20260920"), ["9"]);
         assert_eq!(
-            windows(settle(&pipeline, &client, &Course::CatchUp, NOW).unwrap()),
+            windows(settle(&pipeline, &client, &Course::CatchUp { to: None }, NOW).unwrap()),
             ["window 2026-09-21T00:00:00+00:00 .. 2026-09-22T00:00:00+00:00"]
         );
     }
@@ -470,7 +470,7 @@ pub(crate) mod tests {
             &[built_before("people", CAPTURE)],
         );
 
-        settle(&pipeline, &client, &Course::CatchUp, NOW).unwrap();
+        settle(&pipeline, &client, &Course::CatchUp { to: None }, NOW).unwrap();
 
         assert_eq!(
             rows(
@@ -516,7 +516,7 @@ pub(crate) mod tests {
             ],
         );
 
-        settle(&pipeline, &client, &Course::CatchUp, NOW).unwrap();
+        settle(&pipeline, &client, &Course::CatchUp { to: None }, NOW).unwrap();
 
         assert_eq!(
             rows(
@@ -583,9 +583,9 @@ pub(crate) mod tests {
         let pipeline = pipeline();
         let client = logged(PEOPLE, &[built_before("people", CAPTURE)]);
 
-        settle(&pipeline, &client, &Course::CatchUp, NOW).unwrap();
+        settle(&pipeline, &client, &Course::CatchUp { to: None }, NOW).unwrap();
         settle(&pipeline, &client, &shard("2026-09-20", &[]), NOW).unwrap();
-        settle(&pipeline, &client, &Course::CatchUp, NOW).unwrap();
+        settle(&pipeline, &client, &Course::CatchUp { to: None }, NOW).unwrap();
 
         assert_eq!(
             built(&client),
