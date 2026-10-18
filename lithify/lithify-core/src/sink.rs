@@ -171,7 +171,7 @@ pub trait ChangeLogSql: WarehouseSql {
             .envelope()
             .map(|envelope| self.path(&envelope))
             .unwrap_or_else(|| SqlString::from("*"));
-        let recorded_at = self.path(&log.recorded_at());
+        let occurred_at = self.path(&log.occurred_at());
         let ordering = log
             .sequence()
             .iter()
@@ -180,7 +180,7 @@ pub trait ChangeLogSql: WarehouseSql {
             .join(", ");
 
         SqlString::from(format!(
-            "SELECT {envelope}\nFROM {}\nWHERE {recorded_at} >= {} AND {recorded_at} < {}\nORDER BY {ordering}",
+            "SELECT {envelope}\nFROM {}\nWHERE {occurred_at} >= {} AND {occurred_at} < {}\nORDER BY {ordering}",
             self.change_log_ref(&log.ddl_topic()),
             window.from().milliseconds_since_epoch(),
             window.to().milliseconds_since_epoch(),

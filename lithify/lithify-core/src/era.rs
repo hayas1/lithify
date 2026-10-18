@@ -8,7 +8,8 @@ use crate::listener::{
     TableDropped, TableRenamed,
 };
 use crate::model::{TableId, TableModel};
-use crate::position::{Position, RecordedAt};
+use crate::position::{Coordinate, Position, RecordedAt};
+use crate::source::{ChangeLog, ColumnPath};
 use crate::window::Window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,16 +19,14 @@ pub enum Bound<P> {
 }
 
 impl<P> Bound<P> {
-    pub fn instant(&self) -> RecordedAt {
+    pub fn placed<L: ChangeLog<Position = P>>(&self, log: &L) -> Vec<(ColumnPath, Coordinate)> {
         match self {
-            Self::Time(at) | Self::Position { at, .. } => *at,
-        }
-    }
-
-    pub fn as_position(&self) -> Option<&P> {
-        match self {
-            Self::Time(_) => None,
-            Self::Position { position, .. } => Some(position),
+            Self::Time(at) => vec![(log.occurred_at(), Coordinate::from(*at))],
+            Self::Position { at, position } => log
+                .sequence()
+                .into_iter()
+                .zip(std::iter::once(Coordinate::from(*at)).chain(log.coordinates(position)))
+                .collect(),
         }
     }
 }
@@ -798,25 +797,6 @@ mod tests {
             tracker.finish(&(), &catalog).unwrap_err(),
             Untold::Unopened(people())
         );
-    }
-
-    #[test]
-    fn a_bound_in_time_has_an_instant_and_no_position() {
-        let bound = Bound::<Offset>::Time(RecordedAt::from(15));
-
-        assert_eq!(bound.instant(), RecordedAt::from(15));
-        assert_eq!(bound.as_position(), None);
-    }
-
-    #[test]
-    fn a_bound_at_a_position_has_the_instant_it_was_recorded_at_and_its_position() {
-        let bound = Bound::Position {
-            at: RecordedAt::from(15),
-            position: Offset(99),
-        };
-
-        assert_eq!(bound.instant(), RecordedAt::from(15));
-        assert_eq!(bound.as_position(), Some(&Offset(99)));
     }
 
     #[test]

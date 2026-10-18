@@ -354,7 +354,7 @@ mod tests {
             concat!(
                 "SELECT \"value\"\n",
                 "FROM \"mysql_shop_cdc\".\"mysql\"\n",
-                "WHERE \"value\".\"ts_ms\" >= 0 AND \"value\".\"ts_ms\" < 10\n",
+                "WHERE \"value\".\"source\".\"ts_ms\" >= 0 AND \"value\".\"source\".\"ts_ms\" < 10\n",
                 "ORDER BY \"value\".\"ts_ms\", \"value\".\"source\".\"file\", \"value\".\"source\".\"pos\"",
             )
         );

@@ -380,6 +380,10 @@ mod tests {
             None
         }
 
+        fn occurred_at(&self) -> ColumnPath {
+            ColumnPath::from("source.ts_ms")
+        }
+
         fn recorded_at(&self) -> ColumnPath {
             ColumnPath::from("ts_ms")
         }
@@ -586,7 +590,7 @@ mod tests {
                 "\"changes_1\" AS (\n",
                 "  SELECT *\n",
                 "  FROM \"mysql_shop_cdc\".\"mysql_shop_customers\"\n",
-                "  WHERE \"ts_ms\" >= 100 AND \"ts_ms\" < 200\n",
+                "  WHERE \"source\".\"ts_ms\" >= 100 AND \"source\".\"ts_ms\" < 200\n",
                 "  QUALIFY ROW_NUMBER() OVER (\n",
                 "    PARTITION BY COALESCE(\"after\".\"id\", \"before\".\"id\")\n",
                 "    ORDER BY \"ts_ms\" DESC, \"source\".\"offset\" DESC\n",
@@ -697,20 +701,22 @@ mod tests {
     }
 
     #[test]
-    fn a_bound_in_time_is_placed_on_the_instant_the_log_records() {
+    fn a_bound_in_time_is_placed_on_the_instant_a_change_occurred_at_the_source() {
         assert_eq!(
-            Log.placed(&Bound::<Offset>::Time(RecordedAt::from(150))),
-            [(ColumnPath::from("ts_ms"), Coordinate::Number(150))]
+            Bound::<Offset>::Time(RecordedAt::from(150)).placed(&Log),
+            [(ColumnPath::from("source.ts_ms"), Coordinate::Number(150))]
         );
     }
 
     #[test]
-    fn a_bound_at_a_position_is_placed_on_the_instant_then_the_columns_the_log_orders_by() {
+    fn a_bound_at_a_position_is_placed_on_the_instant_the_log_recorded_then_the_columns_it_orders_by()
+     {
         assert_eq!(
-            Log.placed(&Bound::Position {
+            Bound::Position {
                 at: RecordedAt::from(150),
                 position: Offset(7),
-            }),
+            }
+            .placed(&Log),
             [
                 (ColumnPath::from("ts_ms"), Coordinate::Number(150)),
                 (ColumnPath::from("source.offset"), Coordinate::Number(7))
@@ -733,12 +739,12 @@ mod tests {
         ));
 
         assert!(statement.contains(concat!(
-            "  WHERE \"ts_ms\" >= 100",
+            "  WHERE \"source\".\"ts_ms\" >= 100",
             " AND (\"ts_ms\" < 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" < 7))\n"
         )));
         assert!(statement.contains(concat!(
             "  WHERE (\"ts_ms\" > 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" >= 7))",
-            " AND \"ts_ms\" < 200\n"
+            " AND \"source\".\"ts_ms\" < 200\n"
         )));
     }
 
@@ -757,7 +763,7 @@ mod tests {
             || None,
         ));
 
-        assert!(statement.contains("  WHERE \"ts_ms\" >= 100 AND (\"ts_ms\" < 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" < 150))\n"));
+        assert!(statement.contains("  WHERE \"source\".\"ts_ms\" >= 100 AND (\"ts_ms\" < 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" < 150))\n"));
         assert!(statement.contains(concat!(
             "\"era_2\" AS (\n",
             "  SELECT\n",
@@ -767,7 +773,7 @@ mod tests {
             "  FROM \"era_1\"\n",
             "),\n",
         )));
-        assert!(statement.contains("  WHERE (\"ts_ms\" > 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" >= 150)) AND \"ts_ms\" < 200\n"));
+        assert!(statement.contains("  WHERE (\"ts_ms\" > 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" >= 150)) AND \"source\".\"ts_ms\" < 200\n"));
         assert!(statement.contains("    CAST(\"after\".\"email\" AS TEXT) AS \"email\"\n"));
         assert!(statement.ends_with("SELECT * FROM \"era_3\""));
     }
@@ -928,7 +934,7 @@ mod tests {
             "    \"email\" AS \"email\"\n",
             "  FROM \"era_3\"\n",
         )));
-        assert!(statement.contains("  WHERE (\"ts_ms\" > 160 OR (\"ts_ms\" = 160 AND \"source\".\"offset\" >= 160)) AND \"ts_ms\" < 200\n"));
+        assert!(statement.contains("  WHERE (\"ts_ms\" > 160 OR (\"ts_ms\" = 160 AND \"source\".\"offset\" >= 160)) AND \"source\".\"ts_ms\" < 200\n"));
         assert!(statement.ends_with("SELECT * FROM \"era_5\""));
     }
 
@@ -1189,13 +1195,13 @@ mod tests {
         ));
 
         assert!(statement.contains(concat!(
-            "  WHERE \"ts_ms\" >= 100 AND (\"ts_ms\" < 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" < 150))\n",
+            "  WHERE \"source\".\"ts_ms\" >= 100 AND (\"ts_ms\" < 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" < 150))\n",
             "  QUALIFY ROW_NUMBER() OVER (\n",
             "    PARTITION BY COALESCE(\"after\".\"id\", \"before\".\"id\")\n",
         )));
         assert!(statement.contains("    \"id\" AS \"customer_id\",\n"));
         assert!(statement.contains(concat!(
-            "  WHERE (\"ts_ms\" > 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" >= 150)) AND \"ts_ms\" < 200\n",
+            "  WHERE (\"ts_ms\" > 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" >= 150)) AND \"source\".\"ts_ms\" < 200\n",
             "  QUALIFY ROW_NUMBER() OVER (\n",
             "    PARTITION BY COALESCE(\"after\".\"customer_id\", \"before\".\"customer_id\")\n",
         )));
@@ -1230,13 +1236,13 @@ mod tests {
             "\"changes_1\" AS (\n",
             "  SELECT *\n",
             "  FROM \"mysql_shop_cdc\".\"mysql_shop_customers\"\n",
-            "  WHERE \"ts_ms\" >= 100 AND (\"ts_ms\" < 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" < 150))\n",
+            "  WHERE \"source\".\"ts_ms\" >= 100 AND (\"ts_ms\" < 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" < 150))\n",
         )));
         assert!(statement.contains(concat!(
             "\"changes_2\" AS (\n",
             "  SELECT *\n",
             "  FROM \"mysql_shop_cdc\".\"mysql_shop_clients\"\n",
-            "  WHERE (\"ts_ms\" > 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" >= 150)) AND \"ts_ms\" < 200\n",
+            "  WHERE (\"ts_ms\" > 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" >= 150)) AND \"source\".\"ts_ms\" < 200\n",
         )));
         assert!(statement.ends_with("SELECT * FROM \"era_2\""));
     }

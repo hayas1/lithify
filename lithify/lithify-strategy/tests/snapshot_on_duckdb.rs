@@ -16,13 +16,13 @@ use lithify_strategy::snapshot::Snapshot;
 
 const CHANGE_LOG: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
     CREATE TABLE cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
-      ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 1::BIGINT},
+      ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'ts_ms': 1::BIGINT},
         'before': NULL, 'after': {'id': 1::BIGINT, 'name': 'Alice'}}),
-      ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 2::BIGINT},
+      ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 2::BIGINT, 'ts_ms': 1::BIGINT},
         'before': NULL, 'after': {'id': 2::BIGINT, 'name': 'Bob'}}),
-      ({'op': 'u', 'ts_ms': 2::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 3::BIGINT},
+      ({'op': 'u', 'ts_ms': 2::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 3::BIGINT, 'ts_ms': 2::BIGINT},
         'before': {'id': 1::BIGINT, 'name': 'Alice'}, 'after': {'id': 1::BIGINT, 'name': 'Alicia'}}),
-      ({'op': 'd', 'ts_ms': 3::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 4::BIGINT},
+      ({'op': 'd', 'ts_ms': 3::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'ts_ms': 3::BIGINT},
         'before': {'id': 2::BIGINT, 'name': 'Bob'}, 'after': NULL})
     ) AS t(value)";
 
@@ -77,7 +77,7 @@ fn a_snapshot_holds_each_key_as_the_change_log_last_left_it() {
 
 const SCHEMA_CHANGES: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
     CREATE TABLE cdc.mysql AS SELECT * FROM (VALUES
-      ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL}, 'ts_ms': 0::BIGINT,
+      ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
         'ddl': 'CREATE TABLE people (id BIGINT, name VARCHAR(64))',
         'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
           'table': {'primaryKeyColumnNames': ['id'], 'columns': [
@@ -85,24 +85,24 @@ const SCHEMA_CHANGES: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
              'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL},
             {'name': 'name', 'typeName': 'VARCHAR', 'position': 2, 'optional': false,
              'defaultValueExpression': NULL, 'length': 64, 'scale': NULL}]}}]}),
-      ({'source': {'file': 'binlog.000001', 'pos': 2::BIGINT, 'gtid': NULL}, 'ts_ms': 0::BIGINT,
+      ({'source': {'file': 'binlog.000001', 'pos': 2::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
         'ddl': 'CREATE TABLE pets (id BIGINT)',
         'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"pets\"',
           'table': {'primaryKeyColumnNames': ['id'], 'columns': [
             {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
              'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]}),
-      ({'source': {'file': 'binlog.000001', 'pos': 3::BIGINT, 'gtid': NULL}, 'ts_ms': 0::BIGINT,
+      ({'source': {'file': 'binlog.000001', 'pos': 3::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
         'ddl': 'CREATE TABLE gone (id BIGINT)',
         'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"gone\"',
           'table': {'primaryKeyColumnNames': ['id'], 'columns': [
             {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
              'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]}),
-      ({'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL}, 'ts_ms': 0::BIGINT,
+      ({'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
         'ddl': 'DROP TABLE gone',
         'tableChanges': [{'type': 'DROP', 'id': '\"shop\".\"gone\"', 'table': NULL}]})
     ) AS t(value);
     CREATE TABLE cdc.\"mysql.shop.pets\" AS SELECT * FROM (VALUES
-      ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 5::BIGINT},
+      ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 5::BIGINT, 'ts_ms': 1::BIGINT},
         'before': NULL::STRUCT(id BIGINT), 'after': {'id': 7::BIGINT}})
     ) AS t(value)";
 
@@ -194,7 +194,7 @@ fn a_table_created_before_the_window_is_snapshotted_too() {
 
 const WIDENED: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
     CREATE TABLE cdc.mysql AS SELECT * FROM (VALUES
-      ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL}, 'ts_ms': 0::BIGINT,
+      ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
         'ddl': 'CREATE TABLE people (id BIGINT, name VARCHAR(64))',
         'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
           'table': {'primaryKeyColumnNames': ['id'], 'columns': [
@@ -202,7 +202,7 @@ const WIDENED: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
              'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL},
             {'name': 'name', 'typeName': 'VARCHAR', 'position': 2, 'optional': false,
              'defaultValueExpression': NULL, 'length': 64, 'scale': NULL}]}}]}),
-      ({'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL}, 'ts_ms': 5::BIGINT,
+      ({'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL, 'ts_ms': 5::BIGINT}, 'ts_ms': 5::BIGINT,
         'ddl': 'ALTER TABLE people ADD COLUMN email VARCHAR(64)',
         'tableChanges': [{'type': 'ALTER', 'id': '\"shop\".\"people\"',
           'table': {'primaryKeyColumnNames': ['id'], 'columns': [
@@ -215,13 +215,13 @@ const WIDENED: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
     ) AS t(value);
     CREATE SCHEMA IF NOT EXISTS cdc;
     CREATE TABLE cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
-      ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 2::BIGINT},
+      ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 2::BIGINT, 'ts_ms': 1::BIGINT},
         'before': NULL::STRUCT(id BIGINT, name VARCHAR, email VARCHAR),
         'after': {'id': 1::BIGINT, 'name': 'Alice', 'email': NULL::VARCHAR}}),
-      ({'op': 'c', 'ts_ms': 2::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 3::BIGINT},
+      ({'op': 'c', 'ts_ms': 2::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 3::BIGINT, 'ts_ms': 2::BIGINT},
         'before': NULL::STRUCT(id BIGINT, name VARCHAR, email VARCHAR),
         'after': {'id': 2::BIGINT, 'name': 'Bob', 'email': NULL::VARCHAR}}),
-      ({'op': 'u', 'ts_ms': 6::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 5::BIGINT},
+      ({'op': 'u', 'ts_ms': 6::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 5::BIGINT, 'ts_ms': 6::BIGINT},
         'before': {'id': 1::BIGINT, 'name': 'Alice', 'email': 'none'},
         'after': {'id': 1::BIGINT, 'name': 'Alicia', 'email': 'alicia@example.com'}})
     ) AS t(value)";
@@ -250,7 +250,7 @@ fn a_column_added_within_the_window_is_filled_in_for_the_rows_last_changed_befor
 
 const RESHAPED: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
     CREATE TABLE cdc.mysql AS SELECT * FROM (VALUES
-      ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL}, 'ts_ms': 0::BIGINT,
+      ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
         'ddl': 'CREATE TABLE people (id BIGINT, name VARCHAR(64), email VARCHAR(64))',
         'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
           'table': {'primaryKeyColumnNames': ['id'], 'columns': [
@@ -260,7 +260,7 @@ const RESHAPED: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
              'defaultValueExpression': NULL, 'length': 64, 'scale': NULL},
             {'name': 'email', 'typeName': 'VARCHAR', 'position': 3, 'optional': true,
              'defaultValueExpression': NULL, 'length': 64, 'scale': NULL}]}}]}),
-      ({'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL}, 'ts_ms': 5::BIGINT,
+      ({'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL, 'ts_ms': 5::BIGINT}, 'ts_ms': 5::BIGINT,
         'ddl': 'ALTER TABLE people DROP COLUMN email, ADD COLUMN phone VARCHAR(16) DEFAULT ''unknown'' AFTER id, ADD COLUMN nickname VARCHAR(64)',
         'tableChanges': [{'type': 'ALTER', 'id': '\"shop\".\"people\"',
           'table': {'primaryKeyColumnNames': ['id'], 'columns': [
@@ -275,13 +275,13 @@ const RESHAPED: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
     ) AS t(value);
     CREATE SCHEMA IF NOT EXISTS cdc;
     CREATE TABLE cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
-      ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 2::BIGINT},
+      ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 2::BIGINT, 'ts_ms': 1::BIGINT},
         'before': NULL::STRUCT(id BIGINT, name VARCHAR, email VARCHAR, phone VARCHAR, nickname VARCHAR),
         'after': {'id': 1::BIGINT, 'name': 'Alice', 'email': 'alice@example.com', 'phone': NULL::VARCHAR, 'nickname': NULL::VARCHAR}}),
-      ({'op': 'c', 'ts_ms': 2::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 3::BIGINT},
+      ({'op': 'c', 'ts_ms': 2::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 3::BIGINT, 'ts_ms': 2::BIGINT},
         'before': NULL::STRUCT(id BIGINT, name VARCHAR, email VARCHAR, phone VARCHAR, nickname VARCHAR),
         'after': {'id': 2::BIGINT, 'name': 'Bob', 'email': 'bob@example.com', 'phone': NULL::VARCHAR, 'nickname': NULL::VARCHAR}}),
-      ({'op': 'u', 'ts_ms': 6::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 5::BIGINT},
+      ({'op': 'u', 'ts_ms': 6::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 5::BIGINT, 'ts_ms': 6::BIGINT},
         'before': {'id': 1::BIGINT, 'name': 'Alice', 'email': NULL::VARCHAR, 'phone': 'unknown', 'nickname': NULL::VARCHAR},
         'after': {'id': 1::BIGINT, 'name': 'Alicia', 'email': NULL::VARCHAR, 'phone': '0123', 'nickname': 'Ali'}})
     ) AS t(value)";
@@ -317,7 +317,7 @@ fn columns_one_statement_dropped_and_added_reshape_the_rows_last_changed_before_
 
 const RENAMED: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
     CREATE TABLE cdc.mysql AS SELECT * FROM (VALUES
-      ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL}, 'ts_ms': 0::BIGINT,
+      ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
         'ddl': 'CREATE TABLE people (id BIGINT, name VARCHAR(64))',
         'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
           'table': {'primaryKeyColumnNames': ['id'], 'columns': [
@@ -325,7 +325,7 @@ const RENAMED: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
              'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL},
             {'name': 'name', 'typeName': 'VARCHAR', 'position': 2, 'optional': false,
              'defaultValueExpression': NULL, 'length': 64, 'scale': NULL}]}}]}),
-      ({'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL}, 'ts_ms': 5::BIGINT,
+      ({'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL, 'ts_ms': 5::BIGINT}, 'ts_ms': 5::BIGINT,
         'ddl': 'ALTER TABLE people RENAME COLUMN name TO full_name',
         'tableChanges': [{'type': 'ALTER', 'id': '\"shop\".\"people\"',
           'table': {'primaryKeyColumnNames': ['id'], 'columns': [
@@ -336,13 +336,13 @@ const RENAMED: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
     ) AS t(value);
     CREATE SCHEMA IF NOT EXISTS cdc;
     CREATE TABLE cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
-      ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 2::BIGINT},
+      ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 2::BIGINT, 'ts_ms': 1::BIGINT},
         'before': NULL::STRUCT(id BIGINT, name VARCHAR, full_name VARCHAR),
         'after': {'id': 1::BIGINT, 'name': 'Alice', 'full_name': NULL::VARCHAR}}),
-      ({'op': 'c', 'ts_ms': 2::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 3::BIGINT},
+      ({'op': 'c', 'ts_ms': 2::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 3::BIGINT, 'ts_ms': 2::BIGINT},
         'before': NULL::STRUCT(id BIGINT, name VARCHAR, full_name VARCHAR),
         'after': {'id': 2::BIGINT, 'name': 'Bob', 'full_name': NULL::VARCHAR}}),
-      ({'op': 'u', 'ts_ms': 6::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 5::BIGINT},
+      ({'op': 'u', 'ts_ms': 6::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 5::BIGINT, 'ts_ms': 6::BIGINT},
         'before': {'id': 1::BIGINT, 'name': NULL::VARCHAR, 'full_name': 'Alice'},
         'after': {'id': 1::BIGINT, 'name': NULL::VARCHAR, 'full_name': 'Alicia Liddell'}})
     ) AS t(value)";
@@ -378,7 +378,7 @@ fn a_column_renamed_within_the_window_keeps_the_values_of_the_rows_last_changed_
 
 const MOVED: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
     CREATE TABLE cdc.mysql AS SELECT * FROM (VALUES
-      ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL}, 'ts_ms': 0::BIGINT,
+      ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
         'ddl': 'CREATE TABLE people (id BIGINT, name VARCHAR(64))',
         'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
           'table': {'primaryKeyColumnNames': ['id'], 'columns': [
@@ -386,7 +386,7 @@ const MOVED: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
              'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL},
             {'name': 'name', 'typeName': 'VARCHAR', 'position': 2, 'optional': false,
              'defaultValueExpression': NULL, 'length': 64, 'scale': NULL}]}}]}),
-      ({'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL}, 'ts_ms': 5::BIGINT,
+      ({'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL, 'ts_ms': 5::BIGINT}, 'ts_ms': 5::BIGINT,
         'ddl': 'RENAME TABLE people TO persons',
         'tableChanges': [{'type': 'ALTER', 'id': '\"shop\".\"persons\"',
           'table': {'primaryKeyColumnNames': ['id'], 'columns': [
@@ -397,15 +397,15 @@ const MOVED: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
     ) AS t(value);
     CREATE SCHEMA IF NOT EXISTS cdc;
     CREATE TABLE cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
-      ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 2::BIGINT},
+      ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 2::BIGINT, 'ts_ms': 1::BIGINT},
         'before': NULL::STRUCT(id BIGINT, name VARCHAR), 'after': {'id': 1::BIGINT, 'name': 'Alice'}}),
-      ({'op': 'c', 'ts_ms': 2::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 3::BIGINT},
+      ({'op': 'c', 'ts_ms': 2::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 3::BIGINT, 'ts_ms': 2::BIGINT},
         'before': NULL::STRUCT(id BIGINT, name VARCHAR), 'after': {'id': 2::BIGINT, 'name': 'Bob'}})
     ) AS t(value);
     CREATE TABLE cdc.\"mysql.shop.persons\" AS SELECT * FROM (VALUES
-      ({'op': 'u', 'ts_ms': 6::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 5::BIGINT},
+      ({'op': 'u', 'ts_ms': 6::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 5::BIGINT, 'ts_ms': 6::BIGINT},
         'before': {'id': 1::BIGINT, 'name': 'Alice'}, 'after': {'id': 1::BIGINT, 'name': 'Alicia'}}),
-      ({'op': 'c', 'ts_ms': 7::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 6::BIGINT},
+      ({'op': 'c', 'ts_ms': 7::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 6::BIGINT, 'ts_ms': 7::BIGINT},
         'before': NULL::STRUCT(id BIGINT, name VARCHAR), 'after': {'id': 3::BIGINT, 'name': 'Carol'}})
     ) AS t(value)";
 
@@ -440,13 +440,13 @@ fn a_table_renamed_within_the_window_is_snapshotted_under_its_new_name_with_ever
 
 const STAMPED: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
     CREATE TABLE cdc.mysql AS SELECT * FROM (VALUES
-      ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL}, 'ts_ms': 0::BIGINT,
+      ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
         'ddl': 'CREATE TABLE people (id BIGINT)',
         'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
           'table': {'primaryKeyColumnNames': ['id'], 'columns': [
             {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
              'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]}),
-      ({'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL}, 'ts_ms': 5::BIGINT,
+      ({'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL, 'ts_ms': 5::BIGINT}, 'ts_ms': 5::BIGINT,
         'ddl': 'ALTER TABLE people ADD COLUMN seen_at DATETIME DEFAULT CURRENT_TIMESTAMP',
         'tableChanges': [{'type': 'ALTER', 'id': '\"shop\".\"people\"',
           'table': {'primaryKeyColumnNames': ['id'], 'columns': [
@@ -457,7 +457,7 @@ const STAMPED: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
     ) AS t(value);
     CREATE SCHEMA IF NOT EXISTS cdc;
     CREATE TABLE cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
-      ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 2::BIGINT},
+      ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 2::BIGINT, 'ts_ms': 1::BIGINT},
         'before': NULL::STRUCT(id BIGINT, seen_at BIGINT), 'after': {'id': 1::BIGINT, 'seen_at': NULL::BIGINT}})
     ) AS t(value)";
 
@@ -485,7 +485,7 @@ fn a_column_added_with_a_default_no_literal_spells_is_filled_with_null_rather_th
 
 const SIMULTANEOUS: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
     CREATE TABLE cdc.mysql AS SELECT * FROM (VALUES
-      ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL}, 'ts_ms': 0::BIGINT,
+      ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
         'ddl': 'CREATE TABLE people (id BIGINT, name VARCHAR(64))',
         'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
           'table': {'primaryKeyColumnNames': ['id'], 'columns': [
@@ -493,7 +493,7 @@ const SIMULTANEOUS: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
              'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL},
             {'name': 'name', 'typeName': 'VARCHAR', 'position': 2, 'optional': false,
              'defaultValueExpression': NULL, 'length': 64, 'scale': NULL}]}}]}),
-      ({'source': {'file': 'binlog.000001', 'pos': 10::BIGINT, 'gtid': NULL}, 'ts_ms': 5::BIGINT,
+      ({'source': {'file': 'binlog.000001', 'pos': 10::BIGINT, 'gtid': NULL, 'ts_ms': 5::BIGINT}, 'ts_ms': 5::BIGINT,
         'ddl': 'ALTER TABLE people ADD COLUMN email VARCHAR(64) DEFAULT ''none''',
         'tableChanges': [{'type': 'ALTER', 'id': '\"shop\".\"people\"',
           'table': {'primaryKeyColumnNames': ['id'], 'columns': [
@@ -506,16 +506,16 @@ const SIMULTANEOUS: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
     ) AS t(value);
     CREATE SCHEMA IF NOT EXISTS cdc;
     CREATE TABLE cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
-      ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 2::BIGINT},
+      ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 2::BIGINT, 'ts_ms': 1::BIGINT},
         'before': NULL::STRUCT(id BIGINT, name VARCHAR, email VARCHAR),
         'after': {'id': 1::BIGINT, 'name': 'Alice', 'email': NULL::VARCHAR}}),
-      ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 3::BIGINT},
+      ({'op': 'r', 'ts_ms': 1::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 3::BIGINT, 'ts_ms': 1::BIGINT},
         'before': NULL::STRUCT(id BIGINT, name VARCHAR, email VARCHAR),
         'after': {'id': 2::BIGINT, 'name': 'Bob', 'email': NULL::VARCHAR}}),
-      ({'op': 'u', 'ts_ms': 5::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 8::BIGINT},
+      ({'op': 'u', 'ts_ms': 5::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 8::BIGINT, 'ts_ms': 5::BIGINT},
         'before': {'id': 2::BIGINT, 'name': 'Bob', 'email': NULL::VARCHAR},
         'after': {'id': 2::BIGINT, 'name': 'Bobby', 'email': NULL::VARCHAR}}),
-      ({'op': 'u', 'ts_ms': 5::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 12::BIGINT},
+      ({'op': 'u', 'ts_ms': 5::BIGINT, 'source': {'file': 'binlog.000001', 'pos': 12::BIGINT, 'ts_ms': 5::BIGINT},
         'before': {'id': 1::BIGINT, 'name': 'Alice', 'email': 'none'},
         'after': {'id': 1::BIGINT, 'name': 'Alicia', 'email': 'alicia@example.com'}})
     ) AS t(value)";

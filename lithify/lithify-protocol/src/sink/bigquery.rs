@@ -362,7 +362,7 @@ mod tests {
             concat!(
                 "SELECT *\n",
                 "FROM `local-project`.`mysql_shop_cdc`.`mysql`\n",
-                "WHERE `ts_ms` >= 0 AND `ts_ms` < 10\n",
+                "WHERE `source`.`ts_ms` >= 0 AND `source`.`ts_ms` < 10\n",
                 "ORDER BY `ts_ms`, `source`.`file`, `source`.`pos`",
             )
         );

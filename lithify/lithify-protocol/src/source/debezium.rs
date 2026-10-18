@@ -216,6 +216,10 @@ impl<D: Dialect> ChangeLog for Debezium<D> {
         self.envelope.clone()
     }
 
+    fn occurred_at(&self) -> ColumnPath {
+        self.path("source.ts_ms")
+    }
+
     fn recorded_at(&self) -> ColumnPath {
         self.path("ts_ms")
     }
