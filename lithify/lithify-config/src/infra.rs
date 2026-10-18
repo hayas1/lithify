@@ -288,8 +288,6 @@ pub struct ArtifactTargets {
     snapshot: String,
     history: String,
     shard: String,
-    #[serde(default)]
-    schedule: Schedule,
 }
 
 impl ArtifactTargets {
@@ -305,7 +303,7 @@ impl ArtifactTargets {
     }
 
     pub fn schedule(&self) -> Schedule {
-        self.schedule
+        Schedule::Daily
     }
 }
 
@@ -506,25 +504,17 @@ mod tests {
     }
 
     #[test]
-    fn a_sink_builds_its_artifacts_daily_unless_the_pipeline_says_otherwise() {
-        let written = wiring(&format!(
-            "{SERVER}\n[[sink]]\n{NAMED}{WAREHOUSE}change_log = \"mysql_shop_cdc\"\n{ARTIFACTS}artifacts.schedule = \"daily\"\n"
-        ));
-
+    fn a_sink_builds_its_artifacts_daily() {
         assert_eq!(sinks()[1].artifacts().schedule(), Schedule::Daily);
-        assert_eq!(
-            written.sinks().unwrap()[0].artifacts().schedule(),
-            Schedule::Daily
-        );
     }
 
     #[test]
-    fn a_schedule_this_program_does_not_keep_is_rejected() {
-        let unknown = toml::from_str::<Wiring<Captured, Sunk>>(&format!(
-            "{SERVER}\n[[sink]]\n{NAMED}{WAREHOUSE}{ARTIFACTS}artifacts.schedule = \"fortnightly\"\n"
+    fn a_schedule_written_in_the_pipeline_is_rejected() {
+        let written = toml::from_str::<Wiring<Captured, Sunk>>(&format!(
+            "{SERVER}\n[[sink]]\n{NAMED}{WAREHOUSE}{ARTIFACTS}artifacts.schedule = \"daily\"\n"
         ));
 
-        assert!(unknown.is_err());
+        assert!(written.is_err());
     }
 
     #[test]
