@@ -1,6 +1,7 @@
 use chrono_tz::Tz;
 use serde::Deserialize;
 
+use lithify_artifact::instant::{self, Instant};
 use lithify_artifact::snapshot::{self, Snapshot};
 use lithify_config::Declaration;
 use lithify_config::infra::Sink;
@@ -16,12 +17,21 @@ use crate::unrunnable::Unrunnable;
 #[serde(deny_unknown_fields, rename_all = "lowercase")]
 pub enum ArtifactConfig {
     Snapshot(snapshot::Config<LocationConfig>),
+    Instant(instant::Config<LocationConfig>),
 }
 
 impl ArtifactConfig {
     pub fn as_snapshot(&self) -> Option<&snapshot::Config<LocationConfig>> {
         match self {
             Self::Snapshot(config) => Some(config),
+            Self::Instant(_) => None,
+        }
+    }
+
+    pub fn as_instant(&self) -> Option<&instant::Config<LocationConfig>> {
+        match self {
+            Self::Snapshot(_) => None,
+            Self::Instant(config) => Some(config),
         }
     }
 }
@@ -32,18 +42,22 @@ impl Declaration for ArtifactConfig {
     fn source(&self) -> Option<&'static str> {
         match self {
             Self::Snapshot(_) => None,
+            Self::Instant(_) => Some(<Instant as Artifact>::From::KIND),
         }
     }
 
     fn places(&self) -> impl Iterator<Item = &LocationConfig> {
         match self {
-            Self::Snapshot(config) => config.place().iter(),
+            Self::Snapshot(config) => config.place().iter().collect::<Vec<_>>(),
+            Self::Instant(cuts) => cuts.iter().flat_map(|cut| cut.place()).collect(),
         }
+        .into_iter()
     }
 
     fn schedule(&self, time_zone: Tz) -> Option<Schedule> {
         match self {
             Self::Snapshot(config) => Some(config.schedule(time_zone)),
+            Self::Instant(_) => None,
         }
     }
 }
@@ -58,21 +72,39 @@ impl<'a> DeclaredSnapshot<'a> {
     pub const ARTIFACT: &'static str = Snapshot::KIND;
 
     pub fn of(sink: &'a Sink<WarehouseConfig, ArtifactConfig>) -> Result<Self, Unrunnable> {
-        let undeclared = || Unrunnable::Undeclared {
-            sink: sink.name().to_owned(),
-            artifact: Self::ARTIFACT,
-        };
         let config = sink
             .artifact(Self::ARTIFACT)
             .and_then(ArtifactConfig::as_snapshot)
-            .ok_or_else(undeclared)?;
-        let place = config.place().first().ok_or_else(undeclared)?;
+            .ok_or_else(|| Self::undeclared(sink, Self::ARTIFACT))?;
+
+        Self::placed(sink, config, Self::ARTIFACT)
+    }
+
+    fn placed(
+        sink: &Sink<WarehouseConfig, ArtifactConfig>,
+        config: &'a snapshot::Config<LocationConfig>,
+        artifact: &'static str,
+    ) -> Result<Self, Unrunnable> {
+        let place = config
+            .place()
+            .first()
+            .ok_or_else(|| Self::undeclared(sink, artifact))?;
 
         Ok(Self {
             config,
             namespace: place.clone().into(),
             time_zone: sink.time_zone(),
         })
+    }
+
+    fn undeclared(
+        sink: &Sink<WarehouseConfig, ArtifactConfig>,
+        artifact: &'static str,
+    ) -> Unrunnable {
+        Unrunnable::Undeclared {
+            sink: sink.name().to_owned(),
+            artifact,
+        }
     }
 
     pub fn namespace(&self) -> &Namespace {
@@ -98,6 +130,43 @@ impl<'a> DeclaredSnapshot<'a> {
                     .map(|place| place.clone().into())
                     .collect(),
             )
+    }
+}
+
+pub struct DeclaredInstant<'a> {
+    cut: DeclaredSnapshot<'a>,
+}
+
+impl<'a> DeclaredInstant<'a> {
+    pub const ARTIFACT: &'static str = Instant::KIND;
+
+    pub fn of(sink: &'a Sink<WarehouseConfig, ArtifactConfig>) -> Result<Vec<Self>, Unrunnable> {
+        sink.artifact(Self::ARTIFACT)
+            .and_then(ArtifactConfig::as_instant)
+            .into_iter()
+            .flatten()
+            .map(|config| {
+                Ok(Self {
+                    cut: DeclaredSnapshot::placed(sink, config, Self::ARTIFACT)?,
+                })
+            })
+            .collect()
+    }
+
+    pub fn namespace(&self) -> &Namespace {
+        self.cut.namespace()
+    }
+
+    pub fn series(&self) -> Series {
+        self.artifact().series()
+    }
+
+    pub fn artifact(&self) -> Instant {
+        Instant::new(
+            self.cut.config.at(),
+            self.cut.time_zone,
+            self.cut.artifact(),
+        )
     }
 }
 

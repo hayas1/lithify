@@ -2,6 +2,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 
 use lithify_config::infra::{Sink, Source};
 use lithify_core::build_log::BuildLog;
+use lithify_core::schedule::Schedule;
 use lithify_core::sink::WarehouseClient;
 use lithify_core::window::Window;
 
@@ -57,6 +58,21 @@ impl Itinerary {
         }
     }
 
+    pub fn days(&self, schedule: Schedule) -> Vec<Window> {
+        let closed = self
+            .windows
+            .iter()
+            .filter(|window| schedule.window(*window.from()).as_ref() == Some(*window));
+        let opened = self
+            .windows
+            .last()
+            .map(|window| *window.to())
+            .or_else(|| self.previous.first().map(|log| *log.window().to()))
+            .and_then(|opened| schedule.window(opened));
+
+        closed.cloned().chain(opened).collect()
+    }
+
     pub fn settle<S: Settlement>(
         self,
         settlement: &S,
@@ -86,9 +102,9 @@ pub(crate) mod tests {
     use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbClient};
 
     use super::*;
-    use lithify_core::schedule::Schedule;
     use lithify_core::ts::Ts;
 
+    use crate::intraday::Intraday;
     use crate::plan::Plan;
     use crate::plan::tests::{
         BUILT_CHANGE_LOGS, CAPTURE, PEOPLE, at, built_before, logged, pipeline, rows,
@@ -196,16 +212,33 @@ pub(crate) mod tests {
             .find(|sink| sink.name() == "duckdb_s3")
             .unwrap();
         let settlement = Build::new(sink, source, at(now)).unwrap();
-        let snapshot = DeclaredSnapshot::of(sink).unwrap().artifact();
+        let declared = DeclaredSnapshot::of(sink).unwrap();
+        let snapshot = declared.artifact();
         let mut journal = Journal::default();
+        let itinerary = course.itinerary(sink, source, at(now), client)?;
+        let days = itinerary.days(declared.schedule());
 
-        course.itinerary(sink, source, at(now), client)?.settle(
+        itinerary.settle(&settlement, &mut journal, |window, previous, tables| {
+            source.capture().with_duckdb_change_logs(
+                source.topic_prefix().unwrap(),
+                Plan::new(client, &snapshot, window, previous, tables, &settlement),
+            )
+        })?;
+        Intraday::new(sink, days, Ts::from(at(now))).settle(
+            client,
             &settlement,
             &mut journal,
-            |window, previous, tables| {
+            |instant, window, previous, settlement| {
                 source.capture().with_duckdb_change_logs(
                     source.topic_prefix().unwrap(),
-                    Plan::new(client, &snapshot, window, previous, tables, &settlement),
+                    Plan::new(
+                        client,
+                        instant,
+                        window,
+                        previous,
+                        &Tables::Every,
+                        settlement,
+                    ),
                 )
             },
         )?;

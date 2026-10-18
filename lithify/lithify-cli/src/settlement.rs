@@ -5,7 +5,7 @@ use ulid::Ulid;
 
 use lithify_config::infra::{Sink, Source};
 use lithify_core::artifact::ArtifactBuilder;
-use lithify_core::build_log::{BuildLog, Outcome, Run, Status};
+use lithify_core::build_log::{BuildLog, Outcome, Run, Series, Status};
 use lithify_core::sink::{Namespace, WarehouseClient};
 use lithify_core::sql::SqlString;
 use lithify_core::window::Window;
@@ -24,6 +24,8 @@ pub trait Settlement {
         Unrunnable: From<K::Error>,
         B: ArtifactBuilder;
 
+    fn advancing(&self, namespace: &Namespace, series: &Series) -> Self;
+
     fn report(
         &self,
         window: &Window,
@@ -35,6 +37,7 @@ pub trait Settlement {
 pub struct DryRun {
     into: PathBuf,
     sink: String,
+    series: Option<Series>,
 }
 
 impl DryRun {
@@ -42,12 +45,35 @@ impl DryRun {
         Self {
             into: into.to_owned(),
             sink: sink.to_owned(),
+            series: None,
+        }
+    }
+
+    fn named(&self, window: &Window) -> String {
+        let opened = window.from().milliseconds_since_epoch();
+
+        match &self.series {
+            None => format!("{}_{opened}.sql", self.sink),
+            Some(series) => format!(
+                "{}_{}_{}_{opened}.sql",
+                self.sink,
+                series.artifact(),
+                series.schedule().replace(':', "")
+            ),
         }
     }
 }
 
 impl Settlement for DryRun {
     type Output = Vec<SqlString>;
+
+    fn advancing(&self, _: &Namespace, series: &Series) -> Self {
+        Self {
+            into: self.into.clone(),
+            sink: self.sink.clone(),
+            series: Some(series.clone()),
+        }
+    }
 
     fn settle<K, B>(&self, client: &K, builders: &[B]) -> Result<Self::Output, Unrunnable>
     where
@@ -68,11 +94,7 @@ impl Settlement for DryRun {
         output: Self::Output,
         journal: &mut Journal,
     ) -> Result<Option<Vec<BuildLog>>, Unrunnable> {
-        let path = self.into.join(format!(
-            "{}_{}.sql",
-            self.sink,
-            window.from().milliseconds_since_epoch()
-        ));
+        let path = self.into.join(self.named(window));
 
         std::fs::create_dir_all(&self.into)?;
         std::fs::write(
@@ -136,6 +158,13 @@ impl Build {
 
 impl Settlement for Build {
     type Output = Vec<BuildLog>;
+
+    fn advancing(&self, namespace: &Namespace, series: &Series) -> Self {
+        Self {
+            namespace: namespace.clone(),
+            run: self.run.advancing(series),
+        }
+    }
 
     fn settle<K, B>(&self, client: &K, builders: &[B]) -> Result<Self::Output, Unrunnable>
     where

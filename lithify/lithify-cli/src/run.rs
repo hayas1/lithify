@@ -15,9 +15,10 @@ use lithify_protocol::{BigQueryWarehouse, DuckDbWarehouse};
 use crate::artifacts::{ArtifactConfig, DeclaredSnapshot};
 use crate::course::Course;
 use crate::credential::Credentials;
+use crate::intraday::Intraday;
 use crate::journal::Journal;
 use crate::pipeline::{CaptureConfig, Reached, WarehouseConfig};
-use crate::plan::Plan;
+use crate::plan::{Plan, Tables};
 use crate::settlement::{Build, DryRun, Settlement};
 use crate::unrunnable::Unrunnable;
 use lithify_core::check::{Expectation, Inspection};
@@ -160,33 +161,67 @@ impl Run {
         settlement: &S,
         journal: &mut Journal,
     ) -> Result<(), Unrunnable> {
-        let snapshot = DeclaredSnapshot::of(sink)?.artifact();
+        let declared = DeclaredSnapshot::of(sink)?;
+        let snapshot = declared.artifact();
+        let schedule = declared.schedule();
 
         match Self::reach(sink)? {
             Reached::DuckDb(config, change_log) => {
                 let client = self.duckdb(config, change_log)?;
+                let itinerary = course.itinerary(sink, source, self.now, &client)?;
+                let days = itinerary.days(schedule);
 
-                course.itinerary(sink, source, self.now, &client)?.settle(
+                itinerary.settle(settlement, journal, |window, previous, tables| {
+                    source.capture().with_duckdb_change_logs(
+                        topic_prefix,
+                        Plan::new(&client, &snapshot, window, previous, tables, settlement),
+                    )
+                })?;
+                Intraday::new(sink, days, Ts::from(self.now)).settle(
+                    &client,
                     settlement,
                     journal,
-                    |window, previous, tables| {
+                    |instant, window, previous, settlement| {
                         source.capture().with_duckdb_change_logs(
                             topic_prefix,
-                            Plan::new(&client, &snapshot, window, previous, tables, settlement),
+                            Plan::new(
+                                &client,
+                                instant,
+                                window,
+                                previous,
+                                &Tables::Every,
+                                settlement,
+                            ),
                         )
                     },
                 )
             }
             Reached::BigQuery(config, change_log) => {
                 let client = self.bigquery(config, change_log)?;
+                let itinerary = course.itinerary(sink, source, self.now, &client)?;
+                let days = itinerary.days(schedule);
 
-                course.itinerary(sink, source, self.now, &client)?.settle(
+                itinerary.settle(settlement, journal, |window, previous, tables| {
+                    source.capture().with_bigquery_change_logs(
+                        topic_prefix,
+                        Plan::new(&client, &snapshot, window, previous, tables, settlement),
+                    )
+                })?;
+                Intraday::new(sink, days, Ts::from(self.now)).settle(
+                    &client,
                     settlement,
                     journal,
-                    |window, previous, tables| {
+                    |instant, window, previous, settlement| {
                         source.capture().with_bigquery_change_logs(
                             topic_prefix,
-                            Plan::new(&client, &snapshot, window, previous, tables, settlement),
+                            Plan::new(
+                                &client,
+                                instant,
+                                window,
+                                previous,
+                                &Tables::Every,
+                                settlement,
+                            ),
                         )
                     },
                 )

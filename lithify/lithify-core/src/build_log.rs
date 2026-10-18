@@ -40,6 +40,14 @@ impl Run {
             version: version.to_owned(),
         }
     }
+
+    pub fn advancing(&self, series: &Series) -> Self {
+        Self {
+            artifact: series.artifact.clone(),
+            schedule: series.schedule.clone(),
+            ..self.clone()
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -726,6 +734,33 @@ mod tests {
         assert_eq!(
             BuildLogRow::path("analytics-project.shop.people_20260920").unwrap(),
             TablePath::new("analytics-project.shop", "people_20260920")
+        );
+    }
+
+    #[test]
+    fn a_run_advancing_another_series_is_the_same_run() {
+        let run = Run::new(
+            Ulid::nil(),
+            DateTime::UNIX_EPOCH,
+            "snapshot",
+            "daily",
+            "primary",
+            "{}",
+            "0.1.0",
+        );
+        let cut = run.advancing(&Series::new("instant", "09:00"));
+
+        assert_eq!(
+            cut,
+            Run::new(
+                Ulid::nil(),
+                DateTime::UNIX_EPOCH,
+                "instant",
+                "09:00",
+                "primary",
+                "{}",
+                "0.1.0",
+            )
         );
     }
 

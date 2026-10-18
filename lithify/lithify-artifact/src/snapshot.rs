@@ -58,6 +58,10 @@ impl<L> Config<L> {
         &self.place
     }
 
+    pub fn at(&self) -> NaiveTime {
+        self.at
+    }
+
     pub fn schedule(&self, zone: Tz) -> Schedule {
         Schedule::daily(self.at, zone)
     }
