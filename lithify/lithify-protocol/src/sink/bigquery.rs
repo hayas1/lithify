@@ -148,7 +148,7 @@ mod tests {
     use crate::source::debezium::Debezium;
     use crate::source::debezium::mysql::MySql;
 
-    use lithify_core::build_log::{BuildLog, Latest, Outcome, Run, Status};
+    use lithify_core::build_log::{BuildLog, BuildLogQuery, Latest, Outcome, Run, Status};
     use lithify_core::model::{ColumnType, TableId};
     use lithify_core::position::RecordedAt;
     use lithify_core::sink::{ChangeLogSql, TablePath, UnsupportedColumn};
@@ -218,6 +218,17 @@ mod tests {
             Latest::Succeeded.select(&bigquery(), "mysql_shop"),
             format!(
                 "SELECT {COLUMNS}\nFROM `local-project`.`mysql_shop`.`_lithify_log` AS `latest`\nWHERE `latest`.`table_to` IS NOT NULL AND `latest`.`status` = 'succeeded' AND NOT EXISTS (SELECT 1 FROM `local-project`.`mysql_shop`.`_lithify_log` AS `departed` WHERE `departed`.`artifact` = `latest`.`artifact` AND `departed`.`schedule` = `latest`.`schedule` AND `departed`.`table_from` = `latest`.`table_to` AND `departed`.`lifecycle` IN ('renamed', 'dropped') AND `departed`.`window_from` >= `latest`.`window_to` AND `departed`.`status` = 'succeeded')\nQUALIFY ROW_NUMBER() OVER (PARTITION BY `artifact`, `schedule`, `table_to` ORDER BY `id` DESC) = 1\nORDER BY `artifact`, `schedule`, `table_to`"
+            )
+            .as_str()
+        );
+    }
+
+    #[test]
+    fn a_build_log_is_read_whole_from_the_newest_record() {
+        assert_eq!(
+            BuildLogQuery::All.select(&bigquery(), "mysql_shop"),
+            format!(
+                "SELECT {COLUMNS}\nFROM `local-project`.`mysql_shop`.`_lithify_log`\nORDER BY `id` DESC"
             )
             .as_str()
         );

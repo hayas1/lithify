@@ -4,7 +4,8 @@ use lithify_core::build_log::BuildLog;
 
 use crate::command::BuildCommand;
 use crate::overview::{
-    PipelineLocation, PipelineOverview, SinkInspection, SinkOverview, SourceOverview, TableRow,
+    BuildLogView, PipelineLocation, PipelineOverview, SinkInspection, SinkOverview, SourceOverview,
+    TableRow,
 };
 
 pub enum Page {
@@ -29,39 +30,72 @@ pub enum Page {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Section {
-    BuildLog,
+    BuildLog(BuildLogView),
     Checks,
 }
 
 impl Section {
-    const ALL: [Self; 2] = [Self::BuildLog, Self::Checks];
+    const ALL: [Self; 2] = [Self::BuildLog(BuildLogView::Latest), Self::Checks];
+
+    pub fn view(self) -> BuildLogView {
+        match self {
+            Self::BuildLog(view) => view,
+            Self::Checks => BuildLogView::Latest,
+        }
+    }
+
+    fn is(self, other: Self) -> bool {
+        std::mem::discriminant(&self) == std::mem::discriminant(&other)
+    }
 
     fn label(self) -> &'static str {
         match self {
-            Self::BuildLog => "Build log",
+            Self::BuildLog(_) => "Build log",
             Self::Checks => "Checks",
         }
     }
 
     fn href(self) -> &'static str {
         match self {
-            Self::BuildLog => "/",
+            Self::BuildLog(_) => "/",
             Self::Checks => "/checks",
         }
     }
 
     fn link(self, pipeline: &PipelineLocation) -> String {
         match self {
-            Self::BuildLog => format!("/pipelines/{}", pipeline.name()),
+            Self::BuildLog(BuildLogView::Latest) => format!("/pipelines/{}", pipeline.name()),
+            Self::BuildLog(view) => format!("/pipelines/{}?view={}", pipeline.name(), view.name()),
             Self::Checks => format!("/checks/{}", pipeline.name()),
         }
     }
 
+    fn toggle(self) -> AnyView {
+        let Self::BuildLog(current) = self else {
+            return ().into_any();
+        };
+        let views = BuildLogView::ALL
+            .into_iter()
+            .map(|view| {
+                let class = match view == current {
+                    true => "current",
+                    false => "",
+                };
+
+                view! { <a class=class href=format!("?view={}", view.name())>{view.name()}</a> }
+            })
+            .collect_view();
+
+        view! { <nav class="toggle">{views}</nav> }.into_any()
+    }
+
     fn health(self, inspection: &SinkInspection) -> &'static str {
         match self {
-            Self::BuildLog if inspection.rows().iter().any(|row| row.status.failed()) => "dot bad",
+            Self::BuildLog(_) if inspection.rows().iter().any(|row| row.status.failed()) => {
+                "dot bad"
+            }
             Self::Checks if !inspection.discrepancies().is_empty() => "dot warn",
-            Self::BuildLog | Self::Checks => "dot ok",
+            Self::BuildLog(_) | Self::Checks => "dot ok",
         }
     }
 
@@ -73,7 +107,9 @@ impl Section {
         inspection: &SinkInspection,
     ) -> AnyView {
         match self {
-            Self::BuildLog => Page::inspected(id, pipeline, sink, inspection).into_any(),
+            Self::BuildLog(view) => {
+                Page::inspected(id, pipeline, sink, inspection, view).into_any()
+            }
             Self::Checks => Page::checked(inspection).into_any(),
         }
     }
@@ -175,6 +211,11 @@ impl Page {
         .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
         .dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); } .dot.warn { background: var(--warn); }
 
+        .toggle { display: inline-flex; margin: 0 0 16px; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+        .toggle a { padding: 4px 14px; color: var(--muted); background: var(--surface); }
+        .toggle a + a { border-left: 1px solid var(--border); }
+        .toggle a.current { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+        .toggle a:hover { text-decoration: none; color: var(--text); }
         .summary { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
         a.chip:hover { text-decoration: none; border-color: var(--accent); color: var(--accent); }
         .chip {
@@ -276,7 +317,7 @@ impl Page {
             ),
             Self::Unsurveyed { cause } => (
                 "Unsurveyed".to_owned(),
-                Section::BuildLog,
+                Section::BuildLog(BuildLogView::Latest),
                 view! { <main><div class="callout error">{cause}</div></main> }.into_any(),
             ),
         };
@@ -302,7 +343,7 @@ impl Page {
         let links = Section::ALL
             .into_iter()
             .map(|section| {
-                let class = match section == current {
+                let class = match section.is(current) {
                     true => "current",
                     false => "",
                 };
@@ -401,6 +442,7 @@ impl Page {
             </div>
             <h1>{location.name().to_owned()}</h1>
             <p class="subtitle mono">{location.directory().to_owned()}</p>
+            {section.toggle()}
             {sources}
         }
     }
@@ -467,13 +509,18 @@ impl Page {
         pipeline: &PipelineLocation,
         sink: &str,
         inspection: &SinkInspection,
+        view: BuildLogView,
     ) -> impl IntoView + use<> {
         let rows = inspection.rows();
         let failed = rows.iter().filter(|row| row.status.failed()).count();
+        let counted = match view {
+            BuildLogView::Latest => format!("{} tables", rows.len()),
+            BuildLogView::All => format!("{} rows", rows.len()),
+        };
 
         view! {
             <div class="summary">
-                <span class="chip">{format!("{} tables", rows.len())}</span>
+                <span class="chip">{counted}</span>
                 <span class="chip">{format!("{failed} failed")}</span>
                 <a class="chip" href=Section::Checks.link(pipeline)>
                     {format!("{} discrepancies", inspection.discrepancies().len())}

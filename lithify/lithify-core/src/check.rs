@@ -118,8 +118,8 @@ impl Expectation {
             });
         }
 
-        let latest = client.latest_build_logs(namespace, &Latest::Attempted)?;
-        let succeeded = client.latest_build_logs(namespace, &Latest::Succeeded)?;
+        let latest = client.build_logs(namespace, &Latest::Attempted.into())?;
+        let succeeded = client.build_logs(namespace, &Latest::Succeeded.into())?;
         let mut present = BTreeSet::new();
         for target in succeeded.iter().filter_map(BuildLog::target) {
             if client.exists(target)? {

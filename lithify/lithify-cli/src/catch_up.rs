@@ -52,8 +52,8 @@ impl<'a> CatchUp<'a> {
         Unrunnable: From<K::Error>,
     {
         Resumption::read(
-            &client.latest_build_logs(self.namespace(), &Latest::Attempted)?,
-            &client.latest_build_logs(self.namespace(), &Latest::Succeeded)?,
+            &client.build_logs(self.namespace(), &Latest::Attempted.into())?,
+            &client.build_logs(self.namespace(), &Latest::Succeeded.into())?,
             self.source.since(),
             &self.source.capture().to_json()?,
         )

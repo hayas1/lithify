@@ -6,12 +6,13 @@ use serde::de::DeserializeOwned;
 
 use lithify_config::infra::{Sink, Source};
 use lithify_config::{ArtifactKind, Pipeline};
-use lithify_core::check::{Expectation, Inspection};
+use lithify_core::build_log::BuildLogQuery;
+use lithify_core::check::Expectation;
 use lithify_core::position::RecordedAt;
 use lithify_core::sink::{SinkWarehouse, WarehouseClient, WarehouseFn};
 
 use crate::overview::{
-    PipelineLocation, PipelineOverview, SinkInspection, SinkOverview, SourceOverview,
+    BuildLogView, PipelineLocation, PipelineOverview, SinkInspection, SinkOverview, SourceOverview,
 };
 use crate::server::Survey;
 
@@ -53,13 +54,13 @@ where
         PipelineLocation::new(&name, &directory.display().to_string())
     }
 
-    fn overview(&self, directory: &Path) -> PipelineOverview {
+    fn overview(&self, directory: &Path, view: BuildLogView) -> PipelineOverview {
         let sources = Pipeline::<C, W>::open(directory)
             .map_err(|unreadable| unreadable.to_string())
             .and_then(|pipeline| {
                 pipeline
                     .sources()
-                    .map(|source| self.source(&pipeline, source))
+                    .map(|source| self.source(&pipeline, source, view))
                     .collect()
             });
 
@@ -70,6 +71,7 @@ where
         &self,
         pipeline: &Pipeline<C, W>,
         source: &Source<C>,
+        view: BuildLogView,
     ) -> Result<SourceOverview, String> {
         let capture =
             serde_json::to_string(source.capture()).map_err(|unwritten| unwritten.to_string())?;
@@ -87,7 +89,7 @@ where
                         now,
                     );
 
-                    SinkOverview::new(sink.name(), self.inspection(sink, &expectation))
+                    SinkOverview::new(sink.name(), self.inspection(sink, &expectation, view))
                 })
                 .collect(),
         ))
@@ -97,16 +99,17 @@ where
         &self,
         sink: &Sink<W>,
         expectation: &Expectation,
+        view: BuildLogView,
     ) -> Result<SinkInspection, String> {
         let reading = Reading {
             expectation,
             namespace: sink.artifacts().namespace(ArtifactKind::Snapshot),
+            view,
         };
 
         sink.warehouse()
             .with_client(sink.change_log(), &self.credential, reading)
             .map_err(|unopened| unopened.to_string())?
-            .map(SinkInspection::from)
     }
 }
 
@@ -124,27 +127,40 @@ where
             .collect())
     }
 
-    fn inspect(&self, name: &str) -> Result<Option<PipelineOverview>, String> {
+    fn inspect(&self, name: &str, view: BuildLogView) -> Result<Option<PipelineOverview>, String> {
         Ok(self
             .directories()?
             .iter()
             .find(|directory| Self::location(directory).name() == name)
-            .map(|directory| self.overview(directory)))
+            .map(|directory| self.overview(directory, view)))
     }
 }
 
 struct Reading<'a> {
     expectation: &'a Expectation,
     namespace: &'a str,
+    view: BuildLogView,
+}
+
+impl Reading<'_> {
+    fn read<K: WarehouseClient>(&self, client: &K) -> Result<SinkInspection, K::Error> {
+        let inspection = self.expectation.read(client, self.namespace)?;
+        let unbuilt = inspection.latest().is_empty();
+        let inspection = SinkInspection::from(inspection);
+
+        match (self.view, unbuilt) {
+            (BuildLogView::Latest, _) | (BuildLogView::All, true) => Ok(inspection),
+            (BuildLogView::All, false) => Ok(inspection
+                .showing(client.build_logs(self.namespace, &BuildLogQuery::from(self.view))?)),
+        }
+    }
 }
 
 impl WarehouseFn for Reading<'_> {
-    type Output = Result<Inspection, String>;
+    type Output = Result<SinkInspection, String>;
 
     fn call<K: WarehouseClient>(self, client: &K) -> Self::Output {
-        self.expectation
-            .read(client, self.namespace)
-            .map_err(|unread| unread.to_string())
+        self.read(client).map_err(|unread| unread.to_string())
     }
 }
 
@@ -154,8 +170,15 @@ mod tests {
 
     use serde::{Deserialize, Serialize};
 
+    use chrono::DateTime;
     use lithify_core::sink::{SinkWarehouse, WarehouseFn};
+    use ulid::Ulid;
+
+    use lithify_core::build_log::{BuildLog, Outcome, Run, Status};
+    use lithify_core::model::TableId;
+    use lithify_core::sink::TablePath;
     use lithify_core::testing::{Engine, Recorder};
+    use lithify_core::window::Window;
 
     use super::*;
     use crate::server::Survey;
@@ -170,6 +193,7 @@ mod tests {
     #[serde(rename_all = "lowercase")]
     enum Kept {
         Memory {},
+        Logged {},
         Unreachable { cause: String },
     }
 
@@ -184,6 +208,31 @@ mod tests {
 
     impl std::error::Error for Unreached {}
 
+    impl Kept {
+        fn logs() -> Vec<BuildLog> {
+            let built = |table: &str, from: i64| {
+                BuildLog::new(
+                    &Run::new(Ulid::nil(), "snapshot", "daily", "primary", "{}", "0.1.0"),
+                    Some(TableId::new("shop", table)),
+                    Some(TableId::new("shop", table)),
+                    None,
+                    Some(TablePath::new("mysql_shop", &format!("{table}_{from}"))),
+                    Window::new(RecordedAt::from(from), RecordedAt::from(from + 86_400_000)),
+                    Outcome::new(
+                        Status::Succeeded,
+                        DateTime::from_timestamp_millis(from).unwrap(),
+                    ),
+                )
+            };
+
+            vec![
+                built("people", 0),
+                built("people", 86_400_000),
+                built("pets", 86_400_000),
+            ]
+        }
+    }
+
     impl SinkWarehouse for Kept {
         type Credential = ();
         type Error = Unreached;
@@ -196,6 +245,9 @@ mod tests {
         ) -> Result<F::Output, Unreached> {
             match self {
                 Self::Memory {} => Ok(f.call(&Recorder::new(Engine::default()))),
+                Self::Logged {} => Ok(
+                    f.call(&Recorder::new(Engine::default()).logging("mysql_shop", &Self::logs()))
+                ),
                 Self::Unreachable { cause } => Err(Unreached(cause.clone())),
             }
         }
@@ -263,7 +315,10 @@ mod tests {
         let root = scratch("inspected");
         configure(&root.join("mysql"), INFRA);
 
-        let pipeline = surveyed(&root).inspect("mysql").unwrap().unwrap();
+        let pipeline = surveyed(&root)
+            .inspect("mysql", BuildLogView::Latest)
+            .unwrap()
+            .unwrap();
         let sources = pipeline.sources().unwrap();
         let sinks = sources[0].sinks();
 
@@ -277,6 +332,33 @@ mod tests {
     }
 
     #[test]
+    fn a_sink_shows_its_latest_build_of_each_table_or_every_build_newest_first() {
+        let root = scratch("viewed");
+        configure(
+            &root.join("mysql"),
+            &INFRA.replace("warehouse.memory = {}", "warehouse.logged = {}"),
+        );
+        let tables = |view| {
+            surveyed(&root)
+                .inspect("mysql", view)
+                .unwrap()
+                .unwrap()
+                .sources()
+                .unwrap()[0]
+                .sinks()[0]
+                .found()
+                .unwrap()
+                .rows()
+                .iter()
+                .map(|row| row.table.table().to_owned())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(tables(BuildLogView::Latest), ["people", "people", "pets"]);
+        assert_eq!(tables(BuildLogView::All), ["pets", "people", "people"]);
+    }
+
+    #[test]
     fn a_pipeline_that_could_not_be_opened_is_surveyed_beside_the_ones_that_were() {
         let root = scratch("unopened");
         configure(&root.join("mysql"), INFRA);
@@ -286,7 +368,7 @@ mod tests {
 
         assert!(
             surveyed
-                .inspect("mysql")
+                .inspect("mysql", BuildLogView::Latest)
                 .unwrap()
                 .unwrap()
                 .sources()
@@ -294,13 +376,16 @@ mod tests {
         );
         assert!(
             surveyed
-                .inspect("postgres")
+                .inspect("postgres", BuildLogView::Latest)
                 .unwrap()
                 .unwrap()
                 .sources()
                 .is_err()
         );
-        assert_eq!(surveyed.inspect("oracle").unwrap(), None);
+        assert_eq!(
+            surveyed.inspect("oracle", BuildLogView::Latest).unwrap(),
+            None
+        );
     }
 
     #[test]

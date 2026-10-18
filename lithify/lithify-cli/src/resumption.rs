@@ -68,7 +68,7 @@ impl Resumption {
         match self {
             Self::FromOrigin(_) => Ok(Vec::new()),
             Self::FromBuilt(start) => {
-                Ok(client.latest_build_logs(namespace, &Latest::SucceededUntil(*start))?)
+                Ok(client.build_logs(namespace, &Latest::SucceededUntil(*start).into())?)
             }
         }
     }

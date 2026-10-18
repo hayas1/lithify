@@ -2,18 +2,26 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::Html;
 use axum::routing::get;
 
-use crate::overview::{PipelineLocation, PipelineOverview};
+use serde::Deserialize;
+
+use crate::overview::{BuildLogView, PipelineLocation, PipelineOverview};
 use crate::page::{Page, Section};
 
 pub trait Survey: Send + Sync + 'static {
     fn pipelines(&self) -> Result<Vec<PipelineLocation>, String>;
 
-    fn inspect(&self, name: &str) -> Result<Option<PipelineOverview>, String>;
+    fn inspect(&self, name: &str, view: BuildLogView) -> Result<Option<PipelineOverview>, String>;
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct Viewing {
+    #[serde(default)]
+    view: BuildLogView,
 }
 
 pub struct Board<S> {
@@ -77,7 +85,7 @@ impl<S: Survey> Board<S> {
     }
 
     async fn build_logs(State(survey): State<Arc<S>>) -> (StatusCode, Html<String>) {
-        Self::index(survey, Section::BuildLog).await
+        Self::index(survey, Section::BuildLog(BuildLogView::Latest)).await
     }
 
     async fn checks(State(survey): State<Arc<S>>) -> (StatusCode, Html<String>) {
@@ -87,8 +95,9 @@ impl<S: Survey> Board<S> {
     async fn build_log(
         State(survey): State<Arc<S>>,
         Path(name): Path<String>,
+        Query(viewing): Query<Viewing>,
     ) -> (StatusCode, Html<String>) {
-        Self::pipeline(survey, name, Section::BuildLog).await
+        Self::pipeline(survey, name, Section::BuildLog(viewing.view)).await
     }
 
     async fn check(
@@ -115,7 +124,7 @@ impl<S: Survey> Board<S> {
     ) -> (StatusCode, Html<String>) {
         let named = name.clone();
         let surveyed = Self::blocking(survey, move |survey| {
-            Ok((survey.pipelines()?, survey.inspect(&named)?))
+            Ok((survey.pipelines()?, survey.inspect(&named, section.view())?))
         })
         .await;
 
@@ -156,6 +165,8 @@ mod tests {
 
     use lithify_core::schedule::Schedule;
 
+    use std::sync::Mutex;
+
     use super::*;
     use crate::overview::tests::overview;
     use crate::overview::{SinkInspection, SinkOverview, SourceOverview};
@@ -163,6 +174,7 @@ mod tests {
     struct Surveyed {
         located: Result<Vec<PipelineLocation>, String>,
         inspected: Vec<PipelineOverview>,
+        viewed: Mutex<Vec<BuildLogView>>,
     }
 
     impl Surveyed {
@@ -173,6 +185,7 @@ mod tests {
                     PipelineLocation::new("postgres", "postgres"),
                 ]),
                 inspected,
+                viewed: Mutex::default(),
             }
         }
 
@@ -180,6 +193,7 @@ mod tests {
             Self {
                 located: Err(cause.to_owned()),
                 inspected: vec![],
+                viewed: Mutex::default(),
             }
         }
     }
@@ -189,7 +203,13 @@ mod tests {
             self.located.clone()
         }
 
-        fn inspect(&self, name: &str) -> Result<Option<PipelineOverview>, String> {
+        fn inspect(
+            &self,
+            name: &str,
+            view: BuildLogView,
+        ) -> Result<Option<PipelineOverview>, String> {
+            self.viewed.lock().unwrap().push(view);
+
             Ok(self
                 .inspected
                 .iter()
@@ -212,15 +232,47 @@ mod tests {
     }
 
     async fn get(survey: Surveyed, uri: &str) -> (StatusCode, String) {
-        let response = Board::new(survey)
-            .router()
-            .oneshot(Request::get(uri).body(Body::empty()).unwrap())
-            .await
-            .unwrap();
+        let (status, page, _) = viewed(survey, uri).await;
+
+        (status, page)
+    }
+
+    async fn viewed(survey: Surveyed, uri: &str) -> (StatusCode, String, Vec<BuildLogView>) {
+        let survey = Arc::new(survey);
+        let response = Board {
+            survey: survey.clone(),
+        }
+        .router()
+        .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
         let status = response.status();
         let body = response.into_body().collect().await.unwrap().to_bytes();
+        let viewed = survey.viewed.lock().unwrap().clone();
 
-        (status, String::from_utf8(body.to_vec()).unwrap())
+        (status, String::from_utf8(body.to_vec()).unwrap(), viewed)
+    }
+
+    #[tokio::test]
+    async fn a_build_log_shows_the_latest_build_of_each_table_unless_all_are_asked_for() {
+        let (_, latest, asked) = viewed(Surveyed::of(vec![overview()]), "/pipelines/mysql").await;
+        assert_eq!(asked, [BuildLogView::Latest]);
+        assert!(latest.contains("href=\"?view=all\""));
+
+        let (_, all, asked) =
+            viewed(Surveyed::of(vec![overview()]), "/pipelines/mysql?view=all").await;
+        assert_eq!(asked, [BuildLogView::All]);
+        assert!(all.contains("href=\"?view=latest\""));
+        assert!(all.contains("2 rows"));
+    }
+
+    #[tokio::test]
+    async fn the_checks_read_the_latest_build_of_each_table_alone() {
+        let (_, page, asked) =
+            viewed(Surveyed::of(vec![overview()]), "/checks/mysql?view=all").await;
+
+        assert_eq!(asked, [BuildLogView::Latest]);
+        assert!(!page.contains("?view="));
     }
 
     #[tokio::test]

@@ -1,7 +1,7 @@
 use std::fmt;
 
 use crate::artifact::{ArtifactBuilder, UnbuildableArtifact};
-use crate::build_log::{BuildLog, Latest};
+use crate::build_log::{BuildLog, BuildLogQuery};
 use crate::model::{ColumnModel, ColumnType};
 use crate::source::{ColumnPath, SchemaChangeLog};
 use crate::sql::SqlString;
@@ -234,10 +234,10 @@ pub trait WarehouseClient {
     // instead of being spelled out as SQL by every artifact.
     fn execute(&self, statement: &SqlString) -> Result<(), Self::Error>;
 
-    fn latest_build_logs(
+    fn build_logs(
         &self,
         namespace: &str,
-        latest: &Latest,
+        query: &BuildLogQuery,
     ) -> Result<Vec<BuildLog>, Self::Error>;
 
     fn create_build_log<E>(&self, namespace: &str) -> Result<(), E>

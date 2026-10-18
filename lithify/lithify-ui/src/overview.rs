@@ -1,6 +1,8 @@
 use chrono::NaiveDate;
 
-use lithify_core::build_log::{BuildLog, Status};
+use serde::Deserialize;
+
+use lithify_core::build_log::{BuildLog, BuildLogQuery, Latest, Status};
 use lithify_core::check::Inspection;
 use lithify_core::model::TableId;
 use lithify_core::schedule::Schedule;
@@ -96,31 +98,59 @@ impl SinkOverview {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BuildLogView {
+    #[default]
+    Latest,
+    All,
+}
+
+impl BuildLogView {
+    pub const ALL: [Self; 2] = [Self::Latest, Self::All];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Latest => "latest",
+            Self::All => "all",
+        }
+    }
+}
+
+impl From<BuildLogView> for BuildLogQuery {
+    fn from(view: BuildLogView) -> Self {
+        match view {
+            BuildLogView::Latest => Latest::Attempted.into(),
+            BuildLogView::All => Self::All,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SinkInspection {
     schedule: Schedule,
-    latest: Vec<BuildLog>,
+    logs: Vec<BuildLog>,
     discrepancies: Vec<String>,
 }
 
 impl SinkInspection {
-    pub fn new(schedule: Schedule, latest: Vec<BuildLog>, discrepancies: Vec<String>) -> Self {
+    pub fn new(schedule: Schedule, logs: Vec<BuildLog>, discrepancies: Vec<String>) -> Self {
         Self {
             schedule,
-            latest,
+            logs,
             discrepancies,
         }
     }
 
     pub fn rows(&self) -> Vec<TableRow> {
-        let mut rows: Vec<_> = self
-            .latest
+        self.logs
             .iter()
             .filter_map(|log| TableRow::new(log, self.schedule))
-            .collect();
-        rows.sort_by(|left, right| left.table.cmp(&right.table));
+            .collect()
+    }
 
-        rows
+    pub fn showing(self, logs: Vec<BuildLog>) -> Self {
+        Self { logs, ..self }
     }
 
     pub fn discrepancies(&self) -> &[String] {
@@ -130,9 +160,12 @@ impl SinkInspection {
 
 impl From<Inspection> for SinkInspection {
     fn from(inspection: Inspection) -> Self {
+        let mut latest = inspection.latest().to_vec();
+        latest.sort_by(|left, right| left.table().cmp(&right.table()));
+
         Self::new(
             inspection.schedule(),
-            inspection.latest().to_vec(),
+            latest,
             inspection
                 .discrepancies()
                 .iter()
@@ -223,8 +256,8 @@ pub(crate) mod tests {
         SinkInspection::new(
             Schedule::Daily,
             vec![
-                logged("pets", None, Status::Failed("no such column".to_owned())),
                 logged("people", Some("people_20260919"), Status::Succeeded),
+                logged("pets", None, Status::Failed("no such column".to_owned())),
             ],
             vec!["shop.pets failed to build".to_owned()],
         )
@@ -253,7 +286,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_sink_lists_the_latest_build_of_each_table_in_the_order_of_their_names() {
+    fn a_sink_lists_its_builds_in_the_order_they_were_read() {
         let rows = inspection().rows();
 
         assert_eq!(

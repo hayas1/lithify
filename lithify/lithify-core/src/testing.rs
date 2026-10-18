@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 
-use crate::build_log::{BuildLog, Latest};
+use crate::build_log::{BuildLog, BuildLogQuery, Latest};
 use crate::model::ColumnType;
 use crate::sink::{
     ChangeLogSql, OpenWarehouse, TablePath, UnsupportedColumn, Warehouse, WarehouseClient,
@@ -153,15 +153,18 @@ impl<W: Warehouse> WarehouseClient for Recorder<W> {
         Ok(())
     }
 
-    fn latest_build_logs(&self, _: &str, latest: &Latest) -> Result<Vec<BuildLog>, Self::Error> {
+    fn build_logs(&self, _: &str, query: &BuildLogQuery) -> Result<Vec<BuildLog>, Self::Error> {
         let logged = self.logged.iter().cloned();
 
-        Ok(match latest {
-            Latest::Attempted => logged.collect(),
-            Latest::Succeeded => logged.filter(|log| !log.status().failed()).collect(),
-            Latest::SucceededUntil(to) => logged
+        Ok(match query {
+            BuildLogQuery::Latest(Latest::Attempted) => logged.collect(),
+            BuildLogQuery::Latest(Latest::Succeeded) => {
+                logged.filter(|log| !log.status().failed()).collect()
+            }
+            BuildLogQuery::Latest(Latest::SucceededUntil(to)) => logged
                 .filter(|log| !log.status().failed() && log.window().to() == to)
                 .collect(),
+            BuildLogQuery::All => logged.rev().collect(),
         })
     }
 

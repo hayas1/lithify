@@ -7,7 +7,7 @@ use google_cloud_bigquery::query::Row;
 use google_cloud_gax::client_builder;
 use tokio::runtime::Runtime;
 
-use lithify_core::build_log::{BuildLog, Latest, UnreadableBuildLog};
+use lithify_core::build_log::{BuildLog, BuildLogQuery, UnreadableBuildLog};
 use lithify_core::event::MalformedEvent;
 use lithify_core::sink::{ChangeLogSql, OpenWarehouse, TablePath, WarehouseClient, WarehouseSql};
 use lithify_core::source::{
@@ -114,12 +114,12 @@ impl WarehouseClient for BigQueryClient {
         Ok(counted.iter().any(|count| count.0 > 0))
     }
 
-    fn latest_build_logs(
+    fn build_logs(
         &self,
         namespace: &str,
-        latest: &Latest,
+        query: &BuildLogQuery,
     ) -> Result<Vec<BuildLog>, Self::Error> {
-        self.records::<BigQueryBuildLogRow>(&latest.select(&self.warehouse, namespace))?
+        self.records::<BigQueryBuildLogRow>(&query.select(&self.warehouse, namespace))?
             .into_iter()
             .map(|row| BuildLog::try_from(row.0).map_err(Unqueryable::Misrecorded))
             .collect()

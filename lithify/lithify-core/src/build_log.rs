@@ -166,6 +166,22 @@ impl BuildLog {
         warehouse.insert(&path, &columns, &select)
     }
 
+    fn projection<W: WarehouseSql + ?Sized>(warehouse: &W) -> Vec<String> {
+        Self::COLUMNS
+            .iter()
+            .map(|(name, column_type)| {
+                let column = warehouse.identifier(name);
+
+                match column_type {
+                    ColumnType::ZonedTimestamp => {
+                        format!("{} AS {column}", warehouse.unix_millis(&column))
+                    }
+                    _ => column.to_string(),
+                }
+            })
+            .collect()
+    }
+
     pub fn path(namespace: &str) -> TablePath {
         TablePath::new(namespace, "_lithify_log")
     }
@@ -363,19 +379,6 @@ impl Latest {
     const DEPARTED: &str = "departed";
 
     pub fn select<W: WarehouseSql + ?Sized>(&self, warehouse: &W, namespace: &str) -> SqlString {
-        let columns = BuildLog::COLUMNS
-            .iter()
-            .map(|(name, column_type)| {
-                let column = warehouse.identifier(name);
-
-                match column_type {
-                    ColumnType::ZonedTimestamp => {
-                        format!("{} AS {column}", warehouse.unix_millis(&column))
-                    }
-                    _ => column.to_string(),
-                }
-            })
-            .collect::<Vec<_>>();
         let partition = ["artifact", "schedule", "table_to"]
             .map(|name| warehouse.identifier(name))
             .join(", ");
@@ -383,7 +386,7 @@ impl Latest {
 
         SqlString::from(format!(
             "SELECT {}\nFROM {log} AS {}\nWHERE {}\nQUALIFY ROW_NUMBER() OVER (PARTITION BY {partition} ORDER BY {} DESC) = 1\nORDER BY {partition}",
-            columns.join(", "),
+            BuildLog::projection(warehouse).join(", "),
             warehouse.identifier(Self::ALIAS),
             self.condition(warehouse, &log),
             warehouse.identifier(BuildLog::ID),
@@ -470,6 +473,33 @@ impl Latest {
 
     fn column<W: WarehouseSql + ?Sized>(warehouse: &W, alias: &SqlString, column: &str) -> String {
         format!("{alias}.{}", warehouse.identifier(column))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BuildLogQuery {
+    Latest(Latest),
+    // TODO: page through the build log rather than read all of it at once.
+    All,
+}
+
+impl From<Latest> for BuildLogQuery {
+    fn from(latest: Latest) -> Self {
+        Self::Latest(latest)
+    }
+}
+
+impl BuildLogQuery {
+    pub fn select<W: WarehouseSql + ?Sized>(&self, warehouse: &W, namespace: &str) -> SqlString {
+        match self {
+            Self::Latest(latest) => latest.select(warehouse, namespace),
+            Self::All => SqlString::from(format!(
+                "SELECT {}\nFROM {}\nORDER BY {} DESC",
+                BuildLog::projection(warehouse).join(", "),
+                warehouse.table_ref(&BuildLog::path(namespace)),
+                warehouse.identifier(BuildLog::ID),
+            )),
+        }
     }
 }
 

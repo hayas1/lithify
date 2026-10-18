@@ -529,7 +529,7 @@ pub(crate) mod tests {
         assert_eq!(rows(&client, snapshot), built_once);
         assert_ne!(once[0].run_id(), twice[0].run_id());
         let latest = client
-            .latest_build_logs("mysql_shop", &Latest::Attempted)
+            .build_logs("mysql_shop", &Latest::Attempted.into())
             .unwrap();
         assert_eq!(
             latest

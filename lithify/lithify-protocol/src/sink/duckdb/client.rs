@@ -1,7 +1,7 @@
 use duckdb::types::{FromSql, Type};
 use duckdb::{Connection, Error, Statement};
 
-use lithify_core::build_log::{BuildLog, BuildLogRow, Latest};
+use lithify_core::build_log::{BuildLog, BuildLogQuery, BuildLogRow};
 use lithify_core::sink::{ChangeLogSql, TablePath, WarehouseClient, WarehouseSql};
 use lithify_core::source::{
     ChangeLogs, SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed,
@@ -65,13 +65,13 @@ impl WarehouseClient for DuckDbClient {
         Ok(count > 0)
     }
 
-    fn latest_build_logs(
+    fn build_logs(
         &self,
         namespace: &str,
-        latest: &Latest,
+        query: &BuildLogQuery,
     ) -> Result<Vec<BuildLog>, Self::Error> {
         self.connection
-            .prepare(latest.select(&self.warehouse, namespace).as_str())?
+            .prepare(query.select(&self.warehouse, namespace).as_str())?
             .query_map([], |row| {
                 Ok(BuildLogRow {
                     run_id: row.get("run_id")?,
@@ -161,6 +161,7 @@ mod tests {
     use crate::source::debezium::tests::described;
     use chrono::DateTime;
     use lithify_core::artifact::UnbuildableArtifact;
+    use lithify_core::build_log::Latest;
     use lithify_core::build_log::{Outcome, Run, Status};
     use lithify_core::event::{MalformedEvent, SchemaChange};
     use lithify_core::listener::OutOfOrder;
@@ -370,7 +371,7 @@ mod tests {
     }
 
     fn latest(client: &DuckDbClient, latest: Latest) -> Vec<BuildLog> {
-        client.latest_build_logs("mysql_shop", &latest).unwrap()
+        client.build_logs("mysql_shop", &latest.into()).unwrap()
     }
 
     #[derive(Debug)]
@@ -424,6 +425,18 @@ mod tests {
         assert_eq!(
             latest(&logging(&history), Latest::Attempted),
             [history[3].clone(), history[4].clone()]
+        );
+    }
+
+    #[test]
+    fn a_build_log_reads_back_every_record_from_the_newest() {
+        let history = history();
+
+        assert_eq!(
+            logging(&history)
+                .build_logs("mysql_shop", &BuildLogQuery::All)
+                .unwrap(),
+            history.into_iter().rev().collect::<Vec<_>>()
         );
     }
 
