@@ -213,7 +213,7 @@ pub(crate) mod tests {
         let source = pipeline.sources().next().unwrap();
         let sink = pipeline
             .sinks()
-            .find(|sink| sink.name() == "rustfs")
+            .find(|sink| sink.name() == "duckdb_s3")
             .unwrap();
         let client = DuckDbClient::new(
             Connection::open_in_memory().unwrap(),
@@ -257,7 +257,7 @@ pub(crate) mod tests {
         let source = pipeline.sources().next().unwrap();
         let sink = pipeline
             .sinks()
-            .find(|sink| sink.name() == "rustfs")
+            .find(|sink| sink.name() == "duckdb_s3")
             .unwrap();
         let client = DuckDbClient::new(
             Connection::open_in_memory().unwrap(),
@@ -293,7 +293,7 @@ pub(crate) mod tests {
         let source = pipeline.sources().next().unwrap();
         let sink = pipeline
             .sinks()
-            .find(|sink| sink.name() == "rustfs")
+            .find(|sink| sink.name() == "duckdb_s3")
             .unwrap();
         let client = DuckDbClient::new(
             Connection::open_in_memory().unwrap(),
@@ -431,7 +431,7 @@ pub(crate) mod tests {
         let pipeline = pipeline();
         let sink = pipeline
             .sinks()
-            .find(|sink| sink.name() == "rustfs")
+            .find(|sink| sink.name() == "duckdb_s3")
             .unwrap();
         let client = DuckDbClient::new(
             Connection::open_in_memory().unwrap(),
@@ -449,7 +449,7 @@ pub(crate) mod tests {
         let source = pipeline.sources().next().unwrap();
         let sink = pipeline
             .sinks()
-            .find(|sink| sink.name() == "rustfs")
+            .find(|sink| sink.name() == "duckdb_s3")
             .unwrap();
         let window = Window::new(RecordedAt::from(0), RecordedAt::from(1789948800000));
 

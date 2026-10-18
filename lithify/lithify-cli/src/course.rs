@@ -193,7 +193,7 @@ pub(crate) mod tests {
         let source = pipeline.sources().next().unwrap();
         let sink = pipeline
             .sinks()
-            .find(|sink| sink.name() == "rustfs")
+            .find(|sink| sink.name() == "duckdb_s3")
             .unwrap();
         let settlement = Build::new(sink, source).unwrap();
         let mut journal = Journal::default();
