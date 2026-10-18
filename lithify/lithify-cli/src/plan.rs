@@ -130,9 +130,7 @@ impl<'a, K, S: Settlement> SnapshotPlan<'a, K, S> {
                 logs.row_changes(),
                 table.clone(),
                 window,
-                self.previous
-                    .iter()
-                    .find(|log| log.table_to() == Some(table)),
+                snapshot.base(self.previous, table, window),
             )
         });
         let catalog = self.client.replay::<Unrunnable, _>(

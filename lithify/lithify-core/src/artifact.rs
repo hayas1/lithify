@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::build_log::{BuildLog, Outcome, Run};
+use crate::build_log::{BuildLog, Outcome, Run, Series};
 use crate::listener::SchemaChangeListener;
 use crate::model::TableId;
 use crate::sink::{TablePath, UnsupportedColumn, Warehouse};
@@ -48,10 +48,25 @@ impl From<UnsupportedColumn> for UnbuildableArtifact {
 }
 
 pub trait Artifact {
+    const KIND: &'static str;
+
+    type From: Artifact;
+
     type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>: ArtifactBuilder
         + SchemaChangeListener<L::Position, Context = W, Error = UnbuildableArtifact>
     where
         Self: 'a;
+
+    fn series(&self) -> Series;
+
+    fn windows(&self, daily: &Window) -> Vec<Window>;
+
+    fn base<'b>(
+        &self,
+        built: &'b [BuildLog],
+        table: &TableId,
+        window: &Window,
+    ) -> Option<&'b BuildLog>;
 
     fn target(&self, table: &TableId, window: &Window) -> Result<TablePath, UnbuildableArtifact>;
 

@@ -3,6 +3,7 @@ use serde::Deserialize;
 use lithify_artifact::snapshot::{self, Snapshot};
 use lithify_config::Declaration;
 use lithify_config::infra::Sink;
+use lithify_core::artifact::Artifact;
 use lithify_core::build_log::Series;
 use lithify_core::schedule::Schedule;
 use lithify_core::sink::Namespace;
@@ -46,7 +47,7 @@ pub struct DeclaredSnapshot<'a> {
 }
 
 impl<'a> DeclaredSnapshot<'a> {
-    pub const ARTIFACT: &'static str = "snapshot";
+    pub const ARTIFACT: &'static str = Snapshot::KIND;
 
     pub fn of(sink: &'a Sink<WarehouseConfig, ArtifactConfig>) -> Result<Self, Unrunnable> {
         let undeclared = || Unrunnable::Undeclared {
@@ -74,7 +75,7 @@ impl<'a> DeclaredSnapshot<'a> {
     }
 
     pub fn series(&self) -> Series {
-        Series::new(Self::ARTIFACT, &self.schedule().to_string())
+        self.artifact().series()
     }
 
     pub fn artifact(&self) -> Snapshot {

@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
-use lithify_core::build_log::{BuildLog, Outcome, Run};
+use lithify_core::build_log::{BuildLog, Outcome, Run, Series};
 use lithify_core::era::Era;
 use lithify_core::listener::{
     Alteration, Appearance, SchemaChangeListener, TableAltered, TableCreated, TableDropped,
@@ -60,7 +60,32 @@ impl Snapshot {
 }
 
 impl Artifact for Snapshot {
+    const KIND: &'static str = "snapshot";
+
+    type From = Self;
+
     type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = SnapshotBuilder<'a, L, W>;
+
+    fn series(&self) -> Series {
+        Series::new(Self::KIND, &Schedule::Daily.to_string())
+    }
+
+    fn windows(&self, daily: &Window) -> Vec<Window> {
+        vec![daily.clone()]
+    }
+
+    fn base<'b>(
+        &self,
+        built: &'b [BuildLog],
+        table: &TableId,
+        window: &Window,
+    ) -> Option<&'b BuildLog> {
+        built.iter().find(|log| {
+            log.advances(&self.series())
+                && log.table_to() == Some(table)
+                && log.window().to() == window.from()
+        })
+    }
 
     fn target(&self, table: &TableId, window: &Window) -> Result<TablePath, UnbuildableArtifact> {
         let at = DateTime::<Utc>::from(window.last());
@@ -376,6 +401,56 @@ impl<L: RowChangeLog, W: Warehouse> ArtifactBuilder for SnapshotBuilder<'_, L, W
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn built(artifact: &str, schedule: &str, table: &str, (from, to): (i64, i64)) -> BuildLog {
+        BuildLog::new(
+            &Run::new(
+                ulid::Ulid::nil(),
+                DateTime::UNIX_EPOCH,
+                artifact,
+                schedule,
+                "primary",
+                "{}",
+                "0.1.0",
+            ),
+            Some(TableId::new("shop", table)),
+            Some(TableId::new("shop", table)),
+            None,
+            Some(TablePath::new("mysql_shop", &format!("{table}_{to}"))),
+            Window::new(Ts::try_from(from).unwrap(), Ts::try_from(to).unwrap()),
+            Outcome::new(Status::Succeeded, DateTime::UNIX_EPOCH),
+        )
+    }
+
+    #[test]
+    fn a_snapshot_folds_onto_the_shard_its_table_closed_with_as_its_window_opened() {
+        let built = [
+            built("snapshot", "daily", "pets", (0, 10)),
+            built("snapshot", "daily", "people", (0, 5)),
+            built("instant", "09:00", "people", (0, 10)),
+            built("snapshot", "daily", "people", (0, 10)),
+        ];
+        let window = Window::new(Ts::try_from(10).unwrap(), Ts::try_from(20).unwrap());
+
+        assert_eq!(
+            Snapshot::new("mysql_shop", "%Y%m%d").base(
+                &built,
+                &TableId::new("shop", "people"),
+                &window
+            ),
+            Some(&built[3])
+        );
+    }
+
+    #[test]
+    fn a_snapshot_closes_one_window_for_each_daily_window() {
+        let daily = Window::new(Ts::try_from(0).unwrap(), Ts::try_from(10).unwrap());
+
+        assert_eq!(
+            Snapshot::new("mysql_shop", "%Y%m%d").windows(&daily),
+            [daily]
+        );
+    }
 
     #[test]
     fn a_snapshot_is_declared_with_how_its_shards_are_named_and_where_they_are_placed() {
