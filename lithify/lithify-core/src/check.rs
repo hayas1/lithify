@@ -4,7 +4,7 @@ use std::fmt::{self, Display, Formatter};
 use crate::build_log::{BuildLog, Latest};
 use crate::model::TableId;
 use crate::schedule::Schedule;
-use crate::sink::{TablePath, WarehouseClient};
+use crate::sink::{Namespace, TablePath, WarehouseClient};
 use crate::ts::{Event, Ts};
 use crate::window::Window;
 
@@ -108,7 +108,7 @@ impl Expectation {
     pub fn read<K: WarehouseClient>(
         &self,
         client: &K,
-        namespace: &str,
+        namespace: &Namespace,
     ) -> Result<Inspection, K::Error> {
         if !client.exists(&BuildLog::path(namespace))? {
             return Ok(Inspection {
@@ -417,12 +417,15 @@ mod tests {
         let people = logged(2, "people", day("2026-09-20"), Status::Succeeded);
         let pets = logged(2, "pets", day("2026-09-20"), Status::Succeeded);
         let client = Recorder::new(Engine::default())
-            .logging("mysql_shop", &[people.clone(), pets.clone()])
+            .logging(
+                &Namespace::from("mysql_shop"),
+                &[people.clone(), pets.clone()],
+            )
             .holding(&[people.target().unwrap().clone()]);
 
         assert_eq!(
             expected("2026-09-21T05:00:00Z")
-                .read(&client, "mysql_shop")
+                .read(&client, &Namespace::from("mysql_shop"))
                 .unwrap()
                 .discrepancies(),
             [Discrepancy::Missing {
@@ -436,7 +439,10 @@ mod tests {
     fn a_warehouse_holding_no_build_log_was_never_built() {
         assert_eq!(
             expected("2026-09-21T05:00:00Z")
-                .read(&Recorder::new(Engine::default()), "mysql_shop")
+                .read(
+                    &Recorder::new(Engine::default()),
+                    &Namespace::from("mysql_shop")
+                )
                 .unwrap()
                 .discrepancies(),
             [Discrepancy::NeverBuilt {
@@ -457,9 +463,11 @@ mod tests {
         assert_eq!(
             expected("2026-09-21T05:00:00Z")
                 .read(
-                    &Recorder::new(Engine::default())
-                        .logging("mysql_shop", std::slice::from_ref(&failed)),
-                    "mysql_shop"
+                    &Recorder::new(Engine::default()).logging(
+                        &Namespace::from("mysql_shop"),
+                        std::slice::from_ref(&failed)
+                    ),
+                    &Namespace::from("mysql_shop")
                 )
                 .unwrap()
                 .latest(),

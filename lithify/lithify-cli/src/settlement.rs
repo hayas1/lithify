@@ -7,7 +7,7 @@ use lithify_config::ArtifactKind;
 use lithify_config::infra::{Sink, Source};
 use lithify_core::artifact::ArtifactBuilder;
 use lithify_core::build_log::{BuildLog, Outcome, Run, Status};
-use lithify_core::sink::WarehouseClient;
+use lithify_core::sink::{Namespace, WarehouseClient};
 use lithify_core::sql::SqlString;
 use lithify_core::window::Window;
 
@@ -94,7 +94,7 @@ impl Settlement for DryRun {
 }
 
 pub struct Build {
-    namespace: String,
+    namespace: Namespace,
     run: Run,
 }
 
@@ -107,7 +107,7 @@ impl Build {
         let artifacts = sink.artifacts();
 
         Ok(Self {
-            namespace: artifacts.namespace(ArtifactKind::Snapshot).to_owned(),
+            namespace: Namespace::from(artifacts.namespace(ArtifactKind::Snapshot)),
             run: Run::new(
                 Ulid::from_datetime(now.into()),
                 now,

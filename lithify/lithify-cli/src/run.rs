@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 
 use lithify_config::infra::{Sink, Source};
 use lithify_config::{ArtifactKind, Pipeline};
-use lithify_core::sink::OpenWarehouse;
+use lithify_core::sink::{Namespace, OpenWarehouse};
 use lithify_core::ts::Ts;
 use lithify_protocol::sink::bigquery;
 use lithify_protocol::sink::bigquery::client::{BigQueryCapture, BigQueryClient};
@@ -90,14 +90,14 @@ impl Run {
             &source.capture().to_json()?,
             Ts::from(self.now),
         );
-        let namespace = sink.artifacts().namespace(ArtifactKind::Snapshot);
+        let namespace = Namespace::from(sink.artifacts().namespace(ArtifactKind::Snapshot));
 
         match sink.warehouse() {
             WarehouseConfig::DuckDb(config) => {
-                Ok(expectation.read(&self.duckdb(sink, config)?, namespace)?)
+                Ok(expectation.read(&self.duckdb(sink, config)?, &namespace)?)
             }
             WarehouseConfig::BigQuery(config) => {
-                Ok(expectation.read(&self.bigquery(sink, config)?, namespace)?)
+                Ok(expectation.read(&self.bigquery(sink, config)?, &namespace)?)
             }
         }
     }

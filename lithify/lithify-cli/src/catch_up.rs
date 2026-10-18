@@ -3,7 +3,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use lithify_config::ArtifactKind;
 use lithify_config::infra::{Sink, Source};
 use lithify_core::build_log::Latest;
-use lithify_core::sink::WarehouseClient;
+use lithify_core::sink::{Namespace, WarehouseClient};
 use lithify_core::ts::{Event, Ts};
 
 use crate::course::Itinerary;
@@ -45,7 +45,7 @@ impl<'a> CatchUp<'a> {
 
         Ok(Itinerary::new(
             resumption.windows(self.sink.artifacts().schedule(), self.until(&resumption)?),
-            resumption.previous(client, self.namespace())?,
+            resumption.previous(client, &self.namespace())?,
             Tables::Every,
         ))
     }
@@ -64,8 +64,8 @@ impl<'a> CatchUp<'a> {
         }
     }
 
-    fn namespace(&self) -> &str {
-        self.sink.artifacts().namespace(ArtifactKind::Snapshot)
+    fn namespace(&self) -> Namespace {
+        Namespace::from(self.sink.artifacts().namespace(ArtifactKind::Snapshot))
     }
 
     fn resumption<K>(&self, client: &K) -> Result<Resumption, Unrunnable>
@@ -74,8 +74,8 @@ impl<'a> CatchUp<'a> {
         Unrunnable: From<K::Error>,
     {
         Resumption::read(
-            &client.build_logs(self.namespace(), &Latest::Attempted.into())?,
-            &client.build_logs(self.namespace(), &Latest::Succeeded.into())?,
+            &client.build_logs(&self.namespace(), &Latest::Attempted.into())?,
+            &client.build_logs(&self.namespace(), &Latest::Succeeded.into())?,
             self.source.since(),
             &self.source.capture().to_json()?,
         )

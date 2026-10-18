@@ -166,7 +166,7 @@ impl S3 {
         format!(
             "s3://{}/{}/{}",
             self.bucket,
-            table.namespace(),
+            table.namespace().parts().collect::<Vec<_>>().join("/"),
             table.name()
         )
     }
@@ -271,6 +271,14 @@ pub(crate) mod tests {
         assert_eq!(
             s3("http://rustfs:9000").scan(&TablePath::new("mysql_shop_cdc", "mysql")),
             "read_parquet('s3://lithify/mysql_shop_cdc/mysql/*.parquet', union_by_name = true)"
+        );
+    }
+
+    #[test]
+    fn a_table_lies_under_each_name_of_its_namespace_as_a_directory() {
+        assert_eq!(
+            s3("http://rustfs:9000").scan(&TablePath::new("lithify.mysql_shop", "people")),
+            "read_parquet('s3://lithify/lithify/mysql_shop/people/*.parquet', union_by_name = true)"
         );
     }
 }

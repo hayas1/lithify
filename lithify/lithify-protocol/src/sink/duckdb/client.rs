@@ -2,7 +2,7 @@ use duckdb::types::{FromSql, Type};
 use duckdb::{Connection, Error, Statement};
 
 use lithify_core::build_log::{BuildLog, BuildLogQuery, BuildLogRow};
-use lithify_core::sink::{ChangeLogSql, TablePath, WarehouseClient, WarehouseSql};
+use lithify_core::sink::{ChangeLogSql, Namespace, TablePath, WarehouseClient, WarehouseSql};
 use lithify_core::source::{
     ChangeLogs, SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed,
 };
@@ -67,7 +67,7 @@ impl WarehouseClient for DuckDbClient {
 
     fn build_logs(
         &self,
-        namespace: &str,
+        namespace: &Namespace,
         query: &BuildLogQuery,
     ) -> Result<Vec<BuildLog>, Self::Error> {
         self.connection
@@ -364,16 +364,22 @@ mod tests {
             Connection::open_in_memory().unwrap(),
             DuckDbWarehouse::new("mysql_shop_cdc"),
         );
-        client.create_build_log::<Logged>("mysql_shop").unwrap();
+        client
+            .create_build_log::<Logged>(&Namespace::from("mysql_shop"))
+            .unwrap();
         for log in logs {
-            client.append_build_log("mysql_shop", log).unwrap();
+            client
+                .append_build_log(&Namespace::from("mysql_shop"), log)
+                .unwrap();
         }
 
         client
     }
 
     fn latest(client: &DuckDbClient, latest: Latest) -> Vec<BuildLog> {
-        client.build_logs("mysql_shop", &latest.into()).unwrap()
+        client
+            .build_logs(&Namespace::from("mysql_shop"), &latest.into())
+            .unwrap()
     }
 
     #[derive(Debug)]
@@ -415,7 +421,9 @@ mod tests {
     fn a_build_log_is_created_once_however_often_it_is_asked_for() {
         let client = logging(&history()[..1]);
 
-        client.create_build_log::<Logged>("mysql_shop").unwrap();
+        client
+            .create_build_log::<Logged>(&Namespace::from("mysql_shop"))
+            .unwrap();
 
         assert_eq!(latest(&client, Latest::Attempted).len(), 1);
     }
@@ -436,7 +444,7 @@ mod tests {
 
         assert_eq!(
             logging(&history)
-                .build_logs("mysql_shop", &BuildLogQuery::All)
+                .build_logs(&Namespace::from("mysql_shop"), &BuildLogQuery::All)
                 .unwrap(),
             history.into_iter().rev().collect::<Vec<_>>()
         );

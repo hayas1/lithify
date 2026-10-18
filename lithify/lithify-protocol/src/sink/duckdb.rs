@@ -7,26 +7,26 @@ pub mod from_sql;
 pub mod store;
 
 use lithify_core::model::ColumnType;
-use lithify_core::sink::{ChangeLogSql, TablePath, UnsupportedColumn, WarehouseSql};
+use lithify_core::sink::{ChangeLogSql, Namespace, TablePath, UnsupportedColumn, WarehouseSql};
 use lithify_core::sql::SqlString;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DuckDbWarehouse {
-    change_log: String,
+    change_log: Namespace,
     store: Option<config::Store>,
 }
 
 impl DuckDbWarehouse {
-    pub fn new(change_log: &str) -> Self {
+    pub fn new(change_log: impl Into<Namespace>) -> Self {
         Self {
-            change_log: change_log.to_owned(),
+            change_log: change_log.into(),
             store: None,
         }
     }
 
-    pub fn over(change_log: &str, store: config::Store) -> Self {
+    pub fn over(change_log: impl Into<Namespace>, store: config::Store) -> Self {
         Self {
-            change_log: change_log.to_owned(),
+            change_log: change_log.into(),
             store: Some(store),
         }
     }
@@ -138,7 +138,7 @@ impl WarehouseSql for DuckDbWarehouse {
         SqlString::from(format!(
             "SELECT COUNT(*) AS {} FROM information_schema.tables WHERE table_schema = {} AND table_name = {}",
             self.identifier("count"),
-            self.literal(table.namespace()),
+            self.literal(&table.namespace().to_string()),
             self.literal(table.name())
         ))
     }
@@ -184,7 +184,7 @@ impl WarehouseSql for DuckDbWarehouse {
 }
 
 impl ChangeLogSql for DuckDbWarehouse {
-    fn change_log_namespace(&self) -> &str {
+    fn change_log_namespace(&self) -> &Namespace {
         &self.change_log
     }
 }

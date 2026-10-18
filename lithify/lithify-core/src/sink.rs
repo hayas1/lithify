@@ -37,20 +37,47 @@ impl fmt::Display for UnsupportedColumn {
 impl std::error::Error for UnsupportedColumn {}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Namespace(Vec<String>);
+
+impl Namespace {
+    pub fn parts(&self) -> impl DoubleEndedIterator<Item = &str> {
+        self.0.iter().map(String::as_str)
+    }
+}
+
+impl From<&str> for Namespace {
+    fn from(path: &str) -> Self {
+        Self(path.split('.').map(str::to_owned).collect())
+    }
+}
+
+impl From<Vec<String>> for Namespace {
+    fn from(parts: Vec<String>) -> Self {
+        Self(parts)
+    }
+}
+
+impl fmt::Display for Namespace {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0.join("."))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TablePath {
-    namespace: String,
+    namespace: Namespace,
     name: String,
 }
 
 impl TablePath {
-    pub fn new(namespace: &str, name: &str) -> Self {
+    pub fn new(namespace: impl Into<Namespace>, name: &str) -> Self {
         Self {
-            namespace: namespace.to_owned(),
+            namespace: namespace.into(),
             name: name.to_owned(),
         }
     }
 
-    pub fn namespace(&self) -> &str {
+    pub fn namespace(&self) -> &Namespace {
         &self.namespace
     }
 
@@ -68,8 +95,14 @@ impl fmt::Display for TablePath {
 pub trait WarehouseSql {
     fn identifier(&self, name: &str) -> SqlString;
 
-    fn namespace_ref(&self, namespace: &str) -> SqlString {
-        self.identifier(namespace)
+    fn namespace_ref(&self, namespace: &Namespace) -> SqlString {
+        SqlString::from(
+            namespace
+                .parts()
+                .map(|part| self.identifier(part).to_string())
+                .collect::<Vec<_>>()
+                .join("."),
+        )
     }
 
     fn table_ref(&self, table: &TablePath) -> SqlString;
@@ -104,7 +137,7 @@ pub trait WarehouseSql {
 
     fn timestamp_millis(&self, milliseconds: i64) -> SqlString;
 
-    fn create_namespace(&self, namespace: &str) -> SqlString {
+    fn create_namespace(&self, namespace: &Namespace) -> SqlString {
         SqlString::from(format!(
             "CREATE SCHEMA IF NOT EXISTS {}",
             self.namespace_ref(namespace)
@@ -156,10 +189,10 @@ pub trait WarehouseSql {
 }
 
 pub trait ChangeLogSql: WarehouseSql {
-    fn change_log_namespace(&self) -> &str;
+    fn change_log_namespace(&self) -> &Namespace;
 
     fn change_log(&self, topic: &str) -> TablePath {
-        TablePath::new(self.change_log_namespace(), topic)
+        TablePath::new(self.change_log_namespace().clone(), topic)
     }
 
     fn change_log_ref(&self, topic: &str) -> SqlString {
@@ -236,11 +269,11 @@ pub trait WarehouseClient {
 
     fn build_logs(
         &self,
-        namespace: &str,
+        namespace: &Namespace,
         query: &BuildLogQuery,
     ) -> Result<Vec<BuildLog>, Self::Error>;
 
-    fn create_build_log<E>(&self, namespace: &str) -> Result<(), E>
+    fn create_build_log<E>(&self, namespace: &Namespace) -> Result<(), E>
     where
         E: From<Self::Error> + From<UnbuildableArtifact>,
     {
@@ -256,7 +289,7 @@ pub trait WarehouseClient {
 
     fn exists(&self, table: &TablePath) -> Result<bool, Self::Error>;
 
-    fn append_build_log(&self, namespace: &str, log: &BuildLog) -> Result<(), Self::Error> {
+    fn append_build_log(&self, namespace: &Namespace, log: &BuildLog) -> Result<(), Self::Error> {
         self.execute(&log.insert(self.warehouse(), namespace))
     }
 
@@ -296,7 +329,7 @@ mod tests {
             warehouse: &W,
         ) -> Result<Vec<SqlString>, UnbuildableArtifact> {
             Ok(vec![
-                warehouse.create_namespace("shop"),
+                warehouse.create_namespace(&Namespace::from("shop")),
                 SqlString::from("CREATE TABLE shop.people (id BIGINT)"),
             ])
         }
@@ -371,6 +404,22 @@ mod tests {
                 &SqlString::from("SELECT 1")
             ),
             "INSERT INTO \"shop\".\"people\" (\"id\")\nSELECT 1"
+        );
+    }
+
+    #[test]
+    fn a_namespace_is_a_path_of_names_joined_by_dots() {
+        let namespace = Namespace::from("analytics.shop");
+
+        assert_eq!(namespace.parts().collect::<Vec<_>>(), ["analytics", "shop"]);
+        assert_eq!(namespace.to_string(), "analytics.shop");
+    }
+
+    #[test]
+    fn a_table_is_written_after_the_namespace_it_lies_in() {
+        assert_eq!(
+            TablePath::new("analytics.shop", "people").to_string(),
+            "analytics.shop.people"
         );
     }
 

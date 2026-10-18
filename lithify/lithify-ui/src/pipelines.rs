@@ -9,7 +9,7 @@ use lithify_config::{ArtifactKind, Pipeline};
 use lithify_core::build_log::{BuildLog, BuildLogQuery, Latest};
 use lithify_core::check::{Expectation, Inspection};
 use lithify_core::schedule::Schedule;
-use lithify_core::sink::{SinkWarehouse, WarehouseClient, WarehouseFn};
+use lithify_core::sink::{Namespace, SinkWarehouse, WarehouseClient, WarehouseFn};
 use lithify_core::ts::Ts;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -294,7 +294,7 @@ where
     ) -> Result<SinkInspection, String> {
         let reading = Reading {
             expectation,
-            namespace: sink.artifacts().namespace(ArtifactKind::Snapshot),
+            namespace: Namespace::from(sink.artifacts().namespace(ArtifactKind::Snapshot)),
             view,
         };
 
@@ -306,20 +306,20 @@ where
 
 struct Reading<'a> {
     expectation: &'a Expectation,
-    namespace: &'a str,
+    namespace: Namespace,
     view: BuildLogView,
 }
 
 impl Reading<'_> {
     fn read<K: WarehouseClient>(&self, client: &K) -> Result<SinkInspection, K::Error> {
-        let inspection = self.expectation.read(client, self.namespace)?;
+        let inspection = self.expectation.read(client, &self.namespace)?;
         let unbuilt = inspection.latest().is_empty();
         let inspection = SinkInspection::from(inspection);
 
         match (self.view, unbuilt) {
             (BuildLogView::Latest, _) | (BuildLogView::All, true) => Ok(inspection),
             (BuildLogView::All, false) => Ok(inspection
-                .showing(client.build_logs(self.namespace, &BuildLogQuery::from(self.view))?)),
+                .showing(client.build_logs(&self.namespace, &BuildLogQuery::from(self.view))?)),
         }
     }
 }

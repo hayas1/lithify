@@ -3,7 +3,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use lithify_config::ArtifactKind;
 use lithify_config::infra::{Sink, Source};
 use lithify_core::build_log::BuildLog;
-use lithify_core::sink::WarehouseClient;
+use lithify_core::sink::{Namespace, WarehouseClient};
 use lithify_core::window::Window;
 
 use crate::catch_up::CatchUp;
@@ -31,8 +31,9 @@ impl Course {
         K: WarehouseClient,
         Unrunnable: From<K::Error>,
     {
-        client
-            .create_build_log::<Unrunnable>(sink.artifacts().namespace(ArtifactKind::Snapshot))?;
+        client.create_build_log::<Unrunnable>(&Namespace::from(
+            sink.artifacts().namespace(ArtifactKind::Snapshot),
+        ))?;
 
         match self {
             Self::CatchUp { to } => CatchUp::new(sink, source, now, *to).itinerary(client),
@@ -641,7 +642,7 @@ pub(crate) mod tests {
                 CAPTURE,
                 Ts::from(at(NOW)),
             )
-            .read(&client, "mysql_shop")
+            .read(&client, &Namespace::from("mysql_shop"))
             .unwrap()
             .discrepancies(),
             []

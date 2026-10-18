@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use ulid::Ulid;
 
 use crate::model::{ColumnType, TableId};
-use crate::sink::{TablePath, UnsupportedColumn, WarehouseSql};
+use crate::sink::{Namespace, TablePath, UnsupportedColumn, WarehouseSql};
 use crate::sql::SqlString;
 use crate::ts::{Event, Ts};
 use crate::window::Window;
@@ -139,7 +139,7 @@ impl BuildLog {
 
     pub fn create_table<W: WarehouseSql + ?Sized>(
         warehouse: &W,
-        namespace: &str,
+        namespace: &Namespace,
     ) -> Result<SqlString, UnsupportedColumn> {
         let columns = std::iter::once(&(Self::ID, ColumnType::Int64))
             .chain(Self::COLUMNS.iter())
@@ -154,7 +154,11 @@ impl BuildLog {
         Ok(warehouse.create_table(&Self::path(namespace), &columns))
     }
 
-    pub fn insert<W: WarehouseSql + ?Sized>(&self, warehouse: &W, namespace: &str) -> SqlString {
+    pub fn insert<W: WarehouseSql + ?Sized>(
+        &self,
+        warehouse: &W,
+        namespace: &Namespace,
+    ) -> SqlString {
         let id = warehouse.identifier(Self::ID);
         let path = Self::path(namespace);
         let columns: Vec<_> = std::iter::once(Self::ID)
@@ -186,8 +190,8 @@ impl BuildLog {
             .collect()
     }
 
-    pub fn path(namespace: &str) -> TablePath {
-        TablePath::new(namespace, "_lithify_log")
+    pub fn path(namespace: &Namespace) -> TablePath {
+        TablePath::new(namespace.clone(), "_lithify_log")
     }
 
     pub const ID: &str = "id";
@@ -387,7 +391,11 @@ impl Latest {
     pub const ALIAS: &str = "latest";
     const DEPARTED: &str = "departed";
 
-    pub fn select<W: WarehouseSql + ?Sized>(&self, warehouse: &W, namespace: &str) -> SqlString {
+    pub fn select<W: WarehouseSql + ?Sized>(
+        &self,
+        warehouse: &W,
+        namespace: &Namespace,
+    ) -> SqlString {
         let partition = ["artifact", "schedule", "table_to"]
             .map(|name| warehouse.identifier(name))
             .join(", ");
@@ -499,7 +507,11 @@ impl From<Latest> for BuildLogQuery {
 }
 
 impl BuildLogQuery {
-    pub fn select<W: WarehouseSql + ?Sized>(&self, warehouse: &W, namespace: &str) -> SqlString {
+    pub fn select<W: WarehouseSql + ?Sized>(
+        &self,
+        warehouse: &W,
+        namespace: &Namespace,
+    ) -> SqlString {
         match self {
             Self::Latest(latest) => latest.select(warehouse, namespace),
             Self::All => SqlString::from(format!(
@@ -536,7 +548,7 @@ pub struct BuildLogRow {
 impl BuildLogRow {
     fn path(written: &str) -> Result<TablePath, UnreadableBuildLog> {
         written
-            .split_once('.')
+            .rsplit_once('.')
             .map(|(namespace, name)| TablePath::new(namespace, name))
             .ok_or_else(|| UnreadableBuildLog(format!("{written} names no table")))
     }
@@ -679,6 +691,14 @@ mod tests {
                 ("error", None),
                 ("version", Some("0.1.0")),
             ]
+        );
+    }
+
+    #[test]
+    fn a_target_is_read_back_from_the_namespace_and_name_it_was_written_with() {
+        assert_eq!(
+            BuildLogRow::path("analytics-project.shop.people_20260920").unwrap(),
+            TablePath::new("analytics-project.shop", "people_20260920")
         );
     }
 

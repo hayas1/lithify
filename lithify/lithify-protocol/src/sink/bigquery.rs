@@ -5,25 +5,32 @@ pub mod config;
 pub mod from_sql;
 
 use lithify_core::model::ColumnType;
-use lithify_core::sink::{ChangeLogSql, TablePath, UnsupportedColumn, WarehouseSql};
+use lithify_core::sink::{ChangeLogSql, Namespace, TablePath, UnsupportedColumn, WarehouseSql};
 use lithify_core::sql::SqlString;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BigQueryWarehouse {
     project: String,
-    change_log: String,
+    change_log: Namespace,
 }
 
 impl BigQueryWarehouse {
-    pub fn new(project: &str, change_log: &str) -> Self {
+    pub fn new(project: &str, change_log: impl Into<Namespace>) -> Self {
         Self {
             project: project.to_owned(),
-            change_log: change_log.to_owned(),
+            change_log: change_log.into(),
         }
     }
 
     pub fn project(&self) -> &str {
         &self.project
+    }
+
+    fn dataset<'a>(&'a self, namespace: &'a Namespace) -> [&'a str; 2] {
+        let mut parts = namespace.parts().rev();
+        let dataset = parts.next().unwrap_or_default();
+
+        [parts.next().unwrap_or(&self.project), dataset]
     }
 }
 impl WarehouseSql for BigQueryWarehouse {
@@ -31,12 +38,12 @@ impl WarehouseSql for BigQueryWarehouse {
         SqlString::from(format!("`{name}`"))
     }
 
-    fn namespace_ref(&self, namespace: &str) -> SqlString {
-        SqlString::from(format!(
-            "{}.{}",
-            self.identifier(&self.project),
-            self.identifier(namespace)
-        ))
+    fn namespace_ref(&self, namespace: &Namespace) -> SqlString {
+        SqlString::from(
+            self.dataset(namespace)
+                .map(|part| self.identifier(part).to_string())
+                .join("."),
+        )
     }
 
     fn table_ref(&self, table: &TablePath) -> SqlString {
@@ -85,10 +92,9 @@ impl WarehouseSql for BigQueryWarehouse {
 
     fn select_existence(&self, table: &TablePath) -> SqlString {
         SqlString::from(format!(
-            "SELECT COUNT(*) AS {} FROM {}.{}.INFORMATION_SCHEMA.TABLES WHERE table_name = {}",
+            "SELECT COUNT(*) AS {} FROM {}.INFORMATION_SCHEMA.TABLES WHERE table_name = {}",
             self.identifier("count"),
-            self.identifier(&self.project),
-            self.identifier(table.namespace()),
+            self.namespace_ref(table.namespace()),
             self.literal(table.name())
         ))
     }
@@ -124,13 +130,13 @@ impl WarehouseSql for BigQueryWarehouse {
 }
 
 impl ChangeLogSql for BigQueryWarehouse {
-    fn change_log_namespace(&self) -> &str {
+    fn change_log_namespace(&self) -> &Namespace {
         &self.change_log
     }
 
     fn change_log(&self, topic: &str) -> TablePath {
         TablePath::new(
-            self.change_log_namespace(),
+            self.change_log_namespace().clone(),
             &topic
                 .chars()
                 .map(|character| match character.is_ascii_alphanumeric() {
@@ -182,7 +188,7 @@ mod tests {
     #[test]
     fn a_build_log_is_created_with_the_types_bigquery_has_for_its_columns() {
         assert_eq!(
-            BuildLog::create_table(&bigquery(), "mysql_shop").unwrap(),
+            BuildLog::create_table(&bigquery(), &Namespace::from("mysql_shop")).unwrap(),
             "CREATE TABLE IF NOT EXISTS `local-project`.`mysql_shop`.`_lithify_log` (`id` INT64, `run_id` STRING, `started_at` TIMESTAMP, `artifact` STRING, `schedule` STRING, `source` STRING, `capture` STRING, `table_from` STRING, `table_to` STRING, `lifecycle` STRING, `base` STRING, `target` STRING, `window_from` TIMESTAMP, `window_to` TIMESTAMP, `status` STRING, `finished_at` TIMESTAMP, `error` STRING, `version` STRING)"
         );
     }
@@ -214,7 +220,7 @@ mod tests {
         );
 
         assert_eq!(
-            log.insert(&bigquery(), "mysql_shop"),
+            log.insert(&bigquery(), &Namespace::from("mysql_shop")),
             "INSERT INTO `local-project`.`mysql_shop`.`_lithify_log` (`id`, `run_id`, `started_at`, `artifact`, `schedule`, `source`, `capture`, `table_from`, `table_to`, `lifecycle`, `base`, `target`, `window_from`, `window_to`, `status`, `finished_at`, `error`, `version`)\nSELECT COALESCE(MAX(`id`), 0) + 1, '00000000000000000000000000', TIMESTAMP_MILLIS(0), 'snapshot', 'daily', 'primary', '{}', 'shop.customers', 'shop.clients', 'renamed', 'mysql_shop.customers_20260919', 'mysql_shop.customers_20260920', TIMESTAMP_MILLIS(1789862400000), TIMESTAMP_MILLIS(1789948800000), 'succeeded', TIMESTAMP_MILLIS(1789949000000), NULL, '0.1.0'\nFROM `local-project`.`mysql_shop`.`_lithify_log`"
         );
     }
@@ -224,7 +230,7 @@ mod tests {
     #[test]
     fn a_build_log_is_read_by_the_latest_success_under_each_name_a_table_still_goes_by() {
         assert_eq!(
-            Latest::Succeeded.select(&bigquery(), "mysql_shop"),
+            Latest::Succeeded.select(&bigquery(), &Namespace::from("mysql_shop")),
             format!(
                 "SELECT {COLUMNS}\nFROM `local-project`.`mysql_shop`.`_lithify_log` AS `latest`\nWHERE `latest`.`table_to` IS NOT NULL AND `latest`.`status` = 'succeeded' AND NOT EXISTS (SELECT 1 FROM `local-project`.`mysql_shop`.`_lithify_log` AS `departed` WHERE `departed`.`artifact` = `latest`.`artifact` AND `departed`.`schedule` = `latest`.`schedule` AND `departed`.`table_from` = `latest`.`table_to` AND `departed`.`lifecycle` IN ('renamed', 'dropped') AND `departed`.`window_from` >= `latest`.`window_to` AND `departed`.`status` = 'succeeded')\nQUALIFY ROW_NUMBER() OVER (PARTITION BY `artifact`, `schedule`, `table_to` ORDER BY `id` DESC) = 1\nORDER BY `artifact`, `schedule`, `table_to`"
             )
@@ -235,7 +241,7 @@ mod tests {
     #[test]
     fn a_build_log_is_read_whole_from_the_newest_record() {
         assert_eq!(
-            BuildLogQuery::All.select(&bigquery(), "mysql_shop"),
+            BuildLogQuery::All.select(&bigquery(), &Namespace::from("mysql_shop")),
             format!(
                 "SELECT {COLUMNS}\nFROM `local-project`.`mysql_shop`.`_lithify_log`\nORDER BY `id` DESC"
             )
@@ -248,7 +254,7 @@ mod tests {
      {
         assert_eq!(
             Latest::SucceededUntil(Ts::try_from(1789948800000).unwrap())
-                .select(&bigquery(), "mysql_shop"),
+                .select(&bigquery(), &Namespace::from("mysql_shop")),
             format!(
                 "SELECT {COLUMNS}\nFROM `local-project`.`mysql_shop`.`_lithify_log` AS `latest`\nWHERE `latest`.`table_to` IS NOT NULL AND `latest`.`status` = 'succeeded' AND `latest`.`window_to` = TIMESTAMP_MILLIS(1789948800000)\nQUALIFY ROW_NUMBER() OVER (PARTITION BY `artifact`, `schedule`, `table_to` ORDER BY `id` DESC) = 1\nORDER BY `artifact`, `schedule`, `table_to`"
             )
@@ -269,6 +275,22 @@ mod tests {
         assert_eq!(
             bigquery().table_ref(&TablePath::new("mysql_shop", "customers_20260920")),
             "`local-project`.`mysql_shop`.`customers_20260920`"
+        );
+    }
+
+    #[test]
+    fn a_table_in_another_project_is_qualified_by_that_project() {
+        assert_eq!(
+            bigquery().table_ref(&TablePath::new("analytics-project.shop", "customers")),
+            "`analytics-project`.`shop`.`customers`"
+        );
+    }
+
+    #[test]
+    fn a_table_in_another_project_is_looked_up_among_the_tables_of_that_project() {
+        assert_eq!(
+            bigquery().select_existence(&TablePath::new("analytics-project.shop", "people")),
+            "SELECT COUNT(*) AS `count` FROM `analytics-project`.`shop`.INFORMATION_SCHEMA.TABLES WHERE table_name = 'people'"
         );
     }
 
@@ -393,7 +415,7 @@ mod tests {
     #[test]
     fn a_namespace_is_made_within_the_project_of_the_warehouse() {
         assert_eq!(
-            bigquery().create_namespace("mysql_shop"),
+            bigquery().create_namespace(&Namespace::from("mysql_shop")),
             "CREATE SCHEMA IF NOT EXISTS `local-project`.`mysql_shop`"
         );
     }

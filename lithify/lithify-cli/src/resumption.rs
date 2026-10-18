@@ -1,6 +1,6 @@
 use lithify_core::build_log::{BuildLog, Latest};
 use lithify_core::schedule::Schedule;
-use lithify_core::sink::WarehouseClient;
+use lithify_core::sink::{Namespace, WarehouseClient};
 use lithify_core::ts::{Event, Ts};
 use lithify_core::window::Window;
 
@@ -67,7 +67,11 @@ impl Resumption {
         }
     }
 
-    pub fn previous<K>(&self, client: &K, namespace: &str) -> Result<Vec<BuildLog>, Unrunnable>
+    pub fn previous<K>(
+        &self,
+        client: &K,
+        namespace: &Namespace,
+    ) -> Result<Vec<BuildLog>, Unrunnable>
     where
         K: WarehouseClient,
         Unrunnable: From<K::Error>,

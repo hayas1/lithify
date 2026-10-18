@@ -2,7 +2,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 
 use lithify_config::ArtifactKind;
 use lithify_config::infra::{Sink, Source};
-use lithify_core::sink::WarehouseClient;
+use lithify_core::sink::{Namespace, WarehouseClient};
 use lithify_core::ts::Ts;
 use lithify_core::window::Window;
 
@@ -39,7 +39,7 @@ impl<'a> Shard<'a> {
     {
         let window = self.closed(date)?;
         let previous = Resumption::at(*window.from(), self.source.since())
-            .previous(client, self.namespace())?;
+            .previous(client, &self.namespace())?;
 
         Ok(Itinerary::new(vec![window], previous, tables.clone()))
     }
@@ -58,7 +58,7 @@ impl<'a> Shard<'a> {
         }
     }
 
-    fn namespace(&self) -> &str {
-        self.sink.artifacts().namespace(ArtifactKind::Snapshot)
+    fn namespace(&self) -> Namespace {
+        Namespace::from(self.sink.artifacts().namespace(ArtifactKind::Snapshot))
     }
 }

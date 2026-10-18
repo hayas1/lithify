@@ -6,7 +6,7 @@ use ulid::Ulid;
 
 use lithify_core::build_log::{BuildLog, Outcome, Run, Status};
 use lithify_core::model::TableId;
-use lithify_core::sink::{SinkWarehouse, TablePath, WarehouseFn};
+use lithify_core::sink::{Namespace, SinkWarehouse, TablePath, WarehouseFn};
 use lithify_core::testing::{Engine, Recorder};
 use lithify_core::ts::Ts;
 use lithify_core::window::Window;
@@ -97,9 +97,10 @@ impl SinkWarehouse for Kept {
     fn with_client<F: WarehouseFn>(&self, _: &str, _: &(), f: F) -> Result<F::Output, Unreached> {
         match self {
             Self::Memory {} => Ok(f.call(&Recorder::new(Engine::default()))),
-            Self::Logged {} => {
-                Ok(f.call(&Recorder::new(Engine::default()).logging("mysql_shop", &Self::logs())))
-            }
+            Self::Logged {} => Ok(f.call(
+                &Recorder::new(Engine::default())
+                    .logging(&Namespace::from("mysql_shop"), &Self::logs()),
+            )),
             Self::Unreachable { cause } => Err(Unreached(cause.clone())),
         }
     }

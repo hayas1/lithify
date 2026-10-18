@@ -10,7 +10,7 @@ use lithify_core::listener::{
     TableRenamed,
 };
 use lithify_core::model::{ColumnModel, TableId, TableModel};
-use lithify_core::sink::{TablePath, Warehouse};
+use lithify_core::sink::{Namespace, TablePath, Warehouse};
 use lithify_core::source::RowChangeLog;
 use lithify_core::sql::SqlString;
 use lithify_core::window::Window;
@@ -23,14 +23,14 @@ mod query;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
-    namespace: String,
+    namespace: Namespace,
     shard: String,
 }
 
 impl Snapshot {
-    pub fn new(namespace: &str, shard: &str) -> Self {
+    pub fn new(namespace: impl Into<Namespace>, shard: &str) -> Self {
         Self {
-            namespace: namespace.to_owned(),
+            namespace: namespace.into(),
             shard: shard.to_owned(),
         }
     }
@@ -43,7 +43,7 @@ impl Artifact for Snapshot {
         let at = DateTime::<Utc>::from(window.last());
 
         Ok(TablePath::new(
-            &self.namespace,
+            self.namespace.clone(),
             &format!("{}_{}", table.table(), at.format(&self.shard)),
         ))
     }

@@ -5,14 +5,24 @@ use std::convert::Infallible;
 use crate::build_log::{BuildLog, BuildLogQuery, Latest};
 use crate::model::ColumnType;
 use crate::sink::{
-    ChangeLogSql, OpenWarehouse, TablePath, UnsupportedColumn, Warehouse, WarehouseClient,
-    WarehouseSql,
+    ChangeLogSql, Namespace, OpenWarehouse, TablePath, UnsupportedColumn, Warehouse,
+    WarehouseClient, WarehouseSql,
 };
 use crate::sql::SqlString;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Engine {
+    change_log: Namespace,
     change_logs: BTreeMap<String, SqlString>,
+}
+
+impl Default for Engine {
+    fn default() -> Self {
+        Self {
+            change_log: Namespace::from("mysql_shop_cdc"),
+            change_logs: BTreeMap::new(),
+        }
+    }
 }
 
 impl Engine {
@@ -32,7 +42,7 @@ impl WarehouseSql for Engine {
     fn table_ref(&self, table: &TablePath) -> SqlString {
         SqlString::from(format!(
             "{}.{}",
-            self.identifier(table.namespace()),
+            self.namespace_ref(table.namespace()),
             self.identifier(table.name())
         ))
     }
@@ -81,8 +91,8 @@ impl WarehouseSql for Engine {
 }
 
 impl ChangeLogSql for Engine {
-    fn change_log_namespace(&self) -> &str {
-        "mysql_shop_cdc"
+    fn change_log_namespace(&self) -> &Namespace {
+        &self.change_log
     }
 
     fn change_log_ref(&self, topic: &str) -> SqlString {
@@ -121,7 +131,7 @@ impl<W> Recorder<W> {
         }
     }
 
-    pub fn logging(mut self, namespace: &str, logs: &[BuildLog]) -> Self {
+    pub fn logging(mut self, namespace: &Namespace, logs: &[BuildLog]) -> Self {
         self.logged.extend_from_slice(logs);
         self.present.insert(BuildLog::path(namespace));
 
@@ -153,7 +163,11 @@ impl<W: Warehouse> WarehouseClient for Recorder<W> {
         Ok(())
     }
 
-    fn build_logs(&self, _: &str, query: &BuildLogQuery) -> Result<Vec<BuildLog>, Self::Error> {
+    fn build_logs(
+        &self,
+        _: &Namespace,
+        query: &BuildLogQuery,
+    ) -> Result<Vec<BuildLog>, Self::Error> {
         let logged = self.logged.iter().cloned();
 
         Ok(match query {

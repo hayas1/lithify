@@ -177,7 +177,7 @@ pub(crate) mod tests {
     use duckdb::Connection;
 
     use lithify_config::Pipeline;
-    use lithify_core::sink::{TablePath, WarehouseClient};
+    use lithify_core::sink::{Namespace, TablePath, WarehouseClient};
     use lithify_core::ts::Ts;
     use lithify_protocol::DuckDbWarehouse;
     use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbClient};
@@ -373,9 +373,13 @@ pub(crate) mod tests {
                  CREATE TABLE mysql_shop.pets_20260919 AS SELECT 7::BIGINT AS id",
             ))
             .unwrap();
-        client.create_build_log::<Unrunnable>("mysql_shop").unwrap();
+        client
+            .create_build_log::<Unrunnable>(&Namespace::from("mysql_shop"))
+            .unwrap();
         for log in before {
-            client.append_build_log("mysql_shop", log).unwrap();
+            client
+                .append_build_log(&Namespace::from("mysql_shop"), log)
+                .unwrap();
         }
 
         client
@@ -536,7 +540,7 @@ pub(crate) mod tests {
         assert_eq!(rows(&client, snapshot), built_once);
         assert_ne!(once[0].run_id(), twice[0].run_id());
         let latest = client
-            .build_logs("mysql_shop", &Latest::Attempted.into())
+            .build_logs(&Namespace::from("mysql_shop"), &Latest::Attempted.into())
             .unwrap();
         assert_eq!(
             latest
