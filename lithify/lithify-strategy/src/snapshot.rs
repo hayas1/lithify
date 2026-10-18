@@ -707,16 +707,15 @@ mod tests {
     }
 
     #[test]
-    fn a_bound_in_time_is_placed_on_the_instant_a_change_occurred_at_the_source() {
+    fn a_bound_in_event_time_is_placed_on_the_event_time_of_the_log() {
         assert_eq!(
-            Bound::<Offset>::Time(Ts::try_from(150).unwrap()).placed(&Log),
+            Bound::<Offset>::EventTime(Ts::try_from(150).unwrap()).placed(&Log),
             [(ColumnPath::from("source.ts_ms"), Coordinate::Number(150))]
         );
     }
 
     #[test]
-    fn a_bound_at_a_position_is_placed_on_the_instant_the_log_recorded_then_the_columns_it_orders_by()
-     {
+    fn a_bound_at_a_position_is_placed_on_its_processing_time_then_the_columns_the_log_orders_by() {
         assert_eq!(
             Bound::Position {
                 at: Ts::try_from(150).unwrap(),
@@ -755,7 +754,7 @@ mod tests {
     }
 
     #[test]
-    fn the_latest_change_of_a_key_is_the_one_recorded_last_then_logged_last() {
+    fn the_latest_change_of_a_key_is_the_last_in_processing_time_then_position() {
         let statement = statement(snapshots(customers(), vec![], || None));
 
         assert!(statement.contains("    ORDER BY \"ts_ms\" DESC, \"source\".\"offset\" DESC\n"));
@@ -1401,8 +1400,8 @@ mod tests {
             &Engine::default(),
             &Era::new(
                 customers(),
-                Bound::Time(Ts::try_from(100).unwrap()),
-                Bound::Time(Ts::try_from(200).unwrap()),
+                Bound::EventTime(Ts::try_from(100).unwrap()),
+                Bound::EventTime(Ts::try_from(200).unwrap()),
             ),
         )
         .unwrap();

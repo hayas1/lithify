@@ -55,8 +55,8 @@ fn a_snapshot_holds_each_key_as_the_change_log_last_left_it() {
         client.warehouse(),
         &Era::new(
             people(),
-            Bound::Time(*window.from()),
-            Bound::Time(*window.to()),
+            Bound::EventTime(*window.from()),
+            Bound::EventTime(*window.to()),
         ),
     )
     .unwrap();
@@ -521,7 +521,7 @@ const SIMULTANEOUS: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
     ) AS t(value)";
 
 #[test]
-fn changes_recorded_in_the_instant_of_a_schema_change_fall_on_its_side_their_position_puts_them() {
+fn changes_processed_in_the_instant_of_a_schema_change_fall_on_its_side_their_position_puts_them() {
     let client = DuckDbClient::new(
         Connection::open_in_memory().unwrap(),
         DuckDbWarehouse::new("cdc"),

@@ -71,8 +71,8 @@ fn statements<W: Warehouse>(warehouse: &W) -> String {
         warehouse,
         &Era::new(
             customers(),
-            Bound::Time(*window.from()),
-            Bound::Time(*window.to()),
+            Bound::EventTime(*window.from()),
+            Bound::EventTime(*window.to()),
         ),
     )
     .unwrap();

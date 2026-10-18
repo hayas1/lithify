@@ -261,7 +261,7 @@ pub(crate) mod tests {
         );
     }
 
-    const PERSON_RECORDED_PAST_THE_MIDNIGHT_IT_OCCURRED_BEFORE: &str = "CREATE SCHEMA mysql_shop_cdc;
+    const PERSON_PROCESSED_PAST_THE_MIDNIGHT_ITS_EVENT_TIME_FALLS_BEFORE: &str = "CREATE SCHEMA mysql_shop_cdc;
         CREATE TABLE mysql_shop_cdc.mysql AS SELECT * FROM (VALUES
           ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
             'ddl': 'CREATE TABLE people (id BIGINT)',
@@ -276,7 +276,7 @@ pub(crate) mod tests {
             'before': NULL::STRUCT(id BIGINT), 'after': {'id': 8::BIGINT}})
         ) AS t(value)";
 
-    const PERSON_DELETED_AT_A_SOURCE_INSTANT_BEFORE_ITS_CREATION: &str = "CREATE SCHEMA mysql_shop_cdc;
+    const PERSON_DELETED_AT_AN_EVENT_TIME_BEFORE_ITS_CREATION: &str = "CREATE SCHEMA mysql_shop_cdc;
         CREATE TABLE mysql_shop_cdc.mysql AS SELECT * FROM (VALUES
           ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
             'ddl': 'CREATE TABLE people (id BIGINT)',
@@ -295,9 +295,12 @@ pub(crate) mod tests {
         ) AS t(value)";
 
     #[test]
-    fn a_change_is_built_into_the_shard_of_the_day_it_occurred_on_at_the_source() {
+    fn a_change_is_built_into_the_shard_of_the_day_its_event_time_falls_on() {
         let pipeline = pipeline();
-        let client = logged(PERSON_RECORDED_PAST_THE_MIDNIGHT_IT_OCCURRED_BEFORE, &[]);
+        let client = logged(
+            PERSON_PROCESSED_PAST_THE_MIDNIGHT_ITS_EVENT_TIME_FALLS_BEFORE,
+            &[],
+        );
         let to = Course::CatchUp {
             to: Some("2026-09-20".parse().unwrap()),
         };
@@ -314,9 +317,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn changes_within_a_shard_are_folded_in_the_order_the_change_log_recorded_them() {
+    fn changes_within_a_shard_are_folded_in_the_order_of_their_processing_time() {
         let pipeline = pipeline();
-        let client = logged(PERSON_DELETED_AT_A_SOURCE_INSTANT_BEFORE_ITS_CREATION, &[]);
+        let client = logged(PERSON_DELETED_AT_AN_EVENT_TIME_BEFORE_ITS_CREATION, &[]);
         let to = Course::CatchUp {
             to: Some("2026-09-20".parse().unwrap()),
         };

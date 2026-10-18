@@ -234,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn a_window_holds_the_statements_recorded_within_it() {
+    fn a_window_holds_the_statements_whose_event_time_falls_within_it() {
         let statements = read(&window(1789800000001, 1789900000000));
 
         assert_eq!(
@@ -635,11 +635,11 @@ mod tests {
         }
 
         fn event_time(&self) -> ColumnPath {
-            ColumnPath::from("written")
+            ColumnPath::from("event_time")
         }
 
         fn processing_time(&self) -> ColumnPath {
-            ColumnPath::from("written")
+            ColumnPath::from("processing_time")
         }
 
         fn ordering(&self) -> Vec<ColumnPath> {
@@ -673,15 +673,17 @@ mod tests {
     }
 
     #[test]
-    fn a_change_log_of_any_format_is_streamed_by_the_record_it_reads() {
+    fn a_change_log_of_any_format_is_streamed_by_the_record_it_reads_in_the_order_of_its_processing_time()
+     {
         let connection = Connection::open_in_memory().unwrap();
         connection
             .execute_batch(
                 "CREATE SCHEMA ledger;
                  CREATE TABLE ledger.statements AS SELECT * FROM (VALUES
-                   ('DROP TABLE b', 2, 2),
-                   ('CREATE TABLE a (id bigint)', 1, 1)
-                 ) AS t(statement, line, written)",
+                   ('DROP TABLE b', 2, 1, 2),
+                   ('CREATE TABLE a (id bigint)', 1, 2, 1),
+                   ('DROP TABLE c', 3, 3, 0)
+                 ) AS t(statement, line, event_time, processing_time)",
             )
             .unwrap();
         let client = DuckDbClient::new(connection, DuckDbWarehouse::new("ledger"));

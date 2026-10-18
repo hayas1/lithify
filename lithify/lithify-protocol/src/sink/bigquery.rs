@@ -352,7 +352,8 @@ mod tests {
     }
 
     #[test]
-    fn the_schema_changes_of_a_window_are_read_whole_in_the_order_they_were_recorded_then_logged() {
+    fn the_schema_changes_of_a_window_are_read_whole_in_the_order_of_their_processing_time_then_position()
+     {
         let log = Debezium::new("mysql", MySql);
         let window = Window::new(Ts::try_from(0).unwrap(), Ts::try_from(10).unwrap());
 
