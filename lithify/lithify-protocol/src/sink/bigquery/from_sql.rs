@@ -81,6 +81,7 @@ impl TryFrom<Row> for BigQueryBuildLogRow {
     fn try_from(row: Row) -> Result<Self, Self::Error> {
         Ok(Self(BuildLogRow {
             run_id: row.try_get("run_id")?,
+            started_at: row.try_get("started_at")?,
             artifact: row.try_get("artifact")?,
             schedule: row.try_get("schedule")?,
             source: row.try_get("source")?,

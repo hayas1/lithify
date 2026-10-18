@@ -54,8 +54,8 @@ impl<'a, L: RowChangeLog> ChangeLogQuery<'a, L> {
     ) -> SqlString {
         SqlString::from(format!(
             "  SELECT *\n  FROM {change_log}\n  WHERE {} AND {}\n{}",
-            Edge::Since.condition(warehouse, &self.log.placed(era.from())),
-            Edge::Until.condition(warehouse, &self.log.placed(era.to())),
+            Edge::Since.condition(warehouse, &era.from().placed(self.log)),
+            Edge::Until.condition(warehouse, &era.to().placed(self.log)),
             self.latest(warehouse, era.table()),
         ))
     }

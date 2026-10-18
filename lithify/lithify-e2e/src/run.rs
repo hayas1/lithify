@@ -4,9 +4,9 @@ use std::time::Duration;
 
 use chrono::Utc;
 
-use lithify_cli::pipeline::{Capture, Warehouse};
+use lithify_cli::pipeline::{CaptureConfig, WarehouseConfig};
 use lithify_config::Pipeline;
-use lithify_core::position::RecordedAt;
+use lithify_core::ts::Ts;
 
 use crate::pipeline::{ConnectedPipeline, Watch};
 use crate::runnable::Report;
@@ -40,9 +40,9 @@ impl Run {
     }
 
     pub fn report(&self) -> Result<Report, Unverifiable> {
-        let config: Pipeline<Capture, Warehouse> =
+        let config: Pipeline<CaptureConfig, WarehouseConfig> =
             Pipeline::open(self.directory.join(self.scenario.pipeline()))?;
-        let watch = Watch::new(RecordedAt::from(Utc::now()), self.patience);
+        let watch = Watch::new(Ts::from(Utc::now()), self.patience);
         let mut pipeline =
             ConnectedPipeline::connect(&self.scenario, &config, watch, &self.key_id, &self.secret)?;
 

@@ -8,26 +8,26 @@ use crate::listener::{
     TableDropped, TableRenamed,
 };
 use crate::model::{TableId, TableModel};
-use crate::position::{Position, RecordedAt};
+use crate::position::{Coordinate, Position};
+use crate::source::{ChangeLog, ColumnPath};
+use crate::ts::{Event, Processing, Ts};
 use crate::window::Window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Bound<P> {
-    Time(RecordedAt),
-    Position { at: RecordedAt, position: P },
+    EventTime(Ts<Event>),
+    Position { at: Ts<Processing>, position: P },
 }
 
 impl<P> Bound<P> {
-    pub fn instant(&self) -> RecordedAt {
+    pub fn placed<L: ChangeLog<Position = P>>(&self, log: &L) -> Vec<(ColumnPath, Coordinate)> {
         match self {
-            Self::Time(at) | Self::Position { at, .. } => *at,
-        }
-    }
-
-    pub fn as_position(&self) -> Option<&P> {
-        match self {
-            Self::Time(_) => None,
-            Self::Position { position, .. } => Some(position),
+            Self::EventTime(at) => vec![(log.event_time(), Coordinate::from(*at))],
+            Self::Position { at, position } => log
+                .sequence()
+                .into_iter()
+                .zip(std::iter::once(Coordinate::from(*at)).chain(log.coordinates(position)))
+                .collect(),
         }
     }
 }
@@ -128,7 +128,7 @@ impl<L, P: Position> Track<L, P> {
 impl<F, L, E, P: Position> EraTracker<F, L, E, P> {
     pub fn new(window: Window, open: F) -> Self {
         Self {
-            at: Bound::Time(*window.from()),
+            at: Bound::EventTime(*window.from()),
             window,
             open,
             tables: BTreeMap::new(),
@@ -148,10 +148,10 @@ impl<F, L, E, P: Position> EraTracker<F, L, E, P> {
             .map(|table| {
                 let track = match self.tables.remove(table.id()) {
                     Some(track) => track,
-                    None => self.open(table.id(), Bound::Time(*self.window.from()), None)?,
+                    None => self.open(table.id(), Bound::EventTime(*self.window.from()), None)?,
                 };
 
-                Ok(track.finish(context, table, &Bound::Time(*self.window.to()))?)
+                Ok(track.finish(context, table, &Bound::EventTime(*self.window.to()))?)
             })
             .collect::<Result<Vec<_>, E>>()?;
 
@@ -178,7 +178,7 @@ impl<F, L, E, P: Position> EraTracker<F, L, E, P> {
         F: FnMut(&TableId) -> Result<L, E>,
         E: From<L::Error>,
     {
-        let from = Bound::Time(*self.window.from());
+        let from = Bound::EventTime(*self.window.from());
         let Self { open, tables, .. } = self;
 
         match tables.entry(table.clone()) {
@@ -229,7 +229,7 @@ where
         change: &SchemaChange<P>,
     ) -> Result<(), Self::Error> {
         self.at = Bound::Position {
-            at: *change.recorded_at(),
+            at: *change.processing_time(),
             position: change.position().clone(),
         };
 
@@ -260,7 +260,11 @@ where
     ) -> Result<(), Self::Error> {
         let mut track = match self.tables.remove(event.table().id()) {
             Some(track) => track,
-            None => self.open(event.table().id(), Bound::Time(*self.window.from()), None)?,
+            None => self.open(
+                event.table().id(),
+                Bound::EventTime(*self.window.from()),
+                None,
+            )?,
         };
 
         track.listener.table_dropped(context, event)?;
@@ -316,7 +320,7 @@ mod tests {
 
     fn bound(bound: &Bound<Offset>) -> String {
         match bound {
-            Bound::Time(at) => at.milliseconds_since_epoch().to_string(),
+            Bound::EventTime(at) => at.milliseconds_since_epoch().to_string(),
             Bound::Position {
                 at,
                 position: Offset(offset),
@@ -420,7 +424,13 @@ mod tests {
     }
 
     fn hinted(at: i64, hints: Vec<Hint>, tables: Vec<TableChange>) -> SchemaChange<Offset> {
-        SchemaChange::new(Offset(at as u64), RecordedAt::from(at), "", tables, hints)
+        SchemaChange::new(
+            Offset(at as u64),
+            Ts::try_from(at).unwrap(),
+            "",
+            tables,
+            hints,
+        )
     }
 
     fn stories(
@@ -434,7 +444,7 @@ mod tests {
                 .unwrap();
         }
         let mut tracker = EraTracker::new(
-            Window::new(RecordedAt::from(10), RecordedAt::from(20)),
+            Window::new(Ts::try_from(10).unwrap(), Ts::try_from(20).unwrap()),
             |table: &TableId| {
                 Ok::<_, Untold>(Story {
                     table: table.clone(),
@@ -504,7 +514,7 @@ mod tests {
                 )],
                 vec![SchemaChange::new(
                     Offset(99),
-                    RecordedAt::from(15),
+                    Ts::try_from(15).unwrap(),
                     "",
                     vec![TableChange::Altered(table(people(), &["id", "name"]))],
                     Vec::new(),
@@ -790,7 +800,7 @@ mod tests {
             )
             .unwrap();
         let tracker = EraTracker::new(
-            Window::new(RecordedAt::from(10), RecordedAt::from(20)),
+            Window::new(Ts::try_from(10).unwrap(), Ts::try_from(20).unwrap()),
             |table: &TableId| Err::<Story, _>(Untold::Unopened(table.clone())),
         );
 
@@ -798,25 +808,6 @@ mod tests {
             tracker.finish(&(), &catalog).unwrap_err(),
             Untold::Unopened(people())
         );
-    }
-
-    #[test]
-    fn a_bound_in_time_has_an_instant_and_no_position() {
-        let bound = Bound::<Offset>::Time(RecordedAt::from(15));
-
-        assert_eq!(bound.instant(), RecordedAt::from(15));
-        assert_eq!(bound.as_position(), None);
-    }
-
-    #[test]
-    fn a_bound_at_a_position_has_the_instant_it_was_recorded_at_and_its_position() {
-        let bound = Bound::Position {
-            at: RecordedAt::from(15),
-            position: Offset(99),
-        };
-
-        assert_eq!(bound.instant(), RecordedAt::from(15));
-        assert_eq!(bound.as_position(), Some(&Offset(99)));
     }
 
     #[test]

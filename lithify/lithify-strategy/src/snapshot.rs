@@ -40,8 +40,7 @@ impl Artifact for Snapshot {
     type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = SnapshotBuilder<'a, L, W>;
 
     fn target(&self, table: &TableId, window: &Window) -> Result<TablePath, UnbuildableArtifact> {
-        let at =
-            DateTime::<Utc>::try_from(*window.from()).map_err(UnbuildableArtifact::Unshardable)?;
+        let at = DateTime::<Utc>::from(window.last());
 
         Ok(TablePath::new(
             &self.namespace,
@@ -54,9 +53,15 @@ impl Artifact for Snapshot {
         log: &'a L,
         table: TableId,
         window: &'a Window,
-        base: Option<TablePath>,
+        previous: Option<&BuildLog>,
     ) -> Result<Self::Builder<'a, L, W>, UnbuildableArtifact> {
-        SnapshotBuilder::new(self, log, table, window.clone(), base)
+        SnapshotBuilder::new(
+            self,
+            log,
+            table,
+            window.clone(),
+            previous.and_then(BuildLog::target).cloned(),
+        )
     }
 }
 
@@ -69,14 +74,9 @@ pub struct SnapshotBuilder<'a, L, W> {
     window: Window,
     base: Option<TablePath>,
     target: Option<TablePath>,
-    rendered: Option<Target>,
+    begun: bool,
     fold: Fold,
     warehouse: PhantomData<fn(&W)>,
-}
-
-struct Target {
-    namespace: SqlString,
-    table: SqlString,
 }
 
 impl<'a, L: RowChangeLog, W: Warehouse> SnapshotBuilder<'a, L, W> {
@@ -96,7 +96,7 @@ impl<'a, L: RowChangeLog, W: Warehouse> SnapshotBuilder<'a, L, W> {
             appearance: None,
             window,
             base,
-            rendered: None,
+            begun: false,
             fold: Fold::default(),
             warehouse: PhantomData,
         })
@@ -114,7 +114,7 @@ impl<'a, L: RowChangeLog, W: Warehouse> SnapshotBuilder<'a, L, W> {
     }
 
     fn begin(&mut self, warehouse: &W, table: &TableModel) -> Result<(), UnbuildableArtifact> {
-        if self.rendered.is_some() {
+        if self.begun {
             return Ok(());
         }
         if table.primary_key().next().is_none() {
@@ -124,16 +124,9 @@ impl<'a, L: RowChangeLog, W: Warehouse> SnapshotBuilder<'a, L, W> {
         let base = self.select_base(warehouse, table)?;
 
         self.fold.push(warehouse.identifier("base"), base);
-        self.rendered = self.render_target(warehouse);
+        self.begun = true;
 
         Ok(())
-    }
-
-    fn render_target(&self, warehouse: &W) -> Option<Target> {
-        self.target.as_ref().map(|target| Target {
-            namespace: warehouse.create_namespace(target.namespace()),
-            table: warehouse.table_ref(target),
-        })
     }
 
     fn select_base(
@@ -292,7 +285,6 @@ impl<L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Position>
         self.begin(warehouse, event.before())?;
         self.table = event.after().id().clone();
         self.target = Some(self.snapshot.target(&self.table, &self.window)?);
-        self.rendered = self.render_target(warehouse);
 
         Ok(())
     }
@@ -328,24 +320,21 @@ impl<L: RowChangeLog, W: Warehouse> ArtifactBuilder for SnapshotBuilder<'_, L, W
     }
 
     fn select(&self) -> Result<SqlString, UnbuildableArtifact> {
-        match &self.rendered {
-            Some(_) => Ok(self.fold.select()),
-            None => Err(self.without_era()),
+        match self.begun {
+            true => Ok(self.fold.select()),
+            false => Err(self.without_era()),
         }
     }
 
-    fn create(&self) -> Result<Vec<SqlString>, UnbuildableArtifact> {
-        if self.target.is_none() {
+    fn create<V: Warehouse>(&self, warehouse: &V) -> Result<Vec<SqlString>, UnbuildableArtifact> {
+        let Some(target) = &self.target else {
             return Ok(Vec::new());
-        }
+        };
 
-        match &self.rendered {
-            Some(target) => Ok(vec![
-                target.namespace.clone(),
-                self.fold.create(&target.table),
-            ]),
-            None => Err(self.without_era()),
-        }
+        Ok(vec![
+            warehouse.create_namespace(target.namespace()),
+            warehouse.create_table_as(target, &self.select()?),
+        ])
     }
 
     fn build_log(&self, run: &Run, outcome: Outcome) -> BuildLog {
@@ -370,9 +359,11 @@ mod tests {
     use lithify_core::event::{Hint, SchemaChange, TableChange};
     use lithify_core::listener::{CatalogModel, OutOfOrder};
     use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
-    use lithify_core::position::{Coordinate, Position, RecordedAt};
-    use lithify_core::sink::{TablePath, UnsupportedColumn, Warehouse};
+    use lithify_core::position::{Coordinate, Position};
+    use lithify_core::sink::{TablePath, UnsupportedColumn};
     use lithify_core::source::{ChangeLog, ColumnPath, RowChangeLog};
+    use lithify_core::testing::Engine;
+    use lithify_core::ts::Ts;
     use lithify_core::window::Window;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -389,7 +380,11 @@ mod tests {
             None
         }
 
-        fn recorded_at(&self) -> ColumnPath {
+        fn event_time(&self) -> ColumnPath {
+            ColumnPath::from("source.ts_ms")
+        }
+
+        fn processing_time(&self) -> ColumnPath {
             ColumnPath::from("ts_ms")
         }
 
@@ -420,126 +415,6 @@ mod tests {
         }
     }
 
-    struct Engine;
-
-    impl Warehouse for Engine {
-        type Config = ();
-
-        fn timestamp_millis(&self, milliseconds: i64) -> SqlString {
-            SqlString::from(milliseconds.to_string())
-        }
-
-        fn unix_millis(&self, expression: &SqlString) -> SqlString {
-            expression.clone()
-        }
-
-        fn select_existence(&self, table: &TablePath) -> SqlString {
-            SqlString::from(format!("SELECT COUNT(*) FROM {table}"))
-        }
-
-        fn change_log_namespace(&self) -> &str {
-            "mysql_shop_cdc"
-        }
-
-        fn identifier(&self, name: &str) -> SqlString {
-            SqlString::from(format!("\"{name}\""))
-        }
-
-        fn table_ref(&self, table: &TablePath) -> SqlString {
-            SqlString::from(format!(
-                "{}.{}",
-                self.identifier(table.namespace()),
-                self.identifier(table.name())
-            ))
-        }
-
-        fn column_type(&self, column_type: &ColumnType) -> Result<SqlString, UnsupportedColumn> {
-            match column_type {
-                ColumnType::Int64 => Ok(SqlString::from("BIGINT")),
-                ColumnType::Text => Ok(SqlString::from("TEXT")),
-                unsupported => Err(UnsupportedColumn::new(unsupported)),
-            }
-        }
-
-        fn read(
-            &self,
-            expression: &SqlString,
-            column_type: &ColumnType,
-        ) -> Result<SqlString, UnsupportedColumn> {
-            Ok(SqlString::from(format!(
-                "CAST({expression} AS {})",
-                self.column_type(column_type)?
-            )))
-        }
-
-        fn cast_or_null(
-            &self,
-            expression: &SqlString,
-            column_type: &ColumnType,
-        ) -> Result<SqlString, UnsupportedColumn> {
-            Ok(SqlString::from(format!(
-                "TRY_CAST({expression} AS {})",
-                self.column_type(column_type)?
-            )))
-        }
-    }
-
-    struct Lake;
-
-    impl Warehouse for Lake {
-        type Config = ();
-
-        fn timestamp_millis(&self, milliseconds: i64) -> SqlString {
-            SqlString::from(milliseconds.to_string())
-        }
-
-        fn unix_millis(&self, expression: &SqlString) -> SqlString {
-            expression.clone()
-        }
-
-        fn select_existence(&self, table: &TablePath) -> SqlString {
-            SqlString::from(format!("SELECT COUNT(*) FROM {table}"))
-        }
-
-        fn identifier(&self, name: &str) -> SqlString {
-            Engine.identifier(name)
-        }
-
-        fn table_ref(&self, table: &TablePath) -> SqlString {
-            Engine.table_ref(table)
-        }
-
-        fn change_log_namespace(&self) -> &str {
-            Engine.change_log_namespace()
-        }
-
-        fn change_log_ref(&self, topic: &str) -> SqlString {
-            SqlString::from(format!(
-                "read_parquet('{}/{topic}/*.parquet')",
-                self.change_log_namespace()
-            ))
-        }
-
-        fn column_type(&self, column_type: &ColumnType) -> Result<SqlString, UnsupportedColumn> {
-            Engine.column_type(column_type)
-        }
-
-        fn read(
-            &self,
-            expression: &SqlString,
-            column_type: &ColumnType,
-        ) -> Result<SqlString, UnsupportedColumn> {
-            Engine.read(expression, column_type)
-        }
-
-        fn cast_or_null(
-            &self,
-            expression: &SqlString,
-            column_type: &ColumnType,
-        ) -> Result<SqlString, UnsupportedColumn> {
-            Engine.cast_or_null(expression, column_type)
-        }
-    }
     fn column(name: &str, column_type: ColumnType) -> ColumnModel {
         let type_name = format!("{column_type:?}");
 
@@ -573,7 +448,13 @@ mod tests {
     }
 
     fn hinted(at: i64, hints: Vec<Hint>, tables: Vec<TableChange>) -> SchemaChange<Offset> {
-        SchemaChange::new(Offset(at as u64), RecordedAt::from(at), "", tables, hints)
+        SchemaChange::new(
+            Offset(at as u64),
+            Ts::try_from(at).unwrap(),
+            "",
+            tables,
+            hints,
+        )
     }
 
     fn renamed(from: &str, to: &str) -> Hint {
@@ -614,7 +495,7 @@ mod tests {
     }
 
     fn window() -> Window {
-        Window::new(RecordedAt::from(100), RecordedAt::from(200))
+        Window::new(Ts::try_from(100).unwrap(), Ts::try_from(200).unwrap())
     }
 
     fn snapshots_in<W: Warehouse>(
@@ -626,7 +507,7 @@ mod tests {
         let mut catalog = CatalogModel::default();
         catalog.accept::<OutOfOrder, _>(&(), &change(1, TableChange::Created(created)), &mut ())?;
         let mut tracker = EraTracker::new(
-            Window::new(RecordedAt::from(100), RecordedAt::from(200)),
+            Window::new(Ts::try_from(100).unwrap(), Ts::try_from(200).unwrap()),
             |table: &TableId| {
                 Ok::<_, Untold>(SnapshotBuilder::new(
                     shop(),
@@ -649,14 +530,14 @@ mod tests {
         within: Vec<SchemaChange<Offset>>,
         base: impl Fn() -> Option<TablePath>,
     ) -> Result<Vec<SnapshotBuilder<'static, Log, Engine>>, Untold> {
-        snapshots_in(&Engine, created, within, base)
+        snapshots_in(&Engine::default(), created, within, base)
     }
 
     fn statement<W: Warehouse>(
         snapshots: Result<Vec<SnapshotBuilder<'static, Log, W>>, Untold>,
     ) -> String {
         snapshots.unwrap()[0]
-            .create()
+            .create(&Engine::default())
             .unwrap()
             .remove(1)
             .to_string()
@@ -676,7 +557,7 @@ mod tests {
     #[test]
     fn a_snapshot_is_built_into_a_namespace_made_for_it() {
         let statements = snapshots(customers(), vec![], || None).unwrap()[0]
-            .create()
+            .create(&Engine::default())
             .unwrap();
 
         assert_eq!(statements[0], "CREATE SCHEMA IF NOT EXISTS \"mysql_shop\"");
@@ -684,12 +565,14 @@ mod tests {
 
     #[test]
     fn a_snapshot_reads_the_change_log_where_the_warehouse_reads_change_logs() {
-        let statement = statement(snapshots_in(&Lake, customers(), vec![], || None));
+        let statement = statement(snapshots_in(
+            &Engine::default().reading_change_log("mysql_shop_customers", "changes_of_customers"),
+            customers(),
+            vec![],
+            || None,
+        ));
 
-        assert!(
-            statement
-                .contains("FROM read_parquet('mysql_shop_cdc/mysql_shop_customers/*.parquet')")
-        );
+        assert!(statement.contains("FROM changes_of_customers"));
         assert!(!statement.contains("\"mysql_shop_cdc\".\"mysql_shop_customers\""));
     }
 
@@ -713,7 +596,7 @@ mod tests {
                 "\"changes_1\" AS (\n",
                 "  SELECT *\n",
                 "  FROM \"mysql_shop_cdc\".\"mysql_shop_customers\"\n",
-                "  WHERE \"ts_ms\" >= 100 AND \"ts_ms\" < 200\n",
+                "  WHERE \"source\".\"ts_ms\" >= 100 AND \"source\".\"ts_ms\" < 200\n",
                 "  QUALIFY ROW_NUMBER() OVER (\n",
                 "    PARTITION BY COALESCE(\"after\".\"id\", \"before\".\"id\")\n",
                 "    ORDER BY \"ts_ms\" DESC, \"source\".\"offset\" DESC\n",
@@ -775,7 +658,7 @@ mod tests {
             .iter()
             .find(|snapshot| snapshot.table() == &TableId::new("shop", "orders"))
             .unwrap()
-            .create()
+            .create(&Engine::default())
             .unwrap()
             .remove(1)
             .to_string();
@@ -812,7 +695,7 @@ mod tests {
                 .iter()
                 .find(|snapshot| snapshot.table() == &TableId::new("shop", table))
                 .unwrap()
-                .create()
+                .create(&Engine::default())
                 .unwrap()
                 .remove(1)
                 .to_string()
@@ -824,20 +707,21 @@ mod tests {
     }
 
     #[test]
-    fn a_bound_in_time_is_placed_on_the_instant_the_log_records() {
+    fn a_bound_in_event_time_is_placed_on_the_event_time_of_the_log() {
         assert_eq!(
-            Log.placed(&Bound::<Offset>::Time(RecordedAt::from(150))),
-            [(ColumnPath::from("ts_ms"), Coordinate::Number(150))]
+            Bound::<Offset>::EventTime(Ts::try_from(150).unwrap()).placed(&Log),
+            [(ColumnPath::from("source.ts_ms"), Coordinate::Number(150))]
         );
     }
 
     #[test]
-    fn a_bound_at_a_position_is_placed_on_the_instant_then_the_columns_the_log_orders_by() {
+    fn a_bound_at_a_position_is_placed_on_its_processing_time_then_the_columns_the_log_orders_by() {
         assert_eq!(
-            Log.placed(&Bound::Position {
-                at: RecordedAt::from(150),
+            Bound::Position {
+                at: Ts::try_from(150).unwrap(),
                 position: Offset(7),
-            }),
+            }
+            .placed(&Log),
             [
                 (ColumnPath::from("ts_ms"), Coordinate::Number(150)),
                 (ColumnPath::from("source.offset"), Coordinate::Number(7))
@@ -851,7 +735,7 @@ mod tests {
             customers(),
             vec![SchemaChange::new(
                 Offset(7),
-                RecordedAt::from(150),
+                Ts::try_from(150).unwrap(),
                 "",
                 vec![TableChange::Altered(widened())],
                 Vec::new(),
@@ -860,17 +744,17 @@ mod tests {
         ));
 
         assert!(statement.contains(concat!(
-            "  WHERE \"ts_ms\" >= 100",
+            "  WHERE \"source\".\"ts_ms\" >= 100",
             " AND (\"ts_ms\" < 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" < 7))\n"
         )));
         assert!(statement.contains(concat!(
             "  WHERE (\"ts_ms\" > 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" >= 7))",
-            " AND \"ts_ms\" < 200\n"
+            " AND \"source\".\"ts_ms\" < 200\n"
         )));
     }
 
     #[test]
-    fn the_latest_change_of_a_key_is_the_one_recorded_last_then_logged_last() {
+    fn the_latest_change_of_a_key_is_the_last_in_processing_time_then_position() {
         let statement = statement(snapshots(customers(), vec![], || None));
 
         assert!(statement.contains("    ORDER BY \"ts_ms\" DESC, \"source\".\"offset\" DESC\n"));
@@ -884,7 +768,7 @@ mod tests {
             || None,
         ));
 
-        assert!(statement.contains("  WHERE \"ts_ms\" >= 100 AND (\"ts_ms\" < 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" < 150))\n"));
+        assert!(statement.contains("  WHERE \"source\".\"ts_ms\" >= 100 AND (\"ts_ms\" < 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" < 150))\n"));
         assert!(statement.contains(concat!(
             "\"era_2\" AS (\n",
             "  SELECT\n",
@@ -894,7 +778,7 @@ mod tests {
             "  FROM \"era_1\"\n",
             "),\n",
         )));
-        assert!(statement.contains("  WHERE (\"ts_ms\" > 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" >= 150)) AND \"ts_ms\" < 200\n"));
+        assert!(statement.contains("  WHERE (\"ts_ms\" > 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" >= 150)) AND \"source\".\"ts_ms\" < 200\n"));
         assert!(statement.contains("    CAST(\"after\".\"email\" AS TEXT) AS \"email\"\n"));
         assert!(statement.ends_with("SELECT * FROM \"era_3\""));
     }
@@ -1055,7 +939,7 @@ mod tests {
             "    \"email\" AS \"email\"\n",
             "  FROM \"era_3\"\n",
         )));
-        assert!(statement.contains("  WHERE (\"ts_ms\" > 160 OR (\"ts_ms\" = 160 AND \"source\".\"offset\" >= 160)) AND \"ts_ms\" < 200\n"));
+        assert!(statement.contains("  WHERE (\"ts_ms\" > 160 OR (\"ts_ms\" = 160 AND \"source\".\"offset\" >= 160)) AND \"source\".\"ts_ms\" < 200\n"));
         assert!(statement.ends_with("SELECT * FROM \"era_5\""));
     }
 
@@ -1316,13 +1200,13 @@ mod tests {
         ));
 
         assert!(statement.contains(concat!(
-            "  WHERE \"ts_ms\" >= 100 AND (\"ts_ms\" < 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" < 150))\n",
+            "  WHERE \"source\".\"ts_ms\" >= 100 AND (\"ts_ms\" < 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" < 150))\n",
             "  QUALIFY ROW_NUMBER() OVER (\n",
             "    PARTITION BY COALESCE(\"after\".\"id\", \"before\".\"id\")\n",
         )));
         assert!(statement.contains("    \"id\" AS \"customer_id\",\n"));
         assert!(statement.contains(concat!(
-            "  WHERE (\"ts_ms\" > 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" >= 150)) AND \"ts_ms\" < 200\n",
+            "  WHERE (\"ts_ms\" > 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" >= 150)) AND \"source\".\"ts_ms\" < 200\n",
             "  QUALIFY ROW_NUMBER() OVER (\n",
             "    PARTITION BY COALESCE(\"after\".\"customer_id\", \"before\".\"customer_id\")\n",
         )));
@@ -1357,13 +1241,13 @@ mod tests {
             "\"changes_1\" AS (\n",
             "  SELECT *\n",
             "  FROM \"mysql_shop_cdc\".\"mysql_shop_customers\"\n",
-            "  WHERE \"ts_ms\" >= 100 AND (\"ts_ms\" < 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" < 150))\n",
+            "  WHERE \"source\".\"ts_ms\" >= 100 AND (\"ts_ms\" < 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" < 150))\n",
         )));
         assert!(statement.contains(concat!(
             "\"changes_2\" AS (\n",
             "  SELECT *\n",
             "  FROM \"mysql_shop_cdc\".\"mysql_shop_clients\"\n",
-            "  WHERE (\"ts_ms\" > 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" >= 150)) AND \"ts_ms\" < 200\n",
+            "  WHERE (\"ts_ms\" > 150 OR (\"ts_ms\" = 150 AND \"source\".\"offset\" >= 150)) AND \"source\".\"ts_ms\" < 200\n",
         )));
         assert!(statement.ends_with("SELECT * FROM \"era_2\""));
     }
@@ -1381,7 +1265,7 @@ mod tests {
     #[test]
     fn a_table_renamed_within_the_window_is_snapshotted_under_its_last_name() {
         let snapshots = renamed_to_clients(|| None);
-        let statements = snapshots[0].create().unwrap();
+        let statements = snapshots[0].create(&Engine::default()).unwrap();
 
         assert_eq!(snapshots[0].table(), &TableId::new("shop", "clients"));
         assert!(
@@ -1481,50 +1365,28 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            snapshot.create().unwrap_err(),
+            snapshot.create(&Engine::default()).unwrap_err(),
             UnbuildableArtifact::WithoutEra(TableId::new("shop", "customers"))
         );
     }
 
     #[test]
-    fn a_snapshot_is_named_after_its_table_and_the_day_its_window_opens() {
+    fn a_snapshot_is_named_after_its_table_and_the_last_day_its_window_holds() {
         let snapshot = Snapshot::new("mysql_shop", "%Y%m%d");
-        let window = Window::new(
-            RecordedAt::from(1789862400000),
-            RecordedAt::from(1789948800000),
-        );
 
-        assert_eq!(
-            snapshot
-                .target(&TableId::new("shop", "customers"), &window)
-                .unwrap(),
-            TablePath::new("mysql_shop", "customers_20260920")
-        );
-    }
+        for opened in [0, 1789862400000] {
+            let window = Window::new(
+                Ts::try_from(opened).unwrap(),
+                Ts::try_from(1789948800000).unwrap(),
+            );
 
-    #[test]
-    fn a_window_opening_at_no_instant_a_day_can_hold_names_no_snapshot() {
-        let window = Window::new(RecordedAt::from(i64::MAX), RecordedAt::from(i64::MAX));
-
-        assert_eq!(
-            Snapshot::new("mysql_shop", "%Y%m%d")
-                .target(&TableId::new("shop", "customers"), &window)
-                .unwrap_err(),
-            UnbuildableArtifact::Unshardable(RecordedAt::from(i64::MAX))
-        );
-    }
-
-    #[test]
-    fn a_window_no_shard_can_be_named_after_yields_no_builder() {
-        let window = Window::new(RecordedAt::from(i64::MAX), RecordedAt::from(i64::MAX));
-
-        assert_eq!(
-            shop()
-                .builder::<Log, Engine>(&Log, TableId::new("shop", "customers"), &window, None)
-                .map(drop)
-                .unwrap_err(),
-            UnbuildableArtifact::Unshardable(RecordedAt::from(i64::MAX))
-        );
+            assert_eq!(
+                snapshot
+                    .target(&TableId::new("shop", "customers"), &window)
+                    .unwrap(),
+                TablePath::new("mysql_shop", "customers_20260920")
+            );
+        }
     }
 
     #[test]
@@ -1535,28 +1397,29 @@ mod tests {
             .unwrap();
 
         fold.era_boundary(
-            &Engine,
+            &Engine::default(),
             &Era::new(
                 customers(),
-                Bound::Time(RecordedAt::from(100)),
-                Bound::Time(RecordedAt::from(200)),
+                Bound::EventTime(Ts::try_from(100).unwrap()),
+                Bound::EventTime(Ts::try_from(200).unwrap()),
             ),
         )
         .unwrap();
 
         assert!(
-            fold.create().unwrap()[1]
+            fold.create(&Engine::default()).unwrap()[1]
                 .as_str()
                 .starts_with("CREATE OR REPLACE TABLE \"mysql_shop\".\"customers_20260920\" AS\n")
         );
     }
 
     #[test]
-    fn a_snapshot_is_logged_with_the_shard_it_folds_onto_and_the_one_it_builds() {
+    fn a_snapshot_is_logged_folding_onto_the_shard_its_table_was_last_built_into() {
         let window = window();
         let base = TablePath::new("mysql_shop", "customers_20260919");
         let run = Run::new(
             ulid::Ulid::nil(),
+            DateTime::UNIX_EPOCH,
             "snapshot",
             "daily",
             "primary",
@@ -1564,12 +1427,21 @@ mod tests {
             "0.1.0",
         );
         let finished_at = DateTime::from_timestamp_millis(1789949000000).unwrap();
+        let previous = BuildLog::new(
+            &run,
+            Some(TableId::new("shop", "customers")),
+            Some(TableId::new("shop", "customers")),
+            None,
+            Some(base.clone()),
+            Window::new(Ts::try_from(0).unwrap(), Ts::try_from(100).unwrap()),
+            Outcome::new(Status::Succeeded, finished_at),
+        );
         let builder = shop()
             .builder::<Log, Engine>(
                 &Log,
                 TableId::new("shop", "customers"),
                 &window,
-                Some(base.clone()),
+                Some(&previous),
             )
             .unwrap();
 
@@ -1591,6 +1463,7 @@ mod tests {
     fn a_table_renamed_within_the_window_is_logged_from_its_first_name_to_its_last() {
         let run = Run::new(
             ulid::Ulid::nil(),
+            DateTime::UNIX_EPOCH,
             "snapshot",
             "daily",
             "primary",
@@ -1622,6 +1495,7 @@ mod tests {
     fn a_table_created_within_the_window_is_logged_as_opening_it_under_no_name() {
         let run = Run::new(
             ulid::Ulid::nil(),
+            DateTime::UNIX_EPOCH,
             "snapshot",
             "daily",
             "primary",
@@ -1665,6 +1539,7 @@ mod tests {
     fn a_table_captured_within_the_window_is_logged_as_opening_it_under_its_name() {
         let run = Run::new(
             ulid::Ulid::nil(),
+            DateTime::UNIX_EPOCH,
             "snapshot",
             "daily",
             "primary",
@@ -1700,6 +1575,7 @@ mod tests {
     fn a_table_dropped_within_the_window_is_logged_without_a_target() {
         let run = Run::new(
             ulid::Ulid::nil(),
+            DateTime::UNIX_EPOCH,
             "snapshot",
             "daily",
             "primary",
@@ -1722,7 +1598,10 @@ mod tests {
         .unwrap()
         .remove(0);
 
-        assert_eq!(dropped.create().unwrap(), Vec::<SqlString>::new());
+        assert_eq!(
+            dropped.create(&Engine::default()).unwrap(),
+            Vec::<SqlString>::new()
+        );
         assert_eq!(
             dropped.build_log(&run, outcome.clone()),
             BuildLog::new(
@@ -1741,6 +1620,7 @@ mod tests {
     fn a_table_renamed_and_then_dropped_within_the_window_is_logged_from_its_first_name() {
         let run = Run::new(
             ulid::Ulid::nil(),
+            DateTime::UNIX_EPOCH,
             "snapshot",
             "daily",
             "primary",
@@ -1807,7 +1687,7 @@ mod tests {
 
         assert!(select.as_str().starts_with("WITH \"base\" AS (\n"));
         assert_eq!(
-            snapshot.create().unwrap()[1],
+            snapshot.create(&Engine::default()).unwrap()[1],
             format!("CREATE OR REPLACE TABLE \"mysql_shop\".\"customers_20260920\" AS\n{select}")
                 .as_str()
         );

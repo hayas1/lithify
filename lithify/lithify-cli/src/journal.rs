@@ -3,7 +3,7 @@ use std::fmt::Display;
 use lithify_core::build_log::BuildLog;
 use lithify_core::window::Window;
 
-use crate::check::Discrepancy;
+use lithify_core::check::Discrepancy;
 
 #[derive(Debug, Default)]
 pub struct Journal {
@@ -55,8 +55,8 @@ mod tests {
 
     use lithify_core::build_log::{Outcome, Run, Status};
     use lithify_core::model::TableId;
-    use lithify_core::position::RecordedAt;
     use lithify_core::sink::TablePath;
+    use lithify_core::ts::Ts;
 
     use super::*;
 
@@ -100,6 +100,7 @@ mod tests {
         BuildLog::new(
             &Run::new(
                 ulid::Ulid::nil(),
+                DateTime::UNIX_EPOCH,
                 "snapshot",
                 "daily",
                 "primary",
@@ -111,8 +112,8 @@ mod tests {
             None,
             Some(TablePath::new("mysql_shop", "people_20260920")),
             Window::new(
-                RecordedAt::from(1789862400000),
-                RecordedAt::from(1789948800000),
+                Ts::try_from(1789862400000).unwrap(),
+                Ts::try_from(1789948800000).unwrap(),
             ),
             Outcome::new(
                 status,
@@ -126,8 +127,8 @@ mod tests {
         let mut journal = Journal::default();
 
         journal.window(&Window::new(
-            RecordedAt::from(1789862400000),
-            RecordedAt::from(1789948800000),
+            Ts::try_from(1789862400000).unwrap(),
+            Ts::try_from(1789948800000).unwrap(),
         ));
 
         assert_eq!(
@@ -141,7 +142,7 @@ mod tests {
         let mut journal = Journal::default();
 
         journal.discrepancy(&Discrepancy::NeverBuilt {
-            since: RecordedAt::from(1789862400000),
+            since: Ts::try_from(1789862400000).unwrap(),
         });
 
         assert_eq!(

@@ -1,24 +1,27 @@
 use serde::{Deserialize, Serialize};
 
-use lithify_core::sink;
+use lithify_core::sink::{OpenWarehouse, SinkWarehouse, WarehouseFn};
 use lithify_core::source::CdcFormat;
 use lithify_protocol::sink::bigquery::client::{BigQueryCapture, BigQueryChangeLogsFn};
 use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbChangeLogsFn};
 use lithify_protocol::{BigQueryWarehouse, DebeziumFormat, DuckDbWarehouse};
 
+use crate::credential::Credentials;
+use crate::unrunnable::Unrunnable;
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "lowercase")]
-pub enum Capture {
+pub enum CaptureConfig {
     Debezium(<DebeziumFormat as CdcFormat>::Config),
 }
 
-impl Capture {
+impl CaptureConfig {
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
     }
 }
 
-impl DuckDbCapture for Capture {
+impl DuckDbCapture for CaptureConfig {
     fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(
         &self,
         topic_prefix: &str,
@@ -30,7 +33,7 @@ impl DuckDbCapture for Capture {
     }
 }
 
-impl BigQueryCapture for Capture {
+impl BigQueryCapture for CaptureConfig {
     fn with_bigquery_change_logs<F: BigQueryChangeLogsFn>(
         &self,
         topic_prefix: &str,
@@ -44,9 +47,32 @@ impl BigQueryCapture for Capture {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "lowercase")]
-pub enum Warehouse {
-    DuckDb(<DuckDbWarehouse as sink::Warehouse>::Config),
-    BigQuery(<BigQueryWarehouse as sink::Warehouse>::Config),
+pub enum WarehouseConfig {
+    DuckDb(<DuckDbWarehouse as OpenWarehouse>::Config),
+    BigQuery(<BigQueryWarehouse as OpenWarehouse>::Config),
+}
+
+impl SinkWarehouse for WarehouseConfig {
+    type Credential = Credentials;
+    type Error = Unrunnable;
+
+    fn with_client<F: WarehouseFn>(
+        &self,
+        change_log: &str,
+        credentials: &Credentials,
+        f: F,
+    ) -> Result<F::Output, Unrunnable> {
+        match self {
+            Self::DuckDb(config) => Ok(f.call(&DuckDbWarehouse::open(
+                config,
+                credentials.duckdb()?,
+                change_log,
+            )?)),
+            Self::BigQuery(config) => {
+                Ok(f.call(&BigQueryWarehouse::open(config, &(), change_log)?))
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -59,9 +85,9 @@ mod tests {
 
     #[test]
     fn a_source_is_captured_by_a_format_this_program_reads() {
-        let capture: Capture = toml::from_str("[debezium]\ndialect = \"mysql\"").unwrap();
+        let capture: CaptureConfig = toml::from_str("[debezium]\ndialect = \"mysql\"").unwrap();
 
-        let Capture::Debezium(debezium) = capture;
+        let CaptureConfig::Debezium(debezium) = capture;
         assert_eq!(debezium.dialect(), config::Dialect::MySql);
     }
 
@@ -81,7 +107,7 @@ mod tests {
             }
         }
 
-        let capture: Capture = toml::from_str("[debezium]\ndialect = \"postgres\"").unwrap();
+        let capture: CaptureConfig = toml::from_str("[debezium]\ndialect = \"postgres\"").unwrap();
 
         assert_eq!(
             capture.with_duckdb_change_logs("postgres", Probe),
@@ -91,17 +117,17 @@ mod tests {
 
     #[test]
     fn a_format_this_program_does_not_read_is_rejected() {
-        let unknown = toml::from_str::<Capture>("[maxwell]\ndialect = \"mysql\"");
+        let unknown = toml::from_str::<CaptureConfig>("[maxwell]\ndialect = \"mysql\"");
 
         assert!(unknown.is_err());
     }
 
     #[test]
     fn a_pipeline_is_sunk_into_a_warehouse_this_program_reads() {
-        let warehouse: Warehouse =
+        let warehouse: WarehouseConfig =
             toml::from_str("[bigquery]\nproject = \"local-project\"").unwrap();
 
-        let Warehouse::BigQuery(bigquery) = warehouse else {
+        let WarehouseConfig::BigQuery(bigquery) = warehouse else {
             panic!("expected a bigquery warehouse");
         };
         assert_eq!(bigquery.project(), "local-project");
@@ -109,7 +135,7 @@ mod tests {
 
     #[test]
     fn a_warehouse_this_program_does_not_read_is_rejected() {
-        let unknown = toml::from_str::<Warehouse>("[redshift]\ncluster = \"shop\"");
+        let unknown = toml::from_str::<WarehouseConfig>("[redshift]\ncluster = \"shop\"");
 
         assert!(unknown.is_err());
     }

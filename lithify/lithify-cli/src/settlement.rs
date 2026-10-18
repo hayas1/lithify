@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use ulid::Ulid;
 
 use lithify_config::ArtifactKind;
@@ -12,7 +12,7 @@ use lithify_core::sql::SqlString;
 use lithify_core::window::Window;
 
 use crate::journal::Journal;
-use crate::pipeline::{Capture, Warehouse};
+use crate::pipeline::{CaptureConfig, WarehouseConfig};
 use crate::unrunnable::Unrunnable;
 
 pub trait Settlement {
@@ -29,7 +29,7 @@ pub trait Settlement {
         window: &Window,
         output: Self::Output,
         journal: &mut Journal,
-    ) -> Result<bool, Unrunnable>;
+    ) -> Result<Option<Vec<BuildLog>>, Unrunnable>;
 }
 
 pub struct DryRun {
@@ -49,7 +49,7 @@ impl DryRun {
 impl Settlement for DryRun {
     type Output = Vec<SqlString>;
 
-    fn settle<K, B>(&self, _: &K, builders: &[B]) -> Result<Self::Output, Unrunnable>
+    fn settle<K, B>(&self, client: &K, builders: &[B]) -> Result<Self::Output, Unrunnable>
     where
         K: WarehouseClient,
         Unrunnable: From<K::Error>,
@@ -57,7 +57,7 @@ impl Settlement for DryRun {
     {
         Ok(builders
             .iter()
-            .map(ArtifactBuilder::create)
+            .map(|builder| builder.create(client.warehouse()))
             .collect::<Result<Vec<_>, _>>()?
             .concat())
     }
@@ -67,7 +67,7 @@ impl Settlement for DryRun {
         window: &Window,
         output: Self::Output,
         journal: &mut Journal,
-    ) -> Result<bool, Unrunnable> {
+    ) -> Result<Option<Vec<BuildLog>>, Unrunnable> {
         let path = self.into.join(format!(
             "{}_{}.sql",
             self.sink,
@@ -89,7 +89,7 @@ impl Settlement for DryRun {
             path.display()
         ));
 
-        Ok(true)
+        Ok(None)
     }
 }
 
@@ -99,13 +99,18 @@ pub struct Build {
 }
 
 impl Build {
-    pub fn new(sink: &Sink<Warehouse>, source: &Source<Capture>) -> Result<Self, Unrunnable> {
+    pub fn new(
+        sink: &Sink<WarehouseConfig>,
+        source: &Source<CaptureConfig>,
+        now: DateTime<Utc>,
+    ) -> Result<Self, Unrunnable> {
         let artifacts = sink.artifacts();
 
         Ok(Self {
             namespace: artifacts.namespace(ArtifactKind::Snapshot).to_owned(),
             run: Run::new(
-                Ulid::generate(),
+                Ulid::from_datetime(now.into()),
+                now,
                 &ArtifactKind::Snapshot.to_string(),
                 &artifacts.schedule().to_string(),
                 source.name(),
@@ -156,11 +161,14 @@ impl Settlement for Build {
         _: &Window,
         output: Self::Output,
         journal: &mut Journal,
-    ) -> Result<bool, Unrunnable> {
+    ) -> Result<Option<Vec<BuildLog>>, Unrunnable> {
         for log in &output {
             journal.built(log);
         }
 
-        Ok(output.iter().all(|log| !log.status().failed()))
+        Ok(output
+            .iter()
+            .all(|log| !log.status().failed())
+            .then_some(output))
     }
 }

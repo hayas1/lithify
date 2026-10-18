@@ -2,27 +2,28 @@ use chrono::{DateTime, NaiveDate, Utc};
 
 use lithify_config::ArtifactKind;
 use lithify_config::infra::{Sink, Source};
+use lithify_core::build_log::BuildLog;
 use lithify_core::sink::WarehouseClient;
 use lithify_core::window::Window;
 
 use crate::catch_up::CatchUp;
 use crate::journal::Journal;
-use crate::pipeline::{Capture, Warehouse};
-use crate::plan::{Base, Tables};
+use crate::pipeline::{CaptureConfig, WarehouseConfig};
+use crate::plan::Tables;
 use crate::settlement::Settlement;
 use crate::shard::Shard;
 use crate::unrunnable::Unrunnable;
 
 pub enum Course {
-    CatchUp,
+    CatchUp { to: Option<NaiveDate> },
     Shard { date: NaiveDate, tables: Tables },
 }
 
 impl Course {
     pub fn itinerary<K>(
         &self,
-        sink: &Sink<Warehouse>,
-        source: &Source<Capture>,
+        sink: &Sink<WarehouseConfig>,
+        source: &Source<CaptureConfig>,
         now: DateTime<Utc>,
         client: &K,
     ) -> Result<Itinerary, Unrunnable>
@@ -34,7 +35,7 @@ impl Course {
             .create_build_log::<Unrunnable>(sink.artifacts().namespace(ArtifactKind::Snapshot))?;
 
         match self {
-            Self::CatchUp => CatchUp::new(sink, source, now).itinerary(client),
+            Self::CatchUp { to } => CatchUp::new(sink, source, now, *to).itinerary(client),
             Self::Shard { date, tables } => {
                 Shard::new(sink, source, now).itinerary(client, *date, tables)
             }
@@ -44,15 +45,15 @@ impl Course {
 
 pub struct Itinerary {
     windows: Vec<Window>,
-    base: Base,
+    previous: Vec<BuildLog>,
     tables: Tables,
 }
 
 impl Itinerary {
-    pub fn new(windows: Vec<Window>, base: Base, tables: Tables) -> Self {
+    pub fn new(windows: Vec<Window>, previous: Vec<BuildLog>, tables: Tables) -> Self {
         Self {
             windows,
-            base,
+            previous,
             tables,
         }
     }
@@ -61,16 +62,16 @@ impl Itinerary {
         self,
         settlement: &S,
         journal: &mut Journal,
-        mut plan: impl FnMut(&Window, &Base, &Tables) -> Result<S::Output, Unrunnable>,
+        mut plan: impl FnMut(&Window, &[BuildLog], &Tables) -> Result<S::Output, Unrunnable>,
     ) -> Result<(), Unrunnable> {
-        let mut base = self.base;
+        let mut previous = self.previous;
 
         for window in self.windows {
             journal.window(&window);
-            if !settlement.report(&window, plan(&window, &base, &self.tables)?, journal)? {
-                break;
+            match settlement.report(&window, plan(&window, &previous, &self.tables)?, journal)? {
+                Some(built) => previous = built,
+                None => break,
             }
-            base = Base::Shard(window);
         }
 
         Ok(())
@@ -85,27 +86,27 @@ pub(crate) mod tests {
     use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbClient};
 
     use super::*;
-    use lithify_config::Schedule;
-    use lithify_core::position::RecordedAt;
+    use lithify_core::schedule::Schedule;
+    use lithify_core::ts::Ts;
 
-    use crate::check::Expectation;
     use crate::plan::SnapshotPlan;
     use crate::plan::tests::{
         BUILT_CHANGE_LOGS, CAPTURE, PEOPLE, at, built_before, logged, pipeline, rows,
     };
     use crate::settlement::Build;
+    use lithify_core::check::Expectation;
 
     const NOW: &str = "2026-09-22T05:00:00Z";
 
     const PETS_CREATED_ON_20260920: &str = "CREATE SCHEMA mysql_shop_cdc;
         CREATE TABLE mysql_shop_cdc.mysql AS SELECT * FROM (VALUES
-          ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL}, 'ts_ms': 0::BIGINT,
+          ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
             'ddl': 'CREATE TABLE people (id BIGINT)',
             'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
               'table': {'primaryKeyColumnNames': ['id'], 'columns': [
                 {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
                  'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]}),
-          ({'source': {'file': 'binlog.000001', 'pos': 2::BIGINT, 'gtid': NULL}, 'ts_ms': 1789862400005::BIGINT,
+          ({'source': {'file': 'binlog.000001', 'pos': 2::BIGINT, 'gtid': NULL, 'ts_ms': 1789862400005::BIGINT}, 'ts_ms': 1789862400005::BIGINT,
             'ddl': 'CREATE TABLE pets (id BIGINT)',
             'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"pets\"',
               'table': {'primaryKeyColumnNames': ['id'], 'columns': [
@@ -114,48 +115,48 @@ pub(crate) mod tests {
         ) AS t(value);
         CREATE TABLE mysql_shop_cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
           ({'op': 'c', 'ts_ms': 1789862400001::BIGINT,
-            'source': {'file': 'binlog.000001', 'pos': 3::BIGINT, 'gtid': NULL},
+            'source': {'file': 'binlog.000001', 'pos': 3::BIGINT, 'gtid': NULL, 'ts_ms': 1789862400001::BIGINT},
             'before': NULL::STRUCT(id BIGINT), 'after': {'id': 8::BIGINT}})
         ) AS t(value);
         CREATE TABLE mysql_shop_cdc.\"mysql.shop.pets\" AS SELECT * FROM (VALUES
           ({'op': 'c', 'ts_ms': 1789862400009::BIGINT,
-            'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL},
+            'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL, 'ts_ms': 1789862400009::BIGINT},
             'before': NULL::STRUCT(id BIGINT), 'after': {'id': 9::BIGINT}})
         ) AS t(value)";
 
     const PETS_DROPPED_ON_20260920: &str = "CREATE SCHEMA mysql_shop_cdc;
         CREATE TABLE mysql_shop_cdc.mysql AS SELECT * FROM (VALUES
-          ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL}, 'ts_ms': 0::BIGINT,
+          ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
             'ddl': 'CREATE TABLE people (id BIGINT)',
             'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
               'table': {'primaryKeyColumnNames': ['id'], 'columns': [
                 {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
                  'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]}),
-          ({'source': {'file': 'binlog.000001', 'pos': 2::BIGINT, 'gtid': NULL}, 'ts_ms': 0::BIGINT,
+          ({'source': {'file': 'binlog.000001', 'pos': 2::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
             'ddl': 'CREATE TABLE pets (id BIGINT)',
             'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"pets\"',
               'table': {'primaryKeyColumnNames': ['id'], 'columns': [
                 {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
                  'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]}),
-          ({'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL}, 'ts_ms': 1789862400005::BIGINT,
+          ({'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL, 'ts_ms': 1789862400005::BIGINT}, 'ts_ms': 1789862400005::BIGINT,
             'ddl': 'DROP TABLE pets',
             'tableChanges': [{'type': 'DROP', 'id': '\"shop\".\"pets\"', 'table': NULL}]})
         ) AS t(value);
         CREATE TABLE mysql_shop_cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
           ({'op': 'c', 'ts_ms': 1789862400001::BIGINT,
-            'source': {'file': 'binlog.000001', 'pos': 3::BIGINT, 'gtid': NULL},
+            'source': {'file': 'binlog.000001', 'pos': 3::BIGINT, 'gtid': NULL, 'ts_ms': 1789862400001::BIGINT},
             'before': NULL::STRUCT(id BIGINT), 'after': {'id': 8::BIGINT}})
         ) AS t(value)";
 
     const PEOPLE_RENAMED_ON_20260920: &str = "CREATE SCHEMA mysql_shop_cdc;
         CREATE TABLE mysql_shop_cdc.mysql AS SELECT * FROM (VALUES
-          ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL}, 'ts_ms': 0::BIGINT,
+          ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
             'ddl': 'CREATE TABLE people (id BIGINT)',
             'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
               'table': {'primaryKeyColumnNames': ['id'], 'columns': [
                 {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
                  'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]}),
-          ({'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL}, 'ts_ms': 1789862400005::BIGINT,
+          ({'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL, 'ts_ms': 1789862400005::BIGINT}, 'ts_ms': 1789862400005::BIGINT,
             'ddl': 'RENAME TABLE people TO persons',
             'tableChanges': [{'type': 'ALTER', 'id': '\"shop\".\"persons\"',
               'table': {'primaryKeyColumnNames': ['id'], 'columns': [
@@ -164,12 +165,12 @@ pub(crate) mod tests {
         ) AS t(value);
         CREATE TABLE mysql_shop_cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
           ({'op': 'c', 'ts_ms': 1789862400001::BIGINT,
-            'source': {'file': 'binlog.000001', 'pos': 3::BIGINT, 'gtid': NULL},
+            'source': {'file': 'binlog.000001', 'pos': 3::BIGINT, 'gtid': NULL, 'ts_ms': 1789862400001::BIGINT},
             'before': NULL::STRUCT(id BIGINT), 'after': {'id': 8::BIGINT}})
         ) AS t(value);
         CREATE TABLE mysql_shop_cdc.\"mysql.shop.persons\" AS SELECT * FROM (VALUES
           ({'op': 'c', 'ts_ms': 1789948800009::BIGINT,
-            'source': {'file': 'binlog.000001', 'pos': 5::BIGINT, 'gtid': NULL},
+            'source': {'file': 'binlog.000001', 'pos': 5::BIGINT, 'gtid': NULL, 'ts_ms': 1789948800009::BIGINT},
             'before': NULL::STRUCT(id BIGINT), 'after': {'id': 9::BIGINT}})
         ) AS t(value)";
 
@@ -184,7 +185,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn settle(
-        pipeline: &Pipeline<Capture, Warehouse>,
+        pipeline: &Pipeline<CaptureConfig, WarehouseConfig>,
         client: &DuckDbClient,
         course: &Course,
         now: &str,
@@ -192,18 +193,18 @@ pub(crate) mod tests {
         let source = pipeline.sources().next().unwrap();
         let sink = pipeline
             .sinks()
-            .find(|sink| sink.name() == "rustfs")
+            .find(|sink| sink.name() == "duckdb_s3")
             .unwrap();
-        let settlement = Build::new(sink, source).unwrap();
+        let settlement = Build::new(sink, source, at(now)).unwrap();
         let mut journal = Journal::default();
 
         course.itinerary(sink, source, at(now), client)?.settle(
             &settlement,
             &mut journal,
-            |window, base, tables| {
+            |window, previous, tables| {
                 source.capture().with_duckdb_change_logs(
                     source.topic_prefix().unwrap(),
-                    SnapshotPlan::new(client, sink, window, base, tables, &settlement),
+                    SnapshotPlan::new(client, sink, window, previous, tables, &settlement),
                 )
             },
         )?;
@@ -235,6 +236,102 @@ pub(crate) mod tests {
                 folded("mysql_shop.people_20260919", ""),
                 folded("mysql_shop.people_20260920", "mysql_shop.people_20260919"),
             ]
+        );
+    }
+
+    #[test]
+    fn a_run_logs_the_instant_it_took_for_now_and_is_named_after_it() {
+        let pipeline = pipeline();
+        let client = logged(PEOPLE, &[]);
+
+        settle(&pipeline, &client, &Course::CatchUp { to: None }, NOW).unwrap();
+
+        assert_eq!(
+            rows(
+                &client,
+                "SELECT DISTINCT strftime(started_at, '%Y-%m-%dT%H:%M:%SZ'), run_id FROM mysql_shop._lithify_log"
+            )
+            .into_iter()
+            .map(|(started_at, run_id)| (
+                started_at,
+                ulid::Ulid::from_string(&run_id).unwrap().timestamp_ms()
+            ))
+            .collect::<Vec<_>>(),
+            [(NOW.to_owned(), 1790053200000)]
+        );
+    }
+
+    const PERSON_PROCESSED_PAST_THE_MIDNIGHT_ITS_EVENT_TIME_FALLS_BEFORE: &str = "CREATE SCHEMA mysql_shop_cdc;
+        CREATE TABLE mysql_shop_cdc.mysql AS SELECT * FROM (VALUES
+          ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
+            'ddl': 'CREATE TABLE people (id BIGINT)',
+            'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
+              'table': {'primaryKeyColumnNames': ['id'], 'columns': [
+                {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
+                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]})
+        ) AS t(value);
+        CREATE TABLE mysql_shop_cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
+          ({'op': 'c', 'ts_ms': 1789948800001::BIGINT,
+            'source': {'file': 'binlog.000001', 'pos': 3::BIGINT, 'gtid': NULL, 'ts_ms': 1789948799999::BIGINT},
+            'before': NULL::STRUCT(id BIGINT), 'after': {'id': 8::BIGINT}})
+        ) AS t(value)";
+
+    const PERSON_DELETED_AT_AN_EVENT_TIME_BEFORE_ITS_CREATION: &str = "CREATE SCHEMA mysql_shop_cdc;
+        CREATE TABLE mysql_shop_cdc.mysql AS SELECT * FROM (VALUES
+          ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
+            'ddl': 'CREATE TABLE people (id BIGINT)',
+            'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
+              'table': {'primaryKeyColumnNames': ['id'], 'columns': [
+                {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
+                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]})
+        ) AS t(value);
+        CREATE TABLE mysql_shop_cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
+          ({'op': 'c', 'ts_ms': 1789948799100::BIGINT,
+            'source': {'file': 'binlog.000001', 'pos': 3::BIGINT, 'gtid': NULL, 'ts_ms': 1789948799000::BIGINT},
+            'before': NULL::STRUCT(id BIGINT), 'after': {'id': 8::BIGINT}}),
+          ({'op': 'd', 'ts_ms': 1789948799200::BIGINT,
+            'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL, 'ts_ms': 1789948798000::BIGINT},
+            'before': {'id': 8::BIGINT}, 'after': NULL::STRUCT(id BIGINT)})
+        ) AS t(value)";
+
+    #[test]
+    fn a_change_is_built_into_the_shard_of_the_day_its_event_time_falls_on() {
+        let pipeline = pipeline();
+        let client = logged(
+            PERSON_PROCESSED_PAST_THE_MIDNIGHT_ITS_EVENT_TIME_FALLS_BEFORE,
+            &[],
+        );
+        let to = Course::CatchUp {
+            to: Some("2026-09-20".parse().unwrap()),
+        };
+
+        settle(&pipeline, &client, &to, NOW).unwrap();
+
+        assert_eq!(
+            rows(
+                &client,
+                "SELECT id::VARCHAR, 'kept' FROM mysql_shop.people_20260920"
+            ),
+            [("8".to_owned(), "kept".to_owned())]
+        );
+    }
+
+    #[test]
+    fn changes_within_a_shard_are_folded_in_the_order_of_their_processing_time() {
+        let pipeline = pipeline();
+        let client = logged(PERSON_DELETED_AT_AN_EVENT_TIME_BEFORE_ITS_CREATION, &[]);
+        let to = Course::CatchUp {
+            to: Some("2026-09-20".parse().unwrap()),
+        };
+
+        settle(&pipeline, &client, &to, NOW).unwrap();
+
+        assert_eq!(
+            rows(
+                &client,
+                "SELECT id::VARCHAR, 'kept' FROM mysql_shop.people_20260920"
+            ),
+            []
         );
     }
 
@@ -322,7 +419,7 @@ pub(crate) mod tests {
 
     fn caught_up(changes: &str, now: &str) -> DuckDbClient {
         let client = logged(changes, &[built_before("people", CAPTURE)]);
-        settle(&pipeline(), &client, &Course::CatchUp, now).unwrap();
+        settle(&pipeline(), &client, &Course::CatchUp { to: None }, now).unwrap();
 
         client
     }
@@ -347,7 +444,7 @@ pub(crate) mod tests {
             NOW,
         )
         .unwrap();
-        settle(&pipeline, &client, &Course::CatchUp, NOW).unwrap();
+        settle(&pipeline, &client, &Course::CatchUp { to: None }, NOW).unwrap();
 
         assert_eq!(
             built(&client),
@@ -369,7 +466,7 @@ pub(crate) mod tests {
         let rewound = caught_up(PETS_CREATED_ON_20260920, NOW);
 
         settle(&pipeline, &rewound, &shard("2026-09-20", &[]), NOW).unwrap();
-        let rebuilt = settle(&pipeline, &rewound, &Course::CatchUp, NOW).unwrap();
+        let rebuilt = settle(&pipeline, &rewound, &Course::CatchUp { to: None }, NOW).unwrap();
 
         assert_eq!(
             windows(rebuilt),
@@ -400,7 +497,7 @@ pub(crate) mod tests {
         assert_eq!(ids(&client, "people_20260920"), ["7", "8"]);
         assert_eq!(ids(&client, "pets_20260920"), ["9"]);
         assert_eq!(
-            windows(settle(&pipeline, &client, &Course::CatchUp, NOW).unwrap()),
+            windows(settle(&pipeline, &client, &Course::CatchUp { to: None }, NOW).unwrap()),
             ["window 2026-09-21T00:00:00+00:00 .. 2026-09-22T00:00:00+00:00"]
         );
     }
@@ -469,7 +566,7 @@ pub(crate) mod tests {
             &[built_before("people", CAPTURE)],
         );
 
-        settle(&pipeline, &client, &Course::CatchUp, NOW).unwrap();
+        settle(&pipeline, &client, &Course::CatchUp { to: None }, NOW).unwrap();
 
         assert_eq!(
             rows(
@@ -515,7 +612,7 @@ pub(crate) mod tests {
             ],
         );
 
-        settle(&pipeline, &client, &Course::CatchUp, NOW).unwrap();
+        settle(&pipeline, &client, &Course::CatchUp { to: None }, NOW).unwrap();
 
         assert_eq!(
             rows(
@@ -542,7 +639,7 @@ pub(crate) mod tests {
                 Schedule::Daily,
                 pipeline.sources().next().unwrap().since(),
                 CAPTURE,
-                RecordedAt::from(at(NOW)),
+                Ts::from(at(NOW)),
             )
             .read(&client, "mysql_shop")
             .unwrap()
@@ -582,9 +679,9 @@ pub(crate) mod tests {
         let pipeline = pipeline();
         let client = logged(PEOPLE, &[built_before("people", CAPTURE)]);
 
-        settle(&pipeline, &client, &Course::CatchUp, NOW).unwrap();
+        settle(&pipeline, &client, &Course::CatchUp { to: None }, NOW).unwrap();
         settle(&pipeline, &client, &shard("2026-09-20", &[]), NOW).unwrap();
-        settle(&pipeline, &client, &Course::CatchUp, NOW).unwrap();
+        settle(&pipeline, &client, &Course::CatchUp { to: None }, NOW).unwrap();
 
         assert_eq!(
             built(&client),

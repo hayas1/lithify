@@ -7,16 +7,19 @@ use chrono::{NaiveDate, Utc};
 use clap::{Parser, Subcommand};
 
 use lithify_cli::course::Course;
-use lithify_cli::credential::{Credential, Secret};
+use lithify_cli::credential::Credentials;
 use lithify_cli::journal::Journal;
+#[cfg(feature = "serve")]
+use lithify_cli::pipeline::{CaptureConfig, WarehouseConfig};
 use lithify_cli::plan::Tables;
 use lithify_cli::run::Run;
 use lithify_cli::unrunnable::Unrunnable;
 use lithify_core::model::TableId;
+use lithify_protocol::sink::duckdb::store::{S3Credential, Secret};
 #[cfg(feature = "serve")]
-use lithify_ui::overview::SinkOverview;
+use lithify_ui::pipelines::Pipelines;
 #[cfg(feature = "serve")]
-use lithify_ui::server::{Board, Survey};
+use lithify_ui::server::Board;
 
 #[derive(Parser)]
 #[command(
@@ -44,7 +47,7 @@ enum Command {
     Check(CheckArguments),
     #[cfg(feature = "serve")]
     #[command(
-        about = "Serve the pages listing what was built, and assembling the builds to rebuild it with"
+        about = "Serve the pages listing what was built and what the check finds wrong with it"
     )]
     Serve(ServeArguments),
 }
@@ -80,28 +83,47 @@ impl Command {
 }
 
 #[derive(clap::Args)]
+struct CredentialArguments {
+    #[arg(
+        long,
+        env = "S3_ACCESS_KEY_ID",
+        hide_env_values = true,
+        value_name = "KEY",
+        requires = "secret_access_key",
+        help = "The key the object storage holding the change log is read with"
+    )]
+    access_key_id: Option<String>,
+    #[arg(
+        long,
+        env = "S3_SECRET_ACCESS_KEY",
+        hide_env_values = true,
+        value_name = "SECRET",
+        requires = "access_key_id",
+        help = "The secret the object storage holding the change log is read with"
+    )]
+    secret_access_key: Option<Secret>,
+}
+
+impl CredentialArguments {
+    fn credentials(&self) -> Credentials {
+        Credentials::new(
+            self.access_key_id
+                .clone()
+                .zip(self.secret_access_key.clone())
+                .map(|(key_id, secret)| S3Credential::new(key_id, secret)),
+        )
+    }
+}
+
+#[derive(clap::Args)]
 struct PipelineArguments {
     #[arg(
         value_name = "DIRECTORY",
         help = "The directory holding the infra.toml and table.toml of one pipeline"
     )]
     directory: PathBuf,
-    #[arg(
-        long,
-        env = "S3_ACCESS_KEY_ID",
-        hide_env_values = true,
-        value_name = "KEY",
-        help = "The key the object storage holding the change log is read with"
-    )]
-    access_key_id: String,
-    #[arg(
-        long,
-        env = "S3_SECRET_ACCESS_KEY",
-        hide_env_values = true,
-        value_name = "SECRET",
-        help = "The secret the object storage holding the change log is read with"
-    )]
-    secret_access_key: Secret,
+    #[command(flatten)]
+    credential: CredentialArguments,
     #[arg(
         long,
         value_name = "NAME",
@@ -114,44 +136,10 @@ impl PipelineArguments {
     fn run(&self) -> Run {
         Run::new(
             self.directory.clone(),
-            Credential::new(self.access_key_id.clone(), self.secret_access_key.clone()),
+            self.credential.credentials(),
             self.sink.clone(),
             Utc::now(),
         )
-    }
-}
-
-#[cfg(feature = "serve")]
-impl Survey for PipelineArguments {
-    fn directory(&self) -> String {
-        self.directory.display().to_string()
-    }
-
-    fn sinks(&self) -> Result<Vec<String>, String> {
-        self.run()
-            .sinks()
-            .map_err(|unrunnable| unrunnable.to_string())
-    }
-
-    fn inspect(&self) -> Result<Vec<SinkOverview>, String> {
-        Ok(self
-            .run()
-            .inspect()
-            .map_err(|unrunnable| unrunnable.to_string())?
-            .into_iter()
-            .map(|(sink, inspection)| {
-                SinkOverview::new(
-                    &sink,
-                    inspection.schedule(),
-                    inspection.latest().to_vec(),
-                    inspection
-                        .discrepancies()
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect(),
-                )
-            })
-            .collect())
     }
 }
 
@@ -159,11 +147,17 @@ impl Survey for PipelineArguments {
 struct CatchUpArguments {
     #[command(flatten)]
     pipeline: PipelineArguments,
+    #[arg(
+        long,
+        value_name = "DATE",
+        help = "The date of the last shard to build, rather than the latest one that has closed"
+    )]
+    to: Option<NaiveDate>,
 }
 
 impl CatchUpArguments {
     fn journal(self) -> Result<Journal, Unrunnable> {
-        self.pipeline.run().build(&Course::CatchUp)
+        self.pipeline.run().build(&Course::CatchUp { to: self.to })
     }
 }
 
@@ -225,8 +219,13 @@ impl CheckArguments {
 #[cfg(feature = "serve")]
 #[derive(clap::Args)]
 struct ServeArguments {
+    #[arg(
+        value_name = "DIRECTORY",
+        help = "The directory of one pipeline, or the directory holding the directories of several"
+    )]
+    directory: PathBuf,
     #[command(flatten)]
-    pipeline: PipelineArguments,
+    credential: CredentialArguments,
     #[arg(
         long,
         value_name = "ADDRESS",
@@ -239,7 +238,11 @@ struct ServeArguments {
 #[cfg(feature = "serve")]
 impl ServeArguments {
     fn journal(self) -> Result<Journal, Unrunnable> {
-        Board::new(self.pipeline).serve(self.address)?;
+        Board::new(Pipelines::<CaptureConfig, WarehouseConfig>::new(
+            self.directory,
+            self.credential.credentials(),
+        ))
+        .serve(self.address)?;
 
         Ok(Journal::default())
     }
@@ -283,8 +286,31 @@ mod tests {
     }
 
     #[test]
-    fn a_catch_up_is_given_nothing_but_the_pipeline() {
-        assert!(matches!(parsed("catch-up", &[]), Ok(Command::CatchUp(_))));
+    fn a_pipeline_is_read_without_a_credential_unless_one_is_given_whole() {
+        assert!(Arguments::try_parse_from(["lithify", "catch-up", "mysql"]).is_ok());
+        assert!(
+            Arguments::try_parse_from([
+                "lithify",
+                "catch-up",
+                "mysql",
+                "--access-key-id",
+                "rustfsadmin"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_catch_up_is_given_the_pipeline_and_the_date_of_the_last_shard_it_builds() {
+        let Ok(Command::CatchUp(latest)) = parsed("catch-up", &[]) else {
+            panic!("catch-up was named");
+        };
+        let Ok(Command::CatchUp(past)) = parsed("catch-up", &["--to", "2026-09-20"]) else {
+            panic!("catch-up was named");
+        };
+
+        assert_eq!(latest.to, None);
+        assert_eq!(past.to, Some("2026-09-20".parse::<NaiveDate>().unwrap()));
         assert!(parsed("catch-up", &["--from", "2026-09-20T00:00:00Z"]).is_err());
         assert!(parsed("catch-up", &["--onto", "2026-09-19T00:00:00Z"]).is_err());
         assert!(parsed("catch-up", &["--dry-run", "plans"]).is_err());
@@ -354,30 +380,7 @@ mod tests {
 
     #[cfg(feature = "serve")]
     #[test]
-    fn a_build_the_board_assembles_is_one_the_command_line_takes() {
-        let assembled =
-            lithify_ui::command::BuildCommand::new("mysql", "2026-09-20".parse().unwrap())
-                .sink("rustfs")
-                .table(TableId::new("shop", "pets"))
-                .dry_run("plans");
-
-        let Command::Build(built) = Arguments::try_parse_from(
-            assembled
-                .args()
-                .iter()
-                .map(String::as_str)
-                .chain(PIPELINE[1..].iter().copied()),
-        )
-        .unwrap()
-        .command
-        else {
-            panic!("build was assembled");
-        };
-
-        assert_eq!(built.pipeline.directory, PathBuf::from("mysql"));
-        assert_eq!(built.pipeline.sink.as_deref(), Some("rustfs"));
-        assert_eq!(built.snapshot, "2026-09-20".parse::<NaiveDate>().unwrap());
-        assert_eq!(built.table, [TableId::new("shop", "pets")]);
-        assert_eq!(built.dry_run, Some(PathBuf::from("plans")));
+    fn a_board_reads_every_sink_rather_than_one_it_is_told_of() {
+        assert!(parsed("serve", &["--sink", "rustfs"]).is_err());
     }
 }

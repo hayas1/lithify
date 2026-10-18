@@ -1,6 +1,5 @@
 pub mod artifacts;
 pub mod catch_up;
-pub mod check;
 pub mod course;
 pub mod credential;
 pub mod journal;

@@ -1,8 +1,8 @@
 use duckdb::types::{FromSql, Type};
 use duckdb::{Connection, Error, Statement};
 
-use lithify_core::build_log::{BuildLog, BuildLogRow, Latest};
-use lithify_core::sink::{TablePath, Warehouse, WarehouseClient};
+use lithify_core::build_log::{BuildLog, BuildLogQuery, BuildLogRow};
+use lithify_core::sink::{ChangeLogSql, TablePath, WarehouseClient, WarehouseSql};
 use lithify_core::source::{
     ChangeLogs, SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed,
 };
@@ -65,20 +65,17 @@ impl WarehouseClient for DuckDbClient {
         Ok(count > 0)
     }
 
-    fn latest_build_logs(
+    fn build_logs(
         &self,
         namespace: &str,
-        latest: &Latest,
+        query: &BuildLogQuery,
     ) -> Result<Vec<BuildLog>, Self::Error> {
         self.connection
-            .prepare(
-                self.warehouse
-                    .select_latest_build_logs(namespace, latest)
-                    .as_str(),
-            )?
+            .prepare(query.select(&self.warehouse, namespace).as_str())?
             .query_map([], |row| {
                 Ok(BuildLogRow {
                     run_id: row.get("run_id")?,
+                    started_at: row.get("started_at")?,
                     artifact: row.get("artifact")?,
                     schedule: row.get("schedule")?,
                     source: row.get("source")?,
@@ -165,38 +162,39 @@ mod tests {
     use crate::source::debezium::tests::described;
     use chrono::DateTime;
     use lithify_core::artifact::UnbuildableArtifact;
+    use lithify_core::build_log::Latest;
     use lithify_core::build_log::{Outcome, Run, Status};
     use lithify_core::event::{MalformedEvent, SchemaChange};
     use lithify_core::listener::OutOfOrder;
     use lithify_core::model::TableId;
-    use lithify_core::position::RecordedAt;
     use lithify_core::position::{Coordinate, Position};
     use lithify_core::sink::TablePath;
     use lithify_core::source::{ChangeLog, ColumnPath};
+    use lithify_core::ts::Ts;
     use ulid::Ulid;
 
     const CHANGE_LOG: &str = "CREATE SCHEMA mysql_shop_cdc;
         CREATE TABLE mysql_shop_cdc.mysql AS
         SELECT * FROM (VALUES
-          ({'source': {'file': 'binlog.000002', 'pos': 198, 'gtid': NULL},
+          ({'source': {'file': 'binlog.000002', 'pos': 198, 'gtid': NULL, 'ts_ms': 1789800000000::BIGINT},
             'ts_ms': 1789800000000::BIGINT,
             'ddl': 'DROP TABLE `customers`',
             'tableChanges': [{'type': 'DROP', 'id': '\"shop\".\"customers\"', 'table': NULL}]}),
-          ({'source': {'file': 'binlog.000002', 'pos': 448, 'gtid': NULL},
+          ({'source': {'file': 'binlog.000002', 'pos': 448, 'gtid': NULL, 'ts_ms': 1789800000001::BIGINT},
             'ts_ms': 1789800000001::BIGINT,
             'ddl': 'CREATE TABLE `customers` (`id` bigint)',
             'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"customers\"',
               'table': {'primaryKeyColumnNames': ['id'], 'columns': [
                 {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
                  'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]}),
-          ({'source': {'file': 'binlog.000003', 'pos': 4, 'gtid': NULL},
+          ({'source': {'file': 'binlog.000003', 'pos': 4, 'gtid': NULL, 'ts_ms': 1789900000000::BIGINT},
             'ts_ms': 1789900000000::BIGINT,
             'ddl': 'DROP TABLE `orders`',
             'tableChanges': [{'type': 'DROP', 'id': '\"shop\".\"orders\"', 'table': NULL}]})
         ) AS t(value)";
 
     fn window(from: i64, to: i64) -> Window {
-        Window::new(RecordedAt::from(from), RecordedAt::from(to))
+        Window::new(Ts::try_from(from).unwrap(), Ts::try_from(to).unwrap())
     }
 
     fn read(window: &Window) -> Vec<String> {
@@ -236,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn a_window_holds_the_statements_recorded_within_it() {
+    fn a_window_holds_the_statements_whose_event_time_falls_within_it() {
         let statements = read(&window(1789800000001, 1789900000000));
 
         assert_eq!(
@@ -256,7 +254,7 @@ mod tests {
             .table::<Unread>(
                 &log,
                 &TableId::new("shop", "customers"),
-                RecordedAt::from(1789900000001),
+                Ts::try_from(1789900000001).unwrap(),
             )
             .unwrap()
             .unwrap();
@@ -278,7 +276,7 @@ mod tests {
         let log = Debezium::under("value", "mysql", MySql);
         let tables = |at: i64| {
             client
-                .catalog_at::<Unread>(&log, RecordedAt::from(at))
+                .catalog_at::<Unread>(&log, Ts::try_from(at).unwrap())
                 .unwrap()
                 .tables()
                 .map(|table| table.id().to_string())
@@ -342,6 +340,7 @@ mod tests {
         BuildLog::new(
             &Run::new(
                 Ulid::from_parts(finished_at, 0),
+                DateTime::UNIX_EPOCH,
                 "snapshot",
                 "daily",
                 "primary",
@@ -374,7 +373,7 @@ mod tests {
     }
 
     fn latest(client: &DuckDbClient, latest: Latest) -> Vec<BuildLog> {
-        client.latest_build_logs("mysql_shop", &latest).unwrap()
+        client.build_logs("mysql_shop", &latest.into()).unwrap()
     }
 
     #[derive(Debug)]
@@ -432,6 +431,18 @@ mod tests {
     }
 
     #[test]
+    fn a_build_log_reads_back_every_record_from_the_newest() {
+        let history = history();
+
+        assert_eq!(
+            logging(&history)
+                .build_logs("mysql_shop", &BuildLogQuery::All)
+                .unwrap(),
+            history.into_iter().rev().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn a_build_log_reads_the_latest_success_of_each_table() {
         let history = history();
 
@@ -448,7 +459,7 @@ mod tests {
         assert_eq!(
             latest(
                 &logging(&history),
-                Latest::SucceededUntil(RecordedAt::from(W1.1))
+                Latest::SucceededUntil(Ts::try_from(W1.1).unwrap())
             ),
             [history[2].clone(), history[1].clone()]
         );
@@ -516,7 +527,7 @@ mod tests {
         ]);
 
         assert_eq!(
-            latest(&client, Latest::SucceededUntil(RecordedAt::from(W1.1))),
+            latest(&client, Latest::SucceededUntil(Ts::try_from(W1.1).unwrap())),
             [before]
         );
     }
@@ -623,8 +634,12 @@ mod tests {
             None
         }
 
-        fn recorded_at(&self) -> ColumnPath {
-            ColumnPath::from("written")
+        fn event_time(&self) -> ColumnPath {
+            ColumnPath::from("event_time")
+        }
+
+        fn processing_time(&self) -> ColumnPath {
+            ColumnPath::from("processing_time")
         }
 
         fn ordering(&self) -> Vec<ColumnPath> {
@@ -649,7 +664,7 @@ mod tests {
         ) -> Result<SchemaChange<Self::Position>, MalformedEvent> {
             Ok(SchemaChange::new(
                 Line(0),
-                RecordedAt::from(0),
+                Ts::try_from(0).unwrap(),
                 &statement,
                 Vec::new(),
                 Vec::new(),
@@ -658,15 +673,17 @@ mod tests {
     }
 
     #[test]
-    fn a_change_log_of_any_format_is_streamed_by_the_record_it_reads() {
+    fn a_change_log_of_any_format_is_streamed_by_the_record_it_reads_in_the_order_of_its_processing_time()
+     {
         let connection = Connection::open_in_memory().unwrap();
         connection
             .execute_batch(
                 "CREATE SCHEMA ledger;
                  CREATE TABLE ledger.statements AS SELECT * FROM (VALUES
-                   ('DROP TABLE b', 2, 2),
-                   ('CREATE TABLE a (id bigint)', 1, 1)
-                 ) AS t(statement, line, written)",
+                   ('DROP TABLE b', 2, 1, 2),
+                   ('CREATE TABLE a (id bigint)', 1, 2, 1),
+                   ('DROP TABLE c', 3, 3, 0)
+                 ) AS t(statement, line, event_time, processing_time)",
             )
             .unwrap();
         let client = DuckDbClient::new(connection, DuckDbWarehouse::new("ledger"));

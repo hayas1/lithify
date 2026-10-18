@@ -1,7 +1,7 @@
 use std::fmt;
 
 use crate::model::{TableId, TableModel};
-use crate::position::RecordedAt;
+use crate::ts::{Processing, Ts};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TableChange {
@@ -58,7 +58,7 @@ impl Hint {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaChange<P> {
     position: P,
-    recorded_at: RecordedAt,
+    processing_time: Ts<Processing>,
     statement: String,
     tables: Vec<TableChange>,
     hints: Vec<Hint>,
@@ -70,8 +70,8 @@ impl<P> SchemaChange<P> {
         &self.position
     }
 
-    pub fn recorded_at(&self) -> &RecordedAt {
-        &self.recorded_at
+    pub fn processing_time(&self) -> &Ts<Processing> {
+        &self.processing_time
     }
 
     pub fn statement(&self) -> &str {
@@ -104,14 +104,14 @@ impl<P> SchemaChange<P> {
 
     pub fn new(
         position: P,
-        recorded_at: RecordedAt,
+        processing_time: Ts<Processing>,
         statement: &str,
         tables: Vec<TableChange>,
         hints: Vec<Hint>,
     ) -> Self {
         Self {
             position,
-            recorded_at,
+            processing_time,
             statement: statement.to_owned(),
             tables,
             hints,
@@ -192,7 +192,7 @@ mod tests {
 
     #[test]
     fn a_schema_change_is_taken_at_the_source_unless_marked_captured() {
-        let change = SchemaChange::new(1, RecordedAt::from(1), "", Vec::new(), Vec::new());
+        let change = SchemaChange::new(1, Ts::try_from(1).unwrap(), "", Vec::new(), Vec::new());
 
         assert!(!change.is_captured());
         assert!(change.captured().is_captured());

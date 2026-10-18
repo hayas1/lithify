@@ -78,6 +78,24 @@ impl Store {
         }
     }
 
+    pub fn existence(&self, table: &TablePath) -> SqlString {
+        match self {
+            Self::S3(s3) => s3.existence(table),
+        }
+    }
+
+    pub fn replace(&self, table: &TablePath, select: &SqlString) -> SqlString {
+        match self {
+            Self::S3(s3) => s3.replace(table, select),
+        }
+    }
+
+    pub fn append(&self, table: &TablePath, select: &SqlString) -> SqlString {
+        match self {
+            Self::S3(s3) => s3.append(table, select),
+        }
+    }
+
     pub fn secret(&self, key_id: &str, secret: &str) -> SqlString {
         match self {
             Self::S3(s3) => s3.secret(key_id, secret),
@@ -111,13 +129,46 @@ impl S3 {
     }
 
     fn scan(&self, table: &TablePath) -> SqlString {
-        self.format.scan(&format!(
-            "s3://{}/{}/{}/*.{}",
+        self.format.scan(&self.files(table))
+    }
+
+    fn existence(&self, table: &TablePath) -> SqlString {
+        SqlString::from(format!(
+            "SELECT COUNT(*) AS \"count\" FROM glob('{}')",
+            self.files(table)
+        ))
+    }
+
+    fn replace(&self, table: &TablePath, select: &SqlString) -> SqlString {
+        SqlString::from(format!(
+            "COPY (\n{select}\n) TO '{}/{}.{}' ({})",
+            self.directory(table),
+            table.name(),
+            self.format.extension(),
+            self.format.copy()
+        ))
+    }
+
+    fn append(&self, table: &TablePath, select: &SqlString) -> SqlString {
+        SqlString::from(format!(
+            "COPY (\n{select}\n) TO '{}' ({}, FILENAME_PATTERN '{}_{{uuid}}', PER_THREAD_OUTPUT true, APPEND true)",
+            self.directory(table),
+            self.format.copy(),
+            table.name()
+        ))
+    }
+
+    fn files(&self, table: &TablePath) -> String {
+        format!("{}/*.{}", self.directory(table), self.format.extension())
+    }
+
+    fn directory(&self, table: &TablePath) -> String {
+        format!(
+            "s3://{}/{}/{}",
             self.bucket,
             table.namespace(),
-            table.name(),
-            self.format.extension()
-        ))
+            table.name()
+        )
     }
 }
 
@@ -131,6 +182,12 @@ impl FileFormat {
     pub fn extension(&self) -> &'static str {
         match self {
             Self::Parquet => "parquet",
+        }
+    }
+
+    fn copy(&self) -> &'static str {
+        match self {
+            Self::Parquet => "FORMAT parquet",
         }
     }
 

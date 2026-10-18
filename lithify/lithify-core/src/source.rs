@@ -1,10 +1,10 @@
 use std::fmt;
 
-use crate::era::Bound;
 use crate::event::{MalformedEvent, SchemaChange};
 use crate::listener::{CatalogModel, OutOfOrder, SchemaChangeListener};
 use crate::model::{TableId, TableModel};
-use crate::position::{Coordinate, Position, RecordedAt};
+use crate::position::{Coordinate, Position};
+use crate::ts::{Event, Ts};
 use crate::window::Window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,27 +37,17 @@ pub trait ChangeLog {
 
     fn envelope(&self) -> Option<ColumnPath>;
 
-    fn recorded_at(&self) -> ColumnPath;
+    fn event_time(&self) -> ColumnPath;
+
+    fn processing_time(&self) -> ColumnPath;
 
     fn ordering(&self) -> Vec<ColumnPath>;
 
     fn coordinates(&self, position: &Self::Position) -> Vec<Coordinate>;
 
     fn sequence(&self) -> Vec<ColumnPath> {
-        std::iter::once(self.recorded_at())
+        std::iter::once(self.processing_time())
             .chain(self.ordering())
-            .collect()
-    }
-
-    fn placed(&self, bound: &Bound<Self::Position>) -> Vec<(ColumnPath, Coordinate)> {
-        let positional = bound
-            .as_position()
-            .map(|position| self.ordering().into_iter().zip(self.coordinates(position)))
-            .into_iter()
-            .flatten();
-
-        std::iter::once((self.recorded_at(), Coordinate::from(bound.instant())))
-            .chain(positional)
             .collect()
     }
 }
@@ -146,7 +136,7 @@ pub trait SchemaChangeStream<L: SchemaChangeLog> {
         })
     }
 
-    fn catalog_at<E>(&self, log: &L, at: RecordedAt) -> Result<CatalogModel<L::Position>, E>
+    fn catalog_at<E>(&self, log: &L, at: Ts<Event>) -> Result<CatalogModel<L::Position>, E>
     where
         Self::Error: Into<E>,
         E: From<OutOfOrder>,
@@ -179,7 +169,7 @@ pub trait SchemaChangeStream<L: SchemaChangeLog> {
         Ok(catalog)
     }
 
-    fn table<E>(&self, log: &L, table: &TableId, at: RecordedAt) -> Result<Option<TableModel>, E>
+    fn table<E>(&self, log: &L, table: &TableId, at: Ts<Event>) -> Result<Option<TableModel>, E>
     where
         Self::Error: Into<E>,
         E: From<OutOfOrder>,

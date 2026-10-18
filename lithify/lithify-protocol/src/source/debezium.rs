@@ -9,10 +9,11 @@ use serde_json::Value;
 
 use lithify_core::event::{Hint, MalformedEvent, SchemaChange, TableChange};
 use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
-use lithify_core::position::{Coordinate, Position, RecordedAt};
+use lithify_core::position::{Coordinate, Position};
 use lithify_core::source::{
     CdcFormat, ChangeLog, ChangeLogs, ColumnPath, RowChangeLog, SchemaChangeLog,
 };
+use lithify_core::ts::Ts;
 
 use rename::RenameReader;
 
@@ -216,7 +217,11 @@ impl<D: Dialect> ChangeLog for Debezium<D> {
         self.envelope.clone()
     }
 
-    fn recorded_at(&self) -> ColumnPath {
+    fn event_time(&self) -> ColumnPath {
+        self.path("source.ts_ms")
+    }
+
+    fn processing_time(&self) -> ColumnPath {
         self.path("ts_ms")
     }
 
@@ -266,7 +271,8 @@ impl<D: Dialect> SchemaChangeLog for Debezium<D> {
 
         let change = SchemaChange::new(
             self.dialect.position(&statement.source),
-            RecordedAt::from(statement.ts_ms),
+            Ts::try_from(statement.ts_ms)
+                .map_err(|millis| MalformedEvent::Undecodable(format!("{millis} is no instant")))?,
             &statement.ddl,
             tables,
             hints,

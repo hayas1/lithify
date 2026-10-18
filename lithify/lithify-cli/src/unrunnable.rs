@@ -7,6 +7,7 @@ use lithify_config::Unreadable;
 use lithify_core::artifact::UnbuildableArtifact;
 use lithify_core::listener::OutOfOrder;
 use lithify_core::model::TableId;
+use lithify_core::ts::{Event, Ts};
 use lithify_core::window::Window;
 use lithify_protocol::sink::bigquery::client::Unqueryable;
 
@@ -27,11 +28,16 @@ pub enum Unrunnable {
     WithoutSource,
     Unsharded(NaiveDate),
     Unclosed(Window),
+    Overtaken {
+        date: NaiveDate,
+        built_until: Ts<Event>,
+    },
     Baseless {
         window: Window,
         tables: Vec<TableId>,
     },
     UnknownTables(Vec<TableId>),
+    Uncredentialed(&'static str),
 }
 
 impl Display for Unrunnable {
@@ -59,6 +65,10 @@ impl Display for Unrunnable {
                 window.from(),
                 window.to()
             ),
+            Self::Overtaken { date, built_until } => write!(
+                formatter,
+                "the build log has built past the shard dated {date}, up to {built_until}; rebuild that shard with `lithify build --snapshot {date}` instead"
+            ),
             Self::Baseless { window, tables } => write!(
                 formatter,
                 "nothing was built for {} closing at {}, which the window to {} folds onto; build the windows before it first",
@@ -69,6 +79,10 @@ impl Display for Unrunnable {
                     .join(", "),
                 window.from(),
                 window.to()
+            ),
+            Self::Uncredentialed(warehouse) => write!(
+                formatter,
+                "a {warehouse} sink is read with a credential, but none was given"
             ),
             Self::UnknownTables(tables) => write!(
                 formatter,
@@ -98,8 +112,10 @@ impl std::error::Error for Unrunnable {
             | Self::CaptureChanged { .. }
             | Self::Unsharded(_)
             | Self::Unclosed(_)
+            | Self::Overtaken { .. }
             | Self::Baseless { .. }
-            | Self::UnknownTables(_) => None,
+            | Self::UnknownTables(_)
+            | Self::Uncredentialed(_) => None,
         }
     }
 }

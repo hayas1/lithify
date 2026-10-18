@@ -3,11 +3,11 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 
 use lithify_cli::artifacts::Artifacts;
-use lithify_cli::pipeline::{Capture, Warehouse};
+use lithify_cli::pipeline::{CaptureConfig, WarehouseConfig};
 use lithify_config::{Pipeline, infra};
 use lithify_core::artifact::Artifact;
 use lithify_core::model::{TableId, TableModel};
-use lithify_core::position::RecordedAt;
+use lithify_core::ts::{Event, Processing, Ts};
 use lithify_core::window::Window;
 
 use crate::row::Rows;
@@ -25,7 +25,7 @@ pub struct ConnectedPipeline<'a> {
 impl<'a> ConnectedPipeline<'a> {
     pub fn connect(
         scenario: &'a Scenario,
-        pipeline: &'a Pipeline<Capture, Warehouse>,
+        pipeline: &'a Pipeline<CaptureConfig, WarehouseConfig>,
         watch: Watch,
         key_id: &str,
         secret: &str,
@@ -67,13 +67,13 @@ impl<'a> ConnectedPipeline<'a> {
 }
 
 pub struct Watch {
-    started: RecordedAt,
+    started: Ts<Event>,
     patience: Duration,
     settling: Duration,
 }
 
 impl Watch {
-    pub fn new(started: RecordedAt, patience: Duration) -> Self {
+    pub fn new(started: Ts<Event>, patience: Duration) -> Self {
         Self {
             started,
             patience,
@@ -105,15 +105,15 @@ impl Watch {
         Window::new(self.started, Self::end())
     }
 
-    fn end() -> RecordedAt {
-        RecordedAt::from(4102444800000)
+    fn end() -> Ts<Event> {
+        Ts::try_from(4102444800000).unwrap()
     }
 }
 
 pub struct SourceEnd<'a> {
-    config: &'a infra::Source<Capture>,
+    config: &'a infra::Source<CaptureConfig>,
     client: Box<dyn Source>,
-    applied: Option<RecordedAt>,
+    applied: Option<Ts<Processing>>,
 }
 
 impl<'a> SourceEnd<'a> {
@@ -124,7 +124,7 @@ impl<'a> SourceEnd<'a> {
     }
 
     fn connect(
-        pipeline: &'a Pipeline<Capture, Warehouse>,
+        pipeline: &'a Pipeline<CaptureConfig, WarehouseConfig>,
         name: &str,
         connection: &'a SourceConnection,
     ) -> Result<Self, Unverifiable> {
@@ -139,7 +139,7 @@ impl<'a> SourceEnd<'a> {
     }
 
     pub fn query(&mut self, action: &Action) -> Result<(), Unverifiable> {
-        let applied = RecordedAt::from(Utc::now());
+        let applied = Ts::from(Utc::now());
 
         for query in action.queries() {
             self.client.execute(query)?;
@@ -153,13 +153,13 @@ impl<'a> SourceEnd<'a> {
         Ok(self.client.rows(model)?)
     }
 
-    fn capture(&self) -> &Capture {
+    fn capture(&self) -> &CaptureConfig {
         self.config.capture()
     }
 }
 
 pub struct SinkEnd<'a> {
-    config: &'a infra::Sink<Warehouse>,
+    config: &'a infra::Sink<WarehouseConfig>,
     client: Box<dyn Sink>,
 }
 
@@ -171,7 +171,7 @@ impl<'a> SinkEnd<'a> {
     }
 
     fn connect(
-        pipeline: &'a Pipeline<Capture, Warehouse>,
+        pipeline: &'a Pipeline<CaptureConfig, WarehouseConfig>,
         name: &str,
         _: &'a SinkConnection,
         key_id: &str,
