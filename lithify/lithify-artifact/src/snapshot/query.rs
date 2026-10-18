@@ -6,20 +6,20 @@ use lithify_core::sink::{TablePath, Warehouse};
 use lithify_core::source::{ColumnPath, RowChangeLog};
 use lithify_core::sql::SqlString;
 
-pub(super) struct ChangeLogQuery<'a, L> {
+pub(crate) struct ChangeLogQuery<'a, L> {
     log: &'a L,
 }
 
 impl<'a, L: RowChangeLog> ChangeLogQuery<'a, L> {
-    pub(super) fn new(log: &'a L) -> Self {
+    pub(crate) fn new(log: &'a L) -> Self {
         Self { log }
     }
 
-    pub(super) fn change_log<W: Warehouse>(&self, warehouse: &W, table: &TableId) -> SqlString {
+    pub(crate) fn change_log<W: Warehouse>(&self, warehouse: &W, table: &TableId) -> SqlString {
         warehouse.change_log_ref(&self.log.dml_topic(table))
     }
 
-    pub(super) fn captured<W: Warehouse>(
+    pub(crate) fn captured<W: Warehouse>(
         &self,
         warehouse: &W,
         change_log: &SqlString,
@@ -33,7 +33,7 @@ impl<'a, L: RowChangeLog> ChangeLogQuery<'a, L> {
         )))
     }
 
-    pub(super) fn shard<W: Warehouse>(
+    pub(crate) fn shard<W: Warehouse>(
         &self,
         warehouse: &W,
         shard: &TablePath,
@@ -46,7 +46,7 @@ impl<'a, L: RowChangeLog> ChangeLogQuery<'a, L> {
         ))
     }
 
-    pub(super) fn changes<W: Warehouse>(
+    pub(crate) fn changes<W: Warehouse>(
         &self,
         warehouse: &W,
         change_log: &SqlString,
@@ -60,6 +60,55 @@ impl<'a, L: RowChangeLog> ChangeLogQuery<'a, L> {
         ))
     }
 
+    pub(crate) fn versions<W: Warehouse>(
+        &self,
+        warehouse: &W,
+        change_log: &SqlString,
+        era: &Era<L::Position>,
+    ) -> Result<SqlString, UnbuildableArtifact> {
+        let table = era.table();
+        let after = warehouse.path(&self.log.after());
+        let columns: Vec<String> = table
+            .columns()
+            .map(|column| {
+                let name = warehouse.identifier(column.name());
+                let value = match table.primary_key().any(|key| key == column.name()) {
+                    true => self.keyed(warehouse, None, &name),
+                    false => SqlString::from(format!("{after}.{name}")),
+                };
+
+                Ok(format!(
+                    "    {} AS {name}",
+                    warehouse.read(&value, column.column_type())?
+                ))
+            })
+            .collect::<Result<_, UnbuildableArtifact>>()?;
+        let sequence: Vec<String> = self
+            .sequence(warehouse)
+            .iter()
+            .zip(self.sequenced(warehouse))
+            .map(|(path, name)| format!("    {path} AS {name}"))
+            .collect();
+
+        Ok(SqlString::from(format!(
+            "  SELECT\n{},\n    {} AS {},\n    {} AS {},\n{}\n  FROM {change_log}\n  WHERE {} AND {}",
+            columns.join(",\n"),
+            warehouse.path(&self.log.operation()),
+            warehouse.identifier("_op"),
+            warehouse.path(&self.log.event_time()),
+            warehouse.identifier("_at"),
+            sequence.join(",\n"),
+            Edge::Since.condition(warehouse, &era.from().placed(self.log)),
+            Edge::Until.condition(warehouse, &era.to().placed(self.log)),
+        )))
+    }
+
+    pub(crate) fn sequenced<W: Warehouse>(&self, warehouse: &W) -> Vec<SqlString> {
+        (0..self.log.sequence().len())
+            .map(|at| warehouse.identifier(&format!("_s{at}")))
+            .collect()
+    }
+
     fn sequence<W: Warehouse>(&self, warehouse: &W) -> Vec<SqlString> {
         self.log
             .sequence()
@@ -68,7 +117,7 @@ impl<'a, L: RowChangeLog> ChangeLogQuery<'a, L> {
             .collect()
     }
 
-    pub(super) fn fold_changes<W: Warehouse>(
+    pub(crate) fn fold_changes<W: Warehouse>(
         &self,
         warehouse: &W,
         table: &TableModel,
@@ -91,7 +140,7 @@ impl<'a, L: RowChangeLog> ChangeLogQuery<'a, L> {
         )))
     }
 
-    pub(super) fn carry<W: Warehouse>(
+    pub(crate) fn carry<W: Warehouse>(
         &self,
         warehouse: &W,
         next: &TableModel,

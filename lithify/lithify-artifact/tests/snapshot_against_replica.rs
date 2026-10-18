@@ -8,13 +8,14 @@ use std::collections::BTreeMap;
 use lithify_artifact::instant::Instant;
 use lithify_artifact::masked::Masked;
 use lithify_artifact::scd1::Scd1;
+use lithify_artifact::scd2::Scd2;
 use lithify_artifact::snapshot::Snapshot;
 use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
 use lithify_core::build_log::{BuildLog, Outcome, Run, Status};
 use lithify_core::era::{Bound, Era};
 use lithify_core::listener::SchemaChangeListener;
 use lithify_core::model::{ColumnModel, ColumnType, Mask, TableId, TableModel};
-use lithify_core::sink::WarehouseClient;
+use lithify_core::sink::{Namespace, TablePath, WarehouseClient};
 use lithify_core::sql::SqlString;
 use lithify_core::testing::{Mutation, Replica, Row};
 use lithify_core::ts::Ts;
@@ -153,8 +154,8 @@ impl Shards {
             &Run::new(
                 Ulid::nil(),
                 DateTime::UNIX_EPOCH,
-                "snapshot",
-                "daily",
+                artifact.series().artifact(),
+                artifact.series().schedule(),
                 "primary",
                 "{}",
                 "0.1.0",
@@ -294,5 +295,121 @@ fn an_scd1_holds_what_the_source_holds_now_onto_the_last_daily_snapshot() {
     assert_eq!(
         shards.rows(&current),
         replica.at(Ts::try_from(i64::from(i32::MAX)).unwrap())
+    );
+}
+
+impl Shards {
+    fn as_of(&self, tables: &[TablePath], at: i64) -> Vec<Row> {
+        let versions = tables
+            .iter()
+            .map(|table| {
+                format!(
+                    "SELECT id, name, _valid_from, _valid_to FROM \"{}\".\"{}\"",
+                    table.namespace(),
+                    table.name()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" UNION ALL ");
+
+        self.client
+            .connection()
+            .prepare(&format!(
+                "SELECT id::VARCHAR, name FROM ({versions}) WHERE _valid_from < {at} AND (_valid_to IS NULL OR _valid_to >= {at}) ORDER BY id"
+            ))
+            .unwrap()
+            .query_map([], |row| {
+                Ok(Row::from([
+                    ("id".to_owned(), row.get::<_, Option<String>>(0)?),
+                    ("name".to_owned(), row.get::<_, Option<String>>(1)?),
+                ]))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+}
+
+fn scd2() -> Scd2 {
+    Scd2::new(Namespace::from("shop_scd2"), "%Y%m%d", chrono_tz::Tz::UTC)
+}
+
+#[test]
+fn an_scd2_holds_at_every_instant_the_version_the_source_held_then() {
+    let replica = replica();
+    let shards = Shards::over(&replica);
+    let scd2 = scd2();
+    let first = shards.build_into(&scd2, &day(0), None);
+    let second = shards.build_into(
+        &scd2,
+        &day(1),
+        scd2.base(std::slice::from_ref(&first), people().id(), &day(1)),
+    );
+    let versions = [
+        scd2.closed(people().id(), &day(0)).unwrap(),
+        scd2.closed(people().id(), &day(1)).unwrap(),
+        second.target().unwrap().clone(),
+    ];
+
+    for at in [
+        500,
+        1_500,
+        2_500,
+        3_500,
+        DAY,
+        DAY + 1_500,
+        DAY + 2_500,
+        DAY + 3_500,
+        2 * DAY,
+    ] {
+        assert_eq!(
+            shards.as_of(&versions, at),
+            replica.at(Ts::try_from(at).unwrap()),
+            "as of {at}"
+        );
+    }
+}
+
+#[test]
+fn an_scd2_built_again_for_a_window_holds_the_same_versions() {
+    let replica = replica();
+    let shards = Shards::over(&replica);
+    let scd2 = scd2();
+    let first = shards.build_into(&scd2, &day(0), None);
+    let base = scd2.base(std::slice::from_ref(&first), people().id(), &day(1));
+    let second = shards.build_into(&scd2, &day(1), base);
+    let versions = [
+        scd2.closed(people().id(), &day(1)).unwrap(),
+        second.target().unwrap().clone(),
+    ];
+    let built = shards.as_of(&versions, DAY + 2_500);
+
+    shards.build_into(&scd2, &day(1), base);
+
+    assert_eq!(shards.as_of(&versions, DAY + 2_500), built);
+}
+
+#[test]
+fn an_scd2_whose_table_changed_its_schema_within_the_window_is_refused() {
+    let replica = replica();
+    let shards = Shards::over(&replica);
+    let scd2 = scd2();
+    let log = Debezium::under("value", "mysql", MySql);
+    let window = day(0);
+    let mut versions = scd2
+        .builder::<_, DuckDbWarehouse>(&log, people().id().clone(), &window, None)
+        .unwrap();
+    let era = Era::new(
+        people(),
+        Bound::EventTime(*window.from()),
+        Bound::EventTime(*window.to()),
+    );
+    versions
+        .era_boundary(shards.client.warehouse(), &era)
+        .unwrap();
+
+    assert_eq!(
+        versions.era_boundary(shards.client.warehouse(), &era),
+        Err(UnbuildableArtifact::AcrossEras(people().id().clone()))
     );
 }

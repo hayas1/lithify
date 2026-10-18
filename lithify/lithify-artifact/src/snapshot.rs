@@ -23,7 +23,7 @@ use fold::Fold;
 use query::ChangeLogQuery;
 
 mod fold;
-mod query;
+pub(crate) mod query;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]

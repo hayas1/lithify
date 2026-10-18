@@ -13,6 +13,7 @@ pub enum UnbuildableArtifact {
     WithoutPrimaryKey(TableId),
     PrimaryKeyChanged(TableId),
     WithoutEra(TableId),
+    AcrossEras(TableId),
     UnsupportedColumn(UnsupportedColumn),
     UnsupportedMask {
         table: TableId,
@@ -44,6 +45,10 @@ impl fmt::Display for UnbuildableArtifact {
             Self::WithoutEra(table) => {
                 write!(formatter, "{table} lived through no era of the window")
             }
+            Self::AcrossEras(table) => write!(
+                formatter,
+                "{table} changed its schema within the window, which SCD type 2 does not carry its versions across yet"
+            ),
             Self::UnsupportedColumn(unsupported) => unsupported.fmt(formatter),
             Self::UnsupportedMask {
                 table,
