@@ -148,6 +148,7 @@ mod tests {
     use crate::source::debezium::Debezium;
     use crate::source::debezium::mysql::MySql;
 
+    use chrono::DateTime;
     use lithify_core::build_log::{BuildLog, BuildLogQuery, Latest, Outcome, Run, Status};
     use lithify_core::model::{ColumnType, TableId};
     use lithify_core::position::RecordedAt;
@@ -182,14 +183,22 @@ mod tests {
     fn a_build_log_is_created_with_the_types_bigquery_has_for_its_columns() {
         assert_eq!(
             BuildLog::create_table(&bigquery(), "mysql_shop").unwrap(),
-            "CREATE TABLE IF NOT EXISTS `local-project`.`mysql_shop`.`_lithify_log` (`id` INT64, `run_id` STRING, `artifact` STRING, `schedule` STRING, `source` STRING, `capture` STRING, `table_from` STRING, `table_to` STRING, `lifecycle` STRING, `base` STRING, `target` STRING, `window_from` TIMESTAMP, `window_to` TIMESTAMP, `status` STRING, `finished_at` TIMESTAMP, `error` STRING, `version` STRING)"
+            "CREATE TABLE IF NOT EXISTS `local-project`.`mysql_shop`.`_lithify_log` (`id` INT64, `run_id` STRING, `started_at` TIMESTAMP, `artifact` STRING, `schedule` STRING, `source` STRING, `capture` STRING, `table_from` STRING, `table_to` STRING, `lifecycle` STRING, `base` STRING, `target` STRING, `window_from` TIMESTAMP, `window_to` TIMESTAMP, `status` STRING, `finished_at` TIMESTAMP, `error` STRING, `version` STRING)"
         );
     }
 
     #[test]
     fn a_build_log_is_appended_under_the_next_id_with_its_instants_in_milliseconds() {
         let log = BuildLog::new(
-            &Run::new(Ulid::nil(), "snapshot", "daily", "primary", "{}", "0.1.0"),
+            &Run::new(
+                Ulid::nil(),
+                DateTime::UNIX_EPOCH,
+                "snapshot",
+                "daily",
+                "primary",
+                "{}",
+                "0.1.0",
+            ),
             Some(TableId::new("shop", "customers")),
             Some(TableId::new("shop", "clients")),
             Some(TablePath::new("mysql_shop", "customers_20260919")),
@@ -206,11 +215,11 @@ mod tests {
 
         assert_eq!(
             log.insert(&bigquery(), "mysql_shop"),
-            "INSERT INTO `local-project`.`mysql_shop`.`_lithify_log` (`id`, `run_id`, `artifact`, `schedule`, `source`, `capture`, `table_from`, `table_to`, `lifecycle`, `base`, `target`, `window_from`, `window_to`, `status`, `finished_at`, `error`, `version`)\nSELECT COALESCE(MAX(`id`), 0) + 1, '00000000000000000000000000', 'snapshot', 'daily', 'primary', '{}', 'shop.customers', 'shop.clients', 'renamed', 'mysql_shop.customers_20260919', 'mysql_shop.customers_20260920', TIMESTAMP_MILLIS(1789862400000), TIMESTAMP_MILLIS(1789948800000), 'succeeded', TIMESTAMP_MILLIS(1789949000000), NULL, '0.1.0'\nFROM `local-project`.`mysql_shop`.`_lithify_log`"
+            "INSERT INTO `local-project`.`mysql_shop`.`_lithify_log` (`id`, `run_id`, `started_at`, `artifact`, `schedule`, `source`, `capture`, `table_from`, `table_to`, `lifecycle`, `base`, `target`, `window_from`, `window_to`, `status`, `finished_at`, `error`, `version`)\nSELECT COALESCE(MAX(`id`), 0) + 1, '00000000000000000000000000', TIMESTAMP_MILLIS(0), 'snapshot', 'daily', 'primary', '{}', 'shop.customers', 'shop.clients', 'renamed', 'mysql_shop.customers_20260919', 'mysql_shop.customers_20260920', TIMESTAMP_MILLIS(1789862400000), TIMESTAMP_MILLIS(1789948800000), 'succeeded', TIMESTAMP_MILLIS(1789949000000), NULL, '0.1.0'\nFROM `local-project`.`mysql_shop`.`_lithify_log`"
         );
     }
 
-    const COLUMNS: &str = "`run_id`, `artifact`, `schedule`, `source`, `capture`, `table_from`, `table_to`, `lifecycle`, `base`, `target`, UNIX_MILLIS(`window_from`) AS `window_from`, UNIX_MILLIS(`window_to`) AS `window_to`, `status`, UNIX_MILLIS(`finished_at`) AS `finished_at`, `error`, `version`";
+    const COLUMNS: &str = "`run_id`, UNIX_MILLIS(`started_at`) AS `started_at`, `artifact`, `schedule`, `source`, `capture`, `table_from`, `table_to`, `lifecycle`, `base`, `target`, UNIX_MILLIS(`window_from`) AS `window_from`, UNIX_MILLIS(`window_to`) AS `window_to`, `status`, UNIX_MILLIS(`finished_at`) AS `finished_at`, `error`, `version`";
 
     #[test]
     fn a_build_log_is_read_by_the_latest_success_under_each_name_a_table_still_goes_by() {

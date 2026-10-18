@@ -195,7 +195,7 @@ pub(crate) mod tests {
             .sinks()
             .find(|sink| sink.name() == "duckdb_s3")
             .unwrap();
-        let settlement = Build::new(sink, source).unwrap();
+        let settlement = Build::new(sink, source, at(now)).unwrap();
         let mut journal = Journal::default();
 
         course.itinerary(sink, source, at(now), client)?.settle(
@@ -236,6 +236,28 @@ pub(crate) mod tests {
                 folded("mysql_shop.people_20260919", ""),
                 folded("mysql_shop.people_20260920", "mysql_shop.people_20260919"),
             ]
+        );
+    }
+
+    #[test]
+    fn a_run_logs_the_instant_it_took_for_now_and_is_named_after_it() {
+        let pipeline = pipeline();
+        let client = logged(PEOPLE, &[]);
+
+        settle(&pipeline, &client, &Course::CatchUp { to: None }, NOW).unwrap();
+
+        assert_eq!(
+            rows(
+                &client,
+                "SELECT DISTINCT strftime(started_at, '%Y-%m-%dT%H:%M:%SZ'), run_id FROM mysql_shop._lithify_log"
+            )
+            .into_iter()
+            .map(|(started_at, run_id)| (
+                started_at,
+                ulid::Ulid::from_string(&run_id).unwrap().timestamp_ms()
+            ))
+            .collect::<Vec<_>>(),
+            [(NOW.to_owned(), 1790053200000)]
         );
     }
 

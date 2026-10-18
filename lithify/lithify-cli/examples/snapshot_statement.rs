@@ -34,7 +34,15 @@ fn customers() -> TableModel {
 
 fn previous(window: &Window, shard: &str) -> BuildLog {
     BuildLog::new(
-        &Run::new(Ulid::nil(), "snapshot", "daily", "primary", "{}", "0.1.0"),
+        &Run::new(
+            Ulid::nil(),
+            DateTime::UNIX_EPOCH,
+            "snapshot",
+            "daily",
+            "primary",
+            "{}",
+            "0.1.0",
+        ),
         Some(customers().id().clone()),
         Some(customers().id().clone()),
         None,

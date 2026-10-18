@@ -338,6 +338,7 @@ pub(crate) mod tests {
         BuildLog::new(
             &Run::new(
                 Ulid::from_parts(1, 0),
+                DateTime::UNIX_EPOCH,
                 "snapshot",
                 "daily",
                 "primary",
@@ -463,7 +464,7 @@ pub(crate) mod tests {
                     &window,
                     &[],
                     &Tables::Every,
-                    &Build::new(sink, source).unwrap(),
+                    &Build::new(sink, source, at("2026-09-22T05:00:00Z")).unwrap(),
                 ),
             )
             .unwrap()

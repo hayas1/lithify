@@ -63,7 +63,7 @@ impl Run {
                 sink,
                 source,
                 topic_prefix,
-                &Build::new(sink, source)?,
+                &Build::new(sink, source, self.now)?,
                 journal,
             )
         })

@@ -1430,6 +1430,7 @@ mod tests {
         let base = TablePath::new("mysql_shop", "customers_20260919");
         let run = Run::new(
             ulid::Ulid::nil(),
+            DateTime::UNIX_EPOCH,
             "snapshot",
             "daily",
             "primary",
@@ -1473,6 +1474,7 @@ mod tests {
     fn a_table_renamed_within_the_window_is_logged_from_its_first_name_to_its_last() {
         let run = Run::new(
             ulid::Ulid::nil(),
+            DateTime::UNIX_EPOCH,
             "snapshot",
             "daily",
             "primary",
@@ -1504,6 +1506,7 @@ mod tests {
     fn a_table_created_within_the_window_is_logged_as_opening_it_under_no_name() {
         let run = Run::new(
             ulid::Ulid::nil(),
+            DateTime::UNIX_EPOCH,
             "snapshot",
             "daily",
             "primary",
@@ -1547,6 +1550,7 @@ mod tests {
     fn a_table_captured_within_the_window_is_logged_as_opening_it_under_its_name() {
         let run = Run::new(
             ulid::Ulid::nil(),
+            DateTime::UNIX_EPOCH,
             "snapshot",
             "daily",
             "primary",
@@ -1582,6 +1586,7 @@ mod tests {
     fn a_table_dropped_within_the_window_is_logged_without_a_target() {
         let run = Run::new(
             ulid::Ulid::nil(),
+            DateTime::UNIX_EPOCH,
             "snapshot",
             "daily",
             "primary",
@@ -1626,6 +1631,7 @@ mod tests {
     fn a_table_renamed_and_then_dropped_within_the_window_is_logged_from_its_first_name() {
         let run = Run::new(
             ulid::Ulid::nil(),
+            DateTime::UNIX_EPOCH,
             "snapshot",
             "daily",
             "primary",

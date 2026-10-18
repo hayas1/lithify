@@ -179,7 +179,7 @@ impl From<Inspection> for SinkInspection {
 pub struct TableRow {
     pub table: TableId,
     pub status: Status,
-    pub values: [Option<String>; 16],
+    pub values: [Option<String>; BuildLog::COLUMNS.len()],
     pub shard: Option<NaiveDate>,
 }
 
@@ -234,6 +234,7 @@ pub(crate) mod tests {
         BuildLog::new(
             &Run::new(
                 Ulid::from_parts(1, 0),
+                DateTime::UNIX_EPOCH,
                 "snapshot",
                 "daily",
                 "primary",
@@ -317,6 +318,7 @@ pub(crate) mod tests {
         let renamed = BuildLog::new(
             &Run::new(
                 Ulid::from_parts(1, 0),
+                DateTime::UNIX_EPOCH,
                 "snapshot",
                 "daily",
                 "primary",

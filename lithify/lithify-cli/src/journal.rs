@@ -100,6 +100,7 @@ mod tests {
         BuildLog::new(
             &Run::new(
                 ulid::Ulid::nil(),
+                DateTime::UNIX_EPOCH,
                 "snapshot",
                 "daily",
                 "primary",

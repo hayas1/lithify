@@ -212,7 +212,15 @@ mod tests {
         fn logs() -> Vec<BuildLog> {
             let built = |table: &str, from: i64| {
                 BuildLog::new(
-                    &Run::new(Ulid::nil(), "snapshot", "daily", "primary", "{}", "0.1.0"),
+                    &Run::new(
+                        Ulid::nil(),
+                        DateTime::UNIX_EPOCH,
+                        "snapshot",
+                        "daily",
+                        "primary",
+                        "{}",
+                        "0.1.0",
+                    ),
                     Some(TableId::new("shop", table)),
                     Some(TableId::new("shop", table)),
                     None,

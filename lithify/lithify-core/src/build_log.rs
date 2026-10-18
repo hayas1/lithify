@@ -12,6 +12,7 @@ use crate::window::Window;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Run {
     run_id: Ulid,
+    started_at: DateTime<Utc>,
     artifact: String,
     schedule: String,
     source: String,
@@ -22,6 +23,7 @@ pub struct Run {
 impl Run {
     pub fn new(
         run_id: Ulid,
+        started_at: DateTime<Utc>,
         artifact: &str,
         schedule: &str,
         source: &str,
@@ -30,6 +32,7 @@ impl Run {
     ) -> Self {
         Self {
             run_id,
+            started_at,
             artifact: artifact.to_owned(),
             schedule: schedule.to_owned(),
             source: source.to_owned(),
@@ -94,8 +97,9 @@ pub struct BuildLog {
 }
 
 impl BuildLog {
-    pub const COLUMNS: [(&str, ColumnType); 16] = [
+    pub const COLUMNS: [(&str, ColumnType); 17] = [
         ("run_id", ColumnType::Text),
+        ("started_at", ColumnType::ZonedTimestamp),
         ("artifact", ColumnType::Text),
         ("schedule", ColumnType::Text),
         ("source", ColumnType::Text),
@@ -246,9 +250,13 @@ impl BuildLog {
         &self.outcome.status
     }
 
-    pub fn cells<W: WarehouseSql + ?Sized>(&self, warehouse: &W) -> [SqlString; 16] {
+    pub fn cells<W: WarehouseSql + ?Sized>(
+        &self,
+        warehouse: &W,
+    ) -> [SqlString; Self::COLUMNS.len()] {
         [
             warehouse.literal(&self.run.run_id.to_string()),
+            warehouse.timestamp_millis(self.run.started_at.timestamp_millis()),
             warehouse.literal(&self.run.artifact),
             warehouse.literal(&self.run.schedule),
             warehouse.literal(&self.run.source),
@@ -270,9 +278,10 @@ impl BuildLog {
         ]
     }
 
-    pub fn values(&self) -> [Option<String>; 16] {
+    pub fn values(&self) -> [Option<String>; Self::COLUMNS.len()] {
         [
             Some(self.run.run_id.to_string()),
+            Some(self.run.started_at.to_rfc3339()),
             Some(self.run.artifact.clone()),
             Some(self.run.schedule.clone()),
             Some(self.run.source.clone()),
@@ -506,6 +515,7 @@ impl BuildLogQuery {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildLogRow {
     pub run_id: String,
+    pub started_at: i64,
     pub artifact: String,
     pub schedule: String,
     pub source: String,
@@ -555,12 +565,15 @@ impl TryFrom<BuildLogRow> for BuildLog {
     fn try_from(row: BuildLogRow) -> Result<Self, Self::Error> {
         let run_id = Ulid::from_string(&row.run_id)
             .map_err(|_| UnreadableBuildLog(format!("{} is no run", row.run_id)))?;
-        let finished_at = DateTime::from_timestamp_millis(row.finished_at)
-            .ok_or_else(|| UnreadableBuildLog(format!("{} is no instant", row.finished_at)))?;
+        let [started_at, finished_at] = [row.started_at, row.finished_at].map(|millis| {
+            DateTime::from_timestamp_millis(millis)
+                .ok_or_else(|| UnreadableBuildLog(format!("{millis} is no instant")))
+        });
 
         let log = Self {
             run: Run::new(
                 run_id,
+                started_at?,
                 &row.artifact,
                 &row.schedule,
                 &row.source,
@@ -575,7 +588,7 @@ impl TryFrom<BuildLogRow> for BuildLog {
                 RecordedAt::from(row.window_from),
                 RecordedAt::from(row.window_to),
             ),
-            outcome: Outcome::new(row.status()?, finished_at),
+            outcome: Outcome::new(row.status()?, finished_at?),
         };
         let written = row
             .lifecycle
@@ -615,7 +628,15 @@ mod tests {
 
     fn logged(from: Option<&str>, to: Option<&str>) -> BuildLog {
         BuildLog::new(
-            &Run::new(Ulid::nil(), "snapshot", "daily", "primary", "{}", "0.1.0"),
+            &Run::new(
+                Ulid::nil(),
+                DateTime::UNIX_EPOCH,
+                "snapshot",
+                "daily",
+                "primary",
+                "{}",
+                "0.1.0",
+            ),
             from.map(|table| TableId::new("shop", table)),
             to.map(|table| TableId::new("shop", table)),
             None,
@@ -640,6 +661,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 ("run_id", Some("00000000000000000000000000")),
+                ("started_at", Some("1970-01-01T00:00:00+00:00")),
                 ("artifact", Some("snapshot")),
                 ("schedule", Some("daily")),
                 ("source", Some("primary")),
@@ -696,6 +718,7 @@ mod tests {
     ) -> BuildLogRow {
         BuildLogRow {
             run_id: Ulid::nil().to_string(),
+            started_at: 0,
             artifact: "snapshot".to_owned(),
             schedule: "daily".to_owned(),
             source: "primary".to_owned(),

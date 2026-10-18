@@ -75,6 +75,7 @@ impl WarehouseClient for DuckDbClient {
             .query_map([], |row| {
                 Ok(BuildLogRow {
                     run_id: row.get("run_id")?,
+                    started_at: row.get("started_at")?,
                     artifact: row.get("artifact")?,
                     schedule: row.get("schedule")?,
                     source: row.get("source")?,
@@ -339,6 +340,7 @@ mod tests {
         BuildLog::new(
             &Run::new(
                 Ulid::from_parts(finished_at, 0),
+                DateTime::UNIX_EPOCH,
                 "snapshot",
                 "daily",
                 "primary",

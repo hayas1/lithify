@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use ulid::Ulid;
 
 use lithify_config::ArtifactKind;
@@ -99,13 +99,18 @@ pub struct Build {
 }
 
 impl Build {
-    pub fn new(sink: &Sink<WarehouseConfig>, source: &Source<Capture>) -> Result<Self, Unrunnable> {
+    pub fn new(
+        sink: &Sink<WarehouseConfig>,
+        source: &Source<Capture>,
+        now: DateTime<Utc>,
+    ) -> Result<Self, Unrunnable> {
         let artifacts = sink.artifacts();
 
         Ok(Self {
             namespace: artifacts.namespace(ArtifactKind::Snapshot).to_owned(),
             run: Run::new(
-                Ulid::generate(),
+                Ulid::from_datetime(now.into()),
+                now,
                 &ArtifactKind::Snapshot.to_string(),
                 &artifacts.schedule().to_string(),
                 source.name(),
