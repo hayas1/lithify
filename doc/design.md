@@ -19,7 +19,7 @@ A pipeline moves to another warehouse by rewriting `infra.toml` alone, and a tab
 An artifact is one of the kinds of table lithify builds: `snapshot`, `instant`, `masked`, `scd1` and `scd2`, and is named by its kind alone.
 `infra.toml` declares the artifacts a sink builds under the names of their kinds, each with the series it advances by, how it names its tables and where each series is placed.
 A series is what the build log records under one `artifact` and `schedule`: a `snapshot` has one, cut at `at`, an `instant` has one for each instant of the day it is cut at, and an `scd1` and an `scd2` have one each.
-How a kind writes its series down and names its tables is its own: an `instant` lists its series as an array of tables, each with its instant and where it is placed, and a `snapshot`, an `instant` and a `masked` name a table for each shard by `shard`, while an `scd1` names one table after the table it is built from.
+How a kind writes its series down and names its tables is its own: an `instant` lists its series as an array of tables, each with its instant and where it is placed, and a `snapshot`, an `instant` and a `masked` name a table for each shard by `shard`, an `scd2` names by `shard` the versions each window closed and those it left open, and an `scd1` names one table after the table it is built from.
 
 ```toml
 time_zone = "Asia/Tokyo"
@@ -66,6 +66,7 @@ shard = "%Y%m%d"
 place = [{ duckdb.prefix = "mysql_shop" }]
 
 [sink.artifact.scd2]
+shard = "%Y%m%d"
 place = [{ duckdb.prefix = "mysql_shop_scd2" }]
 ```
 
