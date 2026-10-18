@@ -3,13 +3,16 @@ use duckdb::Connection;
 use ulid::Ulid;
 
 use chrono::NaiveTime;
+use std::collections::BTreeMap;
+
 use lithify_artifact::instant::Instant;
+use lithify_artifact::masked::Masked;
 use lithify_artifact::snapshot::Snapshot;
 use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
 use lithify_core::build_log::{BuildLog, Outcome, Run, Status};
 use lithify_core::era::{Bound, Era};
 use lithify_core::listener::SchemaChangeListener;
-use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
+use lithify_core::model::{ColumnModel, ColumnType, Mask, TableId, TableModel};
 use lithify_core::sink::WarehouseClient;
 use lithify_core::sql::SqlString;
 use lithify_core::testing::{Mutation, Replica, Row};
@@ -236,4 +239,36 @@ fn an_instant_holds_what_the_source_held_as_it_was_cut() {
     );
 
     assert_eq!(shards.rows(&instant), replica.at(*cut.to()));
+}
+
+#[test]
+fn a_masked_snapshot_holds_the_snapshot_of_its_window_with_its_masked_columns_left_null() {
+    let replica = replica();
+    let shards = Shards::over(&replica);
+    let masked = Masked::new(
+        Snapshot::new("shop_masked", "%Y%m%d"),
+        BTreeMap::from([(
+            people().id().clone(),
+            BTreeMap::from([("name".to_owned(), Mask::Null)]),
+        )]),
+    );
+    let snapshot = shards.build(&day(0), None);
+
+    let built = shards.build_into(
+        &masked,
+        &day(0),
+        masked.base(std::slice::from_ref(&snapshot), people().id(), &day(0)),
+    );
+
+    assert_eq!(
+        shards.rows(&built),
+        replica
+            .at(*day(0).to())
+            .into_iter()
+            .map(|mut row| {
+                row.insert("name".to_owned(), None);
+                row
+            })
+            .collect::<Vec<_>>()
+    );
 }

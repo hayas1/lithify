@@ -109,6 +109,30 @@ impl Snapshot {
         })
     }
 
+    pub fn created<W: Warehouse>(
+        &self,
+        warehouse: &W,
+        target: &TablePath,
+        table: &TableId,
+        window: &Window,
+        select: &SqlString,
+    ) -> Vec<SqlString> {
+        let copied = SqlString::from(format!("SELECT * FROM {}", warehouse.table_ref(target)));
+
+        [
+            warehouse.create_namespace(target.namespace()),
+            warehouse.create_table_as(target, select),
+        ]
+        .into_iter()
+        .chain(self.copies.iter().flat_map(|copy| {
+            [
+                warehouse.create_namespace(copy),
+                warehouse.create_table_as(&self.named(copy, table, window), &copied),
+            ]
+        }))
+        .collect()
+    }
+
     fn named(&self, namespace: &Namespace, table: &TableId, window: &Window) -> TablePath {
         let at = DateTime::<Utc>::from(window.last()).with_timezone(&self.zone);
 
@@ -430,23 +454,13 @@ impl<L: RowChangeLog, W: Warehouse> ArtifactBuilder for SnapshotBuilder<'_, L, W
             return Ok(Vec::new());
         };
 
-        let copied = SqlString::from(format!("SELECT * FROM {}", warehouse.table_ref(target)));
-
-        Ok([
-            warehouse.create_namespace(target.namespace()),
-            warehouse.create_table_as(target, &self.select()?),
-        ]
-        .into_iter()
-        .chain(self.snapshot.copies.iter().flat_map(|copy| {
-            [
-                warehouse.create_namespace(copy),
-                warehouse.create_table_as(
-                    &self.snapshot.named(copy, &self.table, &self.window),
-                    &copied,
-                ),
-            ]
-        }))
-        .collect())
+        Ok(self.snapshot.created(
+            warehouse,
+            target,
+            &self.table,
+            &self.window,
+            &self.select()?,
+        ))
     }
 
     fn build_log(&self, run: &Run, outcome: Outcome) -> BuildLog {

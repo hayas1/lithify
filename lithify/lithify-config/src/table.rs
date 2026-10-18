@@ -3,6 +3,7 @@ use std::fmt::{self, Display, Formatter};
 
 use serde::{Deserialize, Serialize};
 
+pub use lithify_core::model::Mask;
 use lithify_core::model::TableId;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -172,25 +173,6 @@ impl Table {
 struct ListedColumn {
     #[serde(default)]
     mask: Mask,
-}
-
-// A mask that takes arguments, as a hash will, is listed as a table,
-// `mask.hash = { algorithm = "sha256" }`, and before an artifact applies it, it has to settle what a
-// null mask gets away with:
-// - each warehouse spells it in SQL of its own, and one that cannot is refused like a column type it
-//   has no column for;
-// - it may change the type of the column in the artifact, as a hash turns any column into text;
-// - it cannot apply to a primary key unless it is deterministic, since rows are folded by their keys;
-// - a secret it needs, such as a salt, is read from the environment rather than written here.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Mask {
-    #[default]
-    Identity,
-    Null,
-    // TODO: take the algorithm and where the salt is read from as arguments, and decide the type
-    // the hashed column takes in the artifact, before any artifact applies it.
-    Hash,
 }
 
 #[cfg(test)]

@@ -1,5 +1,7 @@
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 use crate::event::MalformedEvent;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -166,6 +168,26 @@ impl TableModel {
             primary_key: self.primary_key.clone(),
         }
     }
+}
+
+// A mask that takes arguments, as a hash will, is listed as a table,
+// `mask.hash = { algorithm = "sha256" }`, and before an artifact applies it, it has to settle what a
+// null mask gets away with:
+// - each warehouse spells it in SQL of its own, and one that cannot is refused like a column type it
+//   has no column for;
+// - it may change the type of the column in the artifact, as a hash turns any column into text;
+// - it is applied as a masked snapshot projects the snapshot of its window, never as a snapshot folds,
+//   so a primary key may be masked like any other column;
+// - a secret it needs, such as a salt, is read from the environment rather than written here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mask {
+    #[default]
+    Identity,
+    Null,
+    // TODO: take the algorithm and where the salt is read from as arguments, and decide the type
+    // the hashed column takes in the artifact, before any artifact applies it.
+    Hash,
 }
 
 #[cfg(test)]
