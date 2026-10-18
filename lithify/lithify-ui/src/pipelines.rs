@@ -1,20 +1,191 @@
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
 use lithify_config::infra::{Sink, Source};
 use lithify_config::{ArtifactKind, Pipeline};
-use lithify_core::build_log::BuildLogQuery;
-use lithify_core::check::Expectation;
+use lithify_core::build_log::{BuildLog, BuildLogQuery, Latest};
+use lithify_core::check::{Expectation, Inspection};
+use lithify_core::schedule::Schedule;
 use lithify_core::sink::{SinkWarehouse, WarehouseClient, WarehouseFn};
 use lithify_core::ts::Ts;
 
-use crate::overview::{
-    BuildLogView, PipelineLocation, PipelineOverview, SinkInspection, SinkOverview, SourceOverview,
-};
-use crate::server::Survey;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipelineLocation {
+    name: String,
+    directory: String,
+}
+
+impl PipelineLocation {
+    pub fn new(name: &str, directory: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            directory: directory.to_owned(),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn directory(&self) -> &str {
+        &self.directory
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipelineOverview {
+    location: PipelineLocation,
+    sources: Result<Vec<SourceOverview>, String>,
+}
+
+impl PipelineOverview {
+    pub fn new(location: PipelineLocation, sources: Result<Vec<SourceOverview>, String>) -> Self {
+        Self { location, sources }
+    }
+
+    pub fn location(&self) -> &PipelineLocation {
+        &self.location
+    }
+
+    pub fn sources(&self) -> Result<&[SourceOverview], &str> {
+        self.sources.as_deref().map_err(String::as_str)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceOverview {
+    name: String,
+    sinks: Vec<SinkOverview>,
+}
+
+impl SourceOverview {
+    pub fn new(name: &str, sinks: Vec<SinkOverview>) -> Self {
+        Self {
+            name: name.to_owned(),
+            sinks,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn sinks(&self) -> &[SinkOverview] {
+        &self.sinks
+    }
+
+    pub fn shown(&self, sink_name: Option<&str>) -> Option<(usize, &SinkOverview)> {
+        self.sinks
+            .iter()
+            .enumerate()
+            .find(|(_, sink)| Some(sink.name()) == sink_name)
+            .or_else(|| self.sinks.first().map(|sink| (0, sink)))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SinkOverview {
+    name: String,
+    found: Result<SinkInspection, String>,
+}
+
+impl SinkOverview {
+    pub fn new(name: &str, found: Result<SinkInspection, String>) -> Self {
+        Self {
+            name: name.to_owned(),
+            found,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn found(&self) -> Result<&SinkInspection, &str> {
+        self.found.as_ref().map_err(String::as_str)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BuildLogView {
+    #[default]
+    Latest,
+    All,
+}
+
+impl BuildLogView {
+    pub const ALL: [Self; 2] = [Self::Latest, Self::All];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Latest => "latest",
+            Self::All => "all",
+        }
+    }
+}
+
+impl From<BuildLogView> for BuildLogQuery {
+    fn from(view: BuildLogView) -> Self {
+        match view {
+            BuildLogView::Latest => Latest::Attempted.into(),
+            BuildLogView::All => Self::All,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SinkInspection {
+    schedule: Schedule,
+    logs: Vec<BuildLog>,
+    discrepancies: Vec<String>,
+}
+
+impl SinkInspection {
+    pub fn new(schedule: Schedule, logs: Vec<BuildLog>, discrepancies: Vec<String>) -> Self {
+        Self {
+            schedule,
+            logs,
+            discrepancies,
+        }
+    }
+
+    pub fn schedule(&self) -> Schedule {
+        self.schedule
+    }
+
+    pub fn logs(&self) -> &[BuildLog] {
+        &self.logs
+    }
+
+    pub fn showing(self, logs: Vec<BuildLog>) -> Self {
+        Self { logs, ..self }
+    }
+
+    pub fn discrepancies(&self) -> &[String] {
+        &self.discrepancies
+    }
+}
+
+impl From<Inspection> for SinkInspection {
+    fn from(inspection: Inspection) -> Self {
+        let mut latest = inspection.latest().to_vec();
+        latest.sort_by(|left, right| left.table().cmp(&right.table()));
+
+        Self::new(
+            inspection.schedule(),
+            latest,
+            inspection
+                .discrepancies()
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+        )
+    }
+}
 
 pub struct Pipelines<C, W: SinkWarehouse> {
     root: PathBuf,
@@ -33,6 +204,26 @@ where
             credential,
             capture: std::marker::PhantomData,
         }
+    }
+
+    pub fn locations(&self) -> Result<Vec<PipelineLocation>, String> {
+        Ok(self
+            .directories()?
+            .iter()
+            .map(|directory| Self::location(directory))
+            .collect())
+    }
+
+    pub fn inspect(
+        &self,
+        name: &str,
+        view: BuildLogView,
+    ) -> Result<Option<PipelineOverview>, String> {
+        Ok(self
+            .directories()?
+            .iter()
+            .find(|directory| Self::location(directory).name() == name)
+            .map(|directory| self.overview(directory, view)))
     }
 
     fn directories(&self) -> Result<Vec<PathBuf>, String> {
@@ -113,29 +304,6 @@ where
     }
 }
 
-impl<C, W> Survey for Pipelines<C, W>
-where
-    C: Clone + DeserializeOwned + Serialize + 'static,
-    W: Clone + DeserializeOwned + SinkWarehouse + Send + Sync + 'static,
-    W::Credential: Send + Sync,
-{
-    fn pipelines(&self) -> Result<Vec<PipelineLocation>, String> {
-        Ok(self
-            .directories()?
-            .iter()
-            .map(|directory| Self::location(directory))
-            .collect())
-    }
-
-    fn inspect(&self, name: &str, view: BuildLogView) -> Result<Option<PipelineOverview>, String> {
-        Ok(self
-            .directories()?
-            .iter()
-            .find(|directory| Self::location(directory).name() == name)
-            .map(|directory| self.overview(directory, view)))
-    }
-}
-
 struct Reading<'a> {
     expectation: &'a Expectation,
     namespace: &'a str,
@@ -166,154 +334,34 @@ impl WarehouseFn for Reading<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
-
-    use serde::{Deserialize, Serialize};
-
-    use chrono::DateTime;
-    use lithify_core::sink::{SinkWarehouse, WarehouseFn};
-    use ulid::Ulid;
-
-    use lithify_core::build_log::{BuildLog, Outcome, Run, Status};
-    use lithify_core::model::TableId;
-    use lithify_core::sink::TablePath;
-    use lithify_core::testing::{Engine, Recorder};
-    use lithify_core::window::Window;
-
     use super::*;
-    use crate::server::Survey;
+    use crate::testing::{INFRA, configure, logged, scratch, under};
 
-    #[derive(Debug, Clone, Deserialize, Serialize)]
-    #[serde(rename_all = "lowercase")]
-    enum Captured {
-        Debezium { dialect: String },
-    }
-
-    #[derive(Debug, Clone, Deserialize)]
-    #[serde(rename_all = "lowercase")]
-    enum Kept {
-        Memory {},
-        Logged {},
-        Unreachable { cause: String },
-    }
-
-    #[derive(Debug)]
-    struct Unreached(String);
-
-    impl std::fmt::Display for Unreached {
-        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str(&self.0)
-        }
-    }
-
-    impl std::error::Error for Unreached {}
-
-    impl Kept {
-        fn logs() -> Vec<BuildLog> {
-            let built = |table: &str, from: i64| {
-                BuildLog::new(
-                    &Run::new(
-                        Ulid::nil(),
-                        DateTime::UNIX_EPOCH,
-                        "snapshot",
-                        "daily",
-                        "primary",
-                        "{}",
-                        "0.1.0",
-                    ),
-                    Some(TableId::new("shop", table)),
-                    Some(TableId::new("shop", table)),
-                    None,
-                    Some(TablePath::new("mysql_shop", &format!("{table}_{from}"))),
-                    Window::new(
-                        Ts::try_from(from).unwrap(),
-                        Ts::try_from(from + 86_400_000).unwrap(),
-                    ),
-                    Outcome::new(
-                        Status::Succeeded,
-                        DateTime::from_timestamp_millis(from).unwrap(),
-                    ),
-                )
-            };
-
-            vec![
-                built("people", 0),
-                built("people", 86_400_000),
-                built("pets", 86_400_000),
-            ]
-        }
-    }
-
-    impl SinkWarehouse for Kept {
-        type Credential = ();
-        type Error = Unreached;
-
-        fn with_client<F: WarehouseFn>(
-            &self,
-            _: &str,
-            _: &(),
-            f: F,
-        ) -> Result<F::Output, Unreached> {
-            match self {
-                Self::Memory {} => Ok(f.call(&Recorder::new(Engine::default()))),
-                Self::Logged {} => Ok(
-                    f.call(&Recorder::new(Engine::default()).logging("mysql_shop", &Self::logs()))
-                ),
-                Self::Unreachable { cause } => Err(Unreached(cause.clone())),
-            }
-        }
-    }
-
-    const INFRA: &str = r#"
-        [default]
-        source.capture.debezium.dialect = "mysql"
-        sink.change_log = "mysql_shop_cdc"
-        sink.artifacts.snapshot = "mysql_shop"
-        sink.artifacts.history = "mysql_shop_history"
-        sink.artifacts.shard = "%Y%m%d"
-
-        [[source]]
-        name = "primary"
-
-        [[sink]]
-        name = "rustfs"
-        warehouse.memory = {}
-
-        [[sink]]
-        name = "warehouse"
-        warehouse.unreachable.cause = "JobCreationMode"
-    "#;
-
-    fn scratch(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("lithify-ui-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-
-        root
-    }
-
-    fn configure(directory: &Path, infra: &str) {
-        std::fs::create_dir_all(directory).unwrap();
-        std::fs::write(directory.join("infra.toml"), infra).unwrap();
-        std::fs::write(
-            directory.join("table.toml"),
-            "[default]\nartifacts = [\"snapshot\"]\n",
-        )
-        .unwrap();
-    }
-
-    fn surveyed(root: &Path) -> Pipelines<Captured, Kept> {
-        Pipelines::new(root.to_owned(), ())
+    fn tables(root: &Path, view: BuildLogView) -> Vec<String> {
+        under(root)
+            .inspect("mysql", view)
+            .unwrap()
+            .unwrap()
+            .sources()
+            .unwrap()[0]
+            .sinks()[0]
+            .found()
+            .unwrap()
+            .logs()
+            .iter()
+            .filter_map(BuildLog::table)
+            .map(|table| table.table().to_owned())
+            .collect()
     }
 
     #[test]
-    fn the_pipelines_under_a_directory_are_surveyed_in_the_order_of_their_names() {
+    fn the_pipelines_under_a_directory_are_located_in_the_order_of_their_names() {
         let root = scratch("ordered");
         configure(&root.join("postgres"), INFRA);
         configure(&root.join("mysql"), INFRA);
 
         assert_eq!(
-            surveyed(&root).pipelines().unwrap(),
+            under(&root).locations().unwrap(),
             [
                 PipelineLocation::new("mysql", &root.join("mysql").display().to_string()),
                 PipelineLocation::new("postgres", &root.join("postgres").display().to_string())
@@ -326,7 +374,7 @@ mod tests {
         let root = scratch("inspected");
         configure(&root.join("mysql"), INFRA);
 
-        let pipeline = surveyed(&root)
+        let pipeline = under(&root)
             .inspect("mysql", BuildLogView::Latest)
             .unwrap()
             .unwrap();
@@ -334,7 +382,7 @@ mod tests {
         let sinks = sources[0].sinks();
 
         assert_eq!(sources[0].name(), "primary");
-        assert!(sinks[0].found().unwrap().rows().is_empty());
+        assert!(sinks[0].found().unwrap().logs().is_empty());
         assert_eq!(
             sinks[0].found().unwrap().discrepancies(),
             ["nothing is built since 1970-01-01T00:00:00+00:00"]
@@ -345,40 +393,28 @@ mod tests {
     #[test]
     fn a_sink_shows_its_latest_build_of_each_table_or_every_build_newest_first() {
         let root = scratch("viewed");
-        configure(
-            &root.join("mysql"),
-            &INFRA.replace("warehouse.memory = {}", "warehouse.logged = {}"),
-        );
-        let tables = |view| {
-            surveyed(&root)
-                .inspect("mysql", view)
-                .unwrap()
-                .unwrap()
-                .sources()
-                .unwrap()[0]
-                .sinks()[0]
-                .found()
-                .unwrap()
-                .rows()
-                .iter()
-                .map(|row| row.table.table().to_owned())
-                .collect::<Vec<_>>()
-        };
+        configure(&root.join("mysql"), &logged());
 
-        assert_eq!(tables(BuildLogView::Latest), ["people", "people", "pets"]);
-        assert_eq!(tables(BuildLogView::All), ["pets", "people", "people"]);
+        assert_eq!(
+            tables(&root, BuildLogView::Latest),
+            ["people", "people", "pets"]
+        );
+        assert_eq!(
+            tables(&root, BuildLogView::All),
+            ["pets", "people", "people"]
+        );
     }
 
     #[test]
-    fn a_pipeline_that_could_not_be_opened_is_surveyed_beside_the_ones_that_were() {
+    fn a_pipeline_that_could_not_be_opened_is_inspected_beside_the_ones_that_were() {
         let root = scratch("unopened");
         configure(&root.join("mysql"), INFRA);
         configure(&root.join("postgres"), "[[source]]\nname = \"primary\"");
 
-        let surveyed = surveyed(&root);
+        let pipelines = under(&root);
 
         assert!(
-            surveyed
+            pipelines
                 .inspect("mysql", BuildLogView::Latest)
                 .unwrap()
                 .unwrap()
@@ -386,7 +422,7 @@ mod tests {
                 .is_ok()
         );
         assert!(
-            surveyed
+            pipelines
                 .inspect("postgres", BuildLogView::Latest)
                 .unwrap()
                 .unwrap()
@@ -394,13 +430,30 @@ mod tests {
                 .is_err()
         );
         assert_eq!(
-            surveyed.inspect("oracle", BuildLogView::Latest).unwrap(),
+            pipelines.inspect("oracle", BuildLogView::Latest).unwrap(),
             None
         );
     }
 
     #[test]
-    fn a_directory_configuring_no_pipeline_is_not_surveyed() {
-        assert!(surveyed(&scratch("empty")).pipelines().is_err());
+    fn a_directory_configuring_no_pipeline_locates_none() {
+        assert!(under(&scratch("empty")).locations().is_err());
+    }
+
+    #[test]
+    fn a_source_shows_the_sink_named_or_else_its_first() {
+        let source = SourceOverview::new(
+            "primary",
+            vec![
+                SinkOverview::new("rustfs", Err("unread".to_owned())),
+                SinkOverview::new("warehouse", Err("unread".to_owned())),
+            ],
+        );
+        let shown = |sink_name| source.shown(sink_name).map(|(at, sink)| (at, sink.name()));
+
+        assert_eq!(shown(Some("warehouse")), Some((1, "warehouse")));
+        assert_eq!(shown(Some("lake")), Some((0, "rustfs")));
+        assert_eq!(shown(None), Some((0, "rustfs")));
+        assert!(SourceOverview::new("primary", vec![]).shown(None).is_none());
     }
 }

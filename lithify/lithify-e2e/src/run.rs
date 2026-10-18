@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 
-use lithify_cli::pipeline::{Capture, WarehouseConfig};
+use lithify_cli::pipeline::{CaptureConfig, WarehouseConfig};
 use lithify_config::Pipeline;
 use lithify_core::ts::Ts;
 
@@ -40,7 +40,7 @@ impl Run {
     }
 
     pub fn report(&self) -> Result<Report, Unverifiable> {
-        let config: Pipeline<Capture, WarehouseConfig> =
+        let config: Pipeline<CaptureConfig, WarehouseConfig> =
             Pipeline::open(self.directory.join(self.scenario.pipeline()))?;
         let watch = Watch::new(Ts::from(Utc::now()), self.patience);
         let mut pipeline =

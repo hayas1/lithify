@@ -86,9 +86,8 @@ The change log only replays if the source and sink connectors write it the way a
 | Support | Why | Status | Target |
 | --- | --- | --- | --- |
 | Expressions | One small expression language shared by the naming template and the end-to-end scenarios, such as an instant reckoned from now that a scenario compares a shard with | Not started | |
-| Overview of the build log | `lithify serve` lists the latest build of each table and what `lithify check` finds for every source of every pipeline under the directory it is given, with a tab for each sink, saying in place of the build log why a sink could not be read or that nothing was logged in it | Available: behind the `serve` feature, rendered on the server; a pipeline of several sources shows the same build log under each, as the build log is kept per sink | |
-| Assemble a rebuild | The build page assembles the `lithify build --snapshot` that rebuilds a shard, narrowed to the tables chosen | Available | |
-| Run a retry from the page | A failed build is rebuilt from the page rather than by copying the command it assembles | Not started | |
+| Overview of the build log | `lithify serve` lists the latest build of each table and what `lithify check` finds for every source of every pipeline under the directory it is given, with a tab for each sink, the view and the sink shown read from the query so a link keeps what it shows, saying in place of the build log why a sink could not be read or that nothing was logged in it | Available: behind the `serve` feature, rendered on the server; a pipeline of several sources shows the same build log under each, as the build log is kept per sink | |
+| Run a retry from the page | A failed build is rebuilt from the page rather than by typing the `lithify build --snapshot` it needs | Not started | |
 | List dropped tables | The overview lists the latest build of each table still standing, so a dropped table needs its own read of the build log | Not started | |
 
 ### Deployment
@@ -117,6 +116,7 @@ The change log only replays if the source and sink connectors write it the way a
 | Support | Why | Status | Target |
 | --- | --- | --- | --- |
 | Reconcile against the source | Row counts and checksums of a snapshot compared with the source database at the same position | Partial: end-to-end scenarios only | |
+| Test on the store a warehouse builds in | A DuckDB warehouse always builds in object storage, reading tables through `read_parquet` and writing them with `COPY`, so tests that build on native tables in memory leave that path unexercised, such as parquet files written before a column was added reading it as null; a store over a local directory would run the same statements in tests, and leave the native tables to no one | Not started: the store is only checked by the statements it writes, `compose/e2e_test.sh` does not run lithify, and `DuckDbWarehouse::new` builds on native tables nothing but tests use | |
 
 ### Lifecycle
 

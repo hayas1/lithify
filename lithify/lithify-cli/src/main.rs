@@ -10,7 +10,7 @@ use lithify_cli::course::Course;
 use lithify_cli::credential::Credentials;
 use lithify_cli::journal::Journal;
 #[cfg(feature = "serve")]
-use lithify_cli::pipeline::{Capture, WarehouseConfig};
+use lithify_cli::pipeline::{CaptureConfig, WarehouseConfig};
 use lithify_cli::plan::Tables;
 use lithify_cli::run::Run;
 use lithify_cli::unrunnable::Unrunnable;
@@ -47,7 +47,7 @@ enum Command {
     Check(CheckArguments),
     #[cfg(feature = "serve")]
     #[command(
-        about = "Serve the pages listing what was built, and assembling the builds to rebuild it with"
+        about = "Serve the pages listing what was built and what the check finds wrong with it"
     )]
     Serve(ServeArguments),
 }
@@ -238,7 +238,7 @@ struct ServeArguments {
 #[cfg(feature = "serve")]
 impl ServeArguments {
     fn journal(self) -> Result<Journal, Unrunnable> {
-        Board::new(Pipelines::<Capture, WarehouseConfig>::new(
+        Board::new(Pipelines::<CaptureConfig, WarehouseConfig>::new(
             self.directory,
             self.credential.credentials(),
         ))
@@ -380,36 +380,7 @@ mod tests {
 
     #[cfg(feature = "serve")]
     #[test]
-    fn a_board_surveys_every_sink_rather_than_one_it_is_told_of() {
+    fn a_board_reads_every_sink_rather_than_one_it_is_told_of() {
         assert!(parsed("serve", &["--sink", "rustfs"]).is_err());
-    }
-
-    #[cfg(feature = "serve")]
-    #[test]
-    fn a_build_the_board_assembles_is_one_the_command_line_takes() {
-        let assembled =
-            lithify_ui::command::BuildCommand::new("mysql", "2026-09-20".parse().unwrap())
-                .sink("rustfs")
-                .table(TableId::new("shop", "pets"))
-                .dry_run("plans");
-
-        let Command::Build(built) = Arguments::try_parse_from(
-            assembled
-                .args()
-                .iter()
-                .map(String::as_str)
-                .chain(PIPELINE[1..].iter().copied()),
-        )
-        .unwrap()
-        .command
-        else {
-            panic!("build was assembled");
-        };
-
-        assert_eq!(built.pipeline.directory, PathBuf::from("mysql"));
-        assert_eq!(built.pipeline.sink.as_deref(), Some("rustfs"));
-        assert_eq!(built.snapshot, "2026-09-20".parse::<NaiveDate>().unwrap());
-        assert_eq!(built.table, [TableId::new("shop", "pets")]);
-        assert_eq!(built.dry_run, Some(PathBuf::from("plans")));
     }
 }

@@ -7,21 +7,21 @@ use lithify_core::ts::Ts;
 use lithify_core::window::Window;
 
 use crate::course::Itinerary;
-use crate::pipeline::{Capture, WarehouseConfig};
+use crate::pipeline::{CaptureConfig, WarehouseConfig};
 use crate::plan::Tables;
 use crate::resumption::Resumption;
 use crate::unrunnable::Unrunnable;
 
 pub struct Shard<'a> {
     sink: &'a Sink<WarehouseConfig>,
-    source: &'a Source<Capture>,
+    source: &'a Source<CaptureConfig>,
     now: DateTime<Utc>,
 }
 
 impl<'a> Shard<'a> {
     pub fn new(
         sink: &'a Sink<WarehouseConfig>,
-        source: &'a Source<Capture>,
+        source: &'a Source<CaptureConfig>,
         now: DateTime<Utc>,
     ) -> Self {
         Self { sink, source, now }

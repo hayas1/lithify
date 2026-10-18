@@ -8,7 +8,7 @@ use lithify_core::window::Window;
 
 use crate::catch_up::CatchUp;
 use crate::journal::Journal;
-use crate::pipeline::{Capture, WarehouseConfig};
+use crate::pipeline::{CaptureConfig, WarehouseConfig};
 use crate::plan::Tables;
 use crate::settlement::Settlement;
 use crate::shard::Shard;
@@ -23,7 +23,7 @@ impl Course {
     pub fn itinerary<K>(
         &self,
         sink: &Sink<WarehouseConfig>,
-        source: &Source<Capture>,
+        source: &Source<CaptureConfig>,
         now: DateTime<Utc>,
         client: &K,
     ) -> Result<Itinerary, Unrunnable>
@@ -185,7 +185,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn settle(
-        pipeline: &Pipeline<Capture, WarehouseConfig>,
+        pipeline: &Pipeline<CaptureConfig, WarehouseConfig>,
         client: &DuckDbClient,
         course: &Course,
         now: &str,

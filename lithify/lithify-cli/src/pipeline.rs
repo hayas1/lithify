@@ -11,17 +11,17 @@ use crate::unrunnable::Unrunnable;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "lowercase")]
-pub enum Capture {
+pub enum CaptureConfig {
     Debezium(<DebeziumFormat as CdcFormat>::Config),
 }
 
-impl Capture {
+impl CaptureConfig {
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
     }
 }
 
-impl DuckDbCapture for Capture {
+impl DuckDbCapture for CaptureConfig {
     fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(
         &self,
         topic_prefix: &str,
@@ -33,7 +33,7 @@ impl DuckDbCapture for Capture {
     }
 }
 
-impl BigQueryCapture for Capture {
+impl BigQueryCapture for CaptureConfig {
     fn with_bigquery_change_logs<F: BigQueryChangeLogsFn>(
         &self,
         topic_prefix: &str,
@@ -85,9 +85,9 @@ mod tests {
 
     #[test]
     fn a_source_is_captured_by_a_format_this_program_reads() {
-        let capture: Capture = toml::from_str("[debezium]\ndialect = \"mysql\"").unwrap();
+        let capture: CaptureConfig = toml::from_str("[debezium]\ndialect = \"mysql\"").unwrap();
 
-        let Capture::Debezium(debezium) = capture;
+        let CaptureConfig::Debezium(debezium) = capture;
         assert_eq!(debezium.dialect(), config::Dialect::MySql);
     }
 
@@ -107,7 +107,7 @@ mod tests {
             }
         }
 
-        let capture: Capture = toml::from_str("[debezium]\ndialect = \"postgres\"").unwrap();
+        let capture: CaptureConfig = toml::from_str("[debezium]\ndialect = \"postgres\"").unwrap();
 
         assert_eq!(
             capture.with_duckdb_change_logs("postgres", Probe),
@@ -117,7 +117,7 @@ mod tests {
 
     #[test]
     fn a_format_this_program_does_not_read_is_rejected() {
-        let unknown = toml::from_str::<Capture>("[maxwell]\ndialect = \"mysql\"");
+        let unknown = toml::from_str::<CaptureConfig>("[maxwell]\ndialect = \"mysql\"");
 
         assert!(unknown.is_err());
     }

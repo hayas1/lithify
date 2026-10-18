@@ -15,7 +15,7 @@ use lithify_protocol::{BigQueryWarehouse, DuckDbWarehouse};
 use crate::course::Course;
 use crate::credential::Credentials;
 use crate::journal::Journal;
-use crate::pipeline::{Capture, WarehouseConfig};
+use crate::pipeline::{CaptureConfig, WarehouseConfig};
 use crate::plan::SnapshotPlan;
 use crate::settlement::{Build, DryRun, Settlement};
 use crate::unrunnable::Unrunnable;
@@ -82,7 +82,7 @@ impl Run {
     fn inspection(
         &self,
         sink: &Sink<WarehouseConfig>,
-        source: &Source<Capture>,
+        source: &Source<CaptureConfig>,
     ) -> Result<Inspection, Unrunnable> {
         let expectation = Expectation::new(
             sink.artifacts().schedule(),
@@ -103,8 +103,8 @@ impl Run {
     }
 
     fn source(
-        pipeline: &Pipeline<Capture, WarehouseConfig>,
-    ) -> Result<&Source<Capture>, Unrunnable> {
+        pipeline: &Pipeline<CaptureConfig, WarehouseConfig>,
+    ) -> Result<&Source<CaptureConfig>, Unrunnable> {
         let mut sources = pipeline.sources();
         let source = sources.next().ok_or(Unrunnable::WithoutSource)?;
 
@@ -119,12 +119,12 @@ impl Run {
         &self,
         mut act: impl FnMut(
             &Sink<WarehouseConfig>,
-            &Source<Capture>,
+            &Source<CaptureConfig>,
             &str,
             &mut Journal,
         ) -> Result<(), Unrunnable>,
     ) -> Result<Journal, Unrunnable> {
-        let pipeline: Pipeline<Capture, WarehouseConfig> = Pipeline::open(&self.directory)?;
+        let pipeline: Pipeline<CaptureConfig, WarehouseConfig> = Pipeline::open(&self.directory)?;
         let source = Self::source(&pipeline)?;
         let mut journal = Journal::default();
 
@@ -152,7 +152,7 @@ impl Run {
         &self,
         course: &Course,
         sink: &Sink<WarehouseConfig>,
-        source: &Source<Capture>,
+        source: &Source<CaptureConfig>,
         topic_prefix: &str,
         settlement: &S,
         journal: &mut Journal,
@@ -211,7 +211,7 @@ impl Run {
 
     fn selected<'a>(
         &self,
-        pipeline: &'a Pipeline<Capture, WarehouseConfig>,
+        pipeline: &'a Pipeline<CaptureConfig, WarehouseConfig>,
     ) -> Result<Vec<&'a Sink<WarehouseConfig>>, Unrunnable> {
         let sinks: Vec<_> = pipeline
             .sinks()

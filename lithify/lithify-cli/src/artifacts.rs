@@ -31,11 +31,11 @@ mod tests {
     use lithify_core::window::Window;
 
     use super::*;
-    use crate::pipeline::Capture;
+    use crate::pipeline::CaptureConfig;
 
     #[test]
     fn a_sink_builds_its_snapshots_in_the_namespace_and_shards_the_pipeline_names() {
-        let pipeline: Pipeline<Capture, WarehouseConfig> = Pipeline::open(
+        let pipeline: Pipeline<CaptureConfig, WarehouseConfig> = Pipeline::open(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compose/lithify/mysql"),
         )
         .unwrap();

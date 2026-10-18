@@ -188,7 +188,7 @@ pub(crate) mod tests {
     use lithify_core::sql::SqlString;
 
     use super::*;
-    use crate::pipeline::Capture;
+    use crate::pipeline::CaptureConfig;
     use crate::settlement::{Build, DryRun};
     use lithify_core::build_log::{BuildLog, Latest, Outcome, Run, Status};
 
@@ -202,7 +202,7 @@ pub(crate) mod tests {
                  'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]})
         ) AS t(value)";
 
-    pub(crate) fn pipeline() -> Pipeline<Capture, WarehouseConfig> {
+    pub(crate) fn pipeline() -> Pipeline<CaptureConfig, WarehouseConfig> {
         Pipeline::open(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compose/lithify/mysql"))
             .unwrap()
     }
@@ -431,7 +431,7 @@ pub(crate) mod tests {
             .unwrap()
     }
 
-    fn built() -> (Pipeline<Capture, WarehouseConfig>, DuckDbClient) {
+    fn built() -> (Pipeline<CaptureConfig, WarehouseConfig>, DuckDbClient) {
         let pipeline = pipeline();
         let sink = pipeline
             .sinks()
@@ -447,7 +447,7 @@ pub(crate) mod tests {
     }
 
     fn build(
-        pipeline: &Pipeline<Capture, WarehouseConfig>,
+        pipeline: &Pipeline<CaptureConfig, WarehouseConfig>,
         client: &DuckDbClient,
     ) -> Vec<BuildLog> {
         let source = pipeline.sources().next().unwrap();

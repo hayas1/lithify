@@ -3,7 +3,7 @@ use std::fmt::{self, Display, Formatter};
 use chrono::DateTime;
 use duckdb::types::{FromSql, TimeUnit, Value};
 
-use lithify_cli::pipeline::{self, Capture};
+use lithify_cli::pipeline::{self, CaptureConfig};
 use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
 use lithify_core::era::EraTracker;
 use lithify_core::listener::OutOfOrder;
@@ -27,7 +27,7 @@ pub trait Sink {
 
     fn landed(
         &mut self,
-        capture: &Capture,
+        capture: &CaptureConfig,
         topic_prefix: &str,
         table: &TableId,
         at: Ts<Processing>,
@@ -35,7 +35,7 @@ pub trait Sink {
 
     fn model(
         &mut self,
-        capture: &Capture,
+        capture: &CaptureConfig,
         topic_prefix: &str,
         table: &TableId,
         at: Ts<Event>,
@@ -43,7 +43,7 @@ pub trait Sink {
 
     fn snapshot(
         &mut self,
-        capture: &Capture,
+        capture: &CaptureConfig,
         topic_prefix: &str,
         table: &TableId,
         artifact: &Snapshot,
@@ -130,7 +130,7 @@ impl Sink for DuckDb {
 
     fn landed(
         &mut self,
-        capture: &Capture,
+        capture: &CaptureConfig,
         topic_prefix: &str,
         table: &TableId,
         at: Ts<Processing>,
@@ -159,7 +159,7 @@ impl Sink for DuckDb {
 
     fn model(
         &mut self,
-        capture: &Capture,
+        capture: &CaptureConfig,
         topic_prefix: &str,
         table: &TableId,
         at: Ts<Event>,
@@ -178,7 +178,7 @@ impl Sink for DuckDb {
 
     fn snapshot(
         &mut self,
-        capture: &Capture,
+        capture: &CaptureConfig,
         topic_prefix: &str,
         table: &TableId,
         artifact: &Snapshot,

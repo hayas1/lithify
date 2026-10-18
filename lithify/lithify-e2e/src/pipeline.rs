@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 
 use lithify_cli::artifacts::Artifacts;
-use lithify_cli::pipeline::{Capture, WarehouseConfig};
+use lithify_cli::pipeline::{CaptureConfig, WarehouseConfig};
 use lithify_config::{Pipeline, infra};
 use lithify_core::artifact::Artifact;
 use lithify_core::model::{TableId, TableModel};
@@ -25,7 +25,7 @@ pub struct ConnectedPipeline<'a> {
 impl<'a> ConnectedPipeline<'a> {
     pub fn connect(
         scenario: &'a Scenario,
-        pipeline: &'a Pipeline<Capture, WarehouseConfig>,
+        pipeline: &'a Pipeline<CaptureConfig, WarehouseConfig>,
         watch: Watch,
         key_id: &str,
         secret: &str,
@@ -111,7 +111,7 @@ impl Watch {
 }
 
 pub struct SourceEnd<'a> {
-    config: &'a infra::Source<Capture>,
+    config: &'a infra::Source<CaptureConfig>,
     client: Box<dyn Source>,
     applied: Option<Ts<Processing>>,
 }
@@ -124,7 +124,7 @@ impl<'a> SourceEnd<'a> {
     }
 
     fn connect(
-        pipeline: &'a Pipeline<Capture, WarehouseConfig>,
+        pipeline: &'a Pipeline<CaptureConfig, WarehouseConfig>,
         name: &str,
         connection: &'a SourceConnection,
     ) -> Result<Self, Unverifiable> {
@@ -153,7 +153,7 @@ impl<'a> SourceEnd<'a> {
         Ok(self.client.rows(model)?)
     }
 
-    fn capture(&self) -> &Capture {
+    fn capture(&self) -> &CaptureConfig {
         self.config.capture()
     }
 }
@@ -171,7 +171,7 @@ impl<'a> SinkEnd<'a> {
     }
 
     fn connect(
-        pipeline: &'a Pipeline<Capture, WarehouseConfig>,
+        pipeline: &'a Pipeline<CaptureConfig, WarehouseConfig>,
         name: &str,
         _: &'a SinkConnection,
         key_id: &str,
