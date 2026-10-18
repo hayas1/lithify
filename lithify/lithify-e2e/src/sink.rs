@@ -18,6 +18,7 @@ use lithify_core::ts::{Event, Processing, Ts};
 use lithify_core::window::Window;
 use lithify_protocol::DuckDbWarehouse;
 use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbChangeLogsFn, DuckDbClient};
+use lithify_protocol::sink::duckdb::config::Location;
 use lithify_protocol::sink::duckdb::store::ObjectStore;
 
 use crate::row::{Cell, Row, Rows};
@@ -56,16 +57,16 @@ pub trait Sink {
 impl dyn Sink {
     pub fn connect(
         warehouse: &pipeline::WarehouseConfig,
-        change_log: &str,
+        change_log: &pipeline::LocationConfig,
         key_id: &str,
         secret: &str,
     ) -> Result<Box<Self>, Unbuildable> {
-        match warehouse {
-            pipeline::WarehouseConfig::DuckDb(store) => Ok(Box::new(DuckDb::connect(
+        match warehouse.reach(change_log).ok_or(Unbuildable::Unreached)? {
+            pipeline::Reached::DuckDb(store, change_log) => Ok(Box::new(DuckDb::connect(
                 &ObjectStore::open(store, key_id, secret),
                 change_log,
             )?)),
-            pipeline::WarehouseConfig::BigQuery(_) => Err(Unbuildable::Unverified("bigquery")),
+            pipeline::Reached::BigQuery(..) => Err(Unbuildable::Unverified("bigquery")),
         }
     }
 }
@@ -75,7 +76,7 @@ pub struct DuckDb {
 }
 
 impl DuckDb {
-    pub fn connect(store: &ObjectStore, change_log: &str) -> Result<Self, Unbuildable> {
+    pub fn connect(store: &ObjectStore, change_log: &Location) -> Result<Self, Unbuildable> {
         Ok(Self {
             client: store.client(change_log)?,
         })
@@ -316,6 +317,7 @@ pub enum Unbuildable {
     Unqueryable(duckdb::Error),
     UnknownTable(TableId),
     Unverified(&'static str),
+    Unreached,
     Unwritable(UnbuildableArtifact),
     OutOfOrder(OutOfOrder),
 }
@@ -326,6 +328,10 @@ impl Display for Unbuildable {
             Self::Unqueryable(cause) => write!(formatter, "{cause}"),
             Self::UnknownTable(table) => write!(formatter, "{table} is not in the change log"),
             Self::Unverified(kind) => write!(formatter, "{kind} sinks cannot be verified yet"),
+            Self::Unreached => write!(
+                formatter,
+                "the change log lies in a warehouse other than the one it is sunk into"
+            ),
             Self::Unwritable(cause) => write!(formatter, "{cause}"),
             Self::OutOfOrder(cause) => write!(formatter, "{cause}"),
         }

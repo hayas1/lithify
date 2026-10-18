@@ -24,7 +24,7 @@ pub struct Board<C, W: SinkWarehouse> {
 impl<C, W> Board<C, W>
 where
     C: Clone + DeserializeOwned + Serialize + 'static,
-    W: Clone + DeserializeOwned + SinkWarehouse + Send + Sync + 'static,
+    W: Clone + DeserializeOwned + SinkWarehouse<Location: DeserializeOwned> + Send + Sync + 'static,
     W::Credential: Send + Sync,
 {
     pub fn new(pipelines: Pipelines<C, W>) -> Self {

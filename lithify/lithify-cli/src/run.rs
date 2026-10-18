@@ -6,16 +6,16 @@ use lithify_config::infra::{Sink, Source};
 use lithify_config::{ArtifactKind, Pipeline};
 use lithify_core::sink::{Namespace, OpenWarehouse};
 use lithify_core::ts::Ts;
-use lithify_protocol::sink::bigquery;
 use lithify_protocol::sink::bigquery::client::{BigQueryCapture, BigQueryClient};
 use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbClient};
 use lithify_protocol::sink::duckdb::config::Config;
+use lithify_protocol::sink::{bigquery, duckdb};
 use lithify_protocol::{BigQueryWarehouse, DuckDbWarehouse};
 
 use crate::course::Course;
 use crate::credential::Credentials;
 use crate::journal::Journal;
-use crate::pipeline::{CaptureConfig, WarehouseConfig};
+use crate::pipeline::{CaptureConfig, Reached, WarehouseConfig};
 use crate::plan::SnapshotPlan;
 use crate::settlement::{Build, DryRun, Settlement};
 use crate::unrunnable::Unrunnable;
@@ -92,12 +92,12 @@ impl Run {
         );
         let namespace = Namespace::from(sink.artifacts().namespace(ArtifactKind::Snapshot));
 
-        match sink.warehouse() {
-            WarehouseConfig::DuckDb(config) => {
-                Ok(expectation.read(&self.duckdb(sink, config)?, &namespace)?)
+        match Self::reach(sink)? {
+            Reached::DuckDb(config, change_log) => {
+                Ok(expectation.read(&self.duckdb(config, change_log)?, &namespace)?)
             }
-            WarehouseConfig::BigQuery(config) => {
-                Ok(expectation.read(&self.bigquery(sink, config)?, &namespace)?)
+            Reached::BigQuery(config, change_log) => {
+                Ok(expectation.read(&self.bigquery(config, change_log)?, &namespace)?)
             }
         }
     }
@@ -157,9 +157,9 @@ impl Run {
         settlement: &S,
         journal: &mut Journal,
     ) -> Result<(), Unrunnable> {
-        match sink.warehouse() {
-            WarehouseConfig::DuckDb(config) => {
-                let client = self.duckdb(sink, config)?;
+        match Self::reach(sink)? {
+            Reached::DuckDb(config, change_log) => {
+                let client = self.duckdb(config, change_log)?;
 
                 course.itinerary(sink, source, self.now, &client)?.settle(
                     settlement,
@@ -172,8 +172,8 @@ impl Run {
                     },
                 )
             }
-            WarehouseConfig::BigQuery(config) => {
-                let client = self.bigquery(sink, config)?;
+            Reached::BigQuery(config, change_log) => {
+                let client = self.bigquery(config, change_log)?;
 
                 course.itinerary(sink, source, self.now, &client)?.settle(
                     settlement,
@@ -189,24 +189,30 @@ impl Run {
         }
     }
 
+    fn reach(sink: &Sink<WarehouseConfig>) -> Result<Reached<'_>, Unrunnable> {
+        sink.warehouse()
+            .reach(sink.change_log())
+            .ok_or(Unrunnable::Unreached)
+    }
+
     fn duckdb(
         &self,
-        sink: &Sink<WarehouseConfig>,
         config: &Config,
+        change_log: &duckdb::config::Location,
     ) -> Result<DuckDbClient, Unrunnable> {
         Ok(DuckDbWarehouse::open(
             config,
             self.credentials.duckdb()?,
-            sink.change_log(),
+            change_log,
         )?)
     }
 
     fn bigquery(
         &self,
-        sink: &Sink<WarehouseConfig>,
         config: &bigquery::config::Config,
+        change_log: &bigquery::config::Location,
     ) -> Result<BigQueryClient, Unrunnable> {
-        Ok(BigQueryWarehouse::open(config, &(), sink.change_log())?)
+        Ok(BigQueryWarehouse::open(config, &(), change_log)?)
     }
 
     fn selected<'a>(

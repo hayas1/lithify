@@ -5,17 +5,19 @@ use chrono::{DateTime, Utc};
 use semigroup::Semigroup;
 use serde::{Deserialize, Serialize};
 
-use lithify_core::ts::{Event, Ts};
-
 use lithify_core::schedule::Schedule;
+use lithify_core::sink::SinkWarehouse;
+use lithify_core::ts::{Event, Ts};
 
 use crate::ArtifactKind;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-#[serde(bound(deserialize = "C: Deserialize<'de>, W: Deserialize<'de>"))]
-#[serde(bound(serialize = "C: Serialize, W: Serialize"))]
-pub(crate) struct Wiring<C, W> {
+#[serde(bound(
+    deserialize = "C: Deserialize<'de>, W: Deserialize<'de>, W::Location: Deserialize<'de>"
+))]
+#[serde(bound(serialize = "C: Serialize, W: Serialize, W::Location: Serialize"))]
+pub(crate) struct Wiring<C, W: SinkWarehouse> {
     #[serde(default)]
     default: Defaults<C, W>,
     #[serde(default, rename = "source")]
@@ -24,7 +26,7 @@ pub(crate) struct Wiring<C, W> {
     sinks: Vec<WiredSink<W>>,
 }
 
-impl<C: Clone, W: Clone> Wiring<C, W> {
+impl<C: Clone, W: Clone + SinkWarehouse> Wiring<C, W> {
     pub(crate) fn sources(&self) -> Result<Vec<Source<C>>, Miswiring> {
         if self.sources.is_empty() {
             return Err(Miswiring::WithoutSources);
@@ -88,16 +90,18 @@ impl<C: Clone, W: Clone> Wiring<C, W> {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-#[serde(bound(deserialize = "C: Deserialize<'de>, W: Deserialize<'de>"))]
-#[serde(bound(serialize = "C: Serialize, W: Serialize"))]
-struct Defaults<C, W> {
+#[serde(bound(
+    deserialize = "C: Deserialize<'de>, W: Deserialize<'de>, W::Location: Deserialize<'de>"
+))]
+#[serde(bound(serialize = "C: Serialize, W: Serialize, W::Location: Serialize"))]
+struct Defaults<C, W: SinkWarehouse> {
     #[serde(default)]
     source: WiredSource<C>,
     #[serde(default)]
     sink: WiredSink<W>,
 }
 
-impl<C, W> Default for Defaults<C, W> {
+impl<C, W: SinkWarehouse> Default for Defaults<C, W> {
     fn default() -> Self {
         Self {
             source: WiredSource::default(),
@@ -148,16 +152,16 @@ impl<C: Clone> WiredSource<C> {
 #[derive(Debug, Clone, Deserialize, Serialize, Semigroup)]
 #[semigroup(with = "semigroup::op::Coalesce")]
 #[serde(deny_unknown_fields)]
-#[serde(bound(deserialize = "W: Deserialize<'de>"))]
-#[serde(bound(serialize = "W: Serialize"))]
-struct WiredSink<W> {
+#[serde(bound(deserialize = "W: Deserialize<'de>, W::Location: Deserialize<'de>"))]
+#[serde(bound(serialize = "W: Serialize, W::Location: Serialize"))]
+struct WiredSink<W: SinkWarehouse> {
     name: Option<String>,
-    change_log: Option<String>,
+    change_log: Option<W::Location>,
     warehouse: Option<W>,
     artifacts: Option<ArtifactTargets>,
 }
 
-impl<W> Default for WiredSink<W> {
+impl<W: SinkWarehouse> Default for WiredSink<W> {
     fn default() -> Self {
         Self {
             name: None,
@@ -168,18 +172,23 @@ impl<W> Default for WiredSink<W> {
     }
 }
 
-impl<W: Clone> WiredSink<W> {
+impl<W: Clone + SinkWarehouse> WiredSink<W> {
     fn sink(self, at: usize, default: &Self) -> Result<Sink<W>, Miswiring> {
         let wired = self.semigroup(default.clone());
         let name = wired.name.ok_or(Miswiring::SinkWithoutName(at))?;
+        let change_log = wired
+            .change_log
+            .ok_or_else(|| Miswiring::SinkWithoutChangeLog(name.clone()))?;
+        let warehouse = wired
+            .warehouse
+            .ok_or_else(|| Miswiring::SinkWithoutWarehouse(name.clone()))?;
+        if !warehouse.reaches(&change_log) {
+            return Err(Miswiring::ChangeLogUnreached(name));
+        }
 
         Ok(Sink {
-            change_log: wired
-                .change_log
-                .ok_or_else(|| Miswiring::SinkWithoutChangeLog(name.clone()))?,
-            warehouse: wired
-                .warehouse
-                .ok_or_else(|| Miswiring::SinkWithoutWarehouse(name.clone()))?,
+            change_log,
+            warehouse,
             artifacts: wired
                 .artifacts
                 .ok_or_else(|| Miswiring::SinkWithoutArtifacts(name.clone()))?,
@@ -198,6 +207,7 @@ pub enum Miswiring {
     SourcesTakingOverTogether(String, String),
     SinkWithoutName(usize),
     SinkWithoutChangeLog(String),
+    ChangeLogUnreached(String),
     SinkWithoutWarehouse(String),
     SinkWithoutArtifacts(String),
     SinkNamedTwice(String),
@@ -223,6 +233,10 @@ impl Display for Miswiring {
             Self::SinkWithoutChangeLog(name) => {
                 write!(formatter, "{name} holds no change log")
             }
+            Self::ChangeLogUnreached(name) => write!(
+                formatter,
+                "{name} holds its change log in a warehouse other than the one it is sunk into"
+            ),
             Self::SinkWithoutWarehouse(name) => write!(formatter, "{name} names no warehouse"),
             Self::SinkWithoutArtifacts(name) => write!(formatter, "{name} builds nothing"),
             Self::SinkNamedTwice(name) => write!(formatter, "{name} is sunk into twice"),
@@ -257,19 +271,19 @@ impl<C> Source<C> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Sink<W> {
+pub struct Sink<W: SinkWarehouse> {
     name: String,
-    change_log: String,
+    change_log: W::Location,
     warehouse: W,
     artifacts: ArtifactTargets,
 }
 
-impl<W> Sink<W> {
+impl<W: SinkWarehouse> Sink<W> {
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    pub fn change_log(&self) -> &str {
+    pub fn change_log(&self) -> &W::Location {
         &self.change_log
     }
 
@@ -324,10 +338,46 @@ mod tests {
         Warehouse { project: String },
     }
 
+    #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+    #[serde(deny_unknown_fields, rename_all = "lowercase")]
+    enum Lying {
+        Files { prefix: String },
+        Warehouse { dataset: String },
+    }
+
+    impl SinkWarehouse for Sunk {
+        type Location = Lying;
+        type Credential = ();
+        type Error = fmt::Error;
+
+        fn reaches(&self, location: &Lying) -> bool {
+            matches!(
+                (self, location),
+                (Self::Files { .. }, Lying::Files { .. })
+                    | (Self::Warehouse { .. }, Lying::Warehouse { .. })
+            )
+        }
+
+        fn with_client<F: lithify_core::sink::WarehouseFn>(
+            &self,
+            _: &Lying,
+            _: &(),
+            _: F,
+        ) -> Result<F::Output, fmt::Error> {
+            Err(fmt::Error)
+        }
+    }
+
+    fn prefix(prefix: &str) -> Lying {
+        Lying::Files {
+            prefix: prefix.to_owned(),
+        }
+    }
+
     const INFRA: &str = r#"
         [default]
         source.capture.debezium.dialect = "mysql"
-        sink.change_log = "mysql_shop_cdc"
+        sink.change_log.files.prefix = "mysql_shop_cdc"
         sink.artifacts.snapshot = "mysql_shop"
         sink.artifacts.history = "mysql_shop_history"
         sink.artifacts.shard = "%Y%m%d"
@@ -349,7 +399,7 @@ mod tests {
 
         [[sink]]
         name = "warehouse"
-        change_log = "mysql_shop_archive"
+        change_log.warehouse.dataset = "mysql_shop_archive"
         warehouse.warehouse.project = "local-project"
     "#;
 
@@ -454,7 +504,7 @@ mod tests {
     #[test]
     fn a_pipeline_that_captures_no_server_is_rejected() {
         let wiring = wiring(
-            "[[sink]]\nname = \"rustfs\"\nchange_log = \"mysql_shop_cdc\"\nwarehouse.files.bucket = \"lithify\"\nartifacts.snapshot = \"mysql_shop\"\nartifacts.history = \"mysql_shop_history\"\nartifacts.shard = \"%Y%m%d\"",
+            "[[sink]]\nname = \"rustfs\"\nchange_log.files.prefix = \"mysql_shop_cdc\"\nwarehouse.files.bucket = \"lithify\"\nartifacts.snapshot = \"mysql_shop\"\nartifacts.history = \"mysql_shop_history\"\nartifacts.shard = \"%Y%m%d\"",
         );
 
         assert_eq!(wiring.sources().unwrap_err(), Miswiring::WithoutSources);
@@ -472,17 +522,22 @@ mod tests {
     #[test]
     fn a_sink_holds_the_change_log_the_pipeline_names() {
         assert_eq!(sinks()[0].name(), "rustfs");
-        assert_eq!(sinks()[0].change_log(), "mysql_shop_cdc");
+        assert_eq!(sinks()[0].change_log(), &prefix("mysql_shop_cdc"));
     }
 
     #[test]
     fn a_sink_that_names_its_own_change_log_keeps_it() {
-        assert_eq!(sinks()[1].change_log(), "mysql_shop_archive");
+        assert_eq!(
+            sinks()[1].change_log(),
+            &Lying::Warehouse {
+                dataset: "mysql_shop_archive".to_owned()
+            }
+        );
     }
 
     #[test]
     fn a_sink_says_the_namespace_its_change_logs_landed_in() {
-        assert_eq!(sinks()[0].change_log(), "mysql_shop_cdc");
+        assert_eq!(sinks()[0].change_log(), &prefix("mysql_shop_cdc"));
     }
 
     #[test]
@@ -521,7 +576,7 @@ mod tests {
     fn a_source_that_says_since_when_nowhere_is_captured_since_the_epoch() {
         let wiring = wired(
             "[[source]]\nname = \"primary\"\ncapture.debezium.dialect = \"mysql\"",
-            &format!("change_log = \"mysql_shop_cdc\"\n{WAREHOUSE}{ARTIFACTS}"),
+            &format!("change_log.files.prefix = \"mysql_shop_cdc\"\n{WAREHOUSE}{ARTIFACTS}"),
         );
 
         assert_eq!(
@@ -534,7 +589,7 @@ mod tests {
     fn a_source_captured_in_no_named_way_is_rejected() {
         let wiring = wired(
             "[[source]]\nname = \"primary\"\nsince = \"1970-01-01T00:00:00Z\"",
-            &format!("change_log = \"mysql_shop_cdc\"\n{WAREHOUSE}{ARTIFACTS}"),
+            &format!("change_log.files.prefix = \"mysql_shop_cdc\"\n{WAREHOUSE}{ARTIFACTS}"),
         );
 
         assert_eq!(
@@ -585,10 +640,23 @@ mod tests {
     }
 
     #[test]
+    fn a_sink_holding_its_change_log_in_another_warehouse_is_rejected() {
+        let elsewhere = INFRA.replace(
+            "change_log.warehouse.dataset = \"mysql_shop_archive\"",
+            "change_log.files.prefix = \"mysql_shop_archive\"",
+        );
+
+        assert_eq!(
+            wiring(&elsewhere).sinks().unwrap_err(),
+            Miswiring::ChangeLogUnreached("warehouse".to_owned())
+        );
+    }
+
+    #[test]
     fn a_sink_into_no_warehouse_anywhere_is_rejected() {
         let wiring = wired(
             SERVER,
-            &format!("change_log = \"mysql_shop_cdc\"\n{ARTIFACTS}"),
+            &format!("change_log.files.prefix = \"mysql_shop_cdc\"\n{ARTIFACTS}"),
         );
 
         assert_eq!(
@@ -601,7 +669,7 @@ mod tests {
     fn a_sink_that_builds_nothing_anywhere_is_rejected() {
         let wiring = wired(
             SERVER,
-            &format!("change_log = \"mysql_shop_cdc\"\n{WAREHOUSE}"),
+            &format!("change_log.files.prefix = \"mysql_shop_cdc\"\n{WAREHOUSE}"),
         );
 
         assert_eq!(
@@ -612,7 +680,8 @@ mod tests {
 
     #[test]
     fn a_sink_named_twice_is_rejected() {
-        let sink = format!("{NAMED}change_log = \"mysql_shop_cdc\"\n{WAREHOUSE}{ARTIFACTS}");
+        let sink =
+            format!("{NAMED}change_log.files.prefix = \"mysql_shop_cdc\"\n{WAREHOUSE}{ARTIFACTS}");
         let wiring = wiring(&format!("{SERVER}\n[[sink]]\n{sink}\n[[sink]]\n{sink}"));
 
         assert_eq!(
@@ -624,7 +693,7 @@ mod tests {
     #[test]
     fn a_sink_without_a_name_is_rejected() {
         let wiring = wiring(&format!(
-            "{SERVER}\n[[sink]]\nchange_log = \"mysql_shop_cdc\"\n{WAREHOUSE}{ARTIFACTS}"
+            "{SERVER}\n[[sink]]\nchange_log.files.prefix = \"mysql_shop_cdc\"\n{WAREHOUSE}{ARTIFACTS}"
         ));
 
         assert_eq!(wiring.sinks().unwrap_err(), Miswiring::SinkWithoutName(0));

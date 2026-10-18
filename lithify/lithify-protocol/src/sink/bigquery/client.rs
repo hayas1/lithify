@@ -19,7 +19,7 @@ use lithify_core::sql::SqlString;
 use lithify_core::window::Window;
 
 use crate::sink::bigquery::BigQueryWarehouse;
-use crate::sink::bigquery::config::{Config, Credentials};
+use crate::sink::bigquery::config::{Config, Credentials, Location};
 use crate::sink::bigquery::from_sql::{BigQueryBuildLogRow, BigQueryCount};
 
 pub trait BigQueryChangeLogsFn {
@@ -46,7 +46,7 @@ pub struct BigQueryClient {
 }
 
 impl BigQueryClient {
-    pub fn open(config: &Config, change_log: &str) -> Result<Self, Unqueryable> {
+    pub fn open(config: &Config, change_log: &Location) -> Result<Self, Unqueryable> {
         let runtime = Runtime::new().map_err(Unqueryable::Unrunnable)?;
         let builder = BigQuery::builder()
             .with_project_id(config.project())
@@ -60,7 +60,7 @@ impl BigQueryClient {
             .map_err(Unqueryable::Unbuildable)?;
 
         Ok(Self {
-            warehouse: BigQueryWarehouse::new(config.project(), change_log),
+            warehouse: BigQueryWarehouse::new(config.project(), Namespace::from(change_log)),
             client,
             runtime,
         })
@@ -85,11 +85,12 @@ impl BigQueryClient {
 
 impl OpenWarehouse for BigQueryWarehouse {
     type Config = Config;
+    type Location = Location;
     type Client = BigQueryClient;
     type Credential = ();
     type Error = Unqueryable;
 
-    fn open(config: &Config, _: &(), change_log: &str) -> Result<BigQueryClient, Unqueryable> {
+    fn open(config: &Config, _: &(), change_log: &Location) -> Result<BigQueryClient, Unqueryable> {
         BigQueryClient::open(config, change_log)
     }
 }

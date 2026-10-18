@@ -196,7 +196,7 @@ pub struct Pipelines<C, W: SinkWarehouse> {
 impl<C, W> Pipelines<C, W>
 where
     C: Clone + DeserializeOwned + Serialize,
-    W: Clone + DeserializeOwned + SinkWarehouse,
+    W: Clone + DeserializeOwned + SinkWarehouse<Location: DeserializeOwned>,
 {
     pub fn new(root: PathBuf, credential: W::Credential) -> Self {
         Self {

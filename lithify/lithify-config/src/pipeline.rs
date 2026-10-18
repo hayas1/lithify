@@ -3,20 +3,25 @@ use std::path::{Path, PathBuf};
 use serde::de::DeserializeOwned;
 
 use lithify_core::model::TableId;
+use lithify_core::sink::SinkWarehouse;
 
 use crate::infra::{self, Sink, Source};
 use crate::table::{self, Table, Tables};
 use crate::unreadable::Unreadable;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Pipeline<C, W> {
+pub struct Pipeline<C, W: SinkWarehouse> {
     name: String,
     sources: Vec<Source<C>>,
     sinks: Vec<Sink<W>>,
     tables: Tables,
 }
 
-impl<C: Clone + DeserializeOwned, W: Clone + DeserializeOwned> Pipeline<C, W> {
+impl<
+    C: Clone + DeserializeOwned,
+    W: Clone + DeserializeOwned + SinkWarehouse<Location: DeserializeOwned>,
+> Pipeline<C, W>
+{
     const WIRING: &str = "infra.toml";
     const LISTING: &str = "table.toml";
 
@@ -110,6 +115,35 @@ mod tests {
 
     #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
     #[serde(deny_unknown_fields, rename_all = "lowercase")]
+    enum Lying {
+        DuckDb(duckdb::Location),
+        BigQuery(bigquery::Location),
+    }
+
+    impl SinkWarehouse for Sunk {
+        type Location = Lying;
+        type Credential = ();
+        type Error = std::fmt::Error;
+
+        fn reaches(&self, location: &Lying) -> bool {
+            matches!(
+                (self, location),
+                (Self::DuckDb(_), Lying::DuckDb(_)) | (Self::BigQuery(_), Lying::BigQuery(_))
+            )
+        }
+
+        fn with_client<F: lithify_core::sink::WarehouseFn>(
+            &self,
+            _: &Lying,
+            _: &(),
+            _: F,
+        ) -> Result<F::Output, std::fmt::Error> {
+            Err(std::fmt::Error)
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+    #[serde(deny_unknown_fields, rename_all = "lowercase")]
     enum Capture {
         Debezium(debezium::Config),
     }
@@ -177,9 +211,21 @@ mod tests {
     fn a_pipeline_says_the_namespace_each_sink_holds_the_change_logs_in() {
         let pipeline = pipeline("mysql");
 
-        let change_logs: Vec<_> = pipeline.sinks().map(|sink| sink.change_log()).collect();
+        let change_logs: Vec<_> = pipeline
+            .sinks()
+            .map(|sink| match sink.change_log() {
+                Lying::DuckDb(location) => lithify_core::sink::Namespace::from(location),
+                Lying::BigQuery(location) => lithify_core::sink::Namespace::from(location),
+            })
+            .collect();
 
-        assert_eq!(change_logs, ["mysql_shop_cdc", "mysql_shop_cdc"]);
+        assert_eq!(
+            change_logs,
+            [
+                lithify_core::sink::Namespace::from("mysql_shop_cdc"),
+                lithify_core::sink::Namespace::from("mysql_shop_cdc")
+            ]
+        );
     }
 
     #[test]
@@ -233,7 +279,7 @@ mod tests {
         let directory = scratch("pipeline-without-servers");
         std::fs::write(
             directory.join("infra.toml"),
-            "[[sink]]\nname = \"rustfs\"\nchange_log = \"mysql_shop_cdc\"\nwarehouse.duckdb.s3.endpoint = \"http://rustfs:9000\"\nwarehouse.duckdb.s3.region = \"us-east-1\"\nwarehouse.duckdb.s3.bucket = \"lithify\"\nwarehouse.duckdb.s3.format = \"parquet\"\nartifacts.snapshot = \"mysql_shop\"\nartifacts.history = \"mysql_shop_history\"\nartifacts.shard = \"%Y%m%d\"\n",
+            "[[sink]]\nname = \"rustfs\"\nchange_log.duckdb.prefix = \"mysql_shop_cdc\"\nwarehouse.duckdb.s3.endpoint = \"http://rustfs:9000\"\nwarehouse.duckdb.s3.region = \"us-east-1\"\nwarehouse.duckdb.s3.bucket = \"lithify\"\nwarehouse.duckdb.s3.format = \"parquet\"\nartifacts.snapshot = \"mysql_shop\"\nartifacts.history = \"mysql_shop_history\"\nartifacts.shard = \"%Y%m%d\"\n",
         )
         .unwrap();
         std::fs::write(directory.join("table.toml"), "").unwrap();

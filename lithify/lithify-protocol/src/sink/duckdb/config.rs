@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use lithify_core::sink::TablePath;
+use lithify_core::sink::{Namespace, TablePath};
 use lithify_core::sql::SqlString;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -172,6 +172,18 @@ impl S3 {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Location {
+    prefix: String,
+}
+
+impl From<&Location> for Namespace {
+    fn from(location: &Location) -> Self {
+        Namespace::from(vec![location.prefix.clone()])
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FileFormat {
@@ -271,6 +283,17 @@ pub(crate) mod tests {
         assert_eq!(
             s3("http://rustfs:9000").scan(&TablePath::new("mysql_shop_cdc", "mysql")),
             "read_parquet('s3://lithify/mysql_shop_cdc/mysql/*.parquet', union_by_name = true)"
+        );
+    }
+
+    #[test]
+    fn a_location_lies_under_the_prefix_it_names() {
+        let location: Location =
+            serde_json::from_value(serde_json::json!({"prefix": "mysql_shop_cdc"})).unwrap();
+
+        assert_eq!(
+            Namespace::from(&location),
+            Namespace::from("mysql_shop_cdc")
         );
     }
 

@@ -1,6 +1,5 @@
 [default]
 source.capture.debezium.dialect = "mysql"
-sink.change_log = "mysql_shop_cdc"
 sink.artifacts.snapshot = "mysql_shop"
 sink.artifacts.history = "mysql_shop_history"
 sink.artifacts.shard = "%Y%m%d"
@@ -12,12 +11,14 @@ topic_prefix = "mysql"
 
 [[sink]]
 name = "bigquery"
+change_log.bigquery.dataset = "mysql_shop_cdc"
 warehouse.bigquery.project = "local-project"
 warehouse.bigquery.endpoint = "http://bigquery-emulator:9050"
 warehouse.bigquery.credentials = "anonymous"
 
 [[sink]]
 name = "duckdb_s3"
+change_log.duckdb.prefix = "mysql_shop_cdc"
 warehouse.duckdb.s3.endpoint = "http://rustfs:9000"
 warehouse.duckdb.s3.region = "us-east-1"
 warehouse.duckdb.s3.bucket = "lithify"

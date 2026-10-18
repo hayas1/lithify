@@ -27,6 +27,12 @@ pub enum Kept {
     Unreachable { cause: String },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Shelf {
+    prefix: String,
+}
+
 #[derive(Debug)]
 pub struct Unreached(String);
 
@@ -91,10 +97,15 @@ impl Kept {
 }
 
 impl SinkWarehouse for Kept {
+    type Location = Shelf;
     type Credential = ();
     type Error = Unreached;
 
-    fn with_client<F: WarehouseFn>(&self, _: &str, _: &(), f: F) -> Result<F::Output, Unreached> {
+    fn reaches(&self, _: &Shelf) -> bool {
+        true
+    }
+
+    fn with_client<F: WarehouseFn>(&self, _: &Shelf, _: &(), f: F) -> Result<F::Output, Unreached> {
         match self {
             Self::Memory {} => Ok(f.call(&Recorder::new(Engine::default()))),
             Self::Logged {} => Ok(f.call(
@@ -109,7 +120,7 @@ impl SinkWarehouse for Kept {
 pub const INFRA: &str = r#"
     [default]
     source.capture.debezium.dialect = "mysql"
-    sink.change_log = "mysql_shop_cdc"
+    sink.change_log.prefix = "mysql_shop_cdc"
     sink.artifacts.snapshot = "mysql_shop"
     sink.artifacts.history = "mysql_shop_history"
     sink.artifacts.shard = "%Y%m%d"

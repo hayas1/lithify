@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use lithify_core::sink::{OpenWarehouse, SinkWarehouse, WarehouseFn};
+use lithify_core::sink::{Namespace, OpenWarehouse, SinkWarehouse, WarehouseFn};
 use lithify_core::source::CdcFormat;
 use lithify_protocol::sink::bigquery::client::{BigQueryCapture, BigQueryChangeLogsFn};
 use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbChangeLogsFn};
@@ -52,27 +52,73 @@ pub enum WarehouseConfig {
     BigQuery(<BigQueryWarehouse as OpenWarehouse>::Config),
 }
 
+impl WarehouseConfig {
+    pub fn reach<'a>(&'a self, location: &'a LocationConfig) -> Option<Reached<'a>> {
+        match (self, location) {
+            (Self::DuckDb(config), LocationConfig::DuckDb(location)) => {
+                Some(Reached::DuckDb(config, location))
+            }
+            (Self::BigQuery(config), LocationConfig::BigQuery(location)) => {
+                Some(Reached::BigQuery(config, location))
+            }
+            _ => None,
+        }
+    }
+}
+
 impl SinkWarehouse for WarehouseConfig {
+    type Location = LocationConfig;
     type Credential = Credentials;
     type Error = Unrunnable;
 
+    fn reaches(&self, location: &LocationConfig) -> bool {
+        self.reach(location).is_some()
+    }
+
     fn with_client<F: WarehouseFn>(
         &self,
-        change_log: &str,
+        change_log: &LocationConfig,
         credentials: &Credentials,
         f: F,
     ) -> Result<F::Output, Unrunnable> {
-        match self {
-            Self::DuckDb(config) => Ok(f.call(&DuckDbWarehouse::open(
+        match self.reach(change_log).ok_or(Unrunnable::Unreached)? {
+            Reached::DuckDb(config, change_log) => Ok(f.call(&DuckDbWarehouse::open(
                 config,
                 credentials.duckdb()?,
                 change_log,
             )?)),
-            Self::BigQuery(config) => {
+            Reached::BigQuery(config, change_log) => {
                 Ok(f.call(&BigQueryWarehouse::open(config, &(), change_log)?))
             }
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "lowercase")]
+pub enum LocationConfig {
+    DuckDb(<DuckDbWarehouse as OpenWarehouse>::Location),
+    BigQuery(<BigQueryWarehouse as OpenWarehouse>::Location),
+}
+
+impl From<&LocationConfig> for Namespace {
+    fn from(location: &LocationConfig) -> Self {
+        match location {
+            LocationConfig::DuckDb(location) => Namespace::from(location),
+            LocationConfig::BigQuery(location) => Namespace::from(location),
+        }
+    }
+}
+
+pub enum Reached<'a> {
+    DuckDb(
+        &'a <DuckDbWarehouse as OpenWarehouse>::Config,
+        &'a <DuckDbWarehouse as OpenWarehouse>::Location,
+    ),
+    BigQuery(
+        &'a <BigQueryWarehouse as OpenWarehouse>::Config,
+        &'a <BigQueryWarehouse as OpenWarehouse>::Location,
+    ),
 }
 
 #[cfg(test)]
@@ -131,6 +177,17 @@ mod tests {
             panic!("expected a bigquery warehouse");
         };
         assert_eq!(bigquery.project(), "local-project");
+    }
+
+    #[test]
+    fn a_warehouse_reaches_a_location_written_the_way_it_is() {
+        let bigquery: WarehouseConfig =
+            toml::from_str("[bigquery]\nproject = \"local-project\"").unwrap();
+        let dataset: LocationConfig = toml::from_str("bigquery.dataset = \"mysql_shop\"").unwrap();
+        let prefix: LocationConfig = toml::from_str("duckdb.prefix = \"mysql_shop\"").unwrap();
+
+        assert!(bigquery.reaches(&dataset));
+        assert!(!bigquery.reaches(&prefix));
     }
 
     #[test]

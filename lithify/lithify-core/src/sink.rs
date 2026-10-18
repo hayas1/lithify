@@ -233,6 +233,7 @@ pub trait WarehouseFn {
 
 pub trait OpenWarehouse {
     type Config;
+    type Location;
     type Client: WarehouseClient;
     type Credential;
     type Error: std::error::Error;
@@ -240,17 +241,20 @@ pub trait OpenWarehouse {
     fn open(
         config: &Self::Config,
         credential: &Self::Credential,
-        change_log: &str,
+        change_log: &Self::Location,
     ) -> Result<Self::Client, Self::Error>;
 }
 
 pub trait SinkWarehouse {
+    type Location: Clone + fmt::Debug + PartialEq + Eq;
     type Credential;
     type Error: std::error::Error;
 
+    fn reaches(&self, location: &Self::Location) -> bool;
+
     fn with_client<F: WarehouseFn>(
         &self,
-        change_log: &str,
+        change_log: &Self::Location,
         credential: &Self::Credential,
         f: F,
     ) -> Result<F::Output, Self::Error>;
