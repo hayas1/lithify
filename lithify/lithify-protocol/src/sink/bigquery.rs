@@ -151,8 +151,8 @@ mod tests {
     use chrono::DateTime;
     use lithify_core::build_log::{BuildLog, BuildLogQuery, Latest, Outcome, Run, Status};
     use lithify_core::model::{ColumnType, TableId};
-    use lithify_core::position::RecordedAt;
     use lithify_core::sink::{ChangeLogSql, TablePath, UnsupportedColumn};
+    use lithify_core::ts::Ts;
     use lithify_core::window::Window;
     use ulid::Ulid;
 
@@ -204,8 +204,8 @@ mod tests {
             Some(TablePath::new("mysql_shop", "customers_20260919")),
             Some(TablePath::new("mysql_shop", "customers_20260920")),
             Window::new(
-                RecordedAt::from(1789862400000),
-                RecordedAt::from(1789948800000),
+                Ts::try_from(1789862400000).unwrap(),
+                Ts::try_from(1789948800000).unwrap(),
             ),
             Outcome::new(
                 Status::Succeeded,
@@ -247,7 +247,7 @@ mod tests {
     fn a_build_log_is_read_by_the_latest_success_closing_at_an_instant_under_the_name_it_closed_with()
      {
         assert_eq!(
-            Latest::SucceededUntil(RecordedAt::from(1789948800000))
+            Latest::SucceededUntil(Ts::try_from(1789948800000).unwrap())
                 .select(&bigquery(), "mysql_shop"),
             format!(
                 "SELECT {COLUMNS}\nFROM `local-project`.`mysql_shop`.`_lithify_log` AS `latest`\nWHERE `latest`.`table_to` IS NOT NULL AND `latest`.`status` = 'succeeded' AND `latest`.`window_to` = TIMESTAMP_MILLIS(1789948800000)\nQUALIFY ROW_NUMBER() OVER (PARTITION BY `artifact`, `schedule`, `table_to` ORDER BY `id` DESC) = 1\nORDER BY `artifact`, `schedule`, `table_to`"
@@ -354,7 +354,7 @@ mod tests {
     #[test]
     fn the_schema_changes_of_a_window_are_read_whole_in_the_order_they_were_recorded_then_logged() {
         let log = Debezium::new("mysql", MySql);
-        let window = Window::new(RecordedAt::from(0), RecordedAt::from(10));
+        let window = Window::new(Ts::try_from(0).unwrap(), Ts::try_from(10).unwrap());
 
         assert_eq!(
             BigQueryWarehouse::new("local-project", "mysql_shop_cdc")

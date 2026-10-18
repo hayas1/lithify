@@ -40,8 +40,7 @@ impl Artifact for Snapshot {
     type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = SnapshotBuilder<'a, L, W>;
 
     fn target(&self, table: &TableId, window: &Window) -> Result<TablePath, UnbuildableArtifact> {
-        let at =
-            DateTime::<Utc>::try_from(window.last()).map_err(UnbuildableArtifact::Unshardable)?;
+        let at = DateTime::<Utc>::from(window.last());
 
         Ok(TablePath::new(
             &self.namespace,
@@ -360,10 +359,11 @@ mod tests {
     use lithify_core::event::{Hint, SchemaChange, TableChange};
     use lithify_core::listener::{CatalogModel, OutOfOrder};
     use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
-    use lithify_core::position::{Coordinate, Position, RecordedAt};
+    use lithify_core::position::{Coordinate, Position};
     use lithify_core::sink::{TablePath, UnsupportedColumn};
     use lithify_core::source::{ChangeLog, ColumnPath, RowChangeLog};
     use lithify_core::testing::Engine;
+    use lithify_core::ts::Ts;
     use lithify_core::window::Window;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -380,11 +380,11 @@ mod tests {
             None
         }
 
-        fn occurred_at(&self) -> ColumnPath {
+        fn event_time(&self) -> ColumnPath {
             ColumnPath::from("source.ts_ms")
         }
 
-        fn recorded_at(&self) -> ColumnPath {
+        fn processing_time(&self) -> ColumnPath {
             ColumnPath::from("ts_ms")
         }
 
@@ -448,7 +448,13 @@ mod tests {
     }
 
     fn hinted(at: i64, hints: Vec<Hint>, tables: Vec<TableChange>) -> SchemaChange<Offset> {
-        SchemaChange::new(Offset(at as u64), RecordedAt::from(at), "", tables, hints)
+        SchemaChange::new(
+            Offset(at as u64),
+            Ts::try_from(at).unwrap(),
+            "",
+            tables,
+            hints,
+        )
     }
 
     fn renamed(from: &str, to: &str) -> Hint {
@@ -489,7 +495,7 @@ mod tests {
     }
 
     fn window() -> Window {
-        Window::new(RecordedAt::from(100), RecordedAt::from(200))
+        Window::new(Ts::try_from(100).unwrap(), Ts::try_from(200).unwrap())
     }
 
     fn snapshots_in<W: Warehouse>(
@@ -501,7 +507,7 @@ mod tests {
         let mut catalog = CatalogModel::default();
         catalog.accept::<OutOfOrder, _>(&(), &change(1, TableChange::Created(created)), &mut ())?;
         let mut tracker = EraTracker::new(
-            Window::new(RecordedAt::from(100), RecordedAt::from(200)),
+            Window::new(Ts::try_from(100).unwrap(), Ts::try_from(200).unwrap()),
             |table: &TableId| {
                 Ok::<_, Untold>(SnapshotBuilder::new(
                     shop(),
@@ -703,7 +709,7 @@ mod tests {
     #[test]
     fn a_bound_in_time_is_placed_on_the_instant_a_change_occurred_at_the_source() {
         assert_eq!(
-            Bound::<Offset>::Time(RecordedAt::from(150)).placed(&Log),
+            Bound::<Offset>::Time(Ts::try_from(150).unwrap()).placed(&Log),
             [(ColumnPath::from("source.ts_ms"), Coordinate::Number(150))]
         );
     }
@@ -713,7 +719,7 @@ mod tests {
      {
         assert_eq!(
             Bound::Position {
-                at: RecordedAt::from(150),
+                at: Ts::try_from(150).unwrap(),
                 position: Offset(7),
             }
             .placed(&Log),
@@ -730,7 +736,7 @@ mod tests {
             customers(),
             vec![SchemaChange::new(
                 Offset(7),
-                RecordedAt::from(150),
+                Ts::try_from(150).unwrap(),
                 "",
                 vec![TableChange::Altered(widened())],
                 Vec::new(),
@@ -1370,7 +1376,10 @@ mod tests {
         let snapshot = Snapshot::new("mysql_shop", "%Y%m%d");
 
         for opened in [0, 1789862400000] {
-            let window = Window::new(RecordedAt::from(opened), RecordedAt::from(1789948800000));
+            let window = Window::new(
+                Ts::try_from(opened).unwrap(),
+                Ts::try_from(1789948800000).unwrap(),
+            );
 
             assert_eq!(
                 snapshot
@@ -1379,31 +1388,6 @@ mod tests {
                 TablePath::new("mysql_shop", "customers_20260920")
             );
         }
-    }
-
-    #[test]
-    fn a_window_holding_no_instant_a_day_can_hold_names_no_snapshot() {
-        let window = Window::new(RecordedAt::from(i64::MAX), RecordedAt::from(i64::MAX));
-
-        assert_eq!(
-            Snapshot::new("mysql_shop", "%Y%m%d")
-                .target(&TableId::new("shop", "customers"), &window)
-                .unwrap_err(),
-            UnbuildableArtifact::Unshardable(RecordedAt::from(i64::MAX - 1))
-        );
-    }
-
-    #[test]
-    fn a_window_no_shard_can_be_named_after_yields_no_builder() {
-        let window = Window::new(RecordedAt::from(i64::MAX), RecordedAt::from(i64::MAX));
-
-        assert_eq!(
-            shop()
-                .builder::<Log, Engine>(&Log, TableId::new("shop", "customers"), &window, None)
-                .map(drop)
-                .unwrap_err(),
-            UnbuildableArtifact::Unshardable(RecordedAt::from(i64::MAX - 1))
-        );
     }
 
     #[test]
@@ -1417,8 +1401,8 @@ mod tests {
             &Engine::default(),
             &Era::new(
                 customers(),
-                Bound::Time(RecordedAt::from(100)),
-                Bound::Time(RecordedAt::from(200)),
+                Bound::Time(Ts::try_from(100).unwrap()),
+                Bound::Time(Ts::try_from(200).unwrap()),
             ),
         )
         .unwrap();
@@ -1450,7 +1434,7 @@ mod tests {
             Some(TableId::new("shop", "customers")),
             None,
             Some(base.clone()),
-            Window::new(RecordedAt::from(0), RecordedAt::from(100)),
+            Window::new(Ts::try_from(0).unwrap(), Ts::try_from(100).unwrap()),
             Outcome::new(Status::Succeeded, finished_at),
         );
         let builder = shop()

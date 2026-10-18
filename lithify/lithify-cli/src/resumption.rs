@@ -1,19 +1,19 @@
 use lithify_core::build_log::{BuildLog, Latest};
-use lithify_core::position::RecordedAt;
 use lithify_core::schedule::Schedule;
 use lithify_core::sink::WarehouseClient;
+use lithify_core::ts::{Event, Ts};
 use lithify_core::window::Window;
 
 use crate::unrunnable::Unrunnable;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Resumption {
-    FromOrigin(RecordedAt),
-    FromBuilt(RecordedAt),
+    FromOrigin(Ts<Event>),
+    FromBuilt(Ts<Event>),
 }
 
 impl Resumption {
-    pub fn at(start: RecordedAt, origin: RecordedAt) -> Self {
+    pub fn at(start: Ts<Event>, origin: Ts<Event>) -> Self {
         match start > origin {
             true => Self::FromBuilt(start),
             false => Self::FromOrigin(origin),
@@ -23,7 +23,7 @@ impl Resumption {
     pub fn read(
         latest: &[BuildLog],
         succeeded: &[BuildLog],
-        origin: RecordedAt,
+        origin: Ts<Event>,
         capture: &str,
     ) -> Result<Self, Unrunnable> {
         let Some(last_run) = latest.iter().map(BuildLog::run_id).max() else {
@@ -53,7 +53,7 @@ impl Resumption {
         Ok(Self::at(start, origin))
     }
 
-    pub fn windows(&self, schedule: Schedule, until: RecordedAt) -> Vec<Window> {
+    pub fn windows(&self, schedule: Schedule, until: Ts<Event>) -> Vec<Window> {
         match self {
             Self::FromOrigin(origin) => schedule.span(*origin, until).into_iter().collect(),
             Self::FromBuilt(start) => schedule.windows(*start, until).collect(),
@@ -81,8 +81,8 @@ mod tests {
 
     use lithify_core::build_log::{BuildLog, Outcome, Run, Status};
     use lithify_core::model::TableId;
-    use lithify_core::position::RecordedAt;
     use lithify_core::sink::TablePath;
+    use lithify_core::ts::Ts;
     use lithify_core::window::Window;
 
     use super::*;
@@ -117,7 +117,7 @@ mod tests {
             Some(TableId::new("shop", table)),
             None,
             Some(TablePath::new("mysql_shop", &format!("{table}_{from}"))),
-            Window::new(RecordedAt::from(from), RecordedAt::from(to)),
+            Window::new(Ts::try_from(from).unwrap(), Ts::try_from(to).unwrap()),
             Outcome::new(status, DateTime::from_timestamp_millis(to).unwrap()),
         )
     }
@@ -137,20 +137,23 @@ mod tests {
             Some(TableId::new("shop", to)),
             None,
             Some(TablePath::new("mysql_shop", &format!("{to}_{}", window.0))),
-            Window::new(RecordedAt::from(window.0), RecordedAt::from(window.1)),
+            Window::new(
+                Ts::try_from(window.0).unwrap(),
+                Ts::try_from(window.1).unwrap(),
+            ),
             Outcome::new(status, DateTime::from_timestamp_millis(window.1).unwrap()),
         )
     }
 
     fn resumed(latest: &[BuildLog], succeeded: &[BuildLog]) -> Resumption {
-        Resumption::read(latest, succeeded, RecordedAt::from(ORIGIN), CAPTURE).unwrap()
+        Resumption::read(latest, succeeded, Ts::try_from(ORIGIN).unwrap(), CAPTURE).unwrap()
     }
 
     #[test]
     fn a_pipeline_nothing_was_built_for_starts_from_its_origin() {
         assert_eq!(
             resumed(&[], &[]),
-            Resumption::FromOrigin(RecordedAt::from(ORIGIN))
+            Resumption::FromOrigin(Ts::try_from(ORIGIN).unwrap())
         );
     }
 
@@ -161,7 +164,7 @@ mod tests {
 
         assert_eq!(
             resumed(&[people.clone(), pets.clone()], &[people, pets]),
-            Resumption::FromBuilt(RecordedAt::from(W2.1))
+            Resumption::FromBuilt(Ts::try_from(W2.1).unwrap())
         );
     }
 
@@ -173,7 +176,7 @@ mod tests {
 
         assert_eq!(
             resumed(&[people.clone(), pets], &[people, pets_before]),
-            Resumption::FromBuilt(RecordedAt::from(W1.1))
+            Resumption::FromBuilt(Ts::try_from(W1.1).unwrap())
         );
     }
 
@@ -184,7 +187,7 @@ mod tests {
 
         assert_eq!(
             resumed(&[people.clone(), pets], &[people]),
-            Resumption::FromOrigin(RecordedAt::from(ORIGIN))
+            Resumption::FromOrigin(Ts::try_from(ORIGIN).unwrap())
         );
     }
 
@@ -195,7 +198,7 @@ mod tests {
 
         assert_eq!(
             resumed(&[left.clone(), people.clone()], &[left, people]),
-            Resumption::FromBuilt(RecordedAt::from(W1.1))
+            Resumption::FromBuilt(Ts::try_from(W1.1).unwrap())
         );
     }
 
@@ -212,15 +215,15 @@ mod tests {
 
         assert_eq!(
             resumed(&[renamed], &[before]),
-            Resumption::FromBuilt(RecordedAt::from(W1.1))
+            Resumption::FromBuilt(Ts::try_from(W1.1).unwrap())
         );
     }
 
     #[test]
     fn a_pipeline_built_up_to_its_origin_starts_from_its_origin() {
         assert_eq!(
-            Resumption::at(RecordedAt::from(ORIGIN), RecordedAt::from(ORIGIN)),
-            Resumption::FromOrigin(RecordedAt::from(ORIGIN))
+            Resumption::at(Ts::try_from(ORIGIN).unwrap(), Ts::try_from(ORIGIN).unwrap()),
+            Resumption::FromOrigin(Ts::try_from(ORIGIN).unwrap())
         );
     }
 
@@ -237,7 +240,7 @@ mod tests {
         let changed = Resumption::read(
             std::slice::from_ref(&people),
             std::slice::from_ref(&people),
-            RecordedAt::from(ORIGIN),
+            Ts::try_from(ORIGIN).unwrap(),
             CAPTURE,
         );
 

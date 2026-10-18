@@ -86,8 +86,8 @@ pub(crate) mod tests {
     use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbClient};
 
     use super::*;
-    use lithify_core::position::RecordedAt;
     use lithify_core::schedule::Schedule;
+    use lithify_core::ts::Ts;
 
     use crate::plan::SnapshotPlan;
     use crate::plan::tests::{
@@ -636,7 +636,7 @@ pub(crate) mod tests {
                 Schedule::Daily,
                 pipeline.sources().next().unwrap().since(),
                 CAPTURE,
-                RecordedAt::from(at(NOW)),
+                Ts::from(at(NOW)),
             )
             .read(&client, "mysql_shop")
             .unwrap()

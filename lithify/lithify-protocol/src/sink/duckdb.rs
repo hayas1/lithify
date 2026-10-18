@@ -196,7 +196,8 @@ mod tests {
     use crate::source::debezium::Debezium;
     use crate::source::debezium::mysql::MySql;
     use lithify_core::model::ColumnModel;
-    use lithify_core::position::{Coordinate, RecordedAt};
+    use lithify_core::position::Coordinate;
+    use lithify_core::ts::Ts;
     use lithify_core::window::Window;
 
     fn read(column_type: ColumnType) -> SqlString {
@@ -347,7 +348,7 @@ mod tests {
     fn the_schema_changes_of_a_window_are_read_from_the_envelope_in_the_order_they_were_recorded_then_logged()
      {
         let log = Debezium::under("value", "mysql", MySql);
-        let window = Window::new(RecordedAt::from(0), RecordedAt::from(10));
+        let window = Window::new(Ts::try_from(0).unwrap(), Ts::try_from(10).unwrap());
 
         assert_eq!(
             DuckDbWarehouse::new("mysql_shop_cdc").select_schema_changes(&log, &window),

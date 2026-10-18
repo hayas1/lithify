@@ -12,4 +12,5 @@ pub mod source;
 pub mod sql;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
+pub mod ts;
 pub mod window;

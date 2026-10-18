@@ -2,8 +2,8 @@ use chrono::{DateTime, NaiveDate, Utc};
 
 use lithify_config::ArtifactKind;
 use lithify_config::infra::{Sink, Source};
-use lithify_core::position::RecordedAt;
 use lithify_core::sink::WarehouseClient;
+use lithify_core::ts::Ts;
 use lithify_core::window::Window;
 
 use crate::course::Itinerary;
@@ -52,7 +52,7 @@ impl<'a> Shard<'a> {
             .shard(self.source.since(), date)
             .ok_or(Unrunnable::Unsharded(date))?;
 
-        match *window.to() > RecordedAt::from(self.now) {
+        match *window.to() > Ts::from(self.now) {
             true => Err(Unrunnable::Unclosed(window)),
             false => Ok(window),
         }

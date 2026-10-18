@@ -4,7 +4,7 @@ use std::fmt::{self, Display, Formatter};
 use chrono::{DateTime, Days, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::position::RecordedAt;
+use crate::ts::{Event, Ts};
 use crate::window::Window;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -15,19 +15,19 @@ pub enum Schedule {
 }
 
 impl Schedule {
-    pub fn windows(self, from: RecordedAt, until: RecordedAt) -> impl Iterator<Item = Window> {
+    pub fn windows(self, from: Ts<Event>, until: Ts<Event>) -> impl Iterator<Item = Window> {
         std::iter::successors(self.window(from), move |window| self.window(*window.to()))
             .take_while(move |window| *window.to() <= until)
     }
 
-    pub fn span(self, from: RecordedAt, until: RecordedAt) -> Option<Window> {
+    pub fn span(self, from: Ts<Event>, until: Ts<Event>) -> Option<Window> {
         self.windows(from, until)
             .last()
             .map(|last| Window::new(from, *last.to()))
     }
 
-    pub fn shard(self, since: RecordedAt, date: NaiveDate) -> Option<Window> {
-        match date.cmp(&DateTime::<Utc>::try_from(since).ok()?.date_naive()) {
+    pub fn shard(self, since: Ts<Event>, date: NaiveDate) -> Option<Window> {
+        match date.cmp(&DateTime::<Utc>::from(since).date_naive()) {
             Ordering::Less => None,
             Ordering::Equal => self.window(since),
             Ordering::Greater => self.window(self.opening(date)?),
@@ -35,21 +35,21 @@ impl Schedule {
     }
 
     pub fn date(self, shard: &Window) -> Option<NaiveDate> {
-        let held = DateTime::<Utc>::try_from(shard.last()).ok()?;
+        let held = DateTime::<Utc>::from(shard.last());
 
         match self {
             Self::Daily => Some(held.date_naive()),
         }
     }
 
-    fn opening(self, date: NaiveDate) -> Option<RecordedAt> {
+    fn opening(self, date: NaiveDate) -> Option<Ts<Event>> {
         match self {
-            Self::Daily => Some(RecordedAt::from(date.and_hms_opt(0, 0, 0)?.and_utc())),
+            Self::Daily => Some(Ts::from(date.and_hms_opt(0, 0, 0)?.and_utc())),
         }
     }
 
-    fn window(self, from: RecordedAt) -> Option<Window> {
-        let opened = DateTime::<Utc>::try_from(from).ok()?;
+    fn window(self, from: Ts<Event>) -> Option<Window> {
+        let opened = DateTime::<Utc>::from(from);
         let closed = match self {
             Self::Daily => opened
                 .date_naive()
@@ -58,7 +58,7 @@ impl Schedule {
                 .and_utc(),
         };
 
-        Some(Window::new(from, RecordedAt::from(closed)))
+        Some(Window::new(from, Ts::from(closed)))
     }
 }
 
@@ -74,8 +74,8 @@ impl Display for Schedule {
 mod tests {
     use super::*;
 
-    fn at(rfc3339: &str) -> RecordedAt {
-        RecordedAt::from(rfc3339.parse::<DateTime<Utc>>().unwrap())
+    fn at(rfc3339: &str) -> Ts<Event> {
+        Ts::from(rfc3339.parse::<DateTime<Utc>>().unwrap())
     }
 
     #[test]

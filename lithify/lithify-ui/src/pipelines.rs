@@ -8,8 +8,8 @@ use lithify_config::infra::{Sink, Source};
 use lithify_config::{ArtifactKind, Pipeline};
 use lithify_core::build_log::BuildLogQuery;
 use lithify_core::check::Expectation;
-use lithify_core::position::RecordedAt;
 use lithify_core::sink::{SinkWarehouse, WarehouseClient, WarehouseFn};
+use lithify_core::ts::Ts;
 
 use crate::overview::{
     BuildLogView, PipelineLocation, PipelineOverview, SinkInspection, SinkOverview, SourceOverview,
@@ -75,7 +75,7 @@ where
     ) -> Result<SourceOverview, String> {
         let capture =
             serde_json::to_string(source.capture()).map_err(|unwritten| unwritten.to_string())?;
-        let now = RecordedAt::from(Utc::now());
+        let now = Ts::from(Utc::now());
 
         Ok(SourceOverview::new(
             source.name(),
@@ -225,7 +225,10 @@ mod tests {
                     Some(TableId::new("shop", table)),
                     None,
                     Some(TablePath::new("mysql_shop", &format!("{table}_{from}"))),
-                    Window::new(RecordedAt::from(from), RecordedAt::from(from + 86_400_000)),
+                    Window::new(
+                        Ts::try_from(from).unwrap(),
+                        Ts::try_from(from + 86_400_000).unwrap(),
+                    ),
                     Outcome::new(
                         Status::Succeeded,
                         DateTime::from_timestamp_millis(from).unwrap(),

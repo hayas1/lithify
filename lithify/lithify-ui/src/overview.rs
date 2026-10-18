@@ -217,8 +217,8 @@ pub(crate) mod tests {
 
     use lithify_core::build_log::{BuildLog, Outcome, Run, Status};
     use lithify_core::model::TableId;
-    use lithify_core::position::RecordedAt;
     use lithify_core::sink::TablePath;
+    use lithify_core::ts::Ts;
     use lithify_core::window::Window;
 
     use lithify_core::schedule::Schedule;
@@ -246,8 +246,8 @@ pub(crate) mod tests {
             base.map(|base| TablePath::new("mysql_shop", base)),
             Some(TablePath::new("mysql_shop", &format!("{table}_20260920"))),
             Window::new(
-                RecordedAt::from(at("2026-09-20T00:00:00Z")),
-                RecordedAt::from(at("2026-09-21T00:00:00Z")),
+                Ts::from(at("2026-09-20T00:00:00Z")),
+                Ts::from(at("2026-09-21T00:00:00Z")),
             ),
             Outcome::new(status, at("2026-09-21T00:10:00Z")),
         )
@@ -330,8 +330,8 @@ pub(crate) mod tests {
             None,
             Some(TablePath::new("mysql_shop", "persons_20260920")),
             Window::new(
-                RecordedAt::from(at("2026-09-20T00:00:00Z")),
-                RecordedAt::from(at("2026-09-21T00:00:00Z")),
+                Ts::from(at("2026-09-20T00:00:00Z")),
+                Ts::from(at("2026-09-21T00:00:00Z")),
             ),
             Outcome::new(Status::Succeeded, at("2026-09-21T00:10:00Z")),
         );

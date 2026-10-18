@@ -3,8 +3,8 @@ use chrono::{DateTime, NaiveDate, Utc};
 use lithify_config::ArtifactKind;
 use lithify_config::infra::{Sink, Source};
 use lithify_core::build_log::Latest;
-use lithify_core::position::RecordedAt;
 use lithify_core::sink::WarehouseClient;
+use lithify_core::ts::{Event, Ts};
 
 use crate::course::Itinerary;
 use crate::pipeline::{Capture, WarehouseConfig};
@@ -50,12 +50,12 @@ impl<'a> CatchUp<'a> {
         ))
     }
 
-    fn until(&self) -> Result<RecordedAt, Unrunnable> {
+    fn until(&self) -> Result<Ts<Event>, Unrunnable> {
         match self.to {
             Some(date) => Ok(*Shard::new(self.sink, self.source, self.now)
                 .closed(date)?
                 .to()),
-            None => Ok(RecordedAt::from(self.now)),
+            None => Ok(Ts::from(self.now)),
         }
     }
 

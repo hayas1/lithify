@@ -177,8 +177,8 @@ pub(crate) mod tests {
     use duckdb::Connection;
 
     use lithify_config::Pipeline;
-    use lithify_core::position::RecordedAt;
     use lithify_core::sink::{TablePath, WarehouseClient};
+    use lithify_core::ts::Ts;
     use lithify_protocol::DuckDbWarehouse;
     use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbClient};
 
@@ -220,7 +220,10 @@ pub(crate) mod tests {
             DuckDbWarehouse::new(sink.change_log()),
         );
         client.execute(&SqlString::from(CHANGE_LOGS)).unwrap();
-        let window = Window::new(RecordedAt::from(0), RecordedAt::from(1789948800000));
+        let window = Window::new(
+            Ts::try_from(0).unwrap(),
+            Ts::try_from(1789948800000).unwrap(),
+        );
 
         let statements = source
             .capture()
@@ -265,8 +268,8 @@ pub(crate) mod tests {
         );
         client.execute(&SqlString::from(CHANGE_LOGS)).unwrap();
         let window = Window::new(
-            RecordedAt::from(1789862400000),
-            RecordedAt::from(1789948800000),
+            Ts::try_from(1789862400000).unwrap(),
+            Ts::try_from(1789948800000).unwrap(),
         );
 
         let baseless = source.capture().with_duckdb_change_logs(
@@ -301,8 +304,8 @@ pub(crate) mod tests {
         );
         client.execute(&SqlString::from(CHANGE_LOGS)).unwrap();
         let window = Window::new(
-            RecordedAt::from(1789862400000),
-            RecordedAt::from(1789948800000),
+            Ts::try_from(1789862400000).unwrap(),
+            Ts::try_from(1789948800000).unwrap(),
         );
         let previous = [built_before("people", CAPTURE)];
 
@@ -350,8 +353,8 @@ pub(crate) mod tests {
             None,
             Some(TablePath::new("mysql_shop", &format!("{table}_20260919"))),
             Window::new(
-                RecordedAt::from(at("2026-09-19T00:00:00Z")),
-                RecordedAt::from(at("2026-09-20T00:00:00Z")),
+                Ts::from(at("2026-09-19T00:00:00Z")),
+                Ts::from(at("2026-09-20T00:00:00Z")),
             ),
             Outcome::new(Status::Succeeded, at("2026-09-20T00:10:00Z")),
         )
@@ -452,7 +455,10 @@ pub(crate) mod tests {
             .sinks()
             .find(|sink| sink.name() == "duckdb_s3")
             .unwrap();
-        let window = Window::new(RecordedAt::from(0), RecordedAt::from(1789948800000));
+        let window = Window::new(
+            Ts::try_from(0).unwrap(),
+            Ts::try_from(1789948800000).unwrap(),
+        );
 
         source
             .capture()

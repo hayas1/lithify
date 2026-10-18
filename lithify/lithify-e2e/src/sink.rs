@@ -8,12 +8,12 @@ use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
 use lithify_core::era::EraTracker;
 use lithify_core::listener::OutOfOrder;
 use lithify_core::model::{TableId, TableModel};
-use lithify_core::position::RecordedAt;
 use lithify_core::sink::{ChangeLogSql, TablePath, WarehouseClient, WarehouseSql};
 use lithify_core::source::{
     ChangeLog, ChangeLogs, ColumnPath, RowChangeLog, SchemaChangeLog, SchemaChangeStream,
 };
 use lithify_core::sql::SqlString;
+use lithify_core::ts::{Event, Processing, Ts};
 use lithify_core::window::Window;
 use lithify_protocol::DuckDbWarehouse;
 use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbChangeLogsFn, DuckDbClient};
@@ -30,7 +30,7 @@ pub trait Sink {
         capture: &Capture,
         topic_prefix: &str,
         table: &TableId,
-        at: RecordedAt,
+        at: Ts<Processing>,
     ) -> Result<u64, Unbuildable>;
 
     fn model(
@@ -38,7 +38,7 @@ pub trait Sink {
         capture: &Capture,
         topic_prefix: &str,
         table: &TableId,
-        at: RecordedAt,
+        at: Ts<Event>,
     ) -> Result<TableModel, Unbuildable>;
 
     fn snapshot(
@@ -133,16 +133,17 @@ impl Sink for DuckDb {
         capture: &Capture,
         topic_prefix: &str,
         table: &TableId,
-        at: RecordedAt,
+        at: Ts<Processing>,
     ) -> Result<u64, Unbuildable> {
-        let (topic, recorded_at) = capture.with_duckdb_change_logs(topic_prefix, Landing { table });
+        let (topic, processing_time) =
+            capture.with_duckdb_change_logs(topic_prefix, Landing { table });
 
         let warehouse = self.client.warehouse();
         let landed = self.client.connection().query_row(
             &format!(
                 "SELECT COUNT(*) FROM {} WHERE {} >= {}",
                 warehouse.change_log_ref(&topic),
-                warehouse.path(&recorded_at),
+                warehouse.path(&processing_time),
                 at.milliseconds_since_epoch()
             ),
             [],
@@ -161,7 +162,7 @@ impl Sink for DuckDb {
         capture: &Capture,
         topic_prefix: &str,
         table: &TableId,
-        at: RecordedAt,
+        at: Ts<Event>,
     ) -> Result<TableModel, Unbuildable> {
         let read = capture.with_duckdb_change_logs(
             topic_prefix,
@@ -247,7 +248,7 @@ impl DuckDbChangeLogsFn for Landing<'_> {
     {
         (
             logs.row_changes().dml_topic(self.table),
-            logs.row_changes().recorded_at(),
+            logs.row_changes().processing_time(),
         )
     }
 }
@@ -255,7 +256,7 @@ impl DuckDbChangeLogsFn for Landing<'_> {
 struct Catalog<'a> {
     client: &'a DuckDbClient,
     table: &'a TableId,
-    at: RecordedAt,
+    at: Ts<Event>,
 }
 
 impl DuckDbChangeLogsFn for Catalog<'_> {

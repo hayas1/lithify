@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use semigroup::Semigroup;
 use serde::{Deserialize, Serialize};
 
-use lithify_core::position::RecordedAt;
+use lithify_core::ts::{Event, Ts};
 
 use lithify_core::schedule::Schedule;
 
@@ -247,8 +247,8 @@ impl<C> Source<C> {
         &self.capture
     }
 
-    pub fn since(&self) -> RecordedAt {
-        RecordedAt::from(self.since.timestamp_millis())
+    pub fn since(&self) -> Ts<Event> {
+        Ts::from(self.since)
     }
 
     pub fn topic_prefix(&self) -> Option<&str> {
@@ -524,7 +524,10 @@ mod tests {
             &format!("change_log = \"mysql_shop_cdc\"\n{WAREHOUSE}{ARTIFACTS}"),
         );
 
-        assert_eq!(wiring.sources().unwrap()[0].since(), RecordedAt::from(0));
+        assert_eq!(
+            wiring.sources().unwrap()[0].since(),
+            Ts::try_from(0).unwrap()
+        );
     }
 
     #[test]

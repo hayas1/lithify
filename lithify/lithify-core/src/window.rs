@@ -1,30 +1,32 @@
-use crate::position::RecordedAt;
+use chrono::{DateTime, TimeDelta};
+
+use crate::ts::{Event, Ts};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Window {
-    from: RecordedAt,
-    to: RecordedAt,
+    from: Ts<Event>,
+    to: Ts<Event>,
 }
 
 impl Window {
-    pub fn new(from: RecordedAt, to: RecordedAt) -> Self {
+    pub fn new(from: Ts<Event>, to: Ts<Event>) -> Self {
         Self { from, to }
     }
 
-    pub fn until(to: RecordedAt) -> Self {
-        Self::new(RecordedAt::from(0), to)
+    pub fn until(to: Ts<Event>) -> Self {
+        Self::new(Ts::from(DateTime::UNIX_EPOCH), to)
     }
 
-    pub fn from(&self) -> &RecordedAt {
+    pub fn from(&self) -> &Ts<Event> {
         &self.from
     }
 
-    pub fn to(&self) -> &RecordedAt {
+    pub fn to(&self) -> &Ts<Event> {
         &self.to
     }
 
-    pub fn last(&self) -> RecordedAt {
-        RecordedAt::from(self.to.milliseconds_since_epoch() - 1)
+    pub fn last(&self) -> Ts<Event> {
+        Ts::from(DateTime::from(self.to) - TimeDelta::milliseconds(1))
     }
 }
 
@@ -34,8 +36,8 @@ mod tests {
 
     #[test]
     fn a_window_last_holds_the_instant_before_it_closes() {
-        let window = Window::new(RecordedAt::from(100), RecordedAt::from(200));
+        let window = Window::new(Ts::try_from(100).unwrap(), Ts::try_from(200).unwrap());
 
-        assert_eq!(window.last(), RecordedAt::from(199));
+        assert_eq!(window.last(), Ts::try_from(199).unwrap());
     }
 }

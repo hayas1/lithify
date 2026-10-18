@@ -5,10 +5,10 @@ use lithify_core::era::{Bound, Era, EraTracker};
 use lithify_core::listener::OutOfOrder;
 use lithify_core::listener::SchemaChangeListener;
 use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
-use lithify_core::position::RecordedAt;
 use lithify_core::sink::WarehouseClient;
 use lithify_core::source::SchemaChangeStream;
 use lithify_core::sql::SqlString;
+use lithify_core::ts::Ts;
 use lithify_core::window::Window;
 use lithify_protocol::sink::duckdb::client::DuckDbClient;
 use lithify_protocol::{Debezium, DuckDbWarehouse, MySql, MySqlPosition};
@@ -45,7 +45,7 @@ fn a_snapshot_holds_each_key_as_the_change_log_last_left_it() {
     );
     client.execute(&SqlString::from(CHANGE_LOG)).unwrap();
     let log = Debezium::under("value", "mysql", MySql);
-    let window = Window::new(RecordedAt::from(0), RecordedAt::from(10));
+    let window = Window::new(Ts::try_from(0).unwrap(), Ts::try_from(10).unwrap());
     let artifact = Snapshot::new("shop_snapshot", "%Y%m%d");
     let mut snapshot = artifact
         .builder::<_, DuckDbWarehouse>(&log, people().id().clone(), &window, None)
@@ -144,7 +144,7 @@ fn a_replay_of_the_schema_changes_builds_a_snapshot_of_every_table_left_standing
     );
     client.execute(&SqlString::from(CHANGE_LOG)).unwrap();
     client.execute(&SqlString::from(SCHEMA_CHANGES)).unwrap();
-    let window = Window::new(RecordedAt::from(0), RecordedAt::from(10));
+    let window = Window::new(Ts::try_from(0).unwrap(), Ts::try_from(10).unwrap());
 
     build_snapshots(&client, &window);
 
@@ -179,7 +179,7 @@ fn a_table_created_before_the_window_is_snapshotted_too() {
     );
     client.execute(&SqlString::from(CHANGE_LOG)).unwrap();
     client.execute(&SqlString::from(SCHEMA_CHANGES)).unwrap();
-    let window = Window::new(RecordedAt::from(1), RecordedAt::from(10));
+    let window = Window::new(Ts::try_from(1).unwrap(), Ts::try_from(10).unwrap());
 
     build_snapshots(&client, &window);
 
@@ -236,7 +236,7 @@ fn a_column_added_within_the_window_is_filled_in_for_the_rows_last_changed_befor
 
     build_snapshots(
         &client,
-        &Window::new(RecordedAt::from(0), RecordedAt::from(10)),
+        &Window::new(Ts::try_from(0).unwrap(), Ts::try_from(10).unwrap()),
     );
 
     assert_eq!(
@@ -296,7 +296,7 @@ fn columns_one_statement_dropped_and_added_reshape_the_rows_last_changed_before_
 
     build_snapshots(
         &client,
-        &Window::new(RecordedAt::from(0), RecordedAt::from(10)),
+        &Window::new(Ts::try_from(0).unwrap(), Ts::try_from(10).unwrap()),
     );
 
     assert_eq!(
@@ -357,7 +357,7 @@ fn a_column_renamed_within_the_window_keeps_the_values_of_the_rows_last_changed_
 
     build_snapshots(
         &client,
-        &Window::new(RecordedAt::from(0), RecordedAt::from(10)),
+        &Window::new(Ts::try_from(0).unwrap(), Ts::try_from(10).unwrap()),
     );
 
     assert_eq!(
@@ -419,7 +419,7 @@ fn a_table_renamed_within_the_window_is_snapshotted_under_its_new_name_with_ever
 
     build_snapshots(
         &client,
-        &Window::new(RecordedAt::from(0), RecordedAt::from(10)),
+        &Window::new(Ts::try_from(0).unwrap(), Ts::try_from(10).unwrap()),
     );
 
     assert_eq!(
@@ -471,7 +471,7 @@ fn a_column_added_with_a_default_no_literal_spells_is_filled_with_null_rather_th
 
     build_snapshots(
         &client,
-        &Window::new(RecordedAt::from(0), RecordedAt::from(10)),
+        &Window::new(Ts::try_from(0).unwrap(), Ts::try_from(10).unwrap()),
     );
 
     assert_eq!(
@@ -530,7 +530,7 @@ fn changes_recorded_in_the_instant_of_a_schema_change_fall_on_its_side_their_pos
 
     build_snapshots(
         &client,
-        &Window::new(RecordedAt::from(0), RecordedAt::from(10)),
+        &Window::new(Ts::try_from(0).unwrap(), Ts::try_from(10).unwrap()),
     );
 
     assert_eq!(

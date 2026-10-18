@@ -171,7 +171,7 @@ pub trait ChangeLogSql: WarehouseSql {
             .envelope()
             .map(|envelope| self.path(&envelope))
             .unwrap_or_else(|| SqlString::from("*"));
-        let occurred_at = self.path(&log.occurred_at());
+        let event_time = self.path(&log.event_time());
         let ordering = log
             .sequence()
             .iter()
@@ -180,7 +180,7 @@ pub trait ChangeLogSql: WarehouseSql {
             .join(", ");
 
         SqlString::from(format!(
-            "SELECT {envelope}\nFROM {}\nWHERE {occurred_at} >= {} AND {occurred_at} < {}\nORDER BY {ordering}",
+            "SELECT {envelope}\nFROM {}\nWHERE {event_time} >= {} AND {event_time} < {}\nORDER BY {ordering}",
             self.change_log_ref(&log.ddl_topic()),
             window.from().milliseconds_since_epoch(),
             window.to().milliseconds_since_epoch(),
@@ -277,8 +277,8 @@ mod tests {
     use super::*;
     use crate::build_log::{Outcome, Run};
     use crate::model::TableId;
-    use crate::position::RecordedAt;
     use crate::testing::{Engine, Recorder};
+    use crate::ts::Ts;
 
     struct Namespaced(TableId);
 
@@ -308,7 +308,7 @@ mod tests {
                 Some(self.0.clone()),
                 None,
                 Some(TablePath::new("shop", "people")),
-                Window::until(RecordedAt::from(1)),
+                Window::until(Ts::try_from(1).unwrap()),
                 outcome,
             )
         }

@@ -3,20 +3,20 @@ use std::fmt::{self, Display, Formatter};
 
 use crate::build_log::{BuildLog, Latest};
 use crate::model::TableId;
-use crate::position::RecordedAt;
 use crate::schedule::Schedule;
 use crate::sink::{TablePath, WarehouseClient};
+use crate::ts::{Event, Ts};
 use crate::window::Window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Discrepancy {
     NeverBuilt {
-        since: RecordedAt,
+        since: Ts<Event>,
     },
     Overdue {
         table: TableId,
-        built_until: RecordedAt,
-        due_until: RecordedAt,
+        built_until: Ts<Event>,
+        due_until: Ts<Event>,
     },
     Failed {
         table: TableId,
@@ -90,13 +90,13 @@ impl Inspection {
 
 pub struct Expectation {
     schedule: Schedule,
-    since: RecordedAt,
+    since: Ts<Event>,
     capture: String,
-    now: RecordedAt,
+    now: Ts<Event>,
 }
 
 impl Expectation {
-    pub fn new(schedule: Schedule, since: RecordedAt, capture: &str, now: RecordedAt) -> Self {
+    pub fn new(schedule: Schedule, since: Ts<Event>, capture: &str, now: Ts<Event>) -> Self {
         Self {
             schedule,
             since,
@@ -169,7 +169,7 @@ impl Expectation {
             .collect()
     }
 
-    fn due_until(&self, built_until: RecordedAt) -> Option<RecordedAt> {
+    fn due_until(&self, built_until: Ts<Event>) -> Option<Ts<Event>> {
         self.schedule
             .windows(built_until, self.now)
             .last()
@@ -241,8 +241,8 @@ mod tests {
     use crate::build_log::{Outcome, Run, Status};
     use crate::testing::{Engine, Recorder};
 
-    fn at(rfc3339: &str) -> RecordedAt {
-        RecordedAt::from(rfc3339.parse::<DateTime<Utc>>().unwrap())
+    fn at(rfc3339: &str) -> Ts<Event> {
+        Ts::from(rfc3339.parse::<DateTime<Utc>>().unwrap())
     }
 
     fn day(date: &str) -> Window {
@@ -250,7 +250,7 @@ mod tests {
 
         Window::new(
             from,
-            RecordedAt::from(from.milliseconds_since_epoch() + 86_400_000),
+            Ts::try_from(from.milliseconds_since_epoch() + 86_400_000).unwrap(),
         )
     }
 

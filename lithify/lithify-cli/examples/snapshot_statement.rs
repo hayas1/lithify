@@ -6,8 +6,8 @@ use lithify_core::build_log::{BuildLog, Outcome, Run, Status};
 use lithify_core::era::{Bound, Era};
 use lithify_core::listener::SchemaChangeListener;
 use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
-use lithify_core::position::RecordedAt;
 use lithify_core::sink::{TablePath, Warehouse};
+use lithify_core::ts::Ts;
 use lithify_core::window::Window;
 use lithify_protocol::{BigQueryWarehouse, Debezium, DuckDbWarehouse, MySql, MySqlPosition};
 use lithify_strategy::snapshot::Snapshot;
@@ -47,7 +47,7 @@ fn previous(window: &Window, shard: &str) -> BuildLog {
         Some(customers().id().clone()),
         None,
         Some(TablePath::new("mysql_shop", shard)),
-        Window::new(RecordedAt::from(0), *window.from()),
+        Window::new(Ts::try_from(0).unwrap(), *window.from()),
         Outcome::new(Status::Succeeded, DateTime::UNIX_EPOCH),
     )
 }
@@ -55,8 +55,8 @@ fn previous(window: &Window, shard: &str) -> BuildLog {
 fn statements<W: Warehouse>(warehouse: &W) -> String {
     let log = Debezium::new("mysql", MySql);
     let window = Window::new(
-        RecordedAt::from(1789862400000),
-        RecordedAt::from(1789948800000),
+        Ts::try_from(1789862400000).unwrap(),
+        Ts::try_from(1789948800000).unwrap(),
     );
     let artifact = Snapshot::new("mysql_shop", "%Y%m%d");
     let previous = std::env::args()

@@ -4,8 +4,8 @@ use chrono::{DateTime, Utc};
 
 use lithify_config::infra::{Sink, Source};
 use lithify_config::{ArtifactKind, Pipeline};
-use lithify_core::position::RecordedAt;
 use lithify_core::sink::OpenWarehouse;
+use lithify_core::ts::Ts;
 use lithify_protocol::sink::bigquery;
 use lithify_protocol::sink::bigquery::client::{BigQueryCapture, BigQueryClient};
 use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbClient};
@@ -88,7 +88,7 @@ impl Run {
             sink.artifacts().schedule(),
             source.since(),
             &source.capture().to_json()?,
-            RecordedAt::from(self.now),
+            Ts::from(self.now),
         );
         let namespace = sink.artifacts().namespace(ArtifactKind::Snapshot);
 

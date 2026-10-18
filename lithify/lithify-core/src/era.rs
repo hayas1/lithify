@@ -8,20 +8,21 @@ use crate::listener::{
     TableDropped, TableRenamed,
 };
 use crate::model::{TableId, TableModel};
-use crate::position::{Coordinate, Position, RecordedAt};
+use crate::position::{Coordinate, Position};
 use crate::source::{ChangeLog, ColumnPath};
+use crate::ts::{Event, Processing, Ts};
 use crate::window::Window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Bound<P> {
-    Time(RecordedAt),
-    Position { at: RecordedAt, position: P },
+    Time(Ts<Event>),
+    Position { at: Ts<Processing>, position: P },
 }
 
 impl<P> Bound<P> {
     pub fn placed<L: ChangeLog<Position = P>>(&self, log: &L) -> Vec<(ColumnPath, Coordinate)> {
         match self {
-            Self::Time(at) => vec![(log.occurred_at(), Coordinate::from(*at))],
+            Self::Time(at) => vec![(log.event_time(), Coordinate::from(*at))],
             Self::Position { at, position } => log
                 .sequence()
                 .into_iter()
@@ -228,7 +229,7 @@ where
         change: &SchemaChange<P>,
     ) -> Result<(), Self::Error> {
         self.at = Bound::Position {
-            at: *change.recorded_at(),
+            at: *change.processing_time(),
             position: change.position().clone(),
         };
 
@@ -419,7 +420,13 @@ mod tests {
     }
 
     fn hinted(at: i64, hints: Vec<Hint>, tables: Vec<TableChange>) -> SchemaChange<Offset> {
-        SchemaChange::new(Offset(at as u64), RecordedAt::from(at), "", tables, hints)
+        SchemaChange::new(
+            Offset(at as u64),
+            Ts::try_from(at).unwrap(),
+            "",
+            tables,
+            hints,
+        )
     }
 
     fn stories(
@@ -433,7 +440,7 @@ mod tests {
                 .unwrap();
         }
         let mut tracker = EraTracker::new(
-            Window::new(RecordedAt::from(10), RecordedAt::from(20)),
+            Window::new(Ts::try_from(10).unwrap(), Ts::try_from(20).unwrap()),
             |table: &TableId| {
                 Ok::<_, Untold>(Story {
                     table: table.clone(),
@@ -503,7 +510,7 @@ mod tests {
                 )],
                 vec![SchemaChange::new(
                     Offset(99),
-                    RecordedAt::from(15),
+                    Ts::try_from(15).unwrap(),
                     "",
                     vec![TableChange::Altered(table(people(), &["id", "name"]))],
                     Vec::new(),
@@ -789,7 +796,7 @@ mod tests {
             )
             .unwrap();
         let tracker = EraTracker::new(
-            Window::new(RecordedAt::from(10), RecordedAt::from(20)),
+            Window::new(Ts::try_from(10).unwrap(), Ts::try_from(20).unwrap()),
             |table: &TableId| Err::<Story, _>(Untold::Unopened(table.clone())),
         );
 

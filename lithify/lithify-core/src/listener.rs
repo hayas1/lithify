@@ -608,7 +608,7 @@ mod tests {
     use super::*;
     use crate::event::{Hint, TableChange};
     use crate::model::{ColumnType, TableId};
-    use crate::position::RecordedAt;
+    use crate::ts::Ts;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     struct Offset(u64);
@@ -755,7 +755,7 @@ mod tests {
     fn hinted(offset: u64, hints: Vec<Hint>, tables: Vec<TableChange>) -> SchemaChange<Offset> {
         SchemaChange::new(
             Offset(offset),
-            RecordedAt::from(offset as i64),
+            Ts::try_from(offset as i64).unwrap(),
             "",
             tables,
             hints,
@@ -1614,7 +1614,7 @@ mod tests {
                     &(),
                     &SchemaChange::new(
                         Offset(2),
-                        RecordedAt::from(2),
+                        Ts::try_from(2).unwrap(),
                         "ALTER TABLE customers DROP name, ADD full_name VARCHAR(64)",
                         tables,
                         hints,

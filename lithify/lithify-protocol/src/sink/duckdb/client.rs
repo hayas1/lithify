@@ -167,10 +167,10 @@ mod tests {
     use lithify_core::event::{MalformedEvent, SchemaChange};
     use lithify_core::listener::OutOfOrder;
     use lithify_core::model::TableId;
-    use lithify_core::position::RecordedAt;
     use lithify_core::position::{Coordinate, Position};
     use lithify_core::sink::TablePath;
     use lithify_core::source::{ChangeLog, ColumnPath};
+    use lithify_core::ts::Ts;
     use ulid::Ulid;
 
     const CHANGE_LOG: &str = "CREATE SCHEMA mysql_shop_cdc;
@@ -194,7 +194,7 @@ mod tests {
         ) AS t(value)";
 
     fn window(from: i64, to: i64) -> Window {
-        Window::new(RecordedAt::from(from), RecordedAt::from(to))
+        Window::new(Ts::try_from(from).unwrap(), Ts::try_from(to).unwrap())
     }
 
     fn read(window: &Window) -> Vec<String> {
@@ -254,7 +254,7 @@ mod tests {
             .table::<Unread>(
                 &log,
                 &TableId::new("shop", "customers"),
-                RecordedAt::from(1789900000001),
+                Ts::try_from(1789900000001).unwrap(),
             )
             .unwrap()
             .unwrap();
@@ -276,7 +276,7 @@ mod tests {
         let log = Debezium::under("value", "mysql", MySql);
         let tables = |at: i64| {
             client
-                .catalog_at::<Unread>(&log, RecordedAt::from(at))
+                .catalog_at::<Unread>(&log, Ts::try_from(at).unwrap())
                 .unwrap()
                 .tables()
                 .map(|table| table.id().to_string())
@@ -459,7 +459,7 @@ mod tests {
         assert_eq!(
             latest(
                 &logging(&history),
-                Latest::SucceededUntil(RecordedAt::from(W1.1))
+                Latest::SucceededUntil(Ts::try_from(W1.1).unwrap())
             ),
             [history[2].clone(), history[1].clone()]
         );
@@ -527,7 +527,7 @@ mod tests {
         ]);
 
         assert_eq!(
-            latest(&client, Latest::SucceededUntil(RecordedAt::from(W1.1))),
+            latest(&client, Latest::SucceededUntil(Ts::try_from(W1.1).unwrap())),
             [before]
         );
     }
@@ -634,11 +634,11 @@ mod tests {
             None
         }
 
-        fn occurred_at(&self) -> ColumnPath {
+        fn event_time(&self) -> ColumnPath {
             ColumnPath::from("written")
         }
 
-        fn recorded_at(&self) -> ColumnPath {
+        fn processing_time(&self) -> ColumnPath {
             ColumnPath::from("written")
         }
 
@@ -664,7 +664,7 @@ mod tests {
         ) -> Result<SchemaChange<Self::Position>, MalformedEvent> {
             Ok(SchemaChange::new(
                 Line(0),
-                RecordedAt::from(0),
+                Ts::try_from(0).unwrap(),
                 &statement,
                 Vec::new(),
                 Vec::new(),

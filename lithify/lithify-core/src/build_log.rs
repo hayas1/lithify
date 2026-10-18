@@ -4,9 +4,9 @@ use chrono::{DateTime, Utc};
 use ulid::Ulid;
 
 use crate::model::{ColumnType, TableId};
-use crate::position::RecordedAt;
 use crate::sink::{TablePath, UnsupportedColumn, WarehouseSql};
 use crate::sql::SqlString;
+use crate::ts::{Event, Ts};
 use crate::window::Window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -380,7 +380,7 @@ impl TryFrom<&str> for Lifecycle {
 pub enum Latest {
     Attempted,
     Succeeded,
-    SucceededUntil(RecordedAt),
+    SucceededUntil(Ts<Event>),
 }
 
 impl Latest {
@@ -550,6 +550,11 @@ impl BuildLogRow {
             .transpose()
     }
 
+    fn instant(millis: i64) -> Result<DateTime<Utc>, UnreadableBuildLog> {
+        DateTime::from_timestamp_millis(millis)
+            .ok_or_else(|| UnreadableBuildLog(format!("{millis} is no instant")))
+    }
+
     fn status(&self) -> Result<Status, UnreadableBuildLog> {
         match self.status.as_str() {
             "succeeded" => Ok(Status::Succeeded),
@@ -565,15 +570,11 @@ impl TryFrom<BuildLogRow> for BuildLog {
     fn try_from(row: BuildLogRow) -> Result<Self, Self::Error> {
         let run_id = Ulid::from_string(&row.run_id)
             .map_err(|_| UnreadableBuildLog(format!("{} is no run", row.run_id)))?;
-        let [started_at, finished_at] = [row.started_at, row.finished_at].map(|millis| {
-            DateTime::from_timestamp_millis(millis)
-                .ok_or_else(|| UnreadableBuildLog(format!("{millis} is no instant")))
-        });
 
         let log = Self {
             run: Run::new(
                 run_id,
-                started_at?,
+                BuildLogRow::instant(row.started_at)?,
                 &row.artifact,
                 &row.schedule,
                 &row.source,
@@ -585,10 +586,10 @@ impl TryFrom<BuildLogRow> for BuildLog {
             base: row.base.as_deref().map(BuildLogRow::path).transpose()?,
             target: row.target.as_deref().map(BuildLogRow::path).transpose()?,
             window: Window::new(
-                RecordedAt::from(row.window_from),
-                RecordedAt::from(row.window_to),
+                Ts::from(BuildLogRow::instant(row.window_from)?),
+                Ts::from(BuildLogRow::instant(row.window_to)?),
             ),
-            outcome: Outcome::new(row.status()?, finished_at?),
+            outcome: Outcome::new(row.status()?, BuildLogRow::instant(row.finished_at)?),
         };
         let written = row
             .lifecycle
@@ -641,7 +642,7 @@ mod tests {
             to.map(|table| TableId::new("shop", table)),
             None,
             to.map(|_| TablePath::new("mysql_shop", "people_20260920")),
-            Window::new(RecordedAt::from(0), RecordedAt::from(1)),
+            Window::new(Ts::try_from(0).unwrap(), Ts::try_from(1).unwrap()),
             Outcome::new(
                 Status::Succeeded,
                 DateTime::from_timestamp_millis(1).unwrap(),

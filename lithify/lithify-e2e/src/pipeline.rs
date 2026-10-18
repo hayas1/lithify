@@ -7,7 +7,7 @@ use lithify_cli::pipeline::{Capture, WarehouseConfig};
 use lithify_config::{Pipeline, infra};
 use lithify_core::artifact::Artifact;
 use lithify_core::model::{TableId, TableModel};
-use lithify_core::position::RecordedAt;
+use lithify_core::ts::{Event, Processing, Ts};
 use lithify_core::window::Window;
 
 use crate::row::Rows;
@@ -67,13 +67,13 @@ impl<'a> ConnectedPipeline<'a> {
 }
 
 pub struct Watch {
-    started: RecordedAt,
+    started: Ts<Event>,
     patience: Duration,
     settling: Duration,
 }
 
 impl Watch {
-    pub fn new(started: RecordedAt, patience: Duration) -> Self {
+    pub fn new(started: Ts<Event>, patience: Duration) -> Self {
         Self {
             started,
             patience,
@@ -105,15 +105,15 @@ impl Watch {
         Window::new(self.started, Self::end())
     }
 
-    fn end() -> RecordedAt {
-        RecordedAt::from(4102444800000)
+    fn end() -> Ts<Event> {
+        Ts::try_from(4102444800000).unwrap()
     }
 }
 
 pub struct SourceEnd<'a> {
     config: &'a infra::Source<Capture>,
     client: Box<dyn Source>,
-    applied: Option<RecordedAt>,
+    applied: Option<Ts<Processing>>,
 }
 
 impl<'a> SourceEnd<'a> {
@@ -139,7 +139,7 @@ impl<'a> SourceEnd<'a> {
     }
 
     pub fn query(&mut self, action: &Action) -> Result<(), Unverifiable> {
-        let applied = RecordedAt::from(Utc::now());
+        let applied = Ts::from(Utc::now());
 
         for query in action.queries() {
             self.client.execute(query)?;

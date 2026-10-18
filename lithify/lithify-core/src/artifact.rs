@@ -3,7 +3,6 @@ use std::fmt;
 use crate::build_log::{BuildLog, Outcome, Run};
 use crate::listener::SchemaChangeListener;
 use crate::model::TableId;
-use crate::position::RecordedAt;
 use crate::sink::{TablePath, UnsupportedColumn, Warehouse};
 use crate::source::RowChangeLog;
 use crate::sql::SqlString;
@@ -15,7 +14,6 @@ pub enum UnbuildableArtifact {
     PrimaryKeyChanged(TableId),
     WithoutEra(TableId),
     UnsupportedColumn(UnsupportedColumn),
-    Unshardable(RecordedAt),
 }
 
 impl fmt::Display for UnbuildableArtifact {
@@ -37,11 +35,6 @@ impl fmt::Display for UnbuildableArtifact {
                 write!(formatter, "{table} lived through no era of the window")
             }
             Self::UnsupportedColumn(unsupported) => unsupported.fmt(formatter),
-            Self::Unshardable(at) => write!(
-                formatter,
-                "{} milliseconds since the epoch is no instant to name a shard after",
-                at.milliseconds_since_epoch()
-            ),
         }
     }
 }
