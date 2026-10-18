@@ -268,12 +268,12 @@ mod tests {
         let sinks = sources[0].sinks();
 
         assert_eq!(sources[0].name(), "primary");
-        assert!(sinks[0].inspection().unwrap().rows().is_empty());
+        assert!(sinks[0].found().unwrap().rows().is_empty());
         assert_eq!(
-            sinks[0].inspection().unwrap().discrepancies(),
+            sinks[0].found().unwrap().discrepancies(),
             ["nothing is built since 1970-01-01T00:00:00+00:00"]
         );
-        assert_eq!(sinks[1].inspection(), Err("JobCreationMode"));
+        assert_eq!(sinks[1].found(), Err("JobCreationMode"));
     }
 
     #[test]

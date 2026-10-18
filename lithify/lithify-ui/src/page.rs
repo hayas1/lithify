@@ -9,24 +9,26 @@ use crate::overview::{
 
 pub enum Page {
     Pipelines {
+        section: Section,
         pipelines: Vec<PipelineLocation>,
     },
     Pipeline {
+        section: Section,
         pipelines: Vec<PipelineLocation>,
         pipeline: PipelineOverview,
     },
     Missing {
+        section: Section,
         pipelines: Vec<PipelineLocation>,
         name: String,
     },
     Unsurveyed {
         cause: String,
     },
-    Checks,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Section {
+pub enum Section {
     BuildLog,
     Checks,
 }
@@ -45,6 +47,34 @@ impl Section {
         match self {
             Self::BuildLog => "/",
             Self::Checks => "/checks",
+        }
+    }
+
+    fn link(self, pipeline: &PipelineLocation) -> String {
+        match self {
+            Self::BuildLog => format!("/pipelines/{}", pipeline.name()),
+            Self::Checks => format!("/checks/{}", pipeline.name()),
+        }
+    }
+
+    fn health(self, inspection: &SinkInspection) -> &'static str {
+        match self {
+            Self::BuildLog if inspection.rows().iter().any(|row| row.status.failed()) => "dot bad",
+            Self::Checks if !inspection.discrepancies().is_empty() => "dot warn",
+            Self::BuildLog | Self::Checks => "dot ok",
+        }
+    }
+
+    fn panel(
+        self,
+        id: &str,
+        pipeline: &PipelineLocation,
+        sink: &str,
+        inspection: &SinkInspection,
+    ) -> AnyView {
+        match self {
+            Self::BuildLog => Page::inspected(id, pipeline, sink, inspection).into_any(),
+            Self::Checks => Page::checked(inspection).into_any(),
         }
     }
 }
@@ -146,6 +176,7 @@ impl Page {
         .dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); } .dot.warn { background: var(--warn); }
 
         .summary { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+        a.chip:hover { text-decoration: none; border-color: var(--accent); color: var(--accent); }
         .chip {
             padding: 2px 10px; border-radius: 999px; font-size: 12px;
             background: var(--surface-muted); border: 1px solid var(--border); color: var(--muted);
@@ -205,38 +236,48 @@ impl Page {
 
     pub fn render(self) -> String {
         let (title, section, body) = match self {
-            Self::Pipelines { pipelines } => (
-                Section::BuildLog.label().to_owned(),
-                Section::BuildLog,
-                Self::with_sidebar(&pipelines, None, Self::pipelines(&pipelines).into_any())
-                    .into_any(),
+            Self::Pipelines { section, pipelines } => (
+                section.label().to_owned(),
+                section,
+                Self::with_sidebar(
+                    section,
+                    &pipelines,
+                    None,
+                    Self::pipelines(section, &pipelines).into_any(),
+                ),
             ),
             Self::Pipeline {
+                section,
                 pipelines,
                 pipeline,
             } => (
                 pipeline.location().name().to_owned(),
-                Section::BuildLog,
+                section,
                 Self::with_sidebar(
+                    section,
                     &pipelines,
                     Some(pipeline.location().name()),
-                    Self::pipeline(&pipeline).into_any(),
+                    Self::pipeline(section, &pipeline).into_any(),
                 ),
             ),
-            Self::Missing { pipelines, name } => (
+            Self::Missing {
+                section,
+                pipelines,
+                name,
+            } => (
                 name.clone(),
-                Section::BuildLog,
-                Self::with_sidebar(&pipelines, None, Self::missing(&name).into_any()),
+                section,
+                Self::with_sidebar(
+                    section,
+                    &pipelines,
+                    None,
+                    Self::missing(section, &name).into_any(),
+                ),
             ),
             Self::Unsurveyed { cause } => (
                 "Unsurveyed".to_owned(),
                 Section::BuildLog,
                 view! { <main><div class="callout error">{cause}</div></main> }.into_any(),
-            ),
-            Self::Checks => (
-                Section::Checks.label().to_owned(),
-                Section::Checks,
-                view! { <main>{Self::checks()}</main> }.into_any(),
             ),
         };
         let document = view! {
@@ -278,17 +319,8 @@ impl Page {
         }
     }
 
-    fn checks() -> impl IntoView {
-        view! {
-            <div class="crumbs"><span>{Section::Checks.label()}</span></div>
-            <h1>{Section::Checks.label()}</h1>
-            <div class="callout empty">
-                "TODO: missing shards, reconciliation against the source"
-            </div>
-        }
-    }
-
     fn with_sidebar(
+        section: Section,
         pipelines: &[PipelineLocation],
         current: Option<&str>,
         main: AnyView,
@@ -301,7 +333,7 @@ impl Page {
                     false => "",
                 };
 
-                view! { <a class=class href=pipeline.href()>{pipeline.name().to_owned()}</a> }
+                view! { <a class=class href=section.link(pipeline)>{pipeline.name().to_owned()}</a> }
             })
             .collect_view();
 
@@ -315,12 +347,12 @@ impl Page {
         .into_any()
     }
 
-    fn pipelines(pipelines: &[PipelineLocation]) -> impl IntoView + use<> {
+    fn pipelines(section: Section, pipelines: &[PipelineLocation]) -> impl IntoView + use<> {
         let cards = pipelines
             .iter()
             .map(|pipeline| {
                 view! {
-                    <a class="card" href=pipeline.href()>
+                    <a class="card" href=section.link(pipeline)>
                         <span class="kind">"Pipeline"</span>
                         <h2>{pipeline.name().to_owned()}</h2>
                         <div class="mono subtitle">{pipeline.directory().to_owned()}</div>
@@ -330,27 +362,30 @@ impl Page {
             .collect_view();
 
         view! {
-            <div class="crumbs"><span>{Section::BuildLog.label()}</span></div>
-            <h1>{Section::BuildLog.label()}</h1>
+            <div class="crumbs"><span>{section.label()}</span></div>
+            <h1>{section.label()}</h1>
             <div class="grid">{cards}</div>
         }
     }
 
-    fn missing(name: &str) -> impl IntoView + use<> {
+    fn missing(section: Section, name: &str) -> impl IntoView + use<> {
         view! {
-            <div class="crumbs"><span><a href="/">{Section::BuildLog.label()}</a></span><span>{name.to_owned()}</span></div>
+            <div class="crumbs">
+                <span><a href=section.href()>{section.label()}</a></span>
+                <span>{name.to_owned()}</span>
+            </div>
             <h1>{name.to_owned()}</h1>
             <div class="callout error">{format!("No pipeline is named {name}")}</div>
         }
     }
 
-    fn pipeline(pipeline: &PipelineOverview) -> impl IntoView + use<> {
+    fn pipeline(section: Section, pipeline: &PipelineOverview) -> impl IntoView + use<> {
         let location = pipeline.location();
         let sources = match pipeline.sources() {
             Ok(sources) => sources
                 .iter()
                 .enumerate()
-                .map(|(at, source)| Self::source(at, location.directory(), source))
+                .map(|(at, source)| Self::source(section, at, location, source))
                 .collect_view()
                 .into_any(),
             Err(cause) => view! {
@@ -361,7 +396,7 @@ impl Page {
 
         view! {
             <div class="crumbs">
-                <span><a href="/">{Section::BuildLog.label()}</a></span>
+                <span><a href=section.href()>{section.label()}</a></span>
                 <span>{location.name().to_owned()}</span>
             </div>
             <h1>{location.name().to_owned()}</h1>
@@ -370,12 +405,17 @@ impl Page {
         }
     }
 
-    fn source(at: usize, directory: &str, source: &SourceOverview) -> impl IntoView + use<> {
+    fn source(
+        section: Section,
+        at: usize,
+        pipeline: &PipelineLocation,
+        source: &SourceOverview,
+    ) -> impl IntoView + use<> {
         let tabs = source
             .sinks()
             .iter()
             .enumerate()
-            .map(|(tab, sink)| Self::tab(at, tab, directory, sink))
+            .map(|(tab, sink)| Self::tab(section, at, tab, pipeline, sink))
             .collect_view();
 
         view! {
@@ -390,17 +430,25 @@ impl Page {
     }
 
     fn tab(
+        section: Section,
         source: usize,
         at: usize,
-        directory: &str,
+        pipeline: &PipelineLocation,
         sink: &SinkOverview,
     ) -> impl IntoView + use<> {
         let id = format!("{source}-{at}");
-        let health = match sink.inspection() {
-            Err(_) => "dot bad",
-            Ok(inspection) if inspection.rows().iter().any(|row| row.status.failed()) => "dot bad",
-            Ok(inspection) if !inspection.discrepancies().is_empty() => "dot warn",
-            Ok(_) => "dot ok",
+        let (health, panel) = match sink.found() {
+            Ok(inspection) => (
+                section.health(inspection),
+                section.panel(&id, pipeline, sink.name(), inspection),
+            ),
+            Err(cause) => (
+                "dot bad",
+                view! {
+                    <div class="callout error">{format!("{} could not be read: {cause}", sink.name())}</div>
+                }
+                .into_any(),
+            ),
         };
 
         view! {
@@ -410,48 +458,43 @@ impl Page {
                 <span class="kind">"Sink"</span>
                 {sink.name().to_owned()}
             </label>
-            <div class="panel">{Self::panel(&id, directory, sink)}</div>
-        }
-    }
-
-    fn panel(id: &str, directory: &str, sink: &SinkOverview) -> AnyView {
-        match sink.inspection() {
-            Ok(inspection) => Self::inspected(id, directory, sink.name(), inspection).into_any(),
-            Err(cause) => view! {
-                <div class="callout error">{format!("{} could not be read: {cause}", sink.name())}</div>
-            }
-            .into_any(),
+            <div class="panel">{panel}</div>
         }
     }
 
     fn inspected(
         id: &str,
-        directory: &str,
+        pipeline: &PipelineLocation,
         sink: &str,
         inspection: &SinkInspection,
     ) -> impl IntoView + use<> {
         let rows = inspection.rows();
         let failed = rows.iter().filter(|row| row.status.failed()).count();
-        let discrepancies = match inspection.discrepancies() {
-            [] => ().into_any(),
-            discrepancies => {
-                let found = discrepancies
-                    .iter()
-                    .map(|discrepancy| view! { <div class="callout warn">{discrepancy.clone()}</div> })
-                    .collect_view();
-
-                view! { <h3>"Discrepancies"</h3>{found} }.into_any()
-            }
-        };
 
         view! {
             <div class="summary">
                 <span class="chip">{format!("{} tables", rows.len())}</span>
                 <span class="chip">{format!("{failed} failed")}</span>
+                <a class="chip" href=Section::Checks.link(pipeline)>
+                    {format!("{} discrepancies", inspection.discrepancies().len())}
+                </a>
+            </div>
+            {Self::build_log(id, pipeline.directory(), sink, &rows)}
+        }
+    }
+
+    fn checked(inspection: &SinkInspection) -> impl IntoView + use<> {
+        let found = inspection
+            .discrepancies()
+            .iter()
+            .map(|discrepancy| view! { <div class="callout warn">{discrepancy.clone()}</div> })
+            .collect_view();
+
+        view! {
+            <div class="summary">
                 <span class="chip">{format!("{} discrepancies", inspection.discrepancies().len())}</span>
             </div>
-            {Self::build_log(id, directory, sink, &rows)}
-            {discrepancies}
+            {found}
         }
     }
 

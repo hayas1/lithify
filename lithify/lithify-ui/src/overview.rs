@@ -28,10 +28,6 @@ impl PipelineLocation {
     pub fn directory(&self) -> &str {
         &self.directory
     }
-
-    pub fn href(&self) -> String {
-        format!("/pipelines/{}", self.name)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,14 +76,14 @@ impl SourceOverview {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SinkOverview {
     name: String,
-    inspection: Result<SinkInspection, String>,
+    found: Result<SinkInspection, String>,
 }
 
 impl SinkOverview {
-    pub fn new(name: &str, inspection: Result<SinkInspection, String>) -> Self {
+    pub fn new(name: &str, found: Result<SinkInspection, String>) -> Self {
         Self {
             name: name.to_owned(),
-            inspection,
+            found,
         }
     }
 
@@ -95,8 +91,8 @@ impl SinkOverview {
         &self.name
     }
 
-    pub fn inspection(&self) -> Result<&SinkInspection, &str> {
-        self.inspection.as_ref().map_err(String::as_str)
+    pub fn found(&self) -> Result<&SinkInspection, &str> {
+        self.found.as_ref().map_err(String::as_str)
     }
 }
 
@@ -252,8 +248,8 @@ pub(crate) mod tests {
         let overview = overview();
         let sinks = overview.sources().unwrap()[0].sinks();
 
-        assert_eq!(sinks[0].inspection(), Ok(&inspection()));
-        assert_eq!(sinks[1].inspection(), Err("JobCreationMode"));
+        assert_eq!(sinks[0].found(), Ok(&inspection()));
+        assert_eq!(sinks[1].found(), Err("JobCreationMode"));
     }
 
     #[test]

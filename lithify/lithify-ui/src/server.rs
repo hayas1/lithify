@@ -8,7 +8,7 @@ use axum::response::Html;
 use axum::routing::get;
 
 use crate::overview::{PipelineLocation, PipelineOverview};
-use crate::page::Page;
+use crate::page::{Page, Section};
 
 pub trait Survey: Send + Sync + 'static {
     fn pipelines(&self) -> Result<Vec<PipelineLocation>, String>;
@@ -29,9 +29,10 @@ impl<S: Survey> Board<S> {
 
     pub fn router(self) -> Router {
         Router::new()
-            .route("/", get(Self::index))
-            .route("/pipelines/{name}", get(Self::pipeline))
+            .route("/", get(Self::build_logs))
+            .route("/pipelines/{name}", get(Self::build_log))
             .route("/checks", get(Self::checks))
+            .route("/checks/{name}", get(Self::check))
             .with_state(self.survey)
     }
 
@@ -75,20 +76,42 @@ impl<S: Survey> Board<S> {
         )
     }
 
-    async fn index(State(survey): State<Arc<S>>) -> (StatusCode, Html<String>) {
+    async fn build_logs(State(survey): State<Arc<S>>) -> (StatusCode, Html<String>) {
+        Self::index(survey, Section::BuildLog).await
+    }
+
+    async fn checks(State(survey): State<Arc<S>>) -> (StatusCode, Html<String>) {
+        Self::index(survey, Section::Checks).await
+    }
+
+    async fn build_log(
+        State(survey): State<Arc<S>>,
+        Path(name): Path<String>,
+    ) -> (StatusCode, Html<String>) {
+        Self::pipeline(survey, name, Section::BuildLog).await
+    }
+
+    async fn check(
+        State(survey): State<Arc<S>>,
+        Path(name): Path<String>,
+    ) -> (StatusCode, Html<String>) {
+        Self::pipeline(survey, name, Section::Checks).await
+    }
+
+    async fn index(survey: Arc<S>, section: Section) -> (StatusCode, Html<String>) {
         match Self::blocking(survey, S::pipelines).await {
-            Ok(pipelines) => (StatusCode::OK, Html(Page::Pipelines { pipelines }.render())),
+            Ok(pipelines) => (
+                StatusCode::OK,
+                Html(Page::Pipelines { section, pipelines }.render()),
+            ),
             Err(cause) => Self::unsurveyed(cause),
         }
     }
 
-    async fn checks() -> Html<String> {
-        Html(Page::Checks.render())
-    }
-
     async fn pipeline(
-        State(survey): State<Arc<S>>,
-        Path(name): Path<String>,
+        survey: Arc<S>,
+        name: String,
+        section: Section,
     ) -> (StatusCode, Html<String>) {
         let named = name.clone();
         let surveyed = Self::blocking(survey, move |survey| {
@@ -101,6 +124,7 @@ impl<S: Survey> Board<S> {
                 StatusCode::OK,
                 Html(
                     Page::Pipeline {
+                        section,
                         pipelines,
                         pipeline,
                     }
@@ -109,7 +133,14 @@ impl<S: Survey> Board<S> {
             ),
             Ok((pipelines, None)) => (
                 StatusCode::NOT_FOUND,
-                Html(Page::Missing { pipelines, name }.render()),
+                Html(
+                    Page::Missing {
+                        section,
+                        pipelines,
+                        name,
+                    }
+                    .render(),
+                ),
             ),
             Err(cause) => Self::unsurveyed(cause),
         }
@@ -212,7 +243,7 @@ mod tests {
         assert!(page.contains("warehouse"));
         assert!(page.contains("mysql_shop.people_20260920"));
         assert!(page.contains("no such column"));
-        assert!(page.contains("shop.pets failed to build"));
+        assert!(!page.contains("shop.pets failed to build"));
         assert!(
             page.contains(
                 "lithify build mysql --snapshot 2026-09-20 --sink rustfs --table shop.pets"
@@ -235,6 +266,14 @@ mod tests {
                 "lithify build mysql --snapshot 2026-09-20 --sink rustfs --table shop.pets"
             )
         );
+    }
+
+    #[tokio::test]
+    async fn a_build_log_links_to_the_checks_of_its_pipeline_by_how_many_they_found() {
+        let (_, page) = get(Surveyed::of(vec![overview()]), "/pipelines/mysql").await;
+
+        assert!(page.contains("href=\"/checks/mysql\""));
+        assert!(page.contains("1 discrepancies"));
     }
 
     #[tokio::test]
@@ -303,11 +342,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_checks_are_yet_to_be_made() {
+    async fn the_checks_link_to_a_page_of_each_pipeline() {
         let (status, page) = get(Surveyed::of(vec![]), "/checks").await;
 
         assert_eq!(status, StatusCode::OK);
-        assert!(page.contains("TODO"));
+        assert!(page.contains("href=\"/checks/mysql\""));
+        assert!(page.contains("href=\"/checks/postgres\""));
+    }
+
+    #[tokio::test]
+    async fn a_check_page_lists_what_the_check_of_each_sink_found() {
+        let (status, page) = get(Surveyed::of(vec![overview()]), "/checks/mysql").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(page.contains("shop.pets failed to build"));
+        assert!(page.contains("JobCreationMode"));
+        assert!(!page.contains("mysql_shop.people_20260920"));
+        assert!(page.contains("href=\"/checks/postgres\""));
+    }
+
+    #[tokio::test]
+    async fn a_check_page_of_a_pipeline_the_survey_does_not_hold_is_not_found() {
+        let (status, _) = get(Surveyed::of(vec![overview()]), "/checks/oracle").await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
