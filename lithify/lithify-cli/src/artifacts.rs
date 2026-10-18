@@ -88,7 +88,14 @@ impl<'a> DeclaredSnapshot<'a> {
     }
 
     pub fn artifact(&self) -> Snapshot {
-        Snapshot::new(self.namespace.clone(), self.config.shard())
+        Snapshot::new(self.namespace.clone(), self.config.shard()).copied_into(
+            self.config
+                .place()
+                .iter()
+                .skip(1)
+                .map(|place| place.clone().into())
+                .collect(),
+        )
     }
 }
 
@@ -163,6 +170,46 @@ mod tests {
                 chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
                 chrono_tz::Asia::Tokyo
             )
+        );
+    }
+
+    #[test]
+    fn a_snapshot_placed_more_than_once_is_built_into_its_first_placement_and_copied_into_the_others()
+     {
+        let directory = std::env::temp_dir().join(format!(
+            "lithify-cli-copied-snapshot-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let infra = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compose/lithify/mysql/infra.toml"),
+        )
+        .unwrap();
+        std::fs::write(
+            directory.join("infra.toml"),
+            infra.replacen(
+                "place = [{ bigquery.dataset = \"mysql_shop\" }]",
+                "place = [{ bigquery.dataset = \"mysql_shop\" }, { bigquery = { project = \"analytics\", dataset = \"shop\" } }]",
+                1,
+            ),
+        )
+        .unwrap();
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compose/lithify/mysql/table.toml"),
+            directory.join("table.toml"),
+        )
+        .unwrap();
+
+        let pipeline: Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig> =
+            Pipeline::open(&directory).unwrap();
+        std::fs::remove_dir_all(&directory).unwrap();
+
+        assert_eq!(
+            DeclaredSnapshot::of(pipeline.sinks().next().unwrap())
+                .unwrap()
+                .artifact(),
+            Snapshot::new("mysql_shop", "%Y%m%d")
+                .copied_into(vec![Namespace::from("analytics.shop")])
         );
     }
 }

@@ -66,6 +66,7 @@ impl<L> Config<L> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     namespace: Namespace,
+    copies: Vec<Namespace>,
     shard: String,
 }
 
@@ -73,8 +74,22 @@ impl Snapshot {
     pub fn new(namespace: impl Into<Namespace>, shard: &str) -> Self {
         Self {
             namespace: namespace.into(),
+            copies: Vec::new(),
             shard: shard.to_owned(),
         }
+    }
+
+    pub fn copied_into(self, copies: Vec<Namespace>) -> Self {
+        Self { copies, ..self }
+    }
+
+    fn named(&self, namespace: &Namespace, table: &TableId, window: &Window) -> TablePath {
+        let at = DateTime::<Utc>::from(window.last());
+
+        TablePath::new(
+            namespace.clone(),
+            &format!("{}_{}", table.table(), at.format(&self.shard)),
+        )
     }
 }
 
@@ -107,12 +122,7 @@ impl Artifact for Snapshot {
     }
 
     fn target(&self, table: &TableId, window: &Window) -> Result<TablePath, UnbuildableArtifact> {
-        let at = DateTime::<Utc>::from(window.last());
-
-        Ok(TablePath::new(
-            self.namespace.clone(),
-            &format!("{}_{}", table.table(), at.format(&self.shard)),
-        ))
+        Ok(self.named(&self.namespace, table, window))
     }
 
     fn builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>(
@@ -398,10 +408,23 @@ impl<L: RowChangeLog, W: Warehouse> ArtifactBuilder for SnapshotBuilder<'_, L, W
             return Ok(Vec::new());
         };
 
-        Ok(vec![
+        let copied = SqlString::from(format!("SELECT * FROM {}", warehouse.table_ref(target)));
+
+        Ok([
             warehouse.create_namespace(target.namespace()),
             warehouse.create_table_as(target, &self.select()?),
-        ])
+        ]
+        .into_iter()
+        .chain(self.snapshot.copies.iter().flat_map(|copy| {
+            [
+                warehouse.create_namespace(copy),
+                warehouse.create_table_as(
+                    &self.snapshot.named(copy, &self.table, &self.window),
+                    &copied,
+                ),
+            ]
+        }))
+        .collect())
     }
 
     fn build_log(&self, run: &Run, outcome: Outcome) -> BuildLog {
@@ -1850,6 +1873,36 @@ mod tests {
             snapshot.create(&Engine::default()).unwrap()[1],
             format!("CREATE OR REPLACE TABLE \"mysql_shop\".\"customers_20260920\" AS\n{select}")
                 .as_str()
+        );
+    }
+
+    #[test]
+    fn a_snapshot_placed_more_than_once_is_copied_from_its_first_placement_into_the_others() {
+        let artifact = Snapshot::new("mysql_shop", "20260920")
+            .copied_into(vec![lithify_core::sink::Namespace::from("analytics.shop")]);
+        let window = window();
+        let mut snapshot = artifact
+            .builder::<Log, Engine>(&Log, customers().id().clone(), &window, None)
+            .unwrap();
+        SchemaChangeListener::<Offset>::era_boundary(
+            &mut snapshot,
+            &Engine::default(),
+            &Era::new(
+                customers(),
+                Bound::EventTime(*window.from()),
+                Bound::EventTime(*window.to()),
+            ),
+        )
+        .unwrap();
+
+        let statements = snapshot.create(&Engine::default()).unwrap();
+
+        assert_eq!(
+            statements[2..],
+            [
+                "CREATE SCHEMA IF NOT EXISTS \"analytics\".\"shop\"",
+                "CREATE OR REPLACE TABLE \"analytics\".\"shop\".\"customers_20260920\" AS\nSELECT * FROM \"mysql_shop\".\"customers_20260920\""
+            ]
         );
     }
 }
