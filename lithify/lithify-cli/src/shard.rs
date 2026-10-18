@@ -1,11 +1,11 @@
 use chrono::{DateTime, NaiveDate, Utc};
 
-use lithify_config::ArtifactKind;
 use lithify_config::infra::{Sink, Source};
 use lithify_core::sink::{Namespace, WarehouseClient};
 use lithify_core::ts::Ts;
 use lithify_core::window::Window;
 
+use crate::artifacts::{ArtifactConfig, DeclaredSnapshot};
 use crate::course::Itinerary;
 use crate::pipeline::{CaptureConfig, WarehouseConfig};
 use crate::plan::Tables;
@@ -13,14 +13,14 @@ use crate::resumption::Resumption;
 use crate::unrunnable::Unrunnable;
 
 pub struct Shard<'a> {
-    sink: &'a Sink<WarehouseConfig>,
+    sink: &'a Sink<WarehouseConfig, ArtifactConfig>,
     source: &'a Source<CaptureConfig>,
     now: DateTime<Utc>,
 }
 
 impl<'a> Shard<'a> {
     pub fn new(
-        sink: &'a Sink<WarehouseConfig>,
+        sink: &'a Sink<WarehouseConfig, ArtifactConfig>,
         source: &'a Source<CaptureConfig>,
         now: DateTime<Utc>,
     ) -> Self {
@@ -39,15 +39,13 @@ impl<'a> Shard<'a> {
     {
         let window = self.closed(date)?;
         let previous = Resumption::at(*window.from(), self.source.since())
-            .previous(client, &self.namespace())?;
+            .previous(client, &self.namespace()?)?;
 
         Ok(Itinerary::new(vec![window], previous, tables.clone()))
     }
 
     pub fn closed(&self, date: NaiveDate) -> Result<Window, Unrunnable> {
-        let window = self
-            .sink
-            .artifacts()
+        let window = DeclaredSnapshot::of(self.sink)?
             .schedule()
             .shard(self.source.since(), date)
             .ok_or(Unrunnable::Unsharded(date))?;
@@ -58,7 +56,7 @@ impl<'a> Shard<'a> {
         }
     }
 
-    fn namespace(&self) -> Namespace {
-        Namespace::from(self.sink.artifacts().namespace(ArtifactKind::Snapshot))
+    fn namespace(&self) -> Result<Namespace, Unrunnable> {
+        Ok(DeclaredSnapshot::of(self.sink)?.namespace().clone())
     }
 }

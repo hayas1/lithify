@@ -13,7 +13,7 @@ use lithify_protocol::sink::bigquery::client::Unqueryable;
 
 #[derive(Debug)]
 pub enum Unrunnable {
-    Configuration(Unreadable),
+    Configuration(Box<Unreadable>),
     Unqueryable(duckdb::Error),
     Unanswerable(Unqueryable),
     OutOfOrder(OutOfOrder),
@@ -22,6 +22,10 @@ pub enum Unrunnable {
     Unserializable(serde_json::Error),
     UnknownSink(String),
     Unreached,
+    Undeclared {
+        sink: String,
+        artifact: &'static str,
+    },
     CaptureChanged {
         logged: String,
         configured: String,
@@ -55,6 +59,9 @@ impl Display for Unrunnable {
                 write!(formatter, "nothing in this pipeline is sunk into {name}")
             }
             Self::WithoutSource => write!(formatter, "this pipeline captures no server"),
+            Self::Undeclared { sink, artifact } => {
+                write!(formatter, "{sink} declares no {artifact} placed anywhere")
+            }
             Self::Unreached => write!(
                 formatter,
                 "the change log lies in a warehouse other than the one it is sunk into"
@@ -105,7 +112,7 @@ impl Display for Unrunnable {
 impl std::error::Error for Unrunnable {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Configuration(cause) => Some(cause),
+            Self::Configuration(cause) => Some(cause.as_ref()),
             Self::Unqueryable(cause) => Some(cause),
             Self::Unanswerable(cause) => Some(cause),
             Self::OutOfOrder(cause) => Some(cause),
@@ -114,6 +121,7 @@ impl std::error::Error for Unrunnable {
             Self::Unserializable(cause) => Some(cause),
             Self::UnknownSink(_)
             | Self::Unreached
+            | Self::Undeclared { .. }
             | Self::WithoutSource
             | Self::CaptureChanged { .. }
             | Self::Unsharded(_)
@@ -128,7 +136,7 @@ impl std::error::Error for Unrunnable {
 
 impl From<Unreadable> for Unrunnable {
     fn from(cause: Unreadable) -> Self {
-        Self::Configuration(cause)
+        Self::Configuration(Box::new(cause))
     }
 }
 

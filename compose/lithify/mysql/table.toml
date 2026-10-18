@@ -3,11 +3,6 @@ artifacts = ["snapshot"]
 
 [[table]]
 schema = "shop"
-name = "customers"
-artifacts = ["snapshot", "history"]
-
-[[table]]
-schema = "shop"
 name = "orders"
-artifacts = ["snapshot", "history"]
+artifacts = ["snapshot"]
 column.attributes.mask = "null"

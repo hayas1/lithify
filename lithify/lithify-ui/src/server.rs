@@ -11,23 +11,25 @@ use leptos::prelude::*;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use lithify_config::Declaration;
 use lithify_core::sink::SinkWarehouse;
 
 use crate::pipelines::{PipelineLocation, PipelineOverview, Pipelines};
 use crate::route::{AppRoute, BuildLogQueryParam, CheckQueryParam, QueryState};
 use crate::screen::{BuildLogScreen, CheckScreen, PipelinesScreen, UnreadScreen};
 
-pub struct Board<C, W: SinkWarehouse> {
-    pipelines: Arc<Pipelines<C, W>>,
+pub struct Board<C, W: SinkWarehouse, A> {
+    pipelines: Arc<Pipelines<C, W, A>>,
 }
 
-impl<C, W> Board<C, W>
+impl<C, W, A> Board<C, W, A>
 where
     C: Clone + DeserializeOwned + Serialize + 'static,
     W: Clone + DeserializeOwned + SinkWarehouse<Location: DeserializeOwned> + Send + Sync + 'static,
     W::Credential: Send + Sync,
+    A: Clone + DeserializeOwned + Declaration<Location = W::Location> + 'static,
 {
-    pub fn new(pipelines: Pipelines<C, W>) -> Self {
+    pub fn new(pipelines: Pipelines<C, W, A>) -> Self {
         Self {
             pipelines: Arc::new(pipelines),
         }
@@ -65,8 +67,8 @@ where
     }
 
     async fn blocking<T: Send + 'static>(
-        pipelines: Arc<Pipelines<C, W>>,
-        read: impl FnOnce(&Pipelines<C, W>) -> Result<T, String> + Send + 'static,
+        pipelines: Arc<Pipelines<C, W, A>>,
+        read: impl FnOnce(&Pipelines<C, W, A>) -> Result<T, String> + Send + 'static,
     ) -> Result<T, String> {
         // The pipeline is read from disk and the warehouse clients block, the BigQuery one on a
         // runtime of its own.
@@ -87,17 +89,19 @@ where
     }
 
     async fn build_logs(
-        State(pipelines): State<Arc<Pipelines<C, W>>>,
+        State(pipelines): State<Arc<Pipelines<C, W, A>>>,
     ) -> (StatusCode, Html<String>) {
         Self::index(pipelines, AppRoute::BuildLogs).await
     }
 
-    async fn checks(State(pipelines): State<Arc<Pipelines<C, W>>>) -> (StatusCode, Html<String>) {
+    async fn checks(
+        State(pipelines): State<Arc<Pipelines<C, W, A>>>,
+    ) -> (StatusCode, Html<String>) {
         Self::index(pipelines, AppRoute::Checks).await
     }
 
     async fn build_log(
-        State(pipelines): State<Arc<Pipelines<C, W>>>,
+        State(pipelines): State<Arc<Pipelines<C, W, A>>>,
         Path(name): Path<String>,
         Query(query): Query<QueryState<BuildLogQueryParam>>,
     ) -> (StatusCode, Html<String>) {
@@ -114,7 +118,7 @@ where
     }
 
     async fn check(
-        State(pipelines): State<Arc<Pipelines<C, W>>>,
+        State(pipelines): State<Arc<Pipelines<C, W, A>>>,
         Path(name): Path<String>,
         Query(query): Query<QueryState<CheckQueryParam>>,
     ) -> (StatusCode, Html<String>) {
@@ -129,7 +133,10 @@ where
         .await
     }
 
-    async fn index(pipelines: Arc<Pipelines<C, W>>, route: AppRoute) -> (StatusCode, Html<String>) {
+    async fn index(
+        pipelines: Arc<Pipelines<C, W, A>>,
+        route: AppRoute,
+    ) -> (StatusCode, Html<String>) {
         match Self::blocking(pipelines, Pipelines::locations).await {
             Ok(located) => Self::html(
                 StatusCode::OK,
@@ -140,7 +147,7 @@ where
     }
 
     async fn pipeline(
-        pipelines: Arc<Pipelines<C, W>>,
+        pipelines: Arc<Pipelines<C, W, A>>,
         name: String,
         route: AppRoute,
         screen: fn(AppRoute, Vec<PipelineLocation>, Option<PipelineOverview>) -> AnyView,

@@ -5,7 +5,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use lithify_config::infra::{Sink, Source};
-use lithify_config::{ArtifactKind, Pipeline};
+use lithify_config::{Declaration, Pipeline};
 use lithify_core::build_log::{BuildLog, BuildLogQuery, Latest};
 use lithify_core::check::{Expectation, Inspection};
 use lithify_core::schedule::Schedule;
@@ -187,22 +187,25 @@ impl From<Inspection> for SinkInspection {
     }
 }
 
-pub struct Pipelines<C, W: SinkWarehouse> {
+pub struct Pipelines<C, W: SinkWarehouse, A> {
     root: PathBuf,
     credential: W::Credential,
-    capture: std::marker::PhantomData<fn() -> C>,
+    configured: std::marker::PhantomData<fn() -> (C, A)>,
 }
 
-impl<C, W> Pipelines<C, W>
+impl<C, W, A> Pipelines<C, W, A>
 where
     C: Clone + DeserializeOwned + Serialize,
     W: Clone + DeserializeOwned + SinkWarehouse<Location: DeserializeOwned>,
+    A: Clone + DeserializeOwned + Declaration<Location = W::Location>,
 {
+    const SNAPSHOT: &str = "snapshot";
+
     pub fn new(root: PathBuf, credential: W::Credential) -> Self {
         Self {
             root,
             credential,
-            capture: std::marker::PhantomData,
+            configured: std::marker::PhantomData,
         }
     }
 
@@ -227,7 +230,7 @@ where
     }
 
     fn directories(&self) -> Result<Vec<PathBuf>, String> {
-        let directories = Pipeline::<C, W>::directories(&self.root)
+        let directories = Pipeline::<C, W, A>::directories(&self.root)
             .map_err(|unreadable| unreadable.to_string())?;
 
         match directories.is_empty() {
@@ -246,7 +249,7 @@ where
     }
 
     fn overview(&self, directory: &Path, view: BuildLogView) -> PipelineOverview {
-        let sources = Pipeline::<C, W>::open(directory)
+        let sources = Pipeline::<C, W, A>::open(directory)
             .map_err(|unreadable| unreadable.to_string())
             .and_then(|pipeline| {
                 pipeline
@@ -260,7 +263,7 @@ where
 
     fn source(
         &self,
-        pipeline: &Pipeline<C, W>,
+        pipeline: &Pipeline<C, W, A>,
         source: &Source<C>,
         view: BuildLogView,
     ) -> Result<SourceOverview, String> {
@@ -273,12 +276,8 @@ where
             pipeline
                 .sinks()
                 .map(|sink| {
-                    let expectation = Expectation::new(
-                        sink.artifacts().schedule(),
-                        source.since(),
-                        &capture,
-                        now,
-                    );
+                    let expectation =
+                        Expectation::new(Schedule::Daily, source.since(), &capture, now);
 
                     SinkOverview::new(sink.name(), self.inspection(sink, &expectation, view))
                 })
@@ -288,13 +287,17 @@ where
 
     fn inspection(
         &self,
-        sink: &Sink<W>,
+        sink: &Sink<W, A>,
         expectation: &Expectation,
         view: BuildLogView,
     ) -> Result<SinkInspection, String> {
         let reading = Reading {
             expectation,
-            namespace: Namespace::from(sink.artifacts().namespace(ArtifactKind::Snapshot)),
+            namespace: sink
+                .artifact(Self::SNAPSHOT)
+                .and_then(|declared| declared.places().next())
+                .map(|place| place.clone().into())
+                .ok_or_else(|| format!("{} declares no snapshot placed anywhere", sink.name()))?,
             view,
         };
 

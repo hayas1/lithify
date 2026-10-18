@@ -11,6 +11,8 @@ use lithify_core::testing::{Engine, Recorder};
 use lithify_core::ts::Ts;
 use lithify_core::window::Window;
 
+use lithify_config::Declaration;
+
 use crate::pipelines::Pipelines;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -31,6 +33,32 @@ pub enum Kept {
 #[serde(deny_unknown_fields)]
 pub struct Shelf {
     prefix: String,
+}
+
+impl From<Shelf> for Namespace {
+    fn from(shelf: Shelf) -> Self {
+        Namespace::from(shelf.prefix.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "lowercase")]
+pub enum Made {
+    Snapshot { place: Vec<Shelf> },
+}
+
+impl Declaration for Made {
+    type Location = Shelf;
+
+    fn source(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn places(&self) -> impl Iterator<Item = &Shelf> {
+        match self {
+            Self::Snapshot { place } => place.iter(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -121,9 +149,7 @@ pub const INFRA: &str = r#"
     [default]
     source.capture.debezium.dialect = "mysql"
     sink.change_log.prefix = "mysql_shop_cdc"
-    sink.artifacts.snapshot = "mysql_shop"
-    sink.artifacts.history = "mysql_shop_history"
-    sink.artifacts.shard = "%Y%m%d"
+    sink.artifact.snapshot.place = [{ prefix = "mysql_shop" }]
 
     [[source]]
     name = "primary"
@@ -159,6 +185,6 @@ pub fn configure(directory: &Path, infra: &str) {
     .unwrap();
 }
 
-pub fn under(root: &Path) -> Pipelines<Captured, Kept> {
+pub fn under(root: &Path) -> Pipelines<Captured, Kept, Made> {
     Pipelines::new(root.to_owned(), ())
 }

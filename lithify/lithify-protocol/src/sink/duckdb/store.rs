@@ -90,7 +90,10 @@ impl ObjectStore {
 
         Ok(DuckDbClient::new(
             connection,
-            DuckDbWarehouse::over(Namespace::from(change_log), self.config.store().clone()),
+            DuckDbWarehouse::over(
+                Namespace::from(change_log.clone()),
+                self.config.store().clone(),
+            ),
         ))
     }
 

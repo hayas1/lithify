@@ -101,8 +101,8 @@ pub enum LocationConfig {
     BigQuery(<BigQueryWarehouse as OpenWarehouse>::Location),
 }
 
-impl From<&LocationConfig> for Namespace {
-    fn from(location: &LocationConfig) -> Self {
+impl From<LocationConfig> for Namespace {
+    fn from(location: LocationConfig) -> Self {
         match location {
             LocationConfig::DuckDb(location) => Namespace::from(location),
             LocationConfig::BigQuery(location) => Namespace::from(location),

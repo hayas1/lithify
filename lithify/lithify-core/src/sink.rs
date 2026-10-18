@@ -246,7 +246,7 @@ pub trait OpenWarehouse {
 }
 
 pub trait SinkWarehouse {
-    type Location: Clone + fmt::Debug + PartialEq + Eq;
+    type Location: Clone + fmt::Debug + PartialEq + Eq + Into<Namespace>;
     type Credential;
     type Error: std::error::Error;
 

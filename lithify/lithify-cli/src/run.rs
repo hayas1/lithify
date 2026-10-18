@@ -2,9 +2,9 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 
+use lithify_config::Pipeline;
 use lithify_config::infra::{Sink, Source};
-use lithify_config::{ArtifactKind, Pipeline};
-use lithify_core::sink::{Namespace, OpenWarehouse};
+use lithify_core::sink::OpenWarehouse;
 use lithify_core::ts::Ts;
 use lithify_protocol::sink::bigquery::client::{BigQueryCapture, BigQueryClient};
 use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbClient};
@@ -12,6 +12,7 @@ use lithify_protocol::sink::duckdb::config::Config;
 use lithify_protocol::sink::{bigquery, duckdb};
 use lithify_protocol::{BigQueryWarehouse, DuckDbWarehouse};
 
+use crate::artifacts::{ArtifactConfig, DeclaredSnapshot};
 use crate::course::Course;
 use crate::credential::Credentials;
 use crate::journal::Journal;
@@ -81,29 +82,30 @@ impl Run {
 
     fn inspection(
         &self,
-        sink: &Sink<WarehouseConfig>,
+        sink: &Sink<WarehouseConfig, ArtifactConfig>,
         source: &Source<CaptureConfig>,
     ) -> Result<Inspection, Unrunnable> {
+        let snapshot = DeclaredSnapshot::of(sink)?;
         let expectation = Expectation::new(
-            sink.artifacts().schedule(),
+            snapshot.schedule(),
             source.since(),
             &source.capture().to_json()?,
             Ts::from(self.now),
         );
-        let namespace = Namespace::from(sink.artifacts().namespace(ArtifactKind::Snapshot));
+        let namespace = snapshot.namespace();
 
         match Self::reach(sink)? {
             Reached::DuckDb(config, change_log) => {
-                Ok(expectation.read(&self.duckdb(config, change_log)?, &namespace)?)
+                Ok(expectation.read(&self.duckdb(config, change_log)?, namespace)?)
             }
             Reached::BigQuery(config, change_log) => {
-                Ok(expectation.read(&self.bigquery(config, change_log)?, &namespace)?)
+                Ok(expectation.read(&self.bigquery(config, change_log)?, namespace)?)
             }
         }
     }
 
     fn source(
-        pipeline: &Pipeline<CaptureConfig, WarehouseConfig>,
+        pipeline: &Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig>,
     ) -> Result<&Source<CaptureConfig>, Unrunnable> {
         let mut sources = pipeline.sources();
         let source = sources.next().ok_or(Unrunnable::WithoutSource)?;
@@ -118,13 +120,14 @@ impl Run {
     fn each_sink(
         &self,
         mut act: impl FnMut(
-            &Sink<WarehouseConfig>,
+            &Sink<WarehouseConfig, ArtifactConfig>,
             &Source<CaptureConfig>,
             &str,
             &mut Journal,
         ) -> Result<(), Unrunnable>,
     ) -> Result<Journal, Unrunnable> {
-        let pipeline: Pipeline<CaptureConfig, WarehouseConfig> = Pipeline::open(&self.directory)?;
+        let pipeline: Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig> =
+            Pipeline::open(&self.directory)?;
         let source = Self::source(&pipeline)?;
         let mut journal = Journal::default();
 
@@ -151,7 +154,7 @@ impl Run {
     fn settle<S: Settlement>(
         &self,
         course: &Course,
-        sink: &Sink<WarehouseConfig>,
+        sink: &Sink<WarehouseConfig, ArtifactConfig>,
         source: &Source<CaptureConfig>,
         topic_prefix: &str,
         settlement: &S,
@@ -189,7 +192,7 @@ impl Run {
         }
     }
 
-    fn reach(sink: &Sink<WarehouseConfig>) -> Result<Reached<'_>, Unrunnable> {
+    fn reach(sink: &Sink<WarehouseConfig, ArtifactConfig>) -> Result<Reached<'_>, Unrunnable> {
         sink.warehouse()
             .reach(sink.change_log())
             .ok_or(Unrunnable::Unreached)
@@ -217,8 +220,8 @@ impl Run {
 
     fn selected<'a>(
         &self,
-        pipeline: &'a Pipeline<CaptureConfig, WarehouseConfig>,
-    ) -> Result<Vec<&'a Sink<WarehouseConfig>>, Unrunnable> {
+        pipeline: &'a Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig>,
+    ) -> Result<Vec<&'a Sink<WarehouseConfig, ArtifactConfig>>, Unrunnable> {
         let sinks: Vec<_> = pipeline
             .sinks()
             .filter(|sink| match &self.sink {

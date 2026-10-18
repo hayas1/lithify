@@ -1,8 +1,5 @@
 [default]
 source.capture.debezium.dialect = "postgres"
-sink.artifacts.snapshot = "postgres_shop"
-sink.artifacts.history = "postgres_shop_history"
-sink.artifacts.shard = "%Y%m%d"
 
 [[source]]
 name = "primary"
@@ -16,6 +13,10 @@ warehouse.bigquery.project = "local-project"
 warehouse.bigquery.endpoint = "http://bigquery-emulator:9050"
 warehouse.bigquery.credentials = "anonymous"
 
+[sink.artifact.snapshot]
+shard = "%Y%m%d"
+place = [{ bigquery.dataset = "postgres_shop" }]
+
 [[sink]]
 name = "duckdb_s3"
 change_log.duckdb.prefix = "postgres_shop_cdc"
@@ -23,3 +24,7 @@ warehouse.duckdb.s3.endpoint = "http://rustfs:9000"
 warehouse.duckdb.s3.region = "us-east-1"
 warehouse.duckdb.s3.bucket = "lithify"
 warehouse.duckdb.s3.format = "parquet"
+
+[sink.artifact.snapshot]
+shard = "%Y%m%d"
+place = [{ duckdb.prefix = "postgres_shop" }]

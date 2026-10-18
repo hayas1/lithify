@@ -60,7 +60,10 @@ impl BigQueryClient {
             .map_err(Unqueryable::Unbuildable)?;
 
         Ok(Self {
-            warehouse: BigQueryWarehouse::new(config.project(), Namespace::from(change_log)),
+            warehouse: BigQueryWarehouse::new(
+                config.project(),
+                Namespace::from(change_log.clone()),
+            ),
             client,
             runtime,
         })

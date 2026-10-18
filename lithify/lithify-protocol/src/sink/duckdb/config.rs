@@ -178,9 +178,9 @@ pub struct Location {
     prefix: String,
 }
 
-impl From<&Location> for Namespace {
-    fn from(location: &Location) -> Self {
-        Namespace::from(vec![location.prefix.clone()])
+impl From<Location> for Namespace {
+    fn from(location: Location) -> Self {
+        Namespace::from(vec![location.prefix])
     }
 }
 
@@ -291,10 +291,7 @@ pub(crate) mod tests {
         let location: Location =
             serde_json::from_value(serde_json::json!({"prefix": "mysql_shop_cdc"})).unwrap();
 
-        assert_eq!(
-            Namespace::from(&location),
-            Namespace::from("mysql_shop_cdc")
-        );
+        assert_eq!(Namespace::from(location), Namespace::from("mysql_shop_cdc"));
     }
 
     #[test]

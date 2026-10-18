@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use ulid::Ulid;
 
-use lithify_config::ArtifactKind;
 use lithify_config::infra::{Sink, Source};
 use lithify_core::artifact::ArtifactBuilder;
 use lithify_core::build_log::{BuildLog, Outcome, Run, Status};
@@ -11,6 +10,7 @@ use lithify_core::sink::{Namespace, WarehouseClient};
 use lithify_core::sql::SqlString;
 use lithify_core::window::Window;
 
+use crate::artifacts::{ArtifactConfig, DeclaredSnapshot};
 use crate::journal::Journal;
 use crate::pipeline::{CaptureConfig, WarehouseConfig};
 use crate::unrunnable::Unrunnable;
@@ -100,19 +100,19 @@ pub struct Build {
 
 impl Build {
     pub fn new(
-        sink: &Sink<WarehouseConfig>,
+        sink: &Sink<WarehouseConfig, ArtifactConfig>,
         source: &Source<CaptureConfig>,
         now: DateTime<Utc>,
     ) -> Result<Self, Unrunnable> {
-        let artifacts = sink.artifacts();
+        let snapshot = DeclaredSnapshot::of(sink)?;
 
         Ok(Self {
-            namespace: Namespace::from(artifacts.namespace(ArtifactKind::Snapshot)),
+            namespace: snapshot.namespace().clone(),
             run: Run::new(
                 Ulid::from_datetime(now.into()),
                 now,
-                &ArtifactKind::Snapshot.to_string(),
-                &artifacts.schedule().to_string(),
+                DeclaredSnapshot::ARTIFACT,
+                &snapshot.schedule().to_string(),
                 source.name(),
                 &source.capture().to_json()?,
                 env!("CARGO_PKG_VERSION"),

@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 
-use lithify_cli::artifacts::Artifacts;
+use lithify_cli::artifacts::{ArtifactConfig, DeclaredSnapshot};
 use lithify_cli::pipeline::{CaptureConfig, WarehouseConfig};
 use lithify_config::{Pipeline, infra};
 use lithify_core::artifact::Artifact;
@@ -25,7 +25,7 @@ pub struct ConnectedPipeline<'a> {
 impl<'a> ConnectedPipeline<'a> {
     pub fn connect(
         scenario: &'a Scenario,
-        pipeline: &'a Pipeline<CaptureConfig, WarehouseConfig>,
+        pipeline: &'a Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig>,
         watch: Watch,
         key_id: &str,
         secret: &str,
@@ -124,7 +124,7 @@ impl<'a> SourceEnd<'a> {
     }
 
     fn connect(
-        pipeline: &'a Pipeline<CaptureConfig, WarehouseConfig>,
+        pipeline: &'a Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig>,
         name: &str,
         connection: &'a SourceConnection,
     ) -> Result<Self, Unverifiable> {
@@ -159,7 +159,7 @@ impl<'a> SourceEnd<'a> {
 }
 
 pub struct SinkEnd<'a> {
-    config: &'a infra::Sink<WarehouseConfig>,
+    config: &'a infra::Sink<WarehouseConfig, ArtifactConfig>,
     client: Box<dyn Sink>,
 }
 
@@ -171,7 +171,7 @@ impl<'a> SinkEnd<'a> {
     }
 
     fn connect(
-        pipeline: &'a Pipeline<CaptureConfig, WarehouseConfig>,
+        pipeline: &'a Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig>,
         name: &str,
         _: &'a SinkConnection,
         key_id: &str,
@@ -261,7 +261,7 @@ impl<'a> SinkEnd<'a> {
             source.capture(),
             Self::topic_prefix(source)?,
             table,
-            &self.config.snapshot(),
+            &DeclaredSnapshot::of(self.config)?.artifact(),
             &watch.changes(),
         )?)
     }
@@ -278,9 +278,8 @@ impl<'a> SinkEnd<'a> {
         model: &TableModel,
         watch: &Watch,
     ) -> Result<Rows, Unverifiable> {
-        let target = self
-            .config
-            .snapshot()
+        let target = DeclaredSnapshot::of(self.config)?
+            .artifact()
             .target(model.id(), &watch.changes())
             .map_err(Unbuildable::from)?;
 

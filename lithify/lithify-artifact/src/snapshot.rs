@@ -1,6 +1,7 @@
 use std::marker::PhantomData;
 
 use chrono::{DateTime, Utc};
+use serde::Deserialize;
 
 use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
 use lithify_core::build_log::{BuildLog, Outcome, Run};
@@ -10,6 +11,7 @@ use lithify_core::listener::{
     TableRenamed,
 };
 use lithify_core::model::{ColumnModel, TableId, TableModel};
+use lithify_core::schedule::Schedule;
 use lithify_core::sink::{Namespace, TablePath, Warehouse};
 use lithify_core::source::RowChangeLog;
 use lithify_core::sql::SqlString;
@@ -20,6 +22,27 @@ use query::ChangeLogQuery;
 
 mod fold;
 mod query;
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Config<L> {
+    shard: String,
+    place: Vec<L>,
+}
+
+impl<L> Config<L> {
+    pub fn shard(&self) -> &str {
+        &self.shard
+    }
+
+    pub fn place(&self) -> &[L] {
+        &self.place
+    }
+
+    pub fn schedule(&self) -> Schedule {
+        Schedule::Daily
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
@@ -353,6 +376,31 @@ impl<L: RowChangeLog, W: Warehouse> ArtifactBuilder for SnapshotBuilder<'_, L, W
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_snapshot_is_declared_with_how_its_shards_are_named_and_where_they_are_placed() {
+        let config: Config<String> = serde_json::from_value(serde_json::json!({
+            "shard": "%Y%m%d",
+            "place": ["mysql_shop", "analytics.shop"]
+        }))
+        .unwrap();
+
+        assert_eq!(config.shard(), "%Y%m%d");
+        assert_eq!(config.place(), ["mysql_shop", "analytics.shop"]);
+        assert_eq!(config.schedule(), Schedule::Daily);
+    }
+
+    #[test]
+    fn a_snapshot_declared_with_what_it_does_not_know_is_rejected() {
+        assert!(
+            serde_json::from_value::<Config<String>>(serde_json::json!({
+                "shard": "%Y%m%d",
+                "place": [],
+                "history": "mysql_shop_history"
+            }))
+            .is_err()
+        );
+    }
     use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
     use lithify_core::build_log::{Lifecycle, Status};
     use lithify_core::era::{Bound, EraTracker};

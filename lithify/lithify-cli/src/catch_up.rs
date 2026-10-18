@@ -1,11 +1,11 @@
 use chrono::{DateTime, NaiveDate, Utc};
 
-use lithify_config::ArtifactKind;
 use lithify_config::infra::{Sink, Source};
 use lithify_core::build_log::Latest;
 use lithify_core::sink::{Namespace, WarehouseClient};
 use lithify_core::ts::{Event, Ts};
 
+use crate::artifacts::{ArtifactConfig, DeclaredSnapshot};
 use crate::course::Itinerary;
 use crate::pipeline::{CaptureConfig, WarehouseConfig};
 use crate::plan::Tables;
@@ -14,7 +14,7 @@ use crate::shard::Shard;
 use crate::unrunnable::Unrunnable;
 
 pub struct CatchUp<'a> {
-    sink: &'a Sink<WarehouseConfig>,
+    sink: &'a Sink<WarehouseConfig, ArtifactConfig>,
     source: &'a Source<CaptureConfig>,
     now: DateTime<Utc>,
     to: Option<NaiveDate>,
@@ -22,7 +22,7 @@ pub struct CatchUp<'a> {
 
 impl<'a> CatchUp<'a> {
     pub fn new(
-        sink: &'a Sink<WarehouseConfig>,
+        sink: &'a Sink<WarehouseConfig, ArtifactConfig>,
         source: &'a Source<CaptureConfig>,
         now: DateTime<Utc>,
         to: Option<NaiveDate>,
@@ -44,8 +44,11 @@ impl<'a> CatchUp<'a> {
         let resumption = self.resumption(client)?;
 
         Ok(Itinerary::new(
-            resumption.windows(self.sink.artifacts().schedule(), self.until(&resumption)?),
-            resumption.previous(client, &self.namespace())?,
+            resumption.windows(
+                DeclaredSnapshot::of(self.sink)?.schedule(),
+                self.until(&resumption)?,
+            ),
+            resumption.previous(client, &self.namespace()?)?,
             Tables::Every,
         ))
     }
@@ -64,8 +67,8 @@ impl<'a> CatchUp<'a> {
         }
     }
 
-    fn namespace(&self) -> Namespace {
-        Namespace::from(self.sink.artifacts().namespace(ArtifactKind::Snapshot))
+    fn namespace(&self) -> Result<Namespace, Unrunnable> {
+        Ok(DeclaredSnapshot::of(self.sink)?.namespace().clone())
     }
 
     fn resumption<K>(&self, client: &K) -> Result<Resumption, Unrunnable>
@@ -74,8 +77,8 @@ impl<'a> CatchUp<'a> {
         Unrunnable: From<K::Error>,
     {
         Resumption::read(
-            &client.build_logs(&self.namespace(), &Latest::Attempted.into())?,
-            &client.build_logs(&self.namespace(), &Latest::Succeeded.into())?,
+            &client.build_logs(&self.namespace()?, &Latest::Attempted.into())?,
+            &client.build_logs(&self.namespace()?, &Latest::Succeeded.into())?,
             self.source.since(),
             &self.source.capture().to_json()?,
         )

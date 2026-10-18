@@ -16,7 +16,7 @@ use lithify_core::window::Window;
 use lithify_protocol::sink::bigquery::client::{BigQueryChangeLogsFn, BigQueryClient};
 use lithify_protocol::sink::duckdb::client::{DuckDbChangeLogsFn, DuckDbClient};
 
-use crate::artifacts::Artifacts;
+use crate::artifacts::{ArtifactConfig, DeclaredSnapshot};
 use crate::pipeline::WarehouseConfig;
 use crate::settlement::Settlement;
 use crate::unrunnable::Unrunnable;
@@ -54,7 +54,7 @@ impl Tables {
 
 pub struct SnapshotPlan<'a, K, S> {
     client: &'a K,
-    sink: &'a Sink<WarehouseConfig>,
+    sink: &'a Sink<WarehouseConfig, ArtifactConfig>,
     window: &'a Window,
     previous: &'a [BuildLog],
     tables: &'a Tables,
@@ -64,7 +64,7 @@ pub struct SnapshotPlan<'a, K, S> {
 impl<'a, K, S: Settlement> SnapshotPlan<'a, K, S> {
     pub fn new(
         client: &'a K,
-        sink: &'a Sink<WarehouseConfig>,
+        sink: &'a Sink<WarehouseConfig, ArtifactConfig>,
         window: &'a Window,
         previous: &'a [BuildLog],
         tables: &'a Tables,
@@ -87,7 +87,7 @@ impl<'a, K, S: Settlement> SnapshotPlan<'a, K, S> {
         <K as SchemaChangeStream<C::Schema>>::Error: Into<Unrunnable>,
         Unrunnable: From<<K as WarehouseClient>::Error>,
     {
-        let snapshot = self.sink.snapshot();
+        let snapshot = DeclaredSnapshot::of(self.sink)?.artifact();
         let builders = self.tables.narrow(self.builders(&snapshot, &logs)?)?;
         self.verify(&builders)?;
 
@@ -202,7 +202,7 @@ pub(crate) mod tests {
                  'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]})
         ) AS t(value)";
 
-    pub(crate) fn pipeline() -> Pipeline<CaptureConfig, WarehouseConfig> {
+    pub(crate) fn pipeline() -> Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig> {
         Pipeline::open(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compose/lithify/mysql"))
             .unwrap()
     }
@@ -217,7 +217,7 @@ pub(crate) mod tests {
             .unwrap();
         let client = DuckDbClient::new(
             Connection::open_in_memory().unwrap(),
-            DuckDbWarehouse::new(sink.change_log()),
+            DuckDbWarehouse::new(sink.change_log().clone()),
         );
         client.execute(&SqlString::from(CHANGE_LOGS)).unwrap();
         let window = Window::new(
@@ -264,7 +264,7 @@ pub(crate) mod tests {
             .unwrap();
         let client = DuckDbClient::new(
             Connection::open_in_memory().unwrap(),
-            DuckDbWarehouse::new(sink.change_log()),
+            DuckDbWarehouse::new(sink.change_log().clone()),
         );
         client.execute(&SqlString::from(CHANGE_LOGS)).unwrap();
         let window = Window::new(
@@ -300,7 +300,7 @@ pub(crate) mod tests {
             .unwrap();
         let client = DuckDbClient::new(
             Connection::open_in_memory().unwrap(),
-            DuckDbWarehouse::new(sink.change_log()),
+            DuckDbWarehouse::new(sink.change_log().clone()),
         );
         client.execute(&SqlString::from(CHANGE_LOGS)).unwrap();
         let window = Window::new(
@@ -435,7 +435,10 @@ pub(crate) mod tests {
             .unwrap()
     }
 
-    fn built() -> (Pipeline<CaptureConfig, WarehouseConfig>, DuckDbClient) {
+    fn built() -> (
+        Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig>,
+        DuckDbClient,
+    ) {
         let pipeline = pipeline();
         let sink = pipeline
             .sinks()
@@ -443,7 +446,7 @@ pub(crate) mod tests {
             .unwrap();
         let client = DuckDbClient::new(
             Connection::open_in_memory().unwrap(),
-            DuckDbWarehouse::new(sink.change_log()),
+            DuckDbWarehouse::new(sink.change_log().clone()),
         );
         client.execute(&SqlString::from(BUILT_CHANGE_LOGS)).unwrap();
 
@@ -451,7 +454,7 @@ pub(crate) mod tests {
     }
 
     fn build(
-        pipeline: &Pipeline<CaptureConfig, WarehouseConfig>,
+        pipeline: &Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig>,
         client: &DuckDbClient,
     ) -> Vec<BuildLog> {
         let source = pipeline.sources().next().unwrap();

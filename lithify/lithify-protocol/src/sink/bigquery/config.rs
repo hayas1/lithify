@@ -34,14 +34,13 @@ pub struct Location {
     dataset: String,
 }
 
-impl From<&Location> for Namespace {
-    fn from(location: &Location) -> Self {
+impl From<Location> for Namespace {
+    fn from(location: Location) -> Self {
         Namespace::from(
             location
                 .project
-                .iter()
-                .chain([&location.dataset])
-                .cloned()
+                .into_iter()
+                .chain([location.dataset])
                 .collect::<Vec<_>>(),
         )
     }
@@ -64,10 +63,7 @@ mod tests {
         let location: Location =
             serde_json::from_value(serde_json::json!({"dataset": "mysql_shop_cdc"})).unwrap();
 
-        assert_eq!(
-            Namespace::from(&location),
-            Namespace::from("mysql_shop_cdc")
-        );
+        assert_eq!(Namespace::from(location), Namespace::from("mysql_shop_cdc"));
     }
 
     #[test]
@@ -79,7 +75,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            Namespace::from(&location),
+            Namespace::from(location),
             Namespace::from("raw-project.mysql_shop_cdc")
         );
     }

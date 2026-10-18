@@ -1,21 +1,79 @@
-use lithify_artifact::snapshot::Snapshot;
-use lithify_config::ArtifactKind;
+use serde::Deserialize;
+
+use lithify_artifact::snapshot::{self, Snapshot};
+use lithify_config::Declaration;
 use lithify_config::infra::Sink;
+use lithify_core::schedule::Schedule;
+use lithify_core::sink::Namespace;
 
-use crate::pipeline::WarehouseConfig;
+use crate::pipeline::{LocationConfig, WarehouseConfig};
+use crate::unrunnable::Unrunnable;
 
-pub trait Artifacts {
-    fn snapshot(&self) -> Snapshot;
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "lowercase")]
+pub enum ArtifactConfig {
+    Snapshot(snapshot::Config<LocationConfig>),
 }
 
-impl Artifacts for Sink<WarehouseConfig> {
-    fn snapshot(&self) -> Snapshot {
-        let artifacts = self.artifacts();
+impl ArtifactConfig {
+    pub fn as_snapshot(&self) -> Option<&snapshot::Config<LocationConfig>> {
+        match self {
+            Self::Snapshot(config) => Some(config),
+        }
+    }
+}
 
-        Snapshot::new(
-            artifacts.namespace(ArtifactKind::Snapshot),
-            artifacts.shard(),
-        )
+impl Declaration for ArtifactConfig {
+    type Location = LocationConfig;
+
+    fn source(&self) -> Option<&'static str> {
+        match self {
+            Self::Snapshot(_) => None,
+        }
+    }
+
+    fn places(&self) -> impl Iterator<Item = &LocationConfig> {
+        match self {
+            Self::Snapshot(config) => config.place().iter(),
+        }
+    }
+}
+
+pub struct DeclaredSnapshot<'a> {
+    config: &'a snapshot::Config<LocationConfig>,
+    namespace: Namespace,
+}
+
+impl<'a> DeclaredSnapshot<'a> {
+    pub const ARTIFACT: &'static str = "snapshot";
+
+    pub fn of(sink: &'a Sink<WarehouseConfig, ArtifactConfig>) -> Result<Self, Unrunnable> {
+        let undeclared = || Unrunnable::Undeclared {
+            sink: sink.name().to_owned(),
+            artifact: Self::ARTIFACT,
+        };
+        let config = sink
+            .artifact(Self::ARTIFACT)
+            .and_then(ArtifactConfig::as_snapshot)
+            .ok_or_else(undeclared)?;
+        let place = config.place().first().ok_or_else(undeclared)?;
+
+        Ok(Self {
+            config,
+            namespace: place.clone().into(),
+        })
+    }
+
+    pub fn namespace(&self) -> &Namespace {
+        &self.namespace
+    }
+
+    pub fn schedule(&self) -> Schedule {
+        self.config.schedule()
+    }
+
+    pub fn artifact(&self) -> Snapshot {
+        Snapshot::new(self.namespace.clone(), self.config.shard())
     }
 }
 
@@ -35,7 +93,7 @@ mod tests {
 
     #[test]
     fn a_sink_builds_its_snapshots_in_the_namespace_and_shards_the_pipeline_names() {
-        let pipeline: Pipeline<CaptureConfig, WarehouseConfig> = Pipeline::open(
+        let pipeline: Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig> = Pipeline::open(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compose/lithify/mysql"),
         )
         .unwrap();
@@ -46,7 +104,9 @@ mod tests {
         );
 
         assert_eq!(
-            sink.snapshot()
+            DeclaredSnapshot::of(sink)
+                .unwrap()
+                .artifact()
                 .target(&TableId::new("shop", "customers"), &window)
                 .unwrap(),
             TablePath::new("mysql_shop", "customers_20260920")

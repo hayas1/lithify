@@ -1,11 +1,11 @@
 use chrono::{DateTime, NaiveDate, Utc};
 
-use lithify_config::ArtifactKind;
 use lithify_config::infra::{Sink, Source};
 use lithify_core::build_log::BuildLog;
-use lithify_core::sink::{Namespace, WarehouseClient};
+use lithify_core::sink::WarehouseClient;
 use lithify_core::window::Window;
 
+use crate::artifacts::{ArtifactConfig, DeclaredSnapshot};
 use crate::catch_up::CatchUp;
 use crate::journal::Journal;
 use crate::pipeline::{CaptureConfig, WarehouseConfig};
@@ -22,7 +22,7 @@ pub enum Course {
 impl Course {
     pub fn itinerary<K>(
         &self,
-        sink: &Sink<WarehouseConfig>,
+        sink: &Sink<WarehouseConfig, ArtifactConfig>,
         source: &Source<CaptureConfig>,
         now: DateTime<Utc>,
         client: &K,
@@ -31,9 +31,7 @@ impl Course {
         K: WarehouseClient,
         Unrunnable: From<K::Error>,
     {
-        client.create_build_log::<Unrunnable>(&Namespace::from(
-            sink.artifacts().namespace(ArtifactKind::Snapshot),
-        ))?;
+        client.create_build_log::<Unrunnable>(DeclaredSnapshot::of(sink)?.namespace())?;
 
         match self {
             Self::CatchUp { to } => CatchUp::new(sink, source, now, *to).itinerary(client),
@@ -83,6 +81,7 @@ impl Itinerary {
 pub(crate) mod tests {
     use lithify_config::Pipeline;
     use lithify_core::model::TableId;
+    use lithify_core::sink::Namespace;
     use lithify_core::sql::SqlString;
     use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbClient};
 
@@ -186,7 +185,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn settle(
-        pipeline: &Pipeline<CaptureConfig, WarehouseConfig>,
+        pipeline: &Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig>,
         client: &DuckDbClient,
         course: &Course,
         now: &str,

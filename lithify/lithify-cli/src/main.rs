@@ -6,6 +6,8 @@ use std::process::ExitCode;
 use chrono::{NaiveDate, Utc};
 use clap::{Parser, Subcommand};
 
+#[cfg(feature = "serve")]
+use lithify_cli::artifacts::ArtifactConfig;
 use lithify_cli::course::Course;
 use lithify_cli::credential::Credentials;
 use lithify_cli::journal::Journal;
@@ -238,10 +240,12 @@ struct ServeArguments {
 #[cfg(feature = "serve")]
 impl ServeArguments {
     fn journal(self) -> Result<Journal, Unrunnable> {
-        Board::new(Pipelines::<CaptureConfig, WarehouseConfig>::new(
-            self.directory,
-            self.credential.credentials(),
-        ))
+        Board::new(
+            Pipelines::<CaptureConfig, WarehouseConfig, ArtifactConfig>::new(
+                self.directory,
+                self.credential.credentials(),
+            ),
+        )
         .serve(self.address)?;
 
         Ok(Journal::default())

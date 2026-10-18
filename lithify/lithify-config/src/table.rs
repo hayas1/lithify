@@ -5,8 +5,6 @@ use serde::{Deserialize, Serialize};
 
 use lithify_core::model::TableId;
 
-use crate::ArtifactKind;
-
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Listing {
@@ -20,12 +18,12 @@ pub(crate) struct Listing {
 #[serde(deny_unknown_fields)]
 struct Defaults {
     #[serde(default = "Defaults::snapshot")]
-    artifacts: BTreeSet<ArtifactKind>,
+    artifacts: BTreeSet<String>,
 }
 
 impl Defaults {
-    fn snapshot() -> BTreeSet<ArtifactKind> {
-        BTreeSet::from([ArtifactKind::Snapshot])
+    fn snapshot() -> BTreeSet<String> {
+        BTreeSet::from(["snapshot".to_owned()])
     }
 }
 
@@ -42,7 +40,7 @@ impl Default for Defaults {
 struct ListedTable {
     schema: String,
     name: String,
-    artifacts: Option<BTreeSet<ArtifactKind>>,
+    artifacts: Option<BTreeSet<String>>,
     #[serde(default, rename = "column")]
     columns: BTreeMap<String, ListedColumn>,
 }
@@ -77,6 +75,11 @@ impl Tables {
     pub fn table(&self, id: &TableId) -> &Table {
         self.tables.get(id).unwrap_or(&self.default)
     }
+
+    pub fn listed(&self) -> impl Iterator<Item = (Option<&TableId>, &Table)> {
+        std::iter::once((None, &self.default))
+            .chain(self.tables.iter().map(|(id, table)| (Some(id), table)))
+    }
 }
 
 impl TryFrom<Listing> for Tables {
@@ -102,25 +105,61 @@ impl TryFrom<Listing> for Tables {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mislisting {
     TableListedTwice(TableId),
+    Undeclared {
+        table: Option<TableId>,
+        artifact: String,
+    },
+    WithoutSource {
+        table: Option<TableId>,
+        artifact: String,
+        source: String,
+    },
+}
+
+impl Mislisting {
+    fn named(table: &Option<TableId>) -> String {
+        match table {
+            Some(table) => table.to_string(),
+            None => "a table listed nowhere".to_owned(),
+        }
+    }
 }
 
 impl Display for Mislisting {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::TableListedTwice(table) => write!(formatter, "{table} is listed twice"),
+            Self::Undeclared { table, artifact } => write!(
+                formatter,
+                "{} is built into {artifact}, which no sink declares",
+                Self::named(table)
+            ),
+            Self::WithoutSource {
+                table,
+                artifact,
+                source,
+            } => write!(
+                formatter,
+                "{} is built into {artifact} but not into {source} it is built from",
+                Self::named(table)
+            ),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Table {
-    artifacts: BTreeSet<ArtifactKind>,
+    artifacts: BTreeSet<String>,
     masks: BTreeMap<String, Mask>,
 }
 
 impl Table {
-    pub fn builds(&self, kind: ArtifactKind) -> bool {
-        self.artifacts.contains(&kind)
+    pub fn builds(&self, artifact: &str) -> bool {
+        self.artifacts.contains(artifact)
+    }
+
+    pub fn artifacts(&self) -> impl Iterator<Item = &str> {
+        self.artifacts.iter().map(String::as_str)
     }
 
     pub fn mask(&self, column: &str) -> Mask {
@@ -165,7 +204,7 @@ mod tests {
         [[table]]
         schema = "shop"
         name = "orders"
-        artifacts = ["snapshot", "history"]
+        artifacts = ["snapshot", "scd2"]
         column.attributes.mask = "null"
 
         [[table]]
@@ -186,24 +225,24 @@ mod tests {
     fn a_table_that_is_not_configured_takes_the_defaults() {
         let table = table("shop", "customers");
 
-        assert!(table.builds(ArtifactKind::Snapshot));
-        assert!(!table.builds(ArtifactKind::History));
+        assert!(table.builds("snapshot"));
+        assert!(!table.builds("scd2"));
     }
 
     #[test]
     fn a_configured_table_builds_the_artifacts_it_names() {
         let table = table("shop", "orders");
 
-        assert!(table.builds(ArtifactKind::Snapshot));
-        assert!(table.builds(ArtifactKind::History));
+        assert!(table.builds("snapshot"));
+        assert!(table.builds("scd2"));
     }
 
     #[test]
     fn a_table_can_be_left_out_of_every_artifact() {
         let table = table("shop", "audit_log");
 
-        assert!(!table.builds(ArtifactKind::Snapshot));
-        assert!(!table.builds(ArtifactKind::History));
+        assert!(!table.builds("snapshot"));
+        assert!(!table.builds("scd2"));
     }
 
     #[test]
@@ -238,16 +277,16 @@ mod tests {
             .table(&TableId::new("shop", "customers"))
             .clone();
 
-        assert!(table.builds(ArtifactKind::Snapshot));
-        assert!(!table.builds(ArtifactKind::History));
+        assert!(table.builds("snapshot"));
+        assert!(!table.builds("scd2"));
     }
 
     #[test]
     fn a_configuration_without_defaults_snapshots_every_table() {
         let table = tables("").table(&TableId::new("shop", "customers")).clone();
 
-        assert!(table.builds(ArtifactKind::Snapshot));
-        assert!(!table.builds(ArtifactKind::History));
+        assert!(table.builds("snapshot"));
+        assert!(!table.builds("scd2"));
     }
 
     #[test]
@@ -277,12 +316,5 @@ mod tests {
         );
 
         assert!(toml::from_str::<Listing>(&twice).is_err());
-    }
-
-    #[test]
-    fn an_unknown_artifact_is_rejected() {
-        let unknown = TABLES.replace("\"snapshot\", \"history\"", "\"snapshot\", \"cube\"");
-
-        assert!(toml::from_str::<Listing>(&unknown).is_err());
     }
 }

@@ -5,28 +5,33 @@ use chrono::{DateTime, Utc};
 use semigroup::Semigroup;
 use serde::{Deserialize, Serialize};
 
-use lithify_core::schedule::Schedule;
+use serde::de::DeserializeOwned;
+
 use lithify_core::sink::SinkWarehouse;
 use lithify_core::ts::{Event, Ts};
 
-use crate::ArtifactKind;
+use crate::artifact::{Declaration, Declarations};
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[serde(bound(
-    deserialize = "C: Deserialize<'de>, W: Deserialize<'de>, W::Location: Deserialize<'de>"
+    deserialize = "C: Deserialize<'de>, W: Deserialize<'de>, W::Location: Deserialize<'de>, A: DeserializeOwned"
 ))]
-#[serde(bound(serialize = "C: Serialize, W: Serialize, W::Location: Serialize"))]
-pub(crate) struct Wiring<C, W: SinkWarehouse> {
+pub(crate) struct Wiring<C, W: SinkWarehouse, A> {
     #[serde(default)]
-    default: Defaults<C, W>,
+    default: Defaults<C, W, A>,
     #[serde(default, rename = "source")]
     sources: Vec<WiredSource<C>>,
     #[serde(default, rename = "sink")]
-    sinks: Vec<WiredSink<W>>,
+    sinks: Vec<WiredSink<W, A>>,
 }
 
-impl<C: Clone, W: Clone + SinkWarehouse> Wiring<C, W> {
+impl<C, W, A> Wiring<C, W, A>
+where
+    C: Clone,
+    W: Clone + SinkWarehouse,
+    A: Clone + Declaration<Location = W::Location>,
+{
     pub(crate) fn sources(&self) -> Result<Vec<Source<C>>, Miswiring> {
         if self.sources.is_empty() {
             return Err(Miswiring::WithoutSources);
@@ -58,7 +63,7 @@ impl<C: Clone, W: Clone + SinkWarehouse> Wiring<C, W> {
         }
     }
 
-    pub(crate) fn sinks(&self) -> Result<Vec<Sink<W>>, Miswiring> {
+    pub(crate) fn sinks(&self) -> Result<Vec<Sink<W, A>>, Miswiring> {
         if self.sinks.is_empty() {
             return Err(Miswiring::WithoutSinks);
         }
@@ -88,20 +93,19 @@ impl<C: Clone, W: Clone + SinkWarehouse> Wiring<C, W> {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[serde(bound(
-    deserialize = "C: Deserialize<'de>, W: Deserialize<'de>, W::Location: Deserialize<'de>"
+    deserialize = "C: Deserialize<'de>, W: Deserialize<'de>, W::Location: Deserialize<'de>, A: DeserializeOwned"
 ))]
-#[serde(bound(serialize = "C: Serialize, W: Serialize, W::Location: Serialize"))]
-struct Defaults<C, W: SinkWarehouse> {
+struct Defaults<C, W: SinkWarehouse, A> {
     #[serde(default)]
     source: WiredSource<C>,
     #[serde(default)]
-    sink: WiredSink<W>,
+    sink: WiredSink<W, A>,
 }
 
-impl<C, W: SinkWarehouse> Default for Defaults<C, W> {
+impl<C, W: SinkWarehouse, A> Default for Defaults<C, W, A> {
     fn default() -> Self {
         Self {
             source: WiredSource::default(),
@@ -149,31 +153,40 @@ impl<C: Clone> WiredSource<C> {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Semigroup)]
+#[derive(Debug, Clone, Deserialize, Semigroup)]
 #[semigroup(with = "semigroup::op::Coalesce")]
 #[serde(deny_unknown_fields)]
-#[serde(bound(deserialize = "W: Deserialize<'de>, W::Location: Deserialize<'de>"))]
-#[serde(bound(serialize = "W: Serialize, W::Location: Serialize"))]
-struct WiredSink<W: SinkWarehouse> {
+#[serde(bound(
+    deserialize = "W: Deserialize<'de>, W::Location: Deserialize<'de>, A: DeserializeOwned"
+))]
+struct WiredSink<W: SinkWarehouse, A> {
     name: Option<String>,
     change_log: Option<W::Location>,
     warehouse: Option<W>,
-    artifacts: Option<ArtifactTargets>,
+    artifact: Option<Declarations<A>>,
 }
 
-impl<W: SinkWarehouse> Default for WiredSink<W> {
+impl<W: SinkWarehouse, A> Default for WiredSink<W, A> {
     fn default() -> Self {
         Self {
             name: None,
             change_log: None,
             warehouse: None,
-            artifacts: None,
+            artifact: None,
         }
     }
 }
 
-impl<W: Clone + SinkWarehouse> WiredSink<W> {
-    fn sink(self, at: usize, default: &Self) -> Result<Sink<W>, Miswiring> {
+impl<W, A> WiredSink<W, A>
+where
+    W: Clone + SinkWarehouse,
+    A: Clone + Declaration<Location = W::Location>,
+{
+    fn sink(mut self, at: usize, default: &Self) -> Result<Sink<W, A>, Miswiring> {
+        self.artifact = match (self.artifact.take(), &default.artifact) {
+            (Some(declared), Some(by_default)) => Some(declared.over(by_default)),
+            (declared, by_default) => declared.or_else(|| by_default.clone()),
+        };
         let wired = self.semigroup(default.clone());
         let name = wired.name.ok_or(Miswiring::SinkWithoutName(at))?;
         let change_log = wired
@@ -186,14 +199,44 @@ impl<W: Clone + SinkWarehouse> WiredSink<W> {
             return Err(Miswiring::ChangeLogUnreached(name));
         }
 
+        let artifacts = wired
+            .artifact
+            .filter(|declared| !declared.is_empty())
+            .ok_or_else(|| Miswiring::SinkWithoutArtifacts(name.clone()))?;
+        Self::placed(&name, &warehouse, &artifacts)?;
+
         Ok(Sink {
             change_log,
             warehouse,
-            artifacts: wired
-                .artifacts
-                .ok_or_else(|| Miswiring::SinkWithoutArtifacts(name.clone()))?,
+            artifacts,
             name,
         })
+    }
+
+    fn placed(name: &str, warehouse: &W, artifacts: &Declarations<A>) -> Result<(), Miswiring> {
+        for (artifact, declared) in artifacts.iter() {
+            let misplaced = |misplacing: fn(String, String) -> Miswiring| {
+                misplacing(name.to_owned(), artifact.to_owned())
+            };
+            let mut places = declared.places().peekable();
+            if places.peek().is_none() {
+                return Err(misplaced(Miswiring::Unplaced));
+            }
+            if !places.all(|place| warehouse.reaches(place)) {
+                return Err(misplaced(Miswiring::ArtifactUnreached));
+            }
+            if let Some(source) = declared.source()
+                && artifacts.get(source).is_none()
+            {
+                return Err(Miswiring::SourceUndeclared {
+                    sink: name.to_owned(),
+                    artifact: artifact.to_owned(),
+                    source: source.to_owned(),
+                });
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -210,6 +253,13 @@ pub enum Miswiring {
     ChangeLogUnreached(String),
     SinkWithoutWarehouse(String),
     SinkWithoutArtifacts(String),
+    Unplaced(String, String),
+    ArtifactUnreached(String, String),
+    SourceUndeclared {
+        sink: String,
+        artifact: String,
+        source: String,
+    },
     SinkNamedTwice(String),
 }
 
@@ -239,6 +289,21 @@ impl Display for Miswiring {
             ),
             Self::SinkWithoutWarehouse(name) => write!(formatter, "{name} names no warehouse"),
             Self::SinkWithoutArtifacts(name) => write!(formatter, "{name} builds nothing"),
+            Self::Unplaced(sink, artifact) => {
+                write!(formatter, "{sink} places {artifact} nowhere")
+            }
+            Self::ArtifactUnreached(sink, artifact) => write!(
+                formatter,
+                "{sink} places {artifact} in a warehouse other than the one it is sunk into"
+            ),
+            Self::SourceUndeclared {
+                sink,
+                artifact,
+                source,
+            } => write!(
+                formatter,
+                "{sink} builds {artifact} without {source} it is built from"
+            ),
             Self::SinkNamedTwice(name) => write!(formatter, "{name} is sunk into twice"),
         }
     }
@@ -271,14 +336,14 @@ impl<C> Source<C> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Sink<W: SinkWarehouse> {
+pub struct Sink<W: SinkWarehouse, A> {
     name: String,
     change_log: W::Location,
     warehouse: W,
-    artifacts: ArtifactTargets,
+    artifacts: Declarations<A>,
 }
 
-impl<W: SinkWarehouse> Sink<W> {
+impl<W: SinkWarehouse, A> Sink<W, A> {
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -291,33 +356,12 @@ impl<W: SinkWarehouse> Sink<W> {
         &self.warehouse
     }
 
-    pub fn artifacts(&self) -> &ArtifactTargets {
+    pub fn artifacts(&self) -> &Declarations<A> {
         &self.artifacts
     }
-}
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ArtifactTargets {
-    snapshot: String,
-    history: String,
-    shard: String,
-}
-
-impl ArtifactTargets {
-    pub fn namespace(&self, kind: ArtifactKind) -> &str {
-        match kind {
-            ArtifactKind::Snapshot => &self.snapshot,
-            ArtifactKind::History => &self.history,
-        }
-    }
-
-    pub fn shard(&self) -> &str {
-        &self.shard
-    }
-
-    pub fn schedule(&self) -> Schedule {
-        Schedule::Daily
+    pub fn artifact(&self, artifact: &str) -> Option<&A> {
+        self.artifacts.get(artifact)
     }
 }
 
@@ -345,6 +389,15 @@ mod tests {
         Warehouse { dataset: String },
     }
 
+    impl From<Lying> for lithify_core::sink::Namespace {
+        fn from(location: Lying) -> Self {
+            match location {
+                Lying::Files { prefix } => Self::from(prefix.as_str()),
+                Lying::Warehouse { dataset } => Self::from(dataset.as_str()),
+            }
+        }
+    }
+
     impl SinkWarehouse for Sunk {
         type Location = Lying;
         type Credential = ();
@@ -368,6 +421,30 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+    #[serde(deny_unknown_fields, rename_all = "lowercase")]
+    enum Made {
+        Snapshot { place: Vec<Lying> },
+        Copy { place: Vec<Lying> },
+    }
+
+    impl Declaration for Made {
+        type Location = Lying;
+
+        fn source(&self) -> Option<&'static str> {
+            match self {
+                Self::Snapshot { .. } => None,
+                Self::Copy { .. } => Some("snapshot"),
+            }
+        }
+
+        fn places(&self) -> impl Iterator<Item = &Lying> {
+            match self {
+                Self::Snapshot { place } | Self::Copy { place } => place.iter(),
+            }
+        }
+    }
+
     fn prefix(prefix: &str) -> Lying {
         Lying::Files {
             prefix: prefix.to_owned(),
@@ -378,9 +455,8 @@ mod tests {
         [default]
         source.capture.debezium.dialect = "mysql"
         sink.change_log.files.prefix = "mysql_shop_cdc"
-        sink.artifacts.snapshot = "mysql_shop"
-        sink.artifacts.history = "mysql_shop_history"
-        sink.artifacts.shard = "%Y%m%d"
+        sink.artifact.snapshot.place = [{ files.prefix = "mysql_shop" }]
+        sink.artifact.copy.place = [{ files.prefix = "mysql_shop_copy" }]
 
         [[source]]
         name = "primary"
@@ -401,6 +477,8 @@ mod tests {
         name = "warehouse"
         change_log.warehouse.dataset = "mysql_shop_archive"
         warehouse.warehouse.project = "local-project"
+        artifact.snapshot.place = [{ warehouse.dataset = "mysql_shop" }]
+        artifact.copy.place = [{ warehouse.dataset = "mysql_shop_copy" }]
     "#;
 
     const SERVER: &str = r#"
@@ -420,16 +498,14 @@ mod tests {
     "#;
 
     const ARTIFACTS: &str = r#"
-        artifacts.snapshot = "mysql_shop"
-        artifacts.history = "mysql_shop_history"
-        artifacts.shard = "%Y%m%d"
+        artifact.snapshot.place = [{ files.prefix = "mysql_shop" }]
     "#;
 
-    fn wiring(written: &str) -> Wiring<Captured, Sunk> {
+    fn wiring(written: &str) -> Wiring<Captured, Sunk, Made> {
         toml::from_str(written).unwrap()
     }
 
-    fn wired(server: &str, sink: &str) -> Wiring<Captured, Sunk> {
+    fn wired(server: &str, sink: &str) -> Wiring<Captured, Sunk, Made> {
         wiring(&format!("{server}\n[[sink]]\n{NAMED}{sink}"))
     }
 
@@ -437,7 +513,7 @@ mod tests {
         wiring(INFRA).sources().unwrap()
     }
 
-    fn sinks() -> Vec<Sink<Sunk>> {
+    fn sinks() -> Vec<Sink<Sunk, Made>> {
         wiring(INFRA).sinks().unwrap()
     }
 
@@ -478,7 +554,7 @@ mod tests {
     fn a_server_that_took_over_at_an_unreadable_time_is_rejected() {
         let unknown = INFRA.replace("\"2026-09-21T00:00:00Z\"", "\"yesterday afternoon\"");
 
-        assert!(toml::from_str::<Wiring<Captured, Sunk>>(&unknown).is_err());
+        assert!(toml::from_str::<Wiring<Captured, Sunk, Made>>(&unknown).is_err());
     }
 
     #[test]
@@ -504,7 +580,7 @@ mod tests {
     #[test]
     fn a_pipeline_that_captures_no_server_is_rejected() {
         let wiring = wiring(
-            "[[sink]]\nname = \"rustfs\"\nchange_log.files.prefix = \"mysql_shop_cdc\"\nwarehouse.files.bucket = \"lithify\"\nartifacts.snapshot = \"mysql_shop\"\nartifacts.history = \"mysql_shop_history\"\nartifacts.shard = \"%Y%m%d\"",
+            "[[sink]]\nname = \"rustfs\"\nchange_log.files.prefix = \"mysql_shop_cdc\"\nwarehouse.files.bucket = \"lithify\"\nartifact.snapshot.place = [{ files.prefix = \"mysql_shop\" }]",
         );
 
         assert_eq!(wiring.sources().unwrap_err(), Miswiring::WithoutSources);
@@ -547,29 +623,68 @@ mod tests {
     }
 
     #[test]
-    fn a_sink_builds_each_artifact_in_the_namespace_the_pipeline_names() {
-        let artifacts = sinks()[1].artifacts().clone();
-
-        assert_eq!(artifacts.namespace(ArtifactKind::Snapshot), "mysql_shop");
+    fn a_sink_builds_each_artifact_it_declares_where_it_places_it() {
         assert_eq!(
-            artifacts.namespace(ArtifactKind::History),
-            "mysql_shop_history"
+            sinks()[0].artifact("snapshot"),
+            Some(&Made::Snapshot {
+                place: vec![prefix("mysql_shop")]
+            })
         );
-        assert_eq!(artifacts.shard(), "%Y%m%d");
+        assert_eq!(
+            sinks()[1].artifact("snapshot"),
+            Some(&Made::Snapshot {
+                place: vec![Lying::Warehouse {
+                    dataset: "mysql_shop".to_owned()
+                }]
+            })
+        );
     }
 
     #[test]
-    fn a_sink_builds_its_artifacts_daily() {
-        assert_eq!(sinks()[1].artifacts().schedule(), Schedule::Daily);
+    fn a_sink_declaring_an_artifact_again_keeps_the_others_declared_by_default() {
+        let declared_again = INFRA.replace(
+            "        artifact.copy.place = [{ warehouse.dataset = \"mysql_shop_copy\" }]\n",
+            "",
+        );
+
+        assert_eq!(
+            wiring(&declared_again).sinks().unwrap_err(),
+            Miswiring::ArtifactUnreached("warehouse".to_owned(), "copy".to_owned())
+        );
     }
 
     #[test]
-    fn a_schedule_written_in_the_pipeline_is_rejected() {
-        let written = toml::from_str::<Wiring<Captured, Sunk>>(&format!(
-            "{SERVER}\n[[sink]]\n{NAMED}{WAREHOUSE}{ARTIFACTS}artifacts.schedule = \"daily\"\n"
-        ));
+    fn an_artifact_placed_nowhere_is_rejected() {
+        let wiring = wired(
+            SERVER,
+            &format!(
+                "change_log.files.prefix = \"mysql_shop_cdc\"\n{WAREHOUSE}artifact.snapshot.place = []\n"
+            ),
+        );
 
-        assert!(written.is_err());
+        assert_eq!(
+            wiring.sinks().unwrap_err(),
+            Miswiring::Unplaced("rustfs".to_owned(), "snapshot".to_owned())
+        );
+    }
+
+    #[test]
+    fn an_artifact_built_without_the_one_it_is_built_from_is_rejected() {
+        let wiring = wired(
+            SERVER,
+            &format!(
+                "change_log.files.prefix = \"mysql_shop_cdc\"\n{WAREHOUSE}artifact.copy.place = [{{ files.prefix = \"mysql_shop_copy\" }}]\n"
+            ),
+        );
+
+        assert_eq!(
+            wiring.sinks().unwrap_err(),
+            Miswiring::SourceUndeclared {
+                sink: "rustfs".to_owned(),
+                artifact: "copy".to_owned(),
+                source: "snapshot".to_owned(),
+            }
+        );
     }
 
     #[test]
@@ -723,6 +838,6 @@ mod tests {
     fn a_sink_into_a_warehouse_the_application_does_not_know_is_rejected() {
         let unknown = INFRA.replace("warehouse.files", "warehouse.redshift");
 
-        assert!(toml::from_str::<Wiring<Captured, Sunk>>(&unknown).is_err());
+        assert!(toml::from_str::<Wiring<Captured, Sunk, Made>>(&unknown).is_err());
     }
 }
