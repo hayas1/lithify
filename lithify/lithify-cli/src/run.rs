@@ -17,7 +17,7 @@ use crate::course::Course;
 use crate::credential::Credentials;
 use crate::journal::Journal;
 use crate::pipeline::{CaptureConfig, Reached, WarehouseConfig};
-use crate::plan::SnapshotPlan;
+use crate::plan::Plan;
 use crate::settlement::{Build, DryRun, Settlement};
 use crate::unrunnable::Unrunnable;
 use lithify_core::check::{Expectation, Inspection};
@@ -160,6 +160,8 @@ impl Run {
         settlement: &S,
         journal: &mut Journal,
     ) -> Result<(), Unrunnable> {
+        let snapshot = DeclaredSnapshot::of(sink)?.artifact();
+
         match Self::reach(sink)? {
             Reached::DuckDb(config, change_log) => {
                 let client = self.duckdb(config, change_log)?;
@@ -170,7 +172,7 @@ impl Run {
                     |window, previous, tables| {
                         source.capture().with_duckdb_change_logs(
                             topic_prefix,
-                            SnapshotPlan::new(&client, sink, window, previous, tables, settlement),
+                            Plan::new(&client, &snapshot, window, previous, tables, settlement),
                         )
                     },
                 )
@@ -184,7 +186,7 @@ impl Run {
                     |window, previous, tables| {
                         source.capture().with_bigquery_change_logs(
                             topic_prefix,
-                            SnapshotPlan::new(&client, sink, window, previous, tables, settlement),
+                            Plan::new(&client, &snapshot, window, previous, tables, settlement),
                         )
                     },
                 )

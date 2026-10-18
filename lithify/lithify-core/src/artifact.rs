@@ -82,6 +82,8 @@ pub trait Artifact {
 pub trait ArtifactBuilder {
     fn table(&self) -> &TableId;
 
+    fn missing_base(&self) -> Option<&TableId>;
+
     fn select(&self) -> Result<SqlString, UnbuildableArtifact>;
 
     fn create<W: Warehouse>(&self, warehouse: &W) -> Result<Vec<SqlString>, UnbuildableArtifact>;

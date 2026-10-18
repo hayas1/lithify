@@ -324,6 +324,10 @@ mod tests {
             &self.0
         }
 
+        fn missing_base(&self) -> Option<&TableId> {
+            None
+        }
+
         fn select(&self) -> Result<SqlString, UnbuildableArtifact> {
             Ok(SqlString::from("SELECT 1 AS id"))
         }

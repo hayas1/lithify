@@ -57,7 +57,7 @@ impl Schedule {
         }
     }
 
-    fn window(self, from: Ts<Event>) -> Option<Window> {
+    pub fn window(self, from: Ts<Event>) -> Option<Window> {
         match self {
             Self::Daily(cut) => Some(Window::new(from, cut.after(from)?)),
         }

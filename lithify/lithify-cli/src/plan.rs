@@ -4,25 +4,21 @@ use duckdb::types::FromSql;
 use google_cloud_bigquery::error::RowError;
 use google_cloud_bigquery::query::Row;
 
-use lithify_artifact::snapshot::{Snapshot, SnapshotBuilder};
-use lithify_config::infra::Sink;
 use lithify_core::artifact::{Artifact, ArtifactBuilder};
 use lithify_core::build_log::BuildLog;
 use lithify_core::era::EraTracker;
 use lithify_core::model::TableId;
 use lithify_core::sink::WarehouseClient;
-use lithify_core::source::{ChangeLogs, RowChangeLog, SchemaChangeLog, SchemaChangeStream};
+use lithify_core::source::{ChangeLogs, SchemaChangeLog, SchemaChangeStream};
 use lithify_core::window::Window;
 use lithify_protocol::sink::bigquery::client::{BigQueryChangeLogsFn, BigQueryClient};
 use lithify_protocol::sink::duckdb::client::{DuckDbChangeLogsFn, DuckDbClient};
 
-use crate::artifacts::{ArtifactConfig, DeclaredSnapshot};
-use crate::pipeline::WarehouseConfig;
 use crate::settlement::Settlement;
 use crate::unrunnable::Unrunnable;
 
-type BuilderOf<'b, C, K> =
-    SnapshotBuilder<'b, <C as ChangeLogs>::Row, <K as WarehouseClient>::Warehouse>;
+type BuilderOf<'b, A, C, K> =
+    <A as Artifact>::Builder<'b, <C as ChangeLogs>::Row, <K as WarehouseClient>::Warehouse>;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Tables {
@@ -52,19 +48,19 @@ impl Tables {
     }
 }
 
-pub struct SnapshotPlan<'a, K, S> {
+pub struct Plan<'a, K, S, A> {
     client: &'a K,
-    sink: &'a Sink<WarehouseConfig, ArtifactConfig>,
+    artifact: &'a A,
     window: &'a Window,
     previous: &'a [BuildLog],
     tables: &'a Tables,
     settlement: &'a S,
 }
 
-impl<'a, K, S: Settlement> SnapshotPlan<'a, K, S> {
+impl<'a, K, S: Settlement, A: Artifact> Plan<'a, K, S, A> {
     pub fn new(
         client: &'a K,
-        sink: &'a Sink<WarehouseConfig, ArtifactConfig>,
+        artifact: &'a A,
         window: &'a Window,
         previous: &'a [BuildLog],
         tables: &'a Tables,
@@ -72,7 +68,7 @@ impl<'a, K, S: Settlement> SnapshotPlan<'a, K, S> {
     ) -> Self {
         Self {
             client,
-            sink,
+            artifact,
             window,
             previous,
             tables,
@@ -87,20 +83,16 @@ impl<'a, K, S: Settlement> SnapshotPlan<'a, K, S> {
         <K as SchemaChangeStream<C::Schema>>::Error: Into<Unrunnable>,
         Unrunnable: From<<K as WarehouseClient>::Error>,
     {
-        let snapshot = DeclaredSnapshot::of(self.sink)?.artifact();
-        let builders = self.tables.narrow(self.builders(&snapshot, &logs)?)?;
+        let builders = self.tables.narrow(self.builders(&logs)?)?;
         self.verify(&builders)?;
 
         self.settlement.settle(self.client, &builders)
     }
 
-    fn verify<L: RowChangeLog, W: lithify_core::sink::Warehouse>(
-        &self,
-        builders: &[SnapshotBuilder<'_, L, W>],
-    ) -> Result<(), Unrunnable> {
+    fn verify<B: ArtifactBuilder>(&self, builders: &[B]) -> Result<(), Unrunnable> {
         let tables: Vec<_> = builders
             .iter()
-            .filter_map(SnapshotBuilder::missing_base)
+            .filter_map(ArtifactBuilder::missing_base)
             .cloned()
             .collect();
 
@@ -113,11 +105,7 @@ impl<'a, K, S: Settlement> SnapshotPlan<'a, K, S> {
         }
     }
 
-    fn builders<'b, C>(
-        &self,
-        snapshot: &'b Snapshot,
-        logs: &'b C,
-    ) -> Result<Vec<BuilderOf<'b, C, K>>, Unrunnable>
+    fn builders<'b, C>(&self, logs: &'b C) -> Result<Vec<BuilderOf<'b, A, C, K>>, Unrunnable>
     where
         'a: 'b,
         C: ChangeLogs,
@@ -125,12 +113,13 @@ impl<'a, K, S: Settlement> SnapshotPlan<'a, K, S> {
         <K as SchemaChangeStream<C::Schema>>::Error: Into<Unrunnable>,
     {
         let window: &'b Window = self.window;
+        let artifact: &'b A = self.artifact;
         let mut tracker = EraTracker::new(window.clone(), |table: &TableId| {
-            snapshot.builder::<_, K::Warehouse>(
+            artifact.builder::<_, K::Warehouse>(
                 logs.row_changes(),
                 table.clone(),
                 window,
-                snapshot.base(self.previous, table, window),
+                artifact.base(self.previous, table, window),
             )
         });
         let catalog = self.client.replay::<Unrunnable, _>(
@@ -144,7 +133,7 @@ impl<'a, K, S: Settlement> SnapshotPlan<'a, K, S> {
     }
 }
 
-impl<S: Settlement> DuckDbChangeLogsFn for SnapshotPlan<'_, DuckDbClient, S> {
+impl<S: Settlement, A: Artifact> DuckDbChangeLogsFn for Plan<'_, DuckDbClient, S, A> {
     type Output = Result<S::Output, Unrunnable>;
 
     fn call_duckdb<C>(self, logs: C) -> Self::Output
@@ -156,7 +145,7 @@ impl<S: Settlement> DuckDbChangeLogsFn for SnapshotPlan<'_, DuckDbClient, S> {
     }
 }
 
-impl<S: Settlement> BigQueryChangeLogsFn for SnapshotPlan<'_, BigQueryClient, S> {
+impl<S: Settlement, A: Artifact> BigQueryChangeLogsFn for Plan<'_, BigQueryClient, S, A> {
     type Output = Result<S::Output, Unrunnable>;
 
     fn call_bigquery<C>(self, logs: C) -> Self::Output
@@ -186,8 +175,11 @@ pub(crate) mod tests {
     use lithify_core::sql::SqlString;
 
     use super::*;
-    use crate::pipeline::CaptureConfig;
+    use crate::artifacts::{ArtifactConfig, DeclaredSnapshot};
+    use crate::pipeline::{CaptureConfig, WarehouseConfig};
     use crate::settlement::{Build, DryRun};
+    use lithify_artifact::snapshot::Snapshot;
+    use lithify_config::infra::Sink;
     use lithify_core::build_log::{BuildLog, Latest, Outcome, Run, Status};
 
     const CHANGE_LOGS: &str = "CREATE SCHEMA mysql_shop_cdc;
@@ -199,6 +191,10 @@ pub(crate) mod tests {
                 {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
                  'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]})
         ) AS t(value)";
+
+    fn snapshot(sink: &Sink<WarehouseConfig, ArtifactConfig>) -> Snapshot {
+        DeclaredSnapshot::of(sink).unwrap().artifact()
+    }
 
     pub(crate) fn pipeline() -> Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig> {
         Pipeline::open(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compose/lithify/mysql"))
@@ -227,9 +223,9 @@ pub(crate) mod tests {
             .capture()
             .with_duckdb_change_logs(
                 source.topic_prefix().unwrap(),
-                SnapshotPlan::new(
+                Plan::new(
                     &client,
-                    sink,
+                    &snapshot(sink),
                     &window,
                     &[],
                     &Tables::Every,
@@ -272,9 +268,9 @@ pub(crate) mod tests {
 
         let baseless = source.capture().with_duckdb_change_logs(
             source.topic_prefix().unwrap(),
-            SnapshotPlan::new(
+            Plan::new(
                 &client,
-                sink,
+                &snapshot(sink),
                 &window,
                 &[],
                 &Tables::Every,
@@ -311,9 +307,9 @@ pub(crate) mod tests {
             .capture()
             .with_duckdb_change_logs(
                 source.topic_prefix().unwrap(),
-                SnapshotPlan::new(
+                Plan::new(
                     &client,
-                    sink,
+                    &snapshot(sink),
                     &window,
                     &previous,
                     &Tables::Every,
@@ -469,9 +465,9 @@ pub(crate) mod tests {
             .capture()
             .with_duckdb_change_logs(
                 source.topic_prefix().unwrap(),
-                SnapshotPlan::new(
+                Plan::new(
                     client,
-                    sink,
+                    &snapshot(sink),
                     &window,
                     &[],
                     &Tables::Every,

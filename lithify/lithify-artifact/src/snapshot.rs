@@ -197,17 +197,6 @@ impl<'a, L: RowChangeLog, W: Warehouse> SnapshotBuilder<'a, L, W> {
         })
     }
 
-    pub fn missing_base(&self) -> Option<&TableId> {
-        let logged_from_start = self
-            .appearance
-            .is_some_and(|appearance| appearance.is_logged_from_start());
-
-        match logged_from_start || self.base.is_some() {
-            true => None,
-            false => self.table_from.as_ref(),
-        }
-    }
-
     fn begin(&mut self, warehouse: &W, table: &TableModel) -> Result<(), UnbuildableArtifact> {
         if self.begun {
             return Ok(());
@@ -412,6 +401,17 @@ impl<L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Position>
 impl<L: RowChangeLog, W: Warehouse> ArtifactBuilder for SnapshotBuilder<'_, L, W> {
     fn table(&self) -> &TableId {
         &self.table
+    }
+
+    fn missing_base(&self) -> Option<&TableId> {
+        let logged_from_start = self
+            .appearance
+            .is_some_and(|appearance| appearance.is_logged_from_start());
+
+        match logged_from_start || self.base.is_some() {
+            true => None,
+            false => self.table_from.as_ref(),
+        }
     }
 
     fn select(&self) -> Result<SqlString, UnbuildableArtifact> {

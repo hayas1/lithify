@@ -89,7 +89,7 @@ pub(crate) mod tests {
     use lithify_core::schedule::Schedule;
     use lithify_core::ts::Ts;
 
-    use crate::plan::SnapshotPlan;
+    use crate::plan::Plan;
     use crate::plan::tests::{
         BUILT_CHANGE_LOGS, CAPTURE, PEOPLE, at, built_before, logged, pipeline, rows,
     };
@@ -196,6 +196,7 @@ pub(crate) mod tests {
             .find(|sink| sink.name() == "duckdb_s3")
             .unwrap();
         let settlement = Build::new(sink, source, at(now)).unwrap();
+        let snapshot = DeclaredSnapshot::of(sink).unwrap().artifact();
         let mut journal = Journal::default();
 
         course.itinerary(sink, source, at(now), client)?.settle(
@@ -204,7 +205,7 @@ pub(crate) mod tests {
             |window, previous, tables| {
                 source.capture().with_duckdb_change_logs(
                     source.topic_prefix().unwrap(),
-                    SnapshotPlan::new(client, sink, window, previous, tables, &settlement),
+                    Plan::new(client, &snapshot, window, previous, tables, &settlement),
                 )
             },
         )?;
