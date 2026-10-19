@@ -27,17 +27,13 @@ pub(crate) mod query;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Config<L> {
-    #[serde(
-        default = "Config::<L>::midnight",
-        deserialize_with = "Config::<L>::time"
-    )]
+pub struct Config {
+    #[serde(default = "Config::midnight", deserialize_with = "Config::time")]
     at: NaiveTime,
     shard: String,
-    place: Vec<L>,
 }
 
-impl<L> Config<L> {
+impl Config {
     fn midnight() -> NaiveTime {
         NaiveTime::MIN
     }
@@ -52,10 +48,6 @@ impl<L> Config<L> {
 
     pub fn shard(&self) -> &str {
         &self.shard
-    }
-
-    pub fn place(&self) -> &[L] {
-        &self.place
     }
 
     pub fn at(&self) -> NaiveTime {
@@ -143,31 +135,6 @@ impl Snapshot {
                 && log.table_to() == Some(table)
                 && log.window().to() == window.from()
         })
-    }
-
-    pub fn created<W: Warehouse>(
-        &self,
-        warehouse: &W,
-        target: &TablePath,
-        table: &TableId,
-        window: &Window,
-        select: &SqlString,
-    ) -> Vec<SqlString> {
-        let copied = SqlString::from(format!("SELECT * FROM {}", warehouse.table_ref(target)));
-
-        [
-            warehouse.create_namespace(target.namespace()),
-            self.shard.create(warehouse, target, select),
-        ]
-        .into_iter()
-        .chain(self.copies.iter().flat_map(|copy| {
-            [
-                warehouse.create_namespace(copy),
-                self.shard
-                    .create(warehouse, &self.named(copy, table, window), &copied),
-            ]
-        }))
-        .collect()
     }
 
     fn named(&self, namespace: &Namespace, table: &TableId, window: &Window) -> TablePath {
@@ -488,13 +455,25 @@ impl<L: RowChangeLog, W: Warehouse> ArtifactBuilder for SnapshotBuilder<'_, L, W
             return Ok(Vec::new());
         };
 
-        Ok(self.snapshot.created(
-            warehouse,
-            target,
-            &self.table,
-            &self.window,
-            &self.select()?,
-        ))
+        let copied = SqlString::from(format!("SELECT * FROM {}", warehouse.table_ref(target)));
+        let shard = &self.snapshot.shard;
+
+        Ok([
+            warehouse.create_namespace(target.namespace()),
+            shard.create(warehouse, target, &self.select()?),
+        ]
+        .into_iter()
+        .chain(self.snapshot.copies.iter().flat_map(|copy| {
+            [
+                warehouse.create_namespace(copy),
+                shard.create(
+                    warehouse,
+                    &self.snapshot.named(copy, &self.table, &self.window),
+                    &copied,
+                ),
+            ]
+        }))
+        .collect())
     }
 
     fn build_log(&self, run: &Run, outcome: Outcome) -> BuildLog {
@@ -565,24 +544,21 @@ mod tests {
     }
 
     #[test]
-    fn a_snapshot_is_declared_with_how_its_shards_are_named_and_where_they_are_placed() {
-        let config: Config<String> = serde_json::from_value(serde_json::json!({
-            "shard": "%Y%m%d",
-            "place": ["mysql_shop", "analytics.shop"]
+    fn a_snapshot_is_declared_with_how_its_shards_are_named() {
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "shard": "%Y%m%d"
         }))
         .unwrap();
 
         assert_eq!(config.shard(), "%Y%m%d");
-        assert_eq!(config.place(), ["mysql_shop", "analytics.shop"]);
         assert_eq!(config.schedule(Tz::UTC), Schedule::default());
     }
 
     #[test]
     fn a_snapshot_is_cut_at_the_instant_of_the_day_it_is_declared_with() {
-        let config: Config<String> = serde_json::from_value(serde_json::json!({
+        let config: Config = serde_json::from_value(serde_json::json!({
             "at": "09:00",
-            "shard": "%Y%m%d",
-            "place": ["mysql_shop"]
+            "shard": "%Y%m%d"
         }))
         .unwrap();
 
@@ -596,12 +572,11 @@ mod tests {
     }
 
     #[test]
-    fn a_snapshot_declared_with_what_it_does_not_know_is_rejected() {
+    fn a_snapshot_declared_with_where_it_is_placed_is_rejected_as_the_warehouse_places_it() {
         assert!(
-            serde_json::from_value::<Config<String>>(serde_json::json!({
+            serde_json::from_value::<Config>(serde_json::json!({
                 "shard": "%Y%m%d",
-                "place": [],
-                "history": "mysql_shop_history"
+                "place": ["mysql_shop"]
             }))
             .is_err()
         );

@@ -5,7 +5,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use lithify_config::infra::{Sink, Source};
-use lithify_config::{Declaration, Pipeline};
+use lithify_config::{Declaration, Pipeline, Place, Placing};
 use lithify_core::build_log::{BuildLog, BuildLogQuery, Latest};
 use lithify_core::check::{Expectation, Inspection};
 use lithify_core::schedule::Schedule;
@@ -196,8 +196,8 @@ pub struct Pipelines<C, W: SinkWarehouse, A> {
 impl<C, W, A> Pipelines<C, W, A>
 where
     C: Clone + DeserializeOwned + Serialize,
-    W: Clone + DeserializeOwned + SinkWarehouse<Location: DeserializeOwned>,
-    A: Clone + DeserializeOwned + Declaration<Location = W::Location>,
+    W: Clone + DeserializeOwned + Placing,
+    A: Clone + DeserializeOwned + Declaration,
 {
     const SNAPSHOT: &str = "snapshot";
 
@@ -293,15 +293,16 @@ where
         now: Ts<Event>,
         view: BuildLogView,
     ) -> Result<SinkInspection, String> {
-        let undeclared = || format!("{} declares no snapshot placed anywhere", sink.name());
+        let undeclared = || format!("{} places no snapshot", sink.name());
         let snapshot = sink.artifact(Self::SNAPSHOT).ok_or_else(undeclared)?;
         let schedule = snapshot.schedule(sink.time_zone()).ok_or_else(undeclared)?;
         let expectation = Expectation::new(schedule, source.since(), capture, now);
         let reading = Reading {
             expectation: &expectation,
-            namespace: snapshot
-                .places()
-                .next()
+            namespace: sink
+                .place(Self::SNAPSHOT)
+                .and_then(Place::as_whole)
+                .and_then(<[_]>::first)
                 .map(|place| place.clone().into())
                 .ok_or_else(undeclared)?,
             view,

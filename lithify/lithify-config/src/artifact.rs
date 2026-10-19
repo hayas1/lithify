@@ -4,14 +4,16 @@ use chrono_tz::Tz;
 use serde::Deserialize;
 
 use lithify_core::schedule::Schedule;
+
+use crate::place::Places;
 use serde::de::{self, DeserializeOwned, Deserializer};
 
 pub trait Declaration {
-    type Location;
-
     fn source(&self) -> Option<&'static str>;
 
-    fn places(&self) -> impl Iterator<Item = &Self::Location>;
+    fn cuts(&self) -> Option<Vec<String>> {
+        None
+    }
 
     fn schedule(&self, time_zone: Tz) -> Option<Schedule> {
         let _ = time_zone;
@@ -34,21 +36,24 @@ impl<A> Declarations<A> {
             .map(|(artifact, declared)| (artifact.as_str(), declared))
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    pub(crate) fn over(mut self, default: &Self) -> Self
+    pub(crate) fn placed<L>(&self, places: &Places<L>) -> Self
     where
         A: Clone,
     {
-        for (artifact, declared) in &default.0 {
-            self.0
-                .entry(artifact.clone())
-                .or_insert_with(|| declared.clone());
-        }
+        Self(
+            places
+                .iter()
+                .filter_map(|(artifact, _)| {
+                    Some((artifact.to_owned(), self.get(artifact)?.clone()))
+                })
+                .collect(),
+        )
+    }
+}
 
-        self
+impl<A> Default for Declarations<A> {
+    fn default() -> Self {
+        Self(BTreeMap::new())
     }
 }
 
@@ -101,19 +106,5 @@ mod tests {
     #[test]
     fn a_kind_the_application_does_not_build_is_rejected() {
         assert!(toml::from_str::<Declarations<Made>>("history = {}").is_err());
-    }
-
-    #[test]
-    fn an_artifact_declared_again_replaces_the_one_declared_by_default_whole() {
-        let declarations = declared("snapshot.shard = \"%Y%m\"")
-            .over(&declared("snapshot.shard = \"%Y%m%d\"\ncopy = {}"));
-
-        assert_eq!(
-            declarations.get("snapshot"),
-            Some(&Made::Snapshot {
-                shard: "%Y%m".to_owned()
-            })
-        );
-        assert_eq!(declarations.get("copy"), Some(&Made::Copy {}));
     }
 }

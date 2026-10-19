@@ -1,8 +1,5 @@
-use std::collections::BTreeMap;
-
 use lithify_core::artifact::Artifact;
 use lithify_core::build_log::{BuildLog, Latest};
-use lithify_core::model::{Mask, TableId};
 use lithify_core::schedule::Schedule;
 use lithify_core::sink::WarehouseClient;
 use lithify_core::ts::{Event, Ts};
@@ -11,7 +8,7 @@ use lithify_core::window::Window;
 use lithify_config::infra::Sink;
 
 use crate::artifacts::{
-    ArtifactConfig, DeclaredInstant, DeclaredMasked, DeclaredScd1, DeclaredScd2, DeclaredSnapshot,
+    ArtifactConfig, DeclaredInstant, DeclaredScd1, DeclaredScd2, DeclaredSnapshot,
 };
 use crate::course::Itinerary;
 use crate::journal::Journal;
@@ -26,7 +23,6 @@ pub struct Derivation<'a> {
     days: Vec<Window>,
     built_until: Option<Ts<Event>>,
     now: Ts<Event>,
-    masks: &'a BTreeMap<TableId, BTreeMap<String, Mask>>,
 }
 
 impl<'a> Derivation<'a> {
@@ -35,7 +31,6 @@ impl<'a> Derivation<'a> {
         itinerary: &Itinerary,
         schedule: Schedule,
         now: Ts<Event>,
-        masks: &'a BTreeMap<TableId, BTreeMap<String, Mask>>,
     ) -> Self {
         Self {
             sink,
@@ -43,7 +38,6 @@ impl<'a> Derivation<'a> {
             days: itinerary.days(schedule),
             built_until: itinerary.built_until(),
             now,
-            masks,
         }
     }
 
@@ -72,16 +66,6 @@ impl<'a> Derivation<'a> {
             for window in cuts {
                 let previous = self.built(planner, &snapshot, *window.from())?;
                 self.derive(planner, &instant, &window, &previous, &settlement, journal)?;
-            }
-        }
-
-        if let Some(declared) = DeclaredMasked::of(self.sink, self.masks)? {
-            let masked = declared.artifact();
-            let settlement = settlement.advancing(declared.namespace(), &declared.series());
-
-            for window in &self.windows {
-                let previous = self.built(planner, &snapshot, *window.to())?;
-                self.derive(planner, &masked, window, &previous, &settlement, journal)?;
             }
         }
 
@@ -161,39 +145,29 @@ impl<'a> Derivation<'a> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use lithify_config::Pipeline;
 
     use crate::course::Course;
     use crate::course::tests::settle;
     use crate::pipeline::CaptureConfig;
-    use crate::plan::tests::{CAPTURE, PEOPLE, built_before, logged, rows};
+    use crate::plan::tests::{CAPTURE, INFRA, PEOPLE, built_before, logged, opened, rows};
 
     use super::*;
 
     fn derived(
         name: &str,
         declared: &str,
+        placed: &str,
         listed: &str,
     ) -> Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig> {
-        let directory =
-            std::env::temp_dir().join(format!("lithify-cli-{name}-{}", std::process::id()));
-        std::fs::create_dir_all(&directory).unwrap();
-        let compose = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compose/lithify/mysql");
-        let infra = std::fs::read_to_string(compose.join("infra.toml")).unwrap();
-        std::fs::write(directory.join("infra.toml"), format!("{infra}\n{declared}")).unwrap();
-        std::fs::write(directory.join("table.toml"), listed).unwrap();
-        let pipeline = Pipeline::open(&directory).unwrap();
-        std::fs::remove_dir_all(&directory).unwrap();
-
-        pipeline
+        opened(name, &format!("{declared}{INFRA}{placed}"), listed)
     }
 
     fn cut_at_six(name: &str) -> Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig> {
         derived(
             name,
-            "[[sink.artifact.instant]]\nat = \"06:00\"\nshard = \"%Y%m%d%H\"\nplace = [{ duckdb.prefix = \"mysql_shop_instant\" }]\n",
+            "[[artifact.instant]]\nat = \"06:00\"\nshard = \"%Y%m%d%H\"\n",
+            "place.instant.\"06:00\" = [{ prefix = \"mysql_shop_instant\" }]\n",
             "[default]\nartifacts = [\"snapshot\", \"instant\"]\n",
         )
     }
@@ -203,7 +177,8 @@ mod tests {
         let client = logged(PEOPLE, &[built_before("people", CAPTURE)]);
         let pipeline = derived(
             "scd1",
-            "[sink.artifact.scd1]\nplace = [{ duckdb.prefix = \"mysql_shop_scd1\" }]\n",
+            "[artifact.scd1]\n",
+            "place.scd1 = [{ prefix = \"mysql_shop_scd1\" }]\n",
             "[default]\nartifacts = [\"snapshot\", \"scd1\"]\n",
         );
 
@@ -242,7 +217,8 @@ mod tests {
         let client = logged(PEOPLE, &[]);
         let pipeline = derived(
             "scd2",
-            "[sink.artifact.scd2]\nshard = \"%Y%m%d\"\nplace = [{ duckdb.prefix = \"mysql_shop_scd2\" }]\n",
+            "[artifact.scd2]\nshard = \"%Y%m%d\"\n",
+            "place.scd2 = [{ prefix = \"mysql_shop_scd2\" }]\n",
             "[default]\nartifacts = [\"snapshot\", \"scd2\"]\n",
         );
 
@@ -274,12 +250,13 @@ mod tests {
     }
 
     #[test]
-    fn a_catch_up_masks_each_window_it_builds_from_the_snapshot_of_that_window() {
-        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]);
+    fn a_catch_up_builds_an_artifact_only_for_the_tables_that_name_it() {
+        let client = logged(PEOPLE, &[]);
         let pipeline = derived(
-            "masked",
-            "[sink.artifact.masked]\nshard = \"%Y%m%d\"\nplace = [{ duckdb.prefix = \"mysql_shop_masked\" }]\n",
-            "[default]\nartifacts = [\"snapshot\", \"masked\"]\n\n[[table]]\nschema = \"shop\"\nname = \"people\"\nartifacts = [\"snapshot\", \"masked\"]\ncolumn.id.mask = \"null\"\n",
+            "scd2-unnamed",
+            "[artifact.scd2]\nshard = \"%Y%m%d\"\n",
+            "place.scd2 = [{ prefix = \"mysql_shop_scd2\" }]\n",
+            "[default]\nartifacts = [\"snapshot\"]\n",
         );
 
         settle(
@@ -293,28 +270,9 @@ mod tests {
         assert_eq!(
             rows(
                 &client,
-                "SELECT target, base FROM mysql_shop_masked._lithify_log WHERE status = 'succeeded' ORDER BY id"
+                "SELECT target, '' FROM mysql_shop_scd2._lithify_log WHERE status = 'succeeded'"
             ),
-            [
-                (
-                    "mysql_shop_masked.people_20260920".to_owned(),
-                    "mysql_shop.people_20260920".to_owned()
-                ),
-                (
-                    "mysql_shop_masked.people_20260921".to_owned(),
-                    "mysql_shop.people_20260921".to_owned()
-                ),
-            ]
-        );
-        assert_eq!(
-            rows(
-                &client,
-                "SELECT COALESCE(id::VARCHAR, 'null'), 'people' FROM mysql_shop_masked.people_20260921"
-            ),
-            [
-                ("null".to_owned(), "people".to_owned()),
-                ("null".to_owned(), "people".to_owned())
-            ]
+            []
         );
     }
 

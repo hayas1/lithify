@@ -11,15 +11,7 @@ use crate::snapshot::{Snapshot, SnapshotBuilder};
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Config<L> {
-    place: Vec<L>,
-}
-
-impl<L> Config<L> {
-    pub fn place(&self) -> &[L] {
-        &self.place
-    }
-}
+pub struct Config {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scd1 {

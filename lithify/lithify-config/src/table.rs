@@ -3,7 +3,6 @@ use std::fmt::{self, Display, Formatter};
 
 use serde::{Deserialize, Serialize};
 
-pub use lithify_core::model::Mask;
 use lithify_core::model::TableId;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -77,14 +76,6 @@ impl Tables {
         self.tables.get(id).unwrap_or(&self.default)
     }
 
-    pub fn masks(&self) -> BTreeMap<TableId, BTreeMap<String, Mask>> {
-        self.tables
-            .iter()
-            .filter(|(_, table)| !table.masks.is_empty())
-            .map(|(id, table)| (id.clone(), table.masks.clone()))
-            .collect()
-    }
-
     pub fn listed(&self) -> impl Iterator<Item = (Option<&TableId>, &Table)> {
         std::iter::once((None, &self.default))
             .chain(self.tables.iter().map(|(id, table)| (Some(id), table)))
@@ -140,7 +131,7 @@ impl Display for Mislisting {
             Self::TableListedTwice(table) => write!(formatter, "{table} is listed twice"),
             Self::Undeclared { table, artifact } => write!(
                 formatter,
-                "{} is built into {artifact}, which no sink declares",
+                "{} is built into {artifact}, which no sink places",
                 Self::named(table)
             ),
             Self::WithoutSource {
@@ -181,6 +172,25 @@ impl Table {
 struct ListedColumn {
     #[serde(default)]
     mask: Mask,
+}
+
+// A mask that takes arguments, as a hash will, is listed as a table,
+// `mask.hash = { algorithm = "sha256" }`, and before an artifact applies it, it has to settle what a
+// null mask gets away with:
+// - each warehouse spells it in SQL of its own, and one that cannot is refused like a column type it
+//   has no column for;
+// - it may change the type of the column in the artifact, as a hash turns any column into text;
+// - it cannot apply to a primary key unless it is deterministic, since rows are folded by their keys;
+// - a secret it needs, such as a salt, is read from the environment rather than written here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mask {
+    #[default]
+    Identity,
+    Null,
+    // TODO: take the algorithm and where the salt is read from as arguments, and decide the type
+    // the hashed column takes in the artifact, before any artifact applies it.
+    Hash,
 }
 
 #[cfg(test)]
@@ -240,17 +250,6 @@ mod tests {
         let table = table("shop", "orders");
 
         assert_eq!(table.mask("attributes"), Mask::Null);
-    }
-
-    #[test]
-    fn the_masks_of_every_listed_table_are_read_together() {
-        assert_eq!(
-            tables(TABLES).masks(),
-            BTreeMap::from([(
-                TableId::new("shop", "orders"),
-                BTreeMap::from([("attributes".to_owned(), Mask::Null)])
-            )])
-        );
     }
 
     #[test]

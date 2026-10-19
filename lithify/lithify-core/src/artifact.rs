@@ -2,7 +2,7 @@ use std::fmt;
 
 use crate::build_log::{BuildLog, Outcome, Run, Series};
 use crate::listener::SchemaChangeListener;
-use crate::model::{Mask, TableId};
+use crate::model::TableId;
 use crate::sink::{TablePath, UnsupportedColumn, Warehouse};
 use crate::source::RowChangeLog;
 use crate::sql::SqlString;
@@ -15,16 +15,6 @@ pub enum UnbuildableArtifact {
     WithoutEra(TableId),
     AcrossEras(TableId),
     UnsupportedColumn(UnsupportedColumn),
-    UnsupportedMask {
-        table: TableId,
-        column: String,
-        mask: Mask,
-    },
-    Unmasked {
-        table: TableId,
-        masked: String,
-        renamed: String,
-    },
 }
 
 impl fmt::Display for UnbuildableArtifact {
@@ -50,22 +40,6 @@ impl fmt::Display for UnbuildableArtifact {
                 "{table} changed its schema within the window, which SCD type 2 does not carry its versions across yet"
             ),
             Self::UnsupportedColumn(unsupported) => unsupported.fmt(formatter),
-            Self::UnsupportedMask {
-                table,
-                column,
-                mask,
-            } => write!(
-                formatter,
-                "{table} masks {column} with {mask:?}, which no artifact applies yet"
-            ),
-            Self::Unmasked {
-                table,
-                masked,
-                renamed,
-            } => write!(
-                formatter,
-                "{table} renamed the masked {masked} to {renamed}, which is not masked; mask {renamed} or the values {masked} held come out as they are"
-            ),
         }
     }
 }

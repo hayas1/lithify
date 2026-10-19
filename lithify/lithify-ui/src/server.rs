@@ -11,7 +11,7 @@ use leptos::prelude::*;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use lithify_config::Declaration;
+use lithify_config::{Declaration, Placing};
 use lithify_core::sink::SinkWarehouse;
 
 use crate::pipelines::{PipelineLocation, PipelineOverview, Pipelines};
@@ -25,9 +25,9 @@ pub struct Board<C, W: SinkWarehouse, A> {
 impl<C, W, A> Board<C, W, A>
 where
     C: Clone + DeserializeOwned + Serialize + 'static,
-    W: Clone + DeserializeOwned + SinkWarehouse<Location: DeserializeOwned> + Send + Sync + 'static,
+    W: Clone + DeserializeOwned + Placing + Send + Sync + 'static,
     W::Credential: Send + Sync,
-    A: Clone + DeserializeOwned + Declaration<Location = W::Location> + 'static,
+    A: Clone + DeserializeOwned + Declaration + 'static,
 {
     pub fn new(pipelines: Pipelines<C, W, A>) -> Self {
         Self {

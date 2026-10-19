@@ -16,6 +16,8 @@ use lithify_protocol::sink::bigquery::client::{
 };
 use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbChangeLogsFn, DuckDbClient};
 
+use lithify_config::table;
+
 use crate::pipeline::CaptureConfig;
 use crate::settlement::Settlement;
 use crate::unrunnable::Unrunnable;
@@ -57,6 +59,7 @@ pub struct Plan<'a, K, S, A> {
     window: &'a Window,
     previous: &'a [BuildLog],
     tables: &'a Tables,
+    listing: &'a table::Tables,
     settlement: &'a S,
 }
 
@@ -67,6 +70,7 @@ impl<'a, K, S: Settlement, A: Artifact> Plan<'a, K, S, A> {
         window: &'a Window,
         previous: &'a [BuildLog],
         tables: &'a Tables,
+        listing: &'a table::Tables,
         settlement: &'a S,
     ) -> Self {
         Self {
@@ -75,6 +79,7 @@ impl<'a, K, S: Settlement, A: Artifact> Plan<'a, K, S, A> {
             window,
             previous,
             tables,
+            listing,
             settlement,
         }
     }
@@ -86,7 +91,8 @@ impl<'a, K, S: Settlement, A: Artifact> Plan<'a, K, S, A> {
         <K as SchemaChangeStream<C::Schema>>::Error: Into<Unrunnable>,
         Unrunnable: From<<K as WarehouseClient>::Error>,
     {
-        let builders = self.tables.narrow(self.builders(&logs)?)?;
+        let mut builders = self.tables.narrow(self.builders(&logs)?)?;
+        builders.retain(|builder| self.listing.table(builder.table()).builds(A::KIND));
         self.verify(&builders)?;
 
         self.settlement.settle(self.client, &builders)
@@ -159,14 +165,21 @@ pub struct Planning<'a, K> {
     client: &'a K,
     capture: &'a CaptureConfig,
     topic_prefix: &'a str,
+    listing: &'a table::Tables,
 }
 
 impl<'a, K> Planning<'a, K> {
-    pub fn new(client: &'a K, capture: &'a CaptureConfig, topic_prefix: &'a str) -> Self {
+    pub fn new(
+        client: &'a K,
+        capture: &'a CaptureConfig,
+        topic_prefix: &'a str,
+        listing: &'a table::Tables,
+    ) -> Self {
         Self {
             client,
             capture,
             topic_prefix,
+            listing,
         }
     }
 }
@@ -188,7 +201,15 @@ impl Planner for Planning<'_, DuckDbClient> {
     ) -> Result<S::Output, Unrunnable> {
         self.capture.with_duckdb_change_logs(
             self.topic_prefix,
-            Plan::new(self.client, artifact, window, previous, tables, settlement),
+            Plan::new(
+                self.client,
+                artifact,
+                window,
+                previous,
+                tables,
+                self.listing,
+                settlement,
+            ),
         )
     }
 }
@@ -210,7 +231,15 @@ impl Planner for Planning<'_, BigQueryClient> {
     ) -> Result<S::Output, Unrunnable> {
         self.capture.with_bigquery_change_logs(
             self.topic_prefix,
-            Plan::new(self.client, artifact, window, previous, tables, settlement),
+            Plan::new(
+                self.client,
+                artifact,
+                window,
+                previous,
+                tables,
+                self.listing,
+                settlement,
+            ),
         )
     }
 }
@@ -278,9 +307,53 @@ pub(crate) mod tests {
         DeclaredSnapshot::of(sink).unwrap().artifact()
     }
 
+    pub(crate) const INFRA: &str = r#"
+[artifact.snapshot]
+shard = "%Y%m%d"
+
+[default]
+source.capture.debezium.dialect = "mysql"
+
+[[source]]
+name = "primary"
+since = "1970-01-01T00:00:00Z"
+topic_prefix = "mysql"
+
+[[sink]]
+name = "bigquery"
+
+[sink.warehouse.bigquery]
+project = "local-project"
+change_log = { dataset = "mysql_shop_cdc" }
+place.snapshot = [{ dataset = "mysql_shop" }]
+
+[[sink]]
+name = "duckdb_s3"
+
+[sink.warehouse.duckdb]
+s3 = { endpoint = "http://rustfs:9000", region = "us-east-1", bucket = "lithify", format = "parquet" }
+change_log = { prefix = "mysql_shop_cdc" }
+place.snapshot = [{ prefix = "mysql_shop" }]
+"#;
+
+    pub(crate) fn opened(
+        name: &str,
+        infra: &str,
+        listed: &str,
+    ) -> Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig> {
+        let directory =
+            std::env::temp_dir().join(format!("lithify-cli-{name}-{}", Ulid::generate()));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("infra.toml"), infra).unwrap();
+        std::fs::write(directory.join("table.toml"), listed).unwrap();
+        let pipeline = Pipeline::open(&directory).unwrap();
+        std::fs::remove_dir_all(&directory).unwrap();
+
+        pipeline
+    }
+
     pub(crate) fn pipeline() -> Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig> {
-        Pipeline::open(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compose/lithify/mysql"))
-            .unwrap()
+        opened("pipeline", INFRA, "")
     }
 
     #[test]
@@ -311,6 +384,7 @@ pub(crate) mod tests {
                     &window,
                     &[],
                     &Tables::Every,
+                    pipeline.tables(),
                     &DryRun::new(Path::new("plans"), "rustfs"),
                 ),
             )
@@ -356,6 +430,7 @@ pub(crate) mod tests {
                 &window,
                 &[],
                 &Tables::Every,
+                pipeline.tables(),
                 &DryRun::new(Path::new("plans"), "rustfs"),
             ),
         );
@@ -395,6 +470,7 @@ pub(crate) mod tests {
                     &window,
                     &previous,
                     &Tables::Every,
+                    pipeline.tables(),
                     &DryRun::new(Path::new("plans"), "rustfs"),
                 ),
             )
@@ -553,6 +629,7 @@ pub(crate) mod tests {
                     &window,
                     &[],
                     &Tables::Every,
+                    pipeline.tables(),
                     &Build::new(sink, source, at("2026-09-22T05:00:00Z")).unwrap(),
                 ),
             )

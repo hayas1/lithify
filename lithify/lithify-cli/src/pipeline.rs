@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use lithify_config::{Placed, Places, Placing};
 use lithify_core::sink::{Namespace, OpenWarehouse, SinkWarehouse, WarehouseFn};
 use lithify_core::source::CdcFormat;
 use lithify_protocol::sink::bigquery::client::{BigQueryCapture, BigQueryChangeLogsFn};
@@ -48,20 +49,46 @@ impl BigQueryCapture for CaptureConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "lowercase")]
 pub enum WarehouseConfig {
-    DuckDb(<DuckDbWarehouse as OpenWarehouse>::Config),
-    BigQuery(<BigQueryWarehouse as OpenWarehouse>::Config),
+    DuckDb(
+        Placed<
+            <DuckDbWarehouse as OpenWarehouse>::Config,
+            <DuckDbWarehouse as OpenWarehouse>::Location,
+        >,
+    ),
+    BigQuery(
+        Placed<
+            <BigQueryWarehouse as OpenWarehouse>::Config,
+            <BigQueryWarehouse as OpenWarehouse>::Location,
+        >,
+    ),
 }
 
 impl WarehouseConfig {
     pub fn reach<'a>(&'a self, location: &'a LocationConfig) -> Option<Reached<'a>> {
         match (self, location) {
-            (Self::DuckDb(config), LocationConfig::DuckDb(location)) => {
-                Some(Reached::DuckDb(config, location))
+            (Self::DuckDb(placed), LocationConfig::DuckDb(location)) => {
+                Some(Reached::DuckDb(placed.warehouse(), location))
             }
-            (Self::BigQuery(config), LocationConfig::BigQuery(location)) => {
-                Some(Reached::BigQuery(config, location))
+            (Self::BigQuery(placed), LocationConfig::BigQuery(location)) => {
+                Some(Reached::BigQuery(placed.warehouse(), location))
             }
             _ => None,
+        }
+    }
+}
+
+impl Placing for WarehouseConfig {
+    fn change_log(&self) -> LocationConfig {
+        match self {
+            Self::DuckDb(placed) => LocationConfig::DuckDb(placed.change_log().clone()),
+            Self::BigQuery(placed) => LocationConfig::BigQuery(placed.change_log().clone()),
+        }
+    }
+
+    fn places(&self) -> Places<LocationConfig> {
+        match self {
+            Self::DuckDb(placed) => placed.places().clone().map(LocationConfig::DuckDb),
+            Self::BigQuery(placed) => placed.places().clone().map(LocationConfig::BigQuery),
         }
     }
 }
@@ -94,8 +121,7 @@ impl SinkWarehouse for WarehouseConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "lowercase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LocationConfig {
     DuckDb(<DuckDbWarehouse as OpenWarehouse>::Location),
     BigQuery(<BigQueryWarehouse as OpenWarehouse>::Location),
@@ -168,31 +194,40 @@ mod tests {
         assert!(unknown.is_err());
     }
 
+    const BIGQUERY: &str = "[bigquery]\nproject = \"local-project\"\nchange_log = { dataset = \"mysql_shop_cdc\" }\nplace.snapshot = [{ dataset = \"mysql_shop\" }]";
+
     #[test]
     fn a_pipeline_is_sunk_into_a_warehouse_this_program_reads() {
-        let warehouse: WarehouseConfig =
-            toml::from_str("[bigquery]\nproject = \"local-project\"").unwrap();
+        let warehouse: WarehouseConfig = toml::from_str(BIGQUERY).unwrap();
 
         let WarehouseConfig::BigQuery(bigquery) = warehouse else {
             panic!("expected a bigquery warehouse");
         };
-        assert_eq!(bigquery.project(), "local-project");
+        assert_eq!(bigquery.warehouse().project(), "local-project");
     }
 
     #[test]
-    fn a_warehouse_reaches_a_location_written_the_way_it_is() {
-        let bigquery: WarehouseConfig =
-            toml::from_str("[bigquery]\nproject = \"local-project\"").unwrap();
-        let dataset: LocationConfig = toml::from_str("bigquery.dataset = \"mysql_shop\"").unwrap();
-        let prefix: LocationConfig = toml::from_str("duckdb.prefix = \"mysql_shop\"").unwrap();
+    fn a_warehouse_reaches_the_change_log_and_the_places_written_in_it() {
+        let bigquery: WarehouseConfig = toml::from_str(BIGQUERY).unwrap();
+        let places = bigquery.places();
+        let snapshot = places
+            .get("snapshot")
+            .and_then(lithify_config::Place::as_whole)
+            .unwrap();
 
-        assert!(bigquery.reaches(&dataset));
-        assert!(!bigquery.reaches(&prefix));
+        assert!(bigquery.reaches(&bigquery.change_log()));
+        assert!(snapshot.iter().all(|place| bigquery.reaches(place)));
+        assert_eq!(
+            Namespace::from(snapshot[0].clone()),
+            Namespace::from("mysql_shop")
+        );
     }
 
     #[test]
     fn a_warehouse_this_program_does_not_read_is_rejected() {
-        let unknown = toml::from_str::<WarehouseConfig>("[redshift]\ncluster = \"shop\"");
+        let unknown = toml::from_str::<WarehouseConfig>(
+            "[redshift]\ncluster = \"shop\"\nchange_log = { schema = \"mysql_shop_cdc\" }",
+        );
 
         assert!(unknown.is_err());
     }

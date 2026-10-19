@@ -36,7 +36,7 @@ The `register-*` one-shot services register the connectors in `compose/connect/c
 There is one sink connector per source database and sink, named `sink-<sink>-<source>`. Each is registered from the template `compose/connect/connectors/sink-<sink>.json`: `register.sh sink-bigquery:mysql` replaces `@SOURCE@` with `MYSQL`, so it subscribes to `CDC_MYSQL_TOPICS_REGEX` and writes to `BIGQUERY_MYSQL_DATASET` (`sink-s3:mysql` writes under `S3_MYSQL_PREFIX`).
 
 `CDC_<SOURCE>_NAMESPACE` names the source and `CDC_<SOURCE>_LOG_NAMESPACE` is where its raw change log lands, as a dataset in BigQuery and as a prefix in S3. That leaves the source namespace free for what an application derives from the log.
-Log tables keep the names the source connector and the sink give them, so `mysql_shop_cdc.mysql_shop_customers`, while derived tables read as `mysql_shop.customers_snapshot` and `mysql_shop.customers_history`.
+Log tables keep the names the source connector and the sink give them, so `mysql_shop_cdc.mysql_shop_customers`, while the artifacts `compose/lithify/<source>/infra.toml` places read as `mysql_shop.customers_20260920` for the daily snapshot of every table, and, for the tables `compose/lithify/<source>/table.toml` names them for, `mysql_shop_scd1.customers` for the current state of the customers, and `mysql_shop_1200.orders_20260920` for the orders at noon with `mysql_shop_scd2.orders_closed_20260920` and `mysql_shop_scd2.orders_open_20260920` for their versions of each day.
 Run `compose/connect/register_test.sh` to test the registration script on its own.
 
 Make some changes and look at the result (`docker compose` runs in `compose/`):

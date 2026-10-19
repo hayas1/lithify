@@ -1,10 +1,7 @@
-use std::collections::BTreeMap;
-
 use chrono::{DateTime, NaiveDate, Utc};
 
 use lithify_config::infra::{Sink, Source};
 use lithify_core::build_log::BuildLog;
-use lithify_core::model::{Mask, TableId};
 use lithify_core::schedule::Schedule;
 use lithify_core::sink::WarehouseClient;
 use lithify_core::ts::{Event, Ts};
@@ -28,7 +25,8 @@ pub enum Course {
 impl Course {
     pub fn settle<P, S>(
         &self,
-        leg: &Leg,
+        sink: &Sink<WarehouseConfig, ArtifactConfig>,
+        source: &Source<CaptureConfig>,
         now: DateTime<Utc>,
         planner: &P,
         settlement: &S,
@@ -39,16 +37,10 @@ impl Course {
         Unrunnable: From<<P::Client as WarehouseClient>::Error>,
         S: Settlement,
     {
-        let declared = DeclaredSnapshot::of(leg.sink)?;
+        let declared = DeclaredSnapshot::of(sink)?;
         let snapshot = declared.artifact();
-        let itinerary = self.itinerary(leg.sink, leg.source, now, planner.client())?;
-        let derivation = Derivation::new(
-            leg.sink,
-            &itinerary,
-            declared.schedule(),
-            Ts::from(now),
-            leg.masks,
-        );
+        let itinerary = self.itinerary(sink, source, now, planner.client())?;
+        let derivation = Derivation::new(sink, &itinerary, declared.schedule(), Ts::from(now));
 
         itinerary.settle(settlement, journal, |window, previous, tables| {
             planner.plan(&snapshot, window, previous, tables, settlement)
@@ -76,34 +68,6 @@ impl Course {
                 Shard::new(sink, source, now).itinerary(client, *date, tables)
             }
         }
-    }
-}
-
-pub struct Leg<'a> {
-    sink: &'a Sink<WarehouseConfig, ArtifactConfig>,
-    source: &'a Source<CaptureConfig>,
-    masks: &'a BTreeMap<TableId, BTreeMap<String, Mask>>,
-}
-
-impl<'a> Leg<'a> {
-    pub fn new(
-        sink: &'a Sink<WarehouseConfig, ArtifactConfig>,
-        source: &'a Source<CaptureConfig>,
-        masks: &'a BTreeMap<TableId, BTreeMap<String, Mask>>,
-    ) -> Self {
-        Self {
-            sink,
-            source,
-            masks,
-        }
-    }
-
-    pub fn sink(&self) -> &'a Sink<WarehouseConfig, ArtifactConfig> {
-        self.sink
-    }
-
-    pub fn source(&self) -> &'a Source<CaptureConfig> {
-        self.source
     }
 }
 
@@ -286,9 +250,15 @@ pub(crate) mod tests {
         let mut journal = Journal::default();
 
         course.settle(
-            &Leg::new(sink, source, &pipeline.masks()),
+            sink,
+            source,
             at(now),
-            &Planning::new(client, source.capture(), source.topic_prefix().unwrap()),
+            &Planning::new(
+                client,
+                source.capture(),
+                source.topic_prefix().unwrap(),
+                pipeline.tables(),
+            ),
             &settlement,
             &mut journal,
         )?;

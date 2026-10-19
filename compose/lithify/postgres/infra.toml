@@ -8,23 +8,37 @@ topic_prefix = "postgres"
 
 [[sink]]
 name = "bigquery"
-change_log.bigquery.dataset = "postgres_shop_cdc"
-warehouse.bigquery.project = "local-project"
-warehouse.bigquery.endpoint = "http://bigquery-emulator:9050"
-warehouse.bigquery.credentials = "anonymous"
 
-[sink.artifact.snapshot]
-shard = "%Y%m%d"
-place = [{ bigquery.dataset = "postgres_shop" }]
+[sink.warehouse.bigquery]
+project = "local-project"
+endpoint = "http://bigquery-emulator:9050"
+credentials = "anonymous"
+change_log = { dataset = "postgres_shop_cdc" }
+place.snapshot = [{ dataset = "postgres_shop" }]
+place.instant."12:00" = [{ dataset = "postgres_shop_1200" }]
+place.scd1 = [{ dataset = "postgres_shop_scd1" }]
+place.scd2 = [{ dataset = "postgres_shop_scd2" }]
 
 [[sink]]
 name = "duckdb_s3"
-change_log.duckdb.prefix = "postgres_shop_cdc"
-warehouse.duckdb.s3.endpoint = "http://rustfs:9000"
-warehouse.duckdb.s3.region = "us-east-1"
-warehouse.duckdb.s3.bucket = "lithify"
-warehouse.duckdb.s3.format = "parquet"
 
-[sink.artifact.snapshot]
+[sink.warehouse.duckdb]
+s3 = { endpoint = "http://rustfs:9000", region = "us-east-1", bucket = "lithify", format = "parquet" }
+change_log = { prefix = "postgres_shop_cdc" }
+place.snapshot = [{ prefix = "postgres_shop" }]
+place.instant."12:00" = [{ prefix = "postgres_shop_1200" }]
+place.scd1 = [{ prefix = "postgres_shop_scd1" }]
+place.scd2 = [{ prefix = "postgres_shop_scd2" }]
+
+[artifact.snapshot]
+at = "00:00"
 shard = "%Y%m%d"
-place = [{ duckdb.prefix = "postgres_shop" }]
+
+[[artifact.instant]]
+at = "12:00"
+shard = "%Y%m%d"
+
+[artifact.scd1]
+
+[artifact.scd2]
+shard = "%Y%m%d"

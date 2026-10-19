@@ -1,18 +1,14 @@
-use std::collections::BTreeMap;
-
 use chrono_tz::Tz;
 use serde::Deserialize;
 
 use lithify_artifact::instant::{self, Instant};
-use lithify_artifact::masked::{self, Masked};
 use lithify_artifact::scd1::{self, Scd1};
 use lithify_artifact::scd2::{self, Scd2};
 use lithify_artifact::snapshot::{self, Snapshot};
-use lithify_config::Declaration;
 use lithify_config::infra::Sink;
+use lithify_config::{Declaration, Place};
 use lithify_core::artifact::Artifact;
 use lithify_core::build_log::Series;
-use lithify_core::model::{Mask, TableId};
 use lithify_core::schedule::Schedule;
 use lithify_core::sink::Namespace;
 
@@ -22,77 +18,62 @@ use crate::unrunnable::Unrunnable;
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "lowercase")]
 pub enum ArtifactConfig {
-    Snapshot(snapshot::Config<LocationConfig>),
-    Instant(instant::Config<LocationConfig>),
-    Masked(masked::Config<LocationConfig>),
-    Scd1(scd1::Config<LocationConfig>),
-    Scd2(scd2::Config<LocationConfig>),
+    Snapshot(snapshot::Config),
+    Instant(instant::Config),
+    Scd1(scd1::Config),
+    Scd2(scd2::Config),
 }
 
 impl ArtifactConfig {
-    pub fn as_snapshot(&self) -> Option<&snapshot::Config<LocationConfig>> {
+    pub fn as_snapshot(&self) -> Option<&snapshot::Config> {
         match self {
             Self::Snapshot(config) => Some(config),
-            Self::Instant(_) | Self::Masked(_) | Self::Scd1(_) | Self::Scd2(_) => None,
+            Self::Instant(_) | Self::Scd1(_) | Self::Scd2(_) => None,
         }
     }
 
-    pub fn as_instant(&self) -> Option<&instant::Config<LocationConfig>> {
+    pub fn as_instant(&self) -> Option<&instant::Config> {
         match self {
             Self::Instant(config) => Some(config),
-            Self::Snapshot(_) | Self::Masked(_) | Self::Scd1(_) | Self::Scd2(_) => None,
+            Self::Snapshot(_) | Self::Scd1(_) | Self::Scd2(_) => None,
         }
     }
 
-    pub fn as_masked(&self) -> Option<&masked::Config<LocationConfig>> {
-        match self {
-            Self::Masked(config) => Some(config),
-            Self::Snapshot(_) | Self::Instant(_) | Self::Scd1(_) | Self::Scd2(_) => None,
-        }
-    }
-
-    pub fn as_scd1(&self) -> Option<&scd1::Config<LocationConfig>> {
+    pub fn as_scd1(&self) -> Option<&scd1::Config> {
         match self {
             Self::Scd1(config) => Some(config),
-            Self::Snapshot(_) | Self::Instant(_) | Self::Masked(_) | Self::Scd2(_) => None,
+            Self::Snapshot(_) | Self::Instant(_) | Self::Scd2(_) => None,
         }
     }
 
-    pub fn as_scd2(&self) -> Option<&scd2::Config<LocationConfig>> {
+    pub fn as_scd2(&self) -> Option<&scd2::Config> {
         match self {
             Self::Scd2(config) => Some(config),
-            Self::Snapshot(_) | Self::Instant(_) | Self::Masked(_) | Self::Scd1(_) => None,
+            Self::Snapshot(_) | Self::Instant(_) | Self::Scd1(_) => None,
         }
     }
 }
 
 impl Declaration for ArtifactConfig {
-    type Location = LocationConfig;
-
     fn source(&self) -> Option<&'static str> {
         match self {
             Self::Snapshot(_) | Self::Scd2(_) => None,
             Self::Instant(_) => Some(<Instant as Artifact>::From::KIND),
-            Self::Masked(_) => Some(<Masked as Artifact>::From::KIND),
             Self::Scd1(_) => Some(<Scd1 as Artifact>::From::KIND),
         }
     }
 
-    fn places(&self) -> impl Iterator<Item = &LocationConfig> {
+    fn cuts(&self) -> Option<Vec<String>> {
         match self {
-            Self::Snapshot(config) => config.place().iter().collect::<Vec<_>>(),
-            Self::Instant(cuts) => cuts.iter().flat_map(|cut| cut.place()).collect(),
-            Self::Masked(config) => config.place().iter().collect(),
-            Self::Scd1(config) => config.place().iter().collect(),
-            Self::Scd2(config) => config.place().iter().collect(),
+            Self::Instant(cuts) => Some(cuts.iter().map(|cut| Instant::cut(cut.at())).collect()),
+            Self::Snapshot(_) | Self::Scd1(_) | Self::Scd2(_) => None,
         }
-        .into_iter()
     }
 
     fn schedule(&self, time_zone: Tz) -> Option<Schedule> {
         match self {
             Self::Snapshot(config) => Some(config.schedule(time_zone)),
-            Self::Instant(_) | Self::Masked(_) | Self::Scd1(_) | Self::Scd2(_) => None,
+            Self::Instant(_) | Self::Scd1(_) | Self::Scd2(_) => None,
         }
     }
 }
@@ -105,7 +86,7 @@ pub struct Placement<'a> {
 
 impl<'a> Placement<'a> {
     fn of(
-        sink: &Sink<WarehouseConfig, ArtifactConfig>,
+        sink: &'a Sink<WarehouseConfig, ArtifactConfig>,
         artifact: &'static str,
         places: &'a [LocationConfig],
     ) -> Result<Self, Unrunnable> {
@@ -119,6 +100,19 @@ impl<'a> Placement<'a> {
             namespace: place.clone().into(),
             time_zone: sink.time_zone(),
         })
+    }
+
+    fn whole(
+        sink: &'a Sink<WarehouseConfig, ArtifactConfig>,
+        artifact: &'static str,
+    ) -> Result<Self, Unrunnable> {
+        Self::of(
+            sink,
+            artifact,
+            sink.place(artifact)
+                .and_then(Place::as_whole)
+                .unwrap_or_default(),
+        )
     }
 
     pub fn namespace(&self) -> &Namespace {
@@ -145,7 +139,7 @@ impl<'a> Placement<'a> {
 }
 
 pub struct DeclaredSnapshot<'a> {
-    config: &'a snapshot::Config<LocationConfig>,
+    config: &'a snapshot::Config,
     placement: Placement<'a>,
 }
 
@@ -163,7 +157,7 @@ impl<'a> DeclaredSnapshot<'a> {
 
         Ok(Self {
             config,
-            placement: Placement::of(sink, Self::ARTIFACT, config.place())?,
+            placement: Placement::whole(sink, Self::ARTIFACT)?,
         })
     }
 
@@ -185,7 +179,7 @@ impl<'a> DeclaredSnapshot<'a> {
 }
 
 pub struct DeclaredInstant<'a> {
-    config: &'a snapshot::Config<LocationConfig>,
+    config: &'a snapshot::Config,
     placement: Placement<'a>,
 }
 
@@ -197,11 +191,15 @@ impl<'a> DeclaredInstant<'a> {
             .and_then(ArtifactConfig::as_instant)
             .into_iter()
             .flatten()
-            .map(|config| {
-                Ok(Self {
-                    config,
-                    placement: Placement::of(sink, Self::ARTIFACT, config.place())?,
-                })
+            .filter_map(|config| {
+                let places = sink
+                    .place(Self::ARTIFACT)?
+                    .cut(&Instant::cut(config.at()))?;
+
+                Some(
+                    Placement::of(sink, Self::ARTIFACT, places)
+                        .map(|placement| Self { config, placement }),
+                )
             })
             .collect()
     }
@@ -223,47 +221,6 @@ impl<'a> DeclaredInstant<'a> {
     }
 }
 
-pub struct DeclaredMasked<'a> {
-    config: &'a masked::Config<LocationConfig>,
-    placement: Placement<'a>,
-    masks: &'a BTreeMap<TableId, BTreeMap<String, Mask>>,
-}
-
-impl<'a> DeclaredMasked<'a> {
-    pub const ARTIFACT: &'static str = Masked::KIND;
-
-    pub fn of(
-        sink: &'a Sink<WarehouseConfig, ArtifactConfig>,
-        masks: &'a BTreeMap<TableId, BTreeMap<String, Mask>>,
-    ) -> Result<Option<Self>, Unrunnable> {
-        sink.artifact(Self::ARTIFACT)
-            .and_then(ArtifactConfig::as_masked)
-            .map(|config| {
-                Ok(Self {
-                    config,
-                    placement: Placement::of(sink, Self::ARTIFACT, config.place())?,
-                    masks,
-                })
-            })
-            .transpose()
-    }
-
-    pub fn namespace(&self) -> &Namespace {
-        self.placement.namespace()
-    }
-
-    pub fn series(&self) -> Series {
-        self.artifact().series()
-    }
-
-    pub fn artifact(&self) -> Masked {
-        Masked::new(
-            self.placement.dated(self.config.shard()),
-            self.masks.clone(),
-        )
-    }
-}
-
 pub struct DeclaredScd1<'a> {
     placement: Placement<'a>,
 }
@@ -274,9 +231,9 @@ impl<'a> DeclaredScd1<'a> {
     pub fn of(sink: &'a Sink<WarehouseConfig, ArtifactConfig>) -> Result<Option<Self>, Unrunnable> {
         sink.artifact(Self::ARTIFACT)
             .and_then(ArtifactConfig::as_scd1)
-            .map(|config| {
+            .map(|_| {
                 Ok(Self {
-                    placement: Placement::of(sink, Self::ARTIFACT, config.place())?,
+                    placement: Placement::whole(sink, Self::ARTIFACT)?,
                 })
             })
             .transpose()
@@ -296,7 +253,7 @@ impl<'a> DeclaredScd1<'a> {
 }
 
 pub struct DeclaredScd2<'a> {
-    config: &'a scd2::Config<LocationConfig>,
+    config: &'a scd2::Config,
     placement: Placement<'a>,
 }
 
@@ -309,7 +266,7 @@ impl<'a> DeclaredScd2<'a> {
             .map(|config| {
                 Ok(Self {
                     config,
-                    placement: Placement::of(sink, Self::ARTIFACT, config.place())?,
+                    placement: Placement::whole(sink, Self::ARTIFACT)?,
                 })
             })
             .transpose()
@@ -345,6 +302,7 @@ mod tests {
 
     use super::*;
     use crate::pipeline::CaptureConfig;
+    use crate::plan::tests::{INFRA, opened};
 
     #[test]
     fn a_sink_builds_its_snapshots_in_the_namespace_and_shards_the_pipeline_names() {
@@ -369,31 +327,53 @@ mod tests {
     }
 
     #[test]
-    fn a_sink_cuts_its_snapshot_at_the_instant_it_declares_in_the_time_zone_of_the_pipeline() {
-        let directory =
-            std::env::temp_dir().join(format!("lithify-cli-zoned-snapshot-{}", std::process::id()));
-        std::fs::create_dir_all(&directory).unwrap();
-        let infra = std::fs::read_to_string(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compose/lithify/mysql/infra.toml"),
-        )
-        .unwrap();
-        std::fs::write(
-            directory.join("infra.toml"),
-            format!(
-                "time_zone = \"Asia/Tokyo\"\n{}",
-                infra.replacen("shard = ", "at = \"09:00\"\nshard = ", 1)
-            ),
-        )
-        .unwrap();
-        std::fs::copy(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compose/lithify/mysql/table.toml"),
-            directory.join("table.toml"),
+    fn the_example_pipeline_builds_every_artifact_into_each_sink() {
+        let pipeline: Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig> = Pipeline::open(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compose/lithify/mysql"),
         )
         .unwrap();
 
-        let pipeline: Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig> =
-            Pipeline::open(&directory).unwrap();
-        std::fs::remove_dir_all(&directory).unwrap();
+        for sink in pipeline.sinks() {
+            assert_eq!(
+                DeclaredInstant::of(sink)
+                    .unwrap()
+                    .iter()
+                    .map(DeclaredInstant::series)
+                    .collect::<Vec<_>>(),
+                [Series::new("instant", "12:00")]
+            );
+            assert!(DeclaredScd1::of(sink).unwrap().is_some());
+            assert!(DeclaredScd2::of(sink).unwrap().is_some());
+        }
+    }
+
+    #[test]
+    fn a_sink_cuts_only_the_instants_its_warehouse_places() {
+        let pipeline = opened(
+            "partly-placed-instants",
+            &format!(
+                "[[artifact.instant]]\nat = \"06:00\"\nshard = \"%Y%m%d%H\"\n[[artifact.instant]]\nat = \"18:00\"\nshard = \"%Y%m%d%H\"\n{INFRA}place.instant.\"06:00\" = [{{ prefix = \"mysql_shop_0600\" }}]\n"
+            ),
+            "",
+        );
+        let instants = pipeline
+            .sinks()
+            .map(|sink| DeclaredInstant::of(sink).unwrap().len())
+            .collect::<Vec<_>>();
+
+        assert_eq!(instants, [0, 1]);
+    }
+
+    #[test]
+    fn a_sink_cuts_its_snapshot_at_the_instant_it_declares_in_the_time_zone_of_the_pipeline() {
+        let pipeline = opened(
+            "zoned-snapshot",
+            &format!(
+                "time_zone = \"Asia/Tokyo\"\n{}",
+                INFRA.replacen("shard = ", "at = \"09:00\"\nshard = ", 1)
+            ),
+            "",
+        );
 
         assert_eq!(
             DeclaredSnapshot::of(pipeline.sinks().next().unwrap())
@@ -409,33 +389,15 @@ mod tests {
     #[test]
     fn a_snapshot_placed_more_than_once_is_built_into_its_first_placement_and_copied_into_the_others()
      {
-        let directory = std::env::temp_dir().join(format!(
-            "lithify-cli-copied-snapshot-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&directory).unwrap();
-        let infra = std::fs::read_to_string(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compose/lithify/mysql/infra.toml"),
-        )
-        .unwrap();
-        std::fs::write(
-            directory.join("infra.toml"),
-            infra.replacen(
-                "place = [{ bigquery.dataset = \"mysql_shop\" }]",
-                "place = [{ bigquery.dataset = \"mysql_shop\" }, { bigquery = { project = \"analytics\", dataset = \"shop\" } }]",
+        let pipeline = opened(
+            "copied-snapshot",
+            &INFRA.replacen(
+                "place.snapshot = [{ dataset = \"mysql_shop\" }]",
+                "place.snapshot = [{ dataset = \"mysql_shop\" }, { project = \"analytics\", dataset = \"shop\" }]",
                 1,
             ),
-        )
-        .unwrap();
-        std::fs::copy(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compose/lithify/mysql/table.toml"),
-            directory.join("table.toml"),
-        )
-        .unwrap();
-
-        let pipeline: Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig> =
-            Pipeline::open(&directory).unwrap();
-        std::fs::remove_dir_all(&directory).unwrap();
+            "",
+        );
 
         assert_eq!(
             DeclaredSnapshot::of(pipeline.sinks().next().unwrap())

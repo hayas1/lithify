@@ -22,18 +22,13 @@ use crate::snapshot::query::ChangeLogQuery;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Config<L> {
+pub struct Config {
     shard: String,
-    place: Vec<L>,
 }
 
-impl<L> Config<L> {
+impl Config {
     pub fn shard(&self) -> &str {
         &self.shard
-    }
-
-    pub fn place(&self) -> &[L] {
-        &self.place
     }
 }
 

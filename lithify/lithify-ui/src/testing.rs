@@ -11,7 +11,7 @@ use lithify_core::testing::{Engine, Recorder};
 use lithify_core::ts::Ts;
 use lithify_core::window::Window;
 
-use lithify_config::Declaration;
+use lithify_config::{Declaration, Placed, Places, Placing};
 use lithify_core::schedule::Schedule;
 
 use crate::pipelines::Pipelines;
@@ -23,11 +23,21 @@ pub enum Captured {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Memory {}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Cause {
+    cause: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kept {
-    Memory {},
-    Logged {},
-    Unreachable { cause: String },
+    Memory(Placed<Memory, Shelf>),
+    Logged(Placed<Memory, Shelf>),
+    Unreachable(Placed<Cause, Shelf>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -45,20 +55,12 @@ impl From<Shelf> for Namespace {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "lowercase")]
 pub enum Made {
-    Snapshot { place: Vec<Shelf> },
+    Snapshot {},
 }
 
 impl Declaration for Made {
-    type Location = Shelf;
-
     fn source(&self) -> Option<&'static str> {
         None
-    }
-
-    fn places(&self) -> impl Iterator<Item = &Shelf> {
-        match self {
-            Self::Snapshot { place } => place.iter(),
-        }
     }
 
     fn schedule(&self, time_zone: chrono_tz::Tz) -> Option<Schedule> {
@@ -140,36 +142,59 @@ impl SinkWarehouse for Kept {
 
     fn with_client<F: WarehouseFn>(&self, _: &Shelf, _: &(), f: F) -> Result<F::Output, Unreached> {
         match self {
-            Self::Memory {} => Ok(f.call(&Recorder::new(Engine::default()))),
-            Self::Logged {} => Ok(f.call(
+            Self::Memory(_) => Ok(f.call(&Recorder::new(Engine::default()))),
+            Self::Logged(_) => Ok(f.call(
                 &Recorder::new(Engine::default())
                     .logging(&Namespace::from("mysql_shop"), &Self::logs()),
             )),
-            Self::Unreachable { cause } => Err(Unreached(cause.clone())),
+            Self::Unreachable(placed) => Err(Unreached(placed.warehouse().cause.clone())),
+        }
+    }
+}
+
+impl Placing for Kept {
+    fn change_log(&self) -> Shelf {
+        match self {
+            Self::Memory(placed) | Self::Logged(placed) => placed.change_log().clone(),
+            Self::Unreachable(placed) => placed.change_log().clone(),
+        }
+    }
+
+    fn places(&self) -> Places<Shelf> {
+        match self {
+            Self::Memory(placed) | Self::Logged(placed) => placed.places().clone(),
+            Self::Unreachable(placed) => placed.places().clone(),
         }
     }
 }
 
 pub const INFRA: &str = r#"
+    [artifact.snapshot]
+
     [default]
     source.capture.debezium.dialect = "mysql"
-    sink.change_log.prefix = "mysql_shop_cdc"
-    sink.artifact.snapshot.place = [{ prefix = "mysql_shop" }]
 
     [[source]]
     name = "primary"
 
     [[sink]]
     name = "rustfs"
-    warehouse.memory = {}
+
+    [sink.warehouse.memory]
+    change_log = { prefix = "mysql_shop_cdc" }
+    place.snapshot = [{ prefix = "mysql_shop" }]
 
     [[sink]]
     name = "warehouse"
-    warehouse.unreachable.cause = "JobCreationMode"
+
+    [sink.warehouse.unreachable]
+    cause = "JobCreationMode"
+    change_log = { prefix = "mysql_shop_cdc" }
+    place.snapshot = [{ prefix = "mysql_shop" }]
 "#;
 
 pub fn logged() -> String {
-    INFRA.replace("warehouse.memory = {}", "warehouse.logged = {}")
+    INFRA.replace("[sink.warehouse.memory]", "[sink.warehouse.logged]")
 }
 
 pub fn scratch(name: &str) -> PathBuf {

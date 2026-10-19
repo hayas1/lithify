@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 
 use lithify_config::Pipeline;
 use lithify_config::infra::{Sink, Source};
+use lithify_config::table;
 use lithify_core::sink::OpenWarehouse;
 use lithify_core::ts::Ts;
 use lithify_protocol::sink::bigquery::client::BigQueryClient;
@@ -13,7 +14,7 @@ use lithify_protocol::sink::{bigquery, duckdb};
 use lithify_protocol::{BigQueryWarehouse, DuckDbWarehouse};
 
 use crate::artifacts::{ArtifactConfig, DeclaredSnapshot};
-use crate::course::{Course, Leg};
+use crate::course::Course;
 use crate::credential::Credentials;
 use crate::journal::Journal;
 use crate::pipeline::{CaptureConfig, Reached, WarehouseConfig};
@@ -45,11 +46,12 @@ impl Run {
     }
 
     pub fn plan(&self, course: &Course, into: &Path) -> Result<Journal, Unrunnable> {
-        self.each_sink(|pipeline, sink, source, topic_prefix, journal| {
+        self.each_sink(|sink, source, listing, journal| {
             self.settle(
                 course,
-                &Leg::new(sink, source, &pipeline.masks()),
-                topic_prefix,
+                sink,
+                source,
+                listing,
                 &DryRun::new(into, sink.name()),
                 journal,
             )
@@ -57,11 +59,12 @@ impl Run {
     }
 
     pub fn build(&self, course: &Course) -> Result<Journal, Unrunnable> {
-        self.each_sink(|pipeline, sink, source, topic_prefix, journal| {
+        self.each_sink(|sink, source, listing, journal| {
             self.settle(
                 course,
-                &Leg::new(sink, source, &pipeline.masks()),
-                topic_prefix,
+                sink,
+                source,
+                listing,
                 &Build::new(sink, source, self.now)?,
                 journal,
             )
@@ -69,7 +72,7 @@ impl Run {
     }
 
     pub fn check(&self) -> Result<Journal, Unrunnable> {
-        self.each_sink(|_, sink, source, _, journal| {
+        self.each_sink(|sink, source, _, journal| {
             for discrepancy in self.inspection(sink, source)?.discrepancies() {
                 journal.discrepancy(discrepancy);
             }
@@ -118,10 +121,9 @@ impl Run {
     fn each_sink(
         &self,
         mut act: impl FnMut(
-            &Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig>,
             &Sink<WarehouseConfig, ArtifactConfig>,
             &Source<CaptureConfig>,
-            &str,
+            &table::Tables,
             &mut Journal,
         ) -> Result<(), Unrunnable>,
     ) -> Result<Journal, Unrunnable> {
@@ -133,16 +135,7 @@ impl Run {
         for sink in self.selected(&pipeline)? {
             journal.sink(sink.name());
 
-            let Some(topic_prefix) = source.topic_prefix() else {
-                journal.note(&format!(
-                    "{} names no topic prefix to read its change logs by",
-                    source.name()
-                ));
-
-                continue;
-            };
-
-            if let Err(unrunnable) = act(&pipeline, sink, source, topic_prefix, &mut journal) {
+            if let Err(unrunnable) = act(sink, source, pipeline.tables(), &mut journal) {
                 journal.failed(sink.name(), &unrunnable);
             }
         }
@@ -153,19 +146,30 @@ impl Run {
     fn settle<S: Settlement>(
         &self,
         course: &Course,
-        leg: &Leg,
-        topic_prefix: &str,
+        sink: &Sink<WarehouseConfig, ArtifactConfig>,
+        source: &Source<CaptureConfig>,
+        listing: &table::Tables,
         settlement: &S,
         journal: &mut Journal,
     ) -> Result<(), Unrunnable> {
-        match Self::reach(leg.sink())? {
+        let Some(topic_prefix) = source.topic_prefix() else {
+            journal.note(&format!(
+                "{} names no topic prefix to read its change logs by",
+                source.name()
+            ));
+
+            return Ok(());
+        };
+
+        match Self::reach(sink)? {
             Reached::DuckDb(config, change_log) => {
                 let client = self.duckdb(config, change_log)?;
 
                 course.settle(
-                    leg,
+                    sink,
+                    source,
                     self.now,
-                    &Planning::new(&client, leg.source().capture(), topic_prefix),
+                    &Planning::new(&client, source.capture(), topic_prefix, listing),
                     settlement,
                     journal,
                 )
@@ -174,9 +178,10 @@ impl Run {
                 let client = self.bigquery(config, change_log)?;
 
                 course.settle(
-                    leg,
+                    sink,
+                    source,
                     self.now,
-                    &Planning::new(&client, leg.source().capture(), topic_prefix),
+                    &Planning::new(&client, source.capture(), topic_prefix, listing),
                     settlement,
                     journal,
                 )

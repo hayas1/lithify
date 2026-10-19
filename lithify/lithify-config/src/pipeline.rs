@@ -1,14 +1,13 @@
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
 
-use lithify_core::model::{Mask, TableId};
 use lithify_core::sink::SinkWarehouse;
 
 use crate::artifact::Declaration;
 use crate::infra::{self, Sink, Source};
-use crate::table::{self, Mislisting, Table, Tables};
+use crate::place::Placing;
+use crate::table::{self, Mislisting, Tables};
 use crate::unreadable::Unreadable;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,8 +21,8 @@ pub struct Pipeline<C, W: SinkWarehouse, A> {
 impl<C, W, A> Pipeline<C, W, A>
 where
     C: Clone + DeserializeOwned,
-    W: Clone + DeserializeOwned + SinkWarehouse<Location: DeserializeOwned>,
-    A: Clone + DeserializeOwned + Declaration<Location = W::Location>,
+    W: Clone + DeserializeOwned + Placing,
+    A: Clone + DeserializeOwned + Declaration,
 {
     const WIRING: &str = "infra.toml";
     const LISTING: &str = "table.toml";
@@ -108,12 +107,8 @@ where
         self.sinks.iter()
     }
 
-    pub fn table(&self, id: &TableId) -> &Table {
-        self.tables.table(id)
-    }
-
-    pub fn masks(&self) -> BTreeMap<TableId, BTreeMap<String, Mask>> {
-        self.tables.masks()
+    pub fn tables(&self) -> &Tables {
+        &self.tables
     }
 
     fn named(directory: &Path) -> String {
@@ -136,8 +131,10 @@ where
 mod tests {
     use super::*;
     use crate::infra::Miswiring;
+    use crate::place::{Placed, Places};
     use crate::table::Mask;
     use crate::unreadable::Cause;
+    use lithify_core::model::TableId;
     use lithify_protocol::sink::bigquery::config as bigquery;
     use lithify_protocol::sink::duckdb::config as duckdb;
     use lithify_protocol::source::debezium::config as debezium;
@@ -145,37 +142,45 @@ mod tests {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
     #[serde(deny_unknown_fields, rename_all = "lowercase")]
     enum Sunk {
-        DuckDb(duckdb::Config),
-        BigQuery(bigquery::Config),
+        DuckDb(Placed<duckdb::Config, duckdb::Location>),
+        BigQuery(Placed<bigquery::Config, bigquery::Location>),
     }
 
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
-    #[serde(deny_unknown_fields, rename_all = "lowercase")]
+    #[derive(Debug, Clone, PartialEq, Eq)]
     enum Lying {
         DuckDb(duckdb::Location),
         BigQuery(bigquery::Location),
     }
 
     #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Cut {
+        at: String,
+        shard: String,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
     #[serde(deny_unknown_fields, rename_all = "lowercase")]
     enum Made {
-        Snapshot { shard: String, place: Vec<Lying> },
-        Copy { place: Vec<Lying> },
+        Snapshot { at: String, shard: String },
+        Instant(Vec<Cut>),
+        Scd1 {},
+        Scd2 { shard: String },
+        Copy {},
     }
 
     impl Declaration for Made {
-        type Location = Lying;
-
         fn source(&self) -> Option<&'static str> {
             match self {
-                Self::Snapshot { .. } => None,
-                Self::Copy { .. } => Some("snapshot"),
+                Self::Snapshot { .. } | Self::Scd2 { .. } => None,
+                Self::Instant(_) | Self::Scd1 {} | Self::Copy {} => Some("snapshot"),
             }
         }
 
-        fn places(&self) -> impl Iterator<Item = &Lying> {
+        fn cuts(&self) -> Option<Vec<String>> {
             match self {
-                Self::Snapshot { place, .. } | Self::Copy { place } => place.iter(),
+                Self::Instant(cuts) => Some(cuts.iter().map(|cut| cut.at.clone()).collect()),
+                Self::Snapshot { .. } | Self::Scd1 {} | Self::Scd2 { .. } | Self::Copy {} => None,
             }
         }
     }
@@ -211,11 +216,31 @@ mod tests {
         }
     }
 
+    impl Placing for Sunk {
+        fn change_log(&self) -> Lying {
+            match self {
+                Self::DuckDb(placed) => Lying::DuckDb(placed.change_log().clone()),
+                Self::BigQuery(placed) => Lying::BigQuery(placed.change_log().clone()),
+            }
+        }
+
+        fn places(&self) -> Places<Lying> {
+            match self {
+                Self::DuckDb(placed) => placed.places().clone().map(Lying::DuckDb),
+                Self::BigQuery(placed) => placed.places().clone().map(Lying::BigQuery),
+            }
+        }
+    }
+
     #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
     #[serde(deny_unknown_fields, rename_all = "lowercase")]
     enum Capture {
         Debezium(debezium::Config),
     }
+
+    const ARTIFACTS: &str = "[artifact.snapshot]\nat = \"00:00\"\nshard = \"%Y%m%d\"\n";
+
+    const SINK: &str = "[[sink]]\nname = \"rustfs\"\n[sink.warehouse.duckdb]\ns3 = { endpoint = \"http://rustfs:9000\", region = \"us-east-1\", bucket = \"lithify\", format = \"parquet\" }\nchange_log = { prefix = \"mysql_shop_cdc\" }\nplace.snapshot = [{ prefix = \"mysql_shop\" }]\n";
 
     fn pipeline(name: &str) -> Pipeline<Capture, Sunk, Made> {
         Pipeline::open(
@@ -297,7 +322,9 @@ mod tests {
     #[test]
     fn a_table_the_pipeline_does_not_configure_takes_the_defaults() {
         let pipeline = pipeline("mysql");
-        let table = pipeline.table(&TableId::new("shop", "order_items"));
+        let table = pipeline
+            .tables()
+            .table(&TableId::new("shop", "order_items"));
 
         assert!(table.builds("snapshot"));
         assert_eq!(table.mask("sku"), Mask::Identity);
@@ -306,7 +333,7 @@ mod tests {
     #[test]
     fn a_table_the_pipeline_configures_overrides_the_defaults() {
         let pipeline = pipeline("mysql");
-        let table = pipeline.table(&TableId::new("shop", "orders"));
+        let table = pipeline.tables().table(&TableId::new("shop", "orders"));
 
         assert!(table.builds("snapshot"));
         assert_eq!(table.mask("attributes"), Mask::Null);
@@ -341,11 +368,7 @@ mod tests {
     #[test]
     fn a_pipeline_captured_from_no_server_is_reported_with_the_file_that_wires_it() {
         let directory = scratch("pipeline-without-servers");
-        std::fs::write(
-            directory.join("infra.toml"),
-            "[[sink]]\nname = \"rustfs\"\nchange_log.duckdb.prefix = \"mysql_shop_cdc\"\nwarehouse.duckdb.s3.endpoint = \"http://rustfs:9000\"\nwarehouse.duckdb.s3.region = \"us-east-1\"\nwarehouse.duckdb.s3.bucket = \"lithify\"\nwarehouse.duckdb.s3.format = \"parquet\"\nartifact.snapshot.shard = \"%Y%m%d\"\nartifact.snapshot.place = [{ duckdb.prefix = \"mysql_shop\" }]\n",
-        )
-        .unwrap();
+        std::fs::write(directory.join("infra.toml"), format!("{ARTIFACTS}{SINK}")).unwrap();
         std::fs::write(directory.join("table.toml"), "").unwrap();
 
         let unreadable = Pipeline::<Capture, Sunk, Made>::open(&directory).unwrap_err();
@@ -390,7 +413,9 @@ mod tests {
         let directory = scratch(name);
         std::fs::write(
             directory.join("infra.toml"),
-            "[[source]]\nname = \"primary\"\ncapture.debezium.dialect = \"mysql\"\n[[sink]]\nname = \"rustfs\"\nchange_log.duckdb.prefix = \"mysql_shop_cdc\"\nwarehouse.duckdb.s3.endpoint = \"http://rustfs:9000\"\nwarehouse.duckdb.s3.region = \"us-east-1\"\nwarehouse.duckdb.s3.bucket = \"lithify\"\nwarehouse.duckdb.s3.format = \"parquet\"\nartifact.snapshot.shard = \"%Y%m%d\"\nartifact.snapshot.place = [{ duckdb.prefix = \"mysql_shop\" }]\nartifact.copy.place = [{ duckdb.prefix = \"mysql_shop_copy\" }]\n",
+            format!(
+                "{ARTIFACTS}[artifact.copy]\n[[source]]\nname = \"primary\"\ncapture.debezium.dialect = \"mysql\"\n{SINK}place.copy = [{{ prefix = \"mysql_shop_copy\" }}]\n"
+            ),
         )
         .unwrap();
         std::fs::write(directory.join("table.toml"), listed).unwrap();
@@ -411,6 +436,30 @@ mod tests {
         assert!(matches!(
             unreadable.cause(),
             Cause::Mislisting(Mislisting::Undeclared { table: Some(_), artifact }) if artifact == "scd2"
+        ));
+    }
+
+    #[test]
+    fn a_table_built_into_an_artifact_declared_but_placed_by_no_sink_is_rejected() {
+        let directory = scratch("pipeline-with-an-unplaced-artifact");
+        std::fs::write(
+            directory.join("infra.toml"),
+            format!(
+                "{ARTIFACTS}[artifact.copy]\n[[source]]\nname = \"primary\"\ncapture.debezium.dialect = \"mysql\"\n{SINK}"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            directory.join("table.toml"),
+            "[default]\nartifacts = [\"snapshot\", \"copy\"]\n",
+        )
+        .unwrap();
+        let unreadable = Pipeline::<Capture, Sunk, Made>::open(&directory).unwrap_err();
+        std::fs::remove_dir_all(&directory).unwrap();
+
+        assert!(matches!(
+            unreadable.cause(),
+            Cause::Mislisting(Mislisting::Undeclared { table: None, artifact }) if artifact == "copy"
         ));
     }
 

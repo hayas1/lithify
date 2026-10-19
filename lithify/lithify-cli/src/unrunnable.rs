@@ -60,7 +60,7 @@ impl Display for Unrunnable {
             }
             Self::WithoutSource => write!(formatter, "this pipeline captures no server"),
             Self::Undeclared { sink, artifact } => {
-                write!(formatter, "{sink} declares no {artifact} placed anywhere")
+                write!(formatter, "{sink} places no {artifact}")
             }
             Self::Unreached => write!(
                 formatter,

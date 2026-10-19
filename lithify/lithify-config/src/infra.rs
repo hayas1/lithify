@@ -12,28 +12,29 @@ use lithify_core::sink::SinkWarehouse;
 use lithify_core::ts::{Event, Ts};
 
 use crate::artifact::{Declaration, Declarations};
+use crate::place::{Place, Places, Placing};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[serde(bound(
-    deserialize = "C: Deserialize<'de>, W: Deserialize<'de>, W::Location: Deserialize<'de>, A: DeserializeOwned"
-))]
-pub(crate) struct Wiring<C, W: SinkWarehouse, A> {
+#[serde(bound(deserialize = "C: Deserialize<'de>, W: Deserialize<'de>, A: DeserializeOwned"))]
+pub(crate) struct Wiring<C, W, A> {
     #[serde(default)]
     time_zone: Option<Tz>,
     #[serde(default)]
-    default: Defaults<C, W, A>,
+    artifact: Declarations<A>,
+    #[serde(default)]
+    default: Defaults<C, W>,
     #[serde(default, rename = "source")]
     sources: Vec<WiredSource<C>>,
     #[serde(default, rename = "sink")]
-    sinks: Vec<WiredSink<W, A>>,
+    sinks: Vec<WiredSink<W>>,
 }
 
 impl<C, W, A> Wiring<C, W, A>
 where
     C: Clone,
-    W: Clone + SinkWarehouse,
-    A: Clone + Declaration<Location = W::Location>,
+    W: Clone + Placing,
+    A: Clone + Declaration,
 {
     pub(crate) fn sources(&self) -> Result<Vec<Source<C>>, Miswiring> {
         if self.sources.is_empty() {
@@ -76,9 +77,12 @@ where
             .iter()
             .enumerate()
             .map(|(at, wired)| {
-                wired
-                    .clone()
-                    .sink(at, &self.default.sink, self.time_zone.unwrap_or(Tz::UTC))
+                wired.clone().sink(
+                    at,
+                    &self.default.sink,
+                    &self.artifact,
+                    self.time_zone.unwrap_or(Tz::UTC),
+                )
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -102,17 +106,15 @@ where
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[serde(bound(
-    deserialize = "C: Deserialize<'de>, W: Deserialize<'de>, W::Location: Deserialize<'de>, A: DeserializeOwned"
-))]
-struct Defaults<C, W: SinkWarehouse, A> {
+#[serde(bound(deserialize = "C: Deserialize<'de>, W: Deserialize<'de>"))]
+struct Defaults<C, W> {
     #[serde(default)]
     source: WiredSource<C>,
     #[serde(default)]
-    sink: WiredSink<W, A>,
+    sink: WiredSink<W>,
 }
 
-impl<C, W: SinkWarehouse, A> Default for Defaults<C, W, A> {
+impl<C, W> Default for Defaults<C, W> {
     fn default() -> Self {
         Self {
             source: WiredSource::default(),
@@ -163,88 +165,91 @@ impl<C: Clone> WiredSource<C> {
 #[derive(Debug, Clone, Deserialize, Semigroup)]
 #[semigroup(with = "semigroup::op::Coalesce")]
 #[serde(deny_unknown_fields)]
-#[serde(bound(
-    deserialize = "W: Deserialize<'de>, W::Location: Deserialize<'de>, A: DeserializeOwned"
-))]
-struct WiredSink<W: SinkWarehouse, A> {
+#[serde(bound(deserialize = "W: Deserialize<'de>"))]
+struct WiredSink<W> {
     name: Option<String>,
-    change_log: Option<W::Location>,
     warehouse: Option<W>,
-    artifact: Option<Declarations<A>>,
 }
 
-impl<W: SinkWarehouse, A> Default for WiredSink<W, A> {
+impl<W> Default for WiredSink<W> {
     fn default() -> Self {
         Self {
             name: None,
-            change_log: None,
             warehouse: None,
-            artifact: None,
         }
     }
 }
 
-impl<W, A> WiredSink<W, A>
-where
-    W: Clone + SinkWarehouse,
-    A: Clone + Declaration<Location = W::Location>,
-{
-    fn sink(mut self, at: usize, default: &Self, time_zone: Tz) -> Result<Sink<W, A>, Miswiring> {
-        self.artifact = match (self.artifact.take(), &default.artifact) {
-            (Some(declared), Some(by_default)) => Some(declared.over(by_default)),
-            (declared, by_default) => declared.or_else(|| by_default.clone()),
-        };
+impl<W: Clone + Placing> WiredSink<W> {
+    fn sink<A: Clone + Declaration>(
+        self,
+        at: usize,
+        default: &Self,
+        declarations: &Declarations<A>,
+        time_zone: Tz,
+    ) -> Result<Sink<W, A>, Miswiring> {
         let wired = self.semigroup(default.clone());
         let name = wired.name.ok_or(Miswiring::SinkWithoutName(at))?;
-        let change_log = wired
-            .change_log
-            .ok_or_else(|| Miswiring::SinkWithoutChangeLog(name.clone()))?;
         let warehouse = wired
             .warehouse
             .ok_or_else(|| Miswiring::SinkWithoutWarehouse(name.clone()))?;
-        if !warehouse.reaches(&change_log) {
-            return Err(Miswiring::ChangeLogUnreached(name));
+        let places = warehouse.places();
+        if places.is_empty() {
+            return Err(Miswiring::SinkWithoutArtifacts(name));
+        }
+        for (artifact, place) in places.iter() {
+            Self::placed(&name, artifact, place, declarations, &places)?;
         }
 
-        let artifacts = wired
-            .artifact
-            .filter(|declared| !declared.is_empty())
-            .ok_or_else(|| Miswiring::SinkWithoutArtifacts(name.clone()))?;
-        Self::placed(&name, &warehouse, &artifacts)?;
-
         Ok(Sink {
-            change_log,
+            change_log: warehouse.change_log(),
+            artifacts: declarations.placed(&places),
+            places,
             warehouse,
-            artifacts,
             time_zone,
             name,
         })
     }
 
-    fn placed(name: &str, warehouse: &W, artifacts: &Declarations<A>) -> Result<(), Miswiring> {
-        for (artifact, declared) in artifacts.iter() {
-            let misplaced = |misplacing: fn(String, String) -> Miswiring| {
-                misplacing(name.to_owned(), artifact.to_owned())
-            };
-            let mut places = declared.places().peekable();
-            if places.peek().is_none() {
-                return Err(misplaced(Miswiring::Unplaced));
+    fn placed<A: Declaration>(
+        sink: &str,
+        artifact: &str,
+        place: &Place<W::Location>,
+        declarations: &Declarations<A>,
+        places: &Places<W::Location>,
+    ) -> Result<(), Miswiring> {
+        let misplaced = |misplacing: fn(String, String) -> Miswiring| {
+            misplacing(sink.to_owned(), artifact.to_owned())
+        };
+        let declared = declarations
+            .get(artifact)
+            .ok_or_else(|| misplaced(Miswiring::Undeclared))?;
+        match (declared.cuts(), place) {
+            (None, Place::Whole(_)) => {}
+            (Some(cuts), Place::Cuts(placed)) => {
+                if let Some(uncut) = placed.keys().find(|cut| !cuts.contains(cut)) {
+                    return Err(Miswiring::Uncut {
+                        sink: sink.to_owned(),
+                        artifact: artifact.to_owned(),
+                        cut: uncut.to_owned(),
+                    });
+                }
             }
-            if !places.all(|place| warehouse.reaches(place)) {
-                return Err(misplaced(Miswiring::ArtifactUnreached));
-            }
-            if let Some(source) = declared.source()
-                && artifacts.get(source).is_none()
-            {
-                return Err(Miswiring::SourceUndeclared {
-                    sink: name.to_owned(),
-                    artifact: artifact.to_owned(),
-                    source: source.to_owned(),
-                });
+            (None, Place::Cuts(_)) | (Some(_), Place::Whole(_)) => {
+                return Err(misplaced(Miswiring::Misplaced));
             }
         }
-
-        Ok(())
+        if place.lists().iter().any(|listed| listed.is_empty()) {
+            return Err(misplaced(Miswiring::Unplaced));
+        }
+        match declared.source() {
+            Some(source) if places.get(source).is_none() => Err(Miswiring::SourceUnplaced {
+                sink: sink.to_owned(),
+                artifact: artifact.to_owned(),
+                source: source.to_owned(),
+            }),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -257,13 +262,17 @@ pub enum Miswiring {
     SourceNamedTwice(String),
     SourcesTakingOverTogether(String, String),
     SinkWithoutName(usize),
-    SinkWithoutChangeLog(String),
-    ChangeLogUnreached(String),
     SinkWithoutWarehouse(String),
     SinkWithoutArtifacts(String),
+    Undeclared(String, String),
+    Misplaced(String, String),
+    Uncut {
+        sink: String,
+        artifact: String,
+        cut: String,
+    },
     Unplaced(String, String),
-    ArtifactUnreached(String, String),
-    SourceUndeclared {
+    SourceUnplaced {
         sink: String,
         artifact: String,
         source: String,
@@ -288,29 +297,34 @@ impl Display for Miswiring {
                 )
             }
             Self::SinkWithoutName(at) => write!(formatter, "sink {} is not named", at + 1),
-            Self::SinkWithoutChangeLog(name) => {
-                write!(formatter, "{name} holds no change log")
-            }
-            Self::ChangeLogUnreached(name) => write!(
-                formatter,
-                "{name} holds its change log in a warehouse other than the one it is sunk into"
-            ),
             Self::SinkWithoutWarehouse(name) => write!(formatter, "{name} names no warehouse"),
-            Self::SinkWithoutArtifacts(name) => write!(formatter, "{name} builds nothing"),
+            Self::SinkWithoutArtifacts(name) => write!(formatter, "{name} places nothing"),
+            Self::Undeclared(sink, artifact) => write!(
+                formatter,
+                "{sink} places {artifact}, which is declared nowhere under [artifact]"
+            ),
+            Self::Misplaced(sink, artifact) => write!(
+                formatter,
+                "{sink} places {artifact} as a list where it is placed by each instant it is cut at, or the other way round"
+            ),
+            Self::Uncut {
+                sink,
+                artifact,
+                cut,
+            } => write!(
+                formatter,
+                "{sink} places {artifact} cut at {cut}, which is declared nowhere under [artifact]"
+            ),
             Self::Unplaced(sink, artifact) => {
                 write!(formatter, "{sink} places {artifact} nowhere")
             }
-            Self::ArtifactUnreached(sink, artifact) => write!(
-                formatter,
-                "{sink} places {artifact} in a warehouse other than the one it is sunk into"
-            ),
-            Self::SourceUndeclared {
+            Self::SourceUnplaced {
                 sink,
                 artifact,
                 source,
             } => write!(
                 formatter,
-                "{sink} builds {artifact} without {source} it is built from"
+                "{sink} places {artifact} without {source} it is built from"
             ),
             Self::SinkNamedTwice(name) => write!(formatter, "{name} is sunk into twice"),
         }
@@ -349,6 +363,7 @@ pub struct Sink<W: SinkWarehouse, A> {
     change_log: W::Location,
     warehouse: W,
     artifacts: Declarations<A>,
+    places: Places<W::Location>,
     time_zone: Tz,
 }
 
@@ -365,12 +380,12 @@ impl<W: SinkWarehouse, A> Sink<W, A> {
         &self.warehouse
     }
 
-    pub fn artifacts(&self) -> &Declarations<A> {
-        &self.artifacts
-    }
-
     pub fn artifact(&self, artifact: &str) -> Option<&A> {
         self.artifacts.get(artifact)
+    }
+
+    pub fn place(&self, artifact: &str) -> Option<&Place<W::Location>> {
+        self.places.get(artifact)
     }
 
     pub fn time_zone(&self) -> Tz {
@@ -382,31 +397,56 @@ impl<W: SinkWarehouse, A> Sink<W, A> {
 mod tests {
     use super::*;
 
+    use crate::place::Placed;
+
     #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
     #[serde(deny_unknown_fields, rename_all = "lowercase")]
     enum Captured {
         Debezium { dialect: String },
     }
 
-    #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-    #[serde(deny_unknown_fields, rename_all = "lowercase")]
-    enum Sunk {
-        Files { bucket: String },
-        Warehouse { project: String },
+    #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Bucket {
+        bucket: String,
     }
 
-    #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+    #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Project {
+        project: String,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Prefix {
+        prefix: String,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Dataset {
+        dataset: String,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
     #[serde(deny_unknown_fields, rename_all = "lowercase")]
+    enum Sunk {
+        Files(Placed<Bucket, Prefix>),
+        Warehouse(Placed<Project, Dataset>),
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
     enum Lying {
-        Files { prefix: String },
-        Warehouse { dataset: String },
+        Files(Prefix),
+        Warehouse(Dataset),
     }
 
     impl From<Lying> for lithify_core::sink::Namespace {
         fn from(location: Lying) -> Self {
             match location {
-                Lying::Files { prefix } => Self::from(prefix.as_str()),
-                Lying::Warehouse { dataset } => Self::from(dataset.as_str()),
+                Lying::Files(Prefix { prefix }) => Self::from(prefix.as_str()),
+                Lying::Warehouse(Dataset { dataset }) => Self::from(dataset.as_str()),
             }
         }
     }
@@ -419,8 +459,7 @@ mod tests {
         fn reaches(&self, location: &Lying) -> bool {
             matches!(
                 (self, location),
-                (Self::Files { .. }, Lying::Files { .. })
-                    | (Self::Warehouse { .. }, Lying::Warehouse { .. })
+                (Self::Files(_), Lying::Files(_)) | (Self::Warehouse(_), Lying::Warehouse(_))
             )
         }
 
@@ -434,42 +473,78 @@ mod tests {
         }
     }
 
-    #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-    #[serde(deny_unknown_fields, rename_all = "lowercase")]
-    enum Made {
-        Snapshot { place: Vec<Lying> },
-        Copy { place: Vec<Lying> },
-    }
-
-    impl Declaration for Made {
-        type Location = Lying;
-
-        fn source(&self) -> Option<&'static str> {
+    impl Placing for Sunk {
+        fn change_log(&self) -> Lying {
             match self {
-                Self::Snapshot { .. } => None,
-                Self::Copy { .. } => Some("snapshot"),
+                Self::Files(placed) => Lying::Files(placed.change_log().clone()),
+                Self::Warehouse(placed) => Lying::Warehouse(placed.change_log().clone()),
             }
         }
 
-        fn places(&self) -> impl Iterator<Item = &Lying> {
+        fn places(&self) -> Places<Lying> {
             match self {
-                Self::Snapshot { place } | Self::Copy { place } => place.iter(),
+                Self::Files(placed) => placed.places().clone().map(Lying::Files),
+                Self::Warehouse(placed) => placed.places().clone().map(Lying::Warehouse),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Cut {
+        at: String,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+    #[serde(deny_unknown_fields, rename_all = "lowercase")]
+    enum Made {
+        Snapshot { shard: String },
+        Copy {},
+        Instant(Vec<Cut>),
+    }
+
+    impl Declaration for Made {
+        fn source(&self) -> Option<&'static str> {
+            match self {
+                Self::Snapshot { .. } => None,
+                Self::Copy {} | Self::Instant(_) => Some("snapshot"),
+            }
+        }
+
+        fn cuts(&self) -> Option<Vec<String>> {
+            match self {
+                Self::Snapshot { .. } | Self::Copy {} => None,
+                Self::Instant(cuts) => Some(cuts.iter().map(|cut| cut.at.clone()).collect()),
             }
         }
     }
 
     fn prefix(prefix: &str) -> Lying {
-        Lying::Files {
+        Lying::Files(Prefix {
             prefix: prefix.to_owned(),
-        }
+        })
+    }
+
+    fn dataset(dataset: &str) -> Lying {
+        Lying::Warehouse(Dataset {
+            dataset: dataset.to_owned(),
+        })
     }
 
     const INFRA: &str = r#"
+        [artifact.snapshot]
+        shard = "%Y%m%d"
+
+        [artifact.copy]
+
+        [[artifact.instant]]
+        at = "09:00"
+
+        [[artifact.instant]]
+        at = "18:00"
+
         [default]
         source.capture.debezium.dialect = "mysql"
-        sink.change_log.files.prefix = "mysql_shop_cdc"
-        sink.artifact.snapshot.place = [{ files.prefix = "mysql_shop" }]
-        sink.artifact.copy.place = [{ files.prefix = "mysql_shop_copy" }]
 
         [[source]]
         name = "primary"
@@ -484,17 +559,29 @@ mod tests {
 
         [[sink]]
         name = "rustfs"
-        warehouse.files.bucket = "lithify"
+
+        [sink.warehouse.files]
+        bucket = "lithify"
+        change_log = { prefix = "mysql_shop_cdc" }
+        place.snapshot = [{ prefix = "mysql_shop" }]
+        place.instant."09:00" = [{ prefix = "mysql_shop_0900" }]
 
         [[sink]]
         name = "warehouse"
-        change_log.warehouse.dataset = "mysql_shop_archive"
-        warehouse.warehouse.project = "local-project"
-        artifact.snapshot.place = [{ warehouse.dataset = "mysql_shop" }]
-        artifact.copy.place = [{ warehouse.dataset = "mysql_shop_copy" }]
+
+        [sink.warehouse.warehouse]
+        project = "local-project"
+        change_log = { dataset = "mysql_shop_archive" }
+        place.snapshot = [{ dataset = "mysql_shop" }]
+        place.copy = [{ dataset = "mysql_shop_copy" }]
     "#;
 
     const SERVER: &str = r#"
+        [artifact.snapshot]
+        shard = "%Y%m%d"
+
+        [artifact.copy]
+
         [[source]]
         name = "primary"
         since = "1970-01-01T00:00:00Z"
@@ -503,7 +590,9 @@ mod tests {
     "#;
 
     const WAREHOUSE: &str = r#"
-        warehouse.files.bucket = "lithify"
+        [sink.warehouse.files]
+        bucket = "lithify"
+        change_log = { prefix = "mysql_shop_cdc" }
     "#;
 
     const NAMED: &str = r#"
@@ -511,7 +600,7 @@ mod tests {
     "#;
 
     const ARTIFACTS: &str = r#"
-        artifact.snapshot.place = [{ files.prefix = "mysql_shop" }]
+        place.snapshot = [{ prefix = "mysql_shop" }]
     "#;
 
     fn wiring(written: &str) -> Wiring<Captured, Sunk, Made> {
@@ -592,41 +681,23 @@ mod tests {
 
     #[test]
     fn a_pipeline_that_captures_no_server_is_rejected() {
-        let wiring = wiring(
-            "[[sink]]\nname = \"rustfs\"\nchange_log.files.prefix = \"mysql_shop_cdc\"\nwarehouse.files.bucket = \"lithify\"\nartifact.snapshot.place = [{ files.prefix = \"mysql_shop\" }]",
-        );
+        let wiring = wiring(&format!("[[sink]]\n{NAMED}{WAREHOUSE}{ARTIFACTS}"));
 
         assert_eq!(wiring.sources().unwrap_err(), Miswiring::WithoutSources);
     }
 
     #[test]
     fn a_pipeline_sunk_nowhere_is_rejected() {
-        let wiring = wiring(
-            "[[source]]\nname = \"primary\"\nsince = \"1970-01-01T00:00:00Z\"\ncapture.debezium.dialect = \"mysql\"",
-        );
+        let wiring = wiring(SERVER);
 
         assert_eq!(wiring.sinks().unwrap_err(), Miswiring::WithoutSinks);
     }
 
     #[test]
-    fn a_sink_holds_the_change_log_the_pipeline_names() {
+    fn a_sink_holds_the_change_log_its_warehouse_places() {
         assert_eq!(sinks()[0].name(), "rustfs");
         assert_eq!(sinks()[0].change_log(), &prefix("mysql_shop_cdc"));
-    }
-
-    #[test]
-    fn a_sink_that_names_its_own_change_log_keeps_it() {
-        assert_eq!(
-            sinks()[1].change_log(),
-            &Lying::Warehouse {
-                dataset: "mysql_shop_archive".to_owned()
-            }
-        );
-    }
-
-    #[test]
-    fn a_sink_says_the_namespace_its_change_logs_landed_in() {
-        assert_eq!(sinks()[0].change_log(), &prefix("mysql_shop_cdc"));
+        assert_eq!(sinks()[1].change_log(), &dataset("mysql_shop_archive"));
     }
 
     #[test]
@@ -658,44 +729,95 @@ mod tests {
     }
 
     #[test]
-    fn a_sink_builds_each_artifact_it_declares_where_it_places_it() {
+    fn a_sink_builds_each_artifact_declared_for_the_pipeline_where_its_warehouse_places_it() {
+        let sinks = sinks();
+
         assert_eq!(
-            sinks()[0].artifact("snapshot"),
+            sinks[0].artifact("snapshot"),
             Some(&Made::Snapshot {
-                place: vec![prefix("mysql_shop")]
+                shard: "%Y%m%d".to_owned()
             })
         );
         assert_eq!(
-            sinks()[1].artifact("snapshot"),
-            Some(&Made::Snapshot {
-                place: vec![Lying::Warehouse {
-                    dataset: "mysql_shop".to_owned()
-                }]
-            })
+            sinks[0].place("snapshot").and_then(Place::as_whole),
+            Some([prefix("mysql_shop")].as_slice())
+        );
+        assert_eq!(
+            sinks[1].place("snapshot").and_then(Place::as_whole),
+            Some([dataset("mysql_shop")].as_slice())
         );
     }
 
     #[test]
-    fn a_sink_declaring_an_artifact_again_keeps_the_others_declared_by_default() {
-        let declared_again = INFRA.replace(
-            "        artifact.copy.place = [{ warehouse.dataset = \"mysql_shop_copy\" }]\n",
-            "",
+    fn a_sink_builds_no_artifact_its_warehouse_places_nowhere() {
+        let sinks = sinks();
+
+        assert_eq!(sinks[0].artifact("copy"), None);
+        assert_eq!(sinks[1].artifact("instant"), None);
+    }
+
+    #[test]
+    fn a_sink_places_each_instant_an_artifact_is_cut_at_on_its_own() {
+        let sinks = sinks();
+        let instant = sinks[0].place("instant").unwrap();
+
+        assert_eq!(
+            instant.cut("09:00"),
+            Some([prefix("mysql_shop_0900")].as_slice())
+        );
+        assert_eq!(instant.cut("18:00"), None);
+    }
+
+    #[test]
+    fn an_artifact_placed_but_declared_nowhere_is_rejected() {
+        let undeclared = INFRA.replace("[artifact.copy]\n", "");
+
+        assert_eq!(
+            wiring(&undeclared).sinks().unwrap_err(),
+            Miswiring::Undeclared("warehouse".to_owned(), "copy".to_owned())
+        );
+    }
+
+    #[test]
+    fn an_instant_placed_but_declared_nowhere_is_rejected() {
+        let uncut = INFRA.replace("place.instant.\"09:00\"", "place.instant.\"12:00\"");
+
+        assert_eq!(
+            wiring(&uncut).sinks().unwrap_err(),
+            Miswiring::Uncut {
+                sink: "rustfs".to_owned(),
+                artifact: "instant".to_owned(),
+                cut: "12:00".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn an_artifact_cut_at_several_instants_placed_as_one_list_is_rejected() {
+        let listed = INFRA.replace("place.instant.\"09:00\"", "place.instant");
+
+        assert_eq!(
+            wiring(&listed).sinks().unwrap_err(),
+            Miswiring::Misplaced("rustfs".to_owned(), "instant".to_owned())
+        );
+    }
+
+    #[test]
+    fn an_artifact_placed_by_instants_it_is_not_cut_at_is_rejected() {
+        let by_instant = INFRA.replace(
+            "place.copy = [{ dataset = \"mysql_shop_copy\" }]",
+            "place.copy.\"09:00\" = [{ dataset = \"mysql_shop_copy\" }]",
         );
 
         assert_eq!(
-            wiring(&declared_again).sinks().unwrap_err(),
-            Miswiring::ArtifactUnreached("warehouse".to_owned(), "copy".to_owned())
+            wiring(&by_instant).sinks().unwrap_err(),
+            Miswiring::Misplaced("warehouse".to_owned(), "copy".to_owned())
         );
     }
 
     #[test]
     fn an_artifact_placed_nowhere_is_rejected() {
-        let wiring = wired(
-            SERVER,
-            &format!(
-                "change_log.files.prefix = \"mysql_shop_cdc\"\n{WAREHOUSE}artifact.snapshot.place = []\n"
-            ),
-        );
+        let wiring = wired(SERVER, &format!("{WAREHOUSE}place.snapshot = []\n"));
 
         assert_eq!(
             wiring.sinks().unwrap_err(),
@@ -704,17 +826,15 @@ mod tests {
     }
 
     #[test]
-    fn an_artifact_built_without_the_one_it_is_built_from_is_rejected() {
+    fn an_artifact_placed_without_the_one_it_is_built_from_is_rejected() {
         let wiring = wired(
             SERVER,
-            &format!(
-                "change_log.files.prefix = \"mysql_shop_cdc\"\n{WAREHOUSE}artifact.copy.place = [{{ files.prefix = \"mysql_shop_copy\" }}]\n"
-            ),
+            &format!("{WAREHOUSE}place.copy = [{{ prefix = \"mysql_shop_copy\" }}]\n"),
         );
 
         assert_eq!(
             wiring.sinks().unwrap_err(),
-            Miswiring::SourceUndeclared {
+            Miswiring::SourceUnplaced {
                 sink: "rustfs".to_owned(),
                 artifact: "copy".to_owned(),
                 source: "snapshot".to_owned(),
@@ -723,10 +843,20 @@ mod tests {
     }
 
     #[test]
+    fn a_place_written_the_way_of_another_warehouse_is_rejected() {
+        let elsewhere = INFRA.replace(
+            "place.copy = [{ dataset = \"mysql_shop_copy\" }]",
+            "place.copy = [{ prefix = \"mysql_shop_copy\" }]",
+        );
+
+        assert!(toml::from_str::<Wiring<Captured, Sunk, Made>>(&elsewhere).is_err());
+    }
+
+    #[test]
     fn a_source_that_says_since_when_nowhere_is_captured_since_the_epoch() {
         let wiring = wired(
-            "[[source]]\nname = \"primary\"\ncapture.debezium.dialect = \"mysql\"",
-            &format!("change_log.files.prefix = \"mysql_shop_cdc\"\n{WAREHOUSE}{ARTIFACTS}"),
+            "[artifact.snapshot]\nshard = \"%Y%m%d\"\n[[source]]\nname = \"primary\"\ncapture.debezium.dialect = \"mysql\"",
+            &format!("{WAREHOUSE}{ARTIFACTS}"),
         );
 
         assert_eq!(
@@ -738,8 +868,8 @@ mod tests {
     #[test]
     fn a_source_captured_in_no_named_way_is_rejected() {
         let wiring = wired(
-            "[[source]]\nname = \"primary\"\nsince = \"1970-01-01T00:00:00Z\"",
-            &format!("change_log.files.prefix = \"mysql_shop_cdc\"\n{WAREHOUSE}{ARTIFACTS}"),
+            "[artifact.snapshot]\nshard = \"%Y%m%d\"\n[[source]]\nname = \"primary\"\nsince = \"1970-01-01T00:00:00Z\"",
+            &format!("{WAREHOUSE}{ARTIFACTS}"),
         );
 
         assert_eq!(
@@ -780,34 +910,15 @@ mod tests {
     }
 
     #[test]
-    fn a_sink_holding_no_change_log_anywhere_is_rejected() {
-        let wiring = wired(SERVER, &format!("{WAREHOUSE}{ARTIFACTS}"));
+    fn a_sink_holding_no_change_log_is_rejected() {
+        let unlogged = INFRA.replace("change_log = { prefix = \"mysql_shop_cdc\" }\n", "");
 
-        assert_eq!(
-            wiring.sinks().unwrap_err(),
-            Miswiring::SinkWithoutChangeLog("rustfs".to_owned())
-        );
-    }
-
-    #[test]
-    fn a_sink_holding_its_change_log_in_another_warehouse_is_rejected() {
-        let elsewhere = INFRA.replace(
-            "change_log.warehouse.dataset = \"mysql_shop_archive\"",
-            "change_log.files.prefix = \"mysql_shop_archive\"",
-        );
-
-        assert_eq!(
-            wiring(&elsewhere).sinks().unwrap_err(),
-            Miswiring::ChangeLogUnreached("warehouse".to_owned())
-        );
+        assert!(toml::from_str::<Wiring<Captured, Sunk, Made>>(&unlogged).is_err());
     }
 
     #[test]
     fn a_sink_into_no_warehouse_anywhere_is_rejected() {
-        let wiring = wired(
-            SERVER,
-            &format!("change_log.files.prefix = \"mysql_shop_cdc\"\n{ARTIFACTS}"),
-        );
+        let wiring = wiring(&format!("{SERVER}\n[[sink]]\n{NAMED}"));
 
         assert_eq!(
             wiring.sinks().unwrap_err(),
@@ -816,11 +927,22 @@ mod tests {
     }
 
     #[test]
-    fn a_sink_that_builds_nothing_anywhere_is_rejected() {
-        let wiring = wired(
-            SERVER,
-            &format!("change_log.files.prefix = \"mysql_shop_cdc\"\n{WAREHOUSE}"),
+    fn a_sink_into_the_warehouse_every_sink_is_sunk_into_by_default_places_what_it_places() {
+        let wiring = wiring(&format!(
+            "{SERVER}\n[default.sink.warehouse.files]\nbucket = \"lithify\"\nchange_log = {{ prefix = \"mysql_shop_cdc\" }}\n{ARTIFACTS}\n[[sink]]\n{NAMED}"
+        ));
+
+        assert_eq!(
+            wiring.sinks().unwrap()[0]
+                .place("snapshot")
+                .and_then(Place::as_whole),
+            Some([prefix("mysql_shop")].as_slice())
         );
+    }
+
+    #[test]
+    fn a_sink_that_places_nothing_is_rejected() {
+        let wiring = wired(SERVER, WAREHOUSE);
 
         assert_eq!(
             wiring.sinks().unwrap_err(),
@@ -830,8 +952,7 @@ mod tests {
 
     #[test]
     fn a_sink_named_twice_is_rejected() {
-        let sink =
-            format!("{NAMED}change_log.files.prefix = \"mysql_shop_cdc\"\n{WAREHOUSE}{ARTIFACTS}");
+        let sink = format!("{NAMED}{WAREHOUSE}{ARTIFACTS}");
         let wiring = wiring(&format!("{SERVER}\n[[sink]]\n{sink}\n[[sink]]\n{sink}"));
 
         assert_eq!(
@@ -842,36 +963,26 @@ mod tests {
 
     #[test]
     fn a_sink_without_a_name_is_rejected() {
-        let wiring = wiring(&format!(
-            "{SERVER}\n[[sink]]\nchange_log.files.prefix = \"mysql_shop_cdc\"\n{WAREHOUSE}{ARTIFACTS}"
-        ));
+        let wiring = wiring(&format!("{SERVER}\n[[sink]]\n{WAREHOUSE}{ARTIFACTS}"));
 
         assert_eq!(wiring.sinks().unwrap_err(), Miswiring::SinkWithoutName(0));
     }
 
     #[test]
     fn a_sink_carries_the_warehouse_configuration_as_it_stands() {
-        assert_eq!(
+        assert!(matches!(
             sinks()[0].warehouse(),
-            &Sunk::Files {
-                bucket: "lithify".to_owned()
-            }
-        );
-    }
-
-    #[test]
-    fn a_pipeline_sunk_into_two_warehouses_keeps_each_configuration() {
-        assert_eq!(
+            Sunk::Files(placed) if placed.warehouse().bucket == "lithify"
+        ));
+        assert!(matches!(
             sinks()[1].warehouse(),
-            &Sunk::Warehouse {
-                project: "local-project".to_owned()
-            }
-        );
+            Sunk::Warehouse(placed) if placed.warehouse().project == "local-project"
+        ));
     }
 
     #[test]
     fn a_sink_into_a_warehouse_the_application_does_not_know_is_rejected() {
-        let unknown = INFRA.replace("warehouse.files", "warehouse.redshift");
+        let unknown = INFRA.replace("sink.warehouse.files", "sink.warehouse.redshift");
 
         assert!(toml::from_str::<Wiring<Captured, Sunk, Made>>(&unknown).is_err());
     }

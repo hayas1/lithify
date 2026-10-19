@@ -11,7 +11,7 @@ use lithify_core::window::Window;
 
 use crate::snapshot::{Snapshot, SnapshotBuilder};
 
-pub type Config<L> = Vec<crate::snapshot::Config<L>>;
+pub type Config = Vec<crate::snapshot::Config>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Instant {
@@ -28,6 +28,10 @@ impl Instant {
             snapshot,
         }
     }
+
+    pub fn cut(at: NaiveTime) -> String {
+        at.format("%H:%M").to_string()
+    }
 }
 
 impl Artifact for Instant {
@@ -38,7 +42,7 @@ impl Artifact for Instant {
     type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = SnapshotBuilder<'a, L, W>;
 
     fn series(&self) -> Series {
-        Series::new(Self::KIND, &self.at.format("%H:%M").to_string())
+        Series::new(Self::KIND, &Self::cut(self.at))
     }
 
     fn windows(&self, daily: &Window) -> Vec<Window> {
