@@ -42,6 +42,7 @@ pub enum Unrunnable {
         tables: Vec<TableId>,
     },
     UnknownTables(Vec<TableId>),
+    Unnamed(&'static str),
     Uncredentialed(&'static str),
 }
 
@@ -79,7 +80,7 @@ impl Display for Unrunnable {
             ),
             Self::Overtaken { date, built_until } => write!(
                 formatter,
-                "the build log has built past the shard dated {date}, up to {built_until}; rebuild that shard with `lithify build --snapshot {date}` instead"
+                "the build log has built past the shard dated {date}, up to {built_until}; rebuild that shard with `lithify build --date {date}` instead"
             ),
             Self::Baseless { window, tables } => write!(
                 formatter,
@@ -91,6 +92,10 @@ impl Display for Unrunnable {
                     .join(", "),
                 window.from(),
                 window.to()
+            ),
+            Self::Unnamed(artifact) => write!(
+                formatter,
+                "the sink builds no {artifact} at the instant named"
             ),
             Self::Uncredentialed(warehouse) => write!(
                 formatter,
@@ -129,6 +134,7 @@ impl std::error::Error for Unrunnable {
             | Self::Overtaken { .. }
             | Self::Baseless { .. }
             | Self::UnknownTables(_)
+            | Self::Unnamed(_)
             | Self::Uncredentialed(_) => None,
         }
     }

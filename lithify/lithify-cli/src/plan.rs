@@ -30,6 +30,7 @@ pub enum Tables {
     #[default]
     Every,
     Named(BTreeSet<TableId>),
+    Except(BTreeSet<TableId>),
 }
 
 impl Tables {
@@ -46,6 +47,11 @@ impl Tables {
                     return Err(Unrunnable::UnknownTables(unknown));
                 }
                 builders.retain(|builder| tables.contains(builder.table()));
+
+                Ok(builders)
+            }
+            Self::Except(tables) => {
+                builders.retain(|builder| !tables.contains(builder.table()));
 
                 Ok(builders)
             }
@@ -93,25 +99,8 @@ impl<'a, K, S: Settlement, A: Artifact> Plan<'a, K, S, A> {
     {
         let mut builders = self.tables.narrow(self.builders(&logs)?)?;
         builders.retain(|builder| self.listing.table(builder.table()).builds(A::KIND));
-        self.verify(&builders)?;
 
-        self.settlement.settle(self.client, &builders)
-    }
-
-    fn verify<B: ArtifactBuilder>(&self, builders: &[B]) -> Result<(), Unrunnable> {
-        let tables: Vec<_> = builders
-            .iter()
-            .filter_map(ArtifactBuilder::missing_base)
-            .cloned()
-            .collect();
-
-        match tables.is_empty() {
-            true => Ok(()),
-            false => Err(Unrunnable::Baseless {
-                window: self.window.clone(),
-                tables,
-            }),
-        }
+        self.settlement.settle(self.client, self.window, &builders)
     }
 
     fn builders<'b, C>(&self, logs: &'b C) -> Result<Vec<BuilderOf<'b, A, C, K>>, Unrunnable>
@@ -131,7 +120,7 @@ impl<'a, K, S: Settlement, A: Artifact> Plan<'a, K, S, A> {
                 artifact.base(self.previous, table, window),
             )
         });
-        let mut tracker = match artifact.open_ended() {
+        let mut tracker = match window.is_open() {
             true => tracker.open_ended(),
             false => tracker,
         };

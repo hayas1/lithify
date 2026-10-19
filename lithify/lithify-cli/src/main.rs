@@ -3,12 +3,13 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use chrono::{NaiveDate, Utc};
+use chrono::{NaiveDate, NaiveTime, Utc};
 use clap::{Parser, Subcommand};
 
 #[cfg(feature = "serve")]
 use lithify_cli::artifacts::ArtifactConfig;
-use lithify_cli::course::Course;
+use lithify_cli::artifacts::Declared;
+use lithify_cli::command::{RunCommand, Target};
 use lithify_cli::credential::Credentials;
 use lithify_cli::journal::Journal;
 #[cfg(feature = "serve")]
@@ -40,7 +41,7 @@ enum Command {
     )]
     CatchUp(CatchUpArguments),
     #[command(
-        about = "Build the shard of a pipeline's snapshots that is named, onto the one the build log recorded before it"
+        about = "Build the next window the build log leaves to build, or the one named, onto what the build log recorded before it"
     )]
     Build(BuildArguments),
     #[command(
@@ -159,7 +160,9 @@ struct CatchUpArguments {
 
 impl CatchUpArguments {
     fn journal(self) -> Result<Journal, Unrunnable> {
-        self.pipeline.run().build(&Course::CatchUp { to: self.to })
+        self.pipeline
+            .run()
+            .build(&RunCommand::CatchUp { to: self.to })
     }
 }
 
@@ -169,13 +172,28 @@ struct BuildArguments {
     pipeline: PipelineArguments,
     #[arg(
         long,
-        value_name = "DATE",
-        help = "The date the window of the shard to build opens on, folding onto the shard the build log recorded closing then"
+        value_name = "ARTIFACT",
+        value_parser = |artifact: &str| Declared::KINDS.into_iter().find(|kind| *kind == artifact).ok_or("snapshot, instant, scd1 or scd2"),
+        help = "The artifact to build, out of every one the sink places when none is named"
     )]
-    snapshot: NaiveDate,
+    artifact: Option<&'static str>,
+    #[arg(
+        long,
+        value_name = "HH:MM",
+        requires = "artifact",
+        help = "The instant of the day the instant to build is cut at, out of every one the sink places when none is named"
+    )]
+    at: Option<NaiveTime>,
+    #[arg(
+        long,
+        value_name = "DATE",
+        help = "The date of the shard to build, folding onto what the build log recorded closing as it opens, rather than the step the build log says is next"
+    )]
+    date: Option<NaiveDate>,
     #[arg(
         long,
         value_name = "SCHEMA.TABLE",
+        requires = "date",
         value_parser = |table: &str| TableId::try_from(table),
         help = "A table to build the shard of, out of every table the window holds when none is named"
     )]
@@ -183,25 +201,27 @@ struct BuildArguments {
     #[arg(
         long,
         value_name = "DIRECTORY",
-        help = "Write the statements the shard would run into this directory, one file per sink, instead of running them"
+        help = "Write the statements the step would run into this directory, one file per sink, instead of running them"
     )]
     dry_run: Option<PathBuf>,
 }
 
 impl BuildArguments {
     fn journal(self) -> Result<Journal, Unrunnable> {
-        let course = Course::Shard {
-            date: self.snapshot,
-            tables: match self.table.is_empty() {
+        let command = RunCommand::Build(Target::new(
+            self.artifact,
+            self.at,
+            self.date,
+            match self.table.is_empty() {
                 true => Tables::Every,
                 false => Tables::Named(self.table.into_iter().collect()),
             },
-        };
+        ));
         let run = self.pipeline.run();
 
         match self.dry_run {
-            Some(into) => run.plan(&course, &into),
-            None => run.build(&course),
+            Some(into) => run.plan(&command, &into),
+            None => run.build(&command),
         }
     }
 }
@@ -278,12 +298,7 @@ mod tests {
     }
 
     fn build_arguments(extra: &[&str]) -> BuildArguments {
-        match parsed(
-            "build",
-            &[&["--snapshot", "2026-09-20"][..], extra].concat(),
-        )
-        .unwrap()
-        {
+        match parsed("build", &[&["--date", "2026-09-20"][..], extra].concat()).unwrap() {
             Command::Build(arguments) => arguments,
             _ => unreachable!("build was named"),
         }
@@ -324,7 +339,8 @@ mod tests {
     fn a_build_is_given_the_shard_it_builds_every_table_of() {
         let built = build_arguments(&[]);
 
-        assert_eq!(built.snapshot, "2026-09-20".parse::<NaiveDate>().unwrap());
+        assert_eq!(built.date, Some("2026-09-20".parse::<NaiveDate>().unwrap()));
+        assert_eq!(built.artifact, None);
         assert_eq!(built.table, []);
         assert_eq!(built.dry_run, None);
     }
@@ -340,8 +356,23 @@ mod tests {
     }
 
     #[test]
-    fn a_build_without_its_shard_is_rejected() {
-        assert!(parsed("build", &[]).is_err());
+    fn a_build_named_nothing_takes_the_step_the_build_log_says_is_next() {
+        let Ok(Command::Build(next)) = parsed("build", &[]) else {
+            panic!("build was named");
+        };
+
+        assert_eq!(next.date, None);
+        assert!(parsed("build", &["--table", "shop.people"]).is_err());
+    }
+
+    #[test]
+    fn a_build_is_named_the_artifact_and_the_instant_it_is_cut_at() {
+        let cut = build_arguments(&["--artifact", "instant", "--at", "12:00"]);
+
+        assert_eq!(cut.artifact, Some("instant"));
+        assert_eq!(cut.at, NaiveTime::from_hms_opt(12, 0, 0));
+        assert!(parsed("build", &["--artifact", "masked"]).is_err());
+        assert!(parsed("build", &["--at", "12:00"]).is_err());
     }
 
     #[test]

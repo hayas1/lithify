@@ -139,7 +139,7 @@ impl Shards {
                 &Era::new(
                     people(),
                     Bound::EventTime(*window.from()),
-                    match artifact.open_ended() {
+                    match window.is_open() {
                         true => Bound::Open,
                         false => Bound::EventTime(*window.to()),
                     },
@@ -233,7 +233,7 @@ fn an_instant_holds_what_the_source_held_as_it_was_cut() {
         Snapshot::new("shop_instant", "%Y%m%d%H"),
     );
     let first = shards.build(&day(0), None);
-    let cut = &six.windows(&day(1))[0];
+    let cut = &six.window(&day(1)).unwrap();
 
     let instant = shards.build_into(
         &six,
@@ -250,7 +250,7 @@ fn an_scd1_holds_what_the_source_holds_now_onto_the_last_daily_snapshot() {
     let shards = Shards::over(&replica);
     let scd1 = Scd1::new(Snapshot::current("shop_scd1"));
     let first = shards.build(&day(0), None);
-    let opened = Window::new(*day(1).from(), Ts::try_from(DAY + 1_500).unwrap());
+    let opened = scd1.window(&day(0)).unwrap();
 
     let current = shards.build_into(
         &scd1,

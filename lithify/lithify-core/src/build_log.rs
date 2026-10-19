@@ -50,7 +50,7 @@ impl Run {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Series {
     artifact: String,
     schedule: String,

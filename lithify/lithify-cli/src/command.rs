@@ -1,28 +1,23 @@
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 
 use lithify_config::infra::{Sink, Source};
-use lithify_core::build_log::BuildLog;
-use lithify_core::schedule::Schedule;
 use lithify_core::sink::WarehouseClient;
-use lithify_core::ts::{Event, Ts};
-use lithify_core::window::Window;
+use lithify_core::ts::Ts;
 
-use crate::artifacts::{ArtifactConfig, DeclaredSnapshot};
-use crate::catch_up::CatchUp;
-use crate::derivation::Derivation;
+use crate::artifacts::{ArtifactConfig, Declared, DeclaredSnapshot};
 use crate::journal::Journal;
 use crate::pipeline::{CaptureConfig, WarehouseConfig};
 use crate::plan::{Planner, Tables};
 use crate::settlement::Settlement;
-use crate::shard::Shard;
+use crate::stepping::Stepping;
 use crate::unrunnable::Unrunnable;
 
-pub enum Course {
+pub enum RunCommand {
     CatchUp { to: Option<NaiveDate> },
-    Shard { date: NaiveDate, tables: Tables },
+    Build(Target),
 }
 
-impl Course {
+impl RunCommand {
     pub fn settle<P, S>(
         &self,
         sink: &Sink<WarehouseConfig, ArtifactConfig>,
@@ -37,92 +32,105 @@ impl Course {
         Unrunnable: From<<P::Client as WarehouseClient>::Error>,
         S: Settlement,
     {
-        let declared = DeclaredSnapshot::of(sink)?;
-        let snapshot = declared.artifact();
-        let itinerary = self.itinerary(sink, source, now, planner.client())?;
-        let derivation = Derivation::new(sink, &itinerary, declared.schedule(), Ts::from(now));
-
-        itinerary.settle(settlement, journal, |window, previous, tables| {
-            planner.plan(&snapshot, window, previous, tables, settlement)
-        })?;
-
-        derivation.settle(planner, settlement, journal)
-    }
-
-    pub fn itinerary<K>(
-        &self,
-        sink: &Sink<WarehouseConfig, ArtifactConfig>,
-        source: &Source<CaptureConfig>,
-        now: DateTime<Utc>,
-        client: &K,
-    ) -> Result<Itinerary, Unrunnable>
-    where
-        K: WarehouseClient,
-        Unrunnable: From<K::Error>,
-    {
-        client.create_build_log::<Unrunnable>(DeclaredSnapshot::of(sink)?.namespace())?;
+        let stepping = Stepping::new(sink, source, Ts::from(now), planner)?;
+        let declared = Declared::of(sink)?;
 
         match self {
-            Self::CatchUp { to } => CatchUp::new(sink, source, now, *to).itinerary(client),
-            Self::Shard { date, tables } => {
-                Shard::new(sink, source, now).itinerary(client, *date, tables)
-            }
+            Self::CatchUp { to: None } => stepping.catch_up(&declared, settlement, journal),
+            Self::CatchUp { to: Some(date) } => stepping
+                .up_to(*date)?
+                .catch_up(&declared, settlement, journal),
+            Self::Build(target) => target.build(&stepping, &declared, settlement, journal),
         }
     }
 }
 
-pub struct Itinerary {
-    windows: Vec<Window>,
-    previous: Vec<BuildLog>,
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Target {
+    artifact: Option<&'static str>,
+    at: Option<NaiveTime>,
+    date: Option<NaiveDate>,
     tables: Tables,
 }
 
-impl Itinerary {
-    pub fn new(windows: Vec<Window>, previous: Vec<BuildLog>, tables: Tables) -> Self {
+impl Target {
+    pub fn new(
+        artifact: Option<&'static str>,
+        at: Option<NaiveTime>,
+        date: Option<NaiveDate>,
+        tables: Tables,
+    ) -> Self {
         Self {
-            windows,
-            previous,
+            artifact,
+            at,
+            date,
             tables,
         }
     }
 
-    pub fn windows(&self) -> &[Window] {
-        &self.windows
-    }
-
-    pub fn days(&self, schedule: Schedule) -> Vec<Window> {
-        let closed = self
-            .windows
-            .iter()
-            .filter(|window| schedule.window(*window.from()).as_ref() == Some(*window));
-        let opened = self
-            .built_until()
-            .and_then(|opened| schedule.window(opened));
-
-        closed.cloned().chain(opened).collect()
-    }
-
-    pub fn built_until(&self) -> Option<Ts<Event>> {
-        self.windows
-            .last()
-            .map(|window| *window.to())
-            .or_else(|| self.previous.first().map(|log| *log.window().to()))
-    }
-
-    pub fn settle<S: Settlement>(
-        self,
+    fn build<P, S>(
+        &self,
+        stepping: &Stepping<P>,
+        declared: &[Declared],
         settlement: &S,
         journal: &mut Journal,
-        mut plan: impl FnMut(&Window, &[BuildLog], &Tables) -> Result<S::Output, Unrunnable>,
-    ) -> Result<(), Unrunnable> {
-        let mut previous = self.previous;
+    ) -> Result<(), Unrunnable>
+    where
+        P: Planner,
+        Unrunnable: From<<P::Client as WarehouseClient>::Error>,
+        S: Settlement,
+    {
+        match self.date {
+            Some(date) => self.dated(stepping, declared, date, settlement, journal),
+            None => self.next(stepping, declared, settlement, journal),
+        }
+    }
 
-        for window in self.windows {
-            journal.window(&window);
-            match settlement.report(&window, plan(&window, &previous, &self.tables)?, journal)? {
-                Some(built) => previous = built,
-                None => break,
-            }
+    fn dated<P, S>(
+        &self,
+        stepping: &Stepping<P>,
+        declared: &[Declared],
+        date: NaiveDate,
+        settlement: &S,
+        journal: &mut Journal,
+    ) -> Result<(), Unrunnable>
+    where
+        P: Planner,
+        Unrunnable: From<<P::Client as WarehouseClient>::Error>,
+        S: Settlement,
+    {
+        let artifact = self.artifact.unwrap_or(DeclaredSnapshot::ARTIFACT);
+        let declared = declared
+            .iter()
+            .find(|declared| declared.is(artifact, self.at))
+            .ok_or(Unrunnable::Unnamed(artifact))?;
+        let window = stepping.dated(declared.on(stepping, date), date)?;
+
+        declared.take(stepping, &window, &self.tables, settlement, journal)
+    }
+
+    fn next<P, S>(
+        &self,
+        stepping: &Stepping<P>,
+        declared: &[Declared],
+        settlement: &S,
+        journal: &mut Journal,
+    ) -> Result<(), Unrunnable>
+    where
+        P: Planner,
+        Unrunnable: From<<P::Client as WarehouseClient>::Error>,
+        S: Settlement,
+    {
+        let named = declared.iter().filter(|declared| match self.artifact {
+            Some(artifact) => declared.is(artifact, self.at),
+            None => true,
+        });
+
+        if stepping
+            .step(named, &Default::default(), settlement, journal)?
+            .is_none()
+        {
+            journal.note("nothing is left to build");
         }
 
         Ok(())
@@ -145,7 +153,9 @@ pub(crate) mod tests {
         BUILT_CHANGE_LOGS, CAPTURE, PEOPLE, at, built_before, logged, pipeline, rows,
     };
     use crate::settlement::Build;
+    use lithify_core::artifact::UnbuildableArtifact;
     use lithify_core::check::Expectation;
+    use lithify_core::schedule::Schedule;
 
     const NOW: &str = "2026-09-22T05:00:00Z";
 
@@ -225,20 +235,22 @@ pub(crate) mod tests {
             'before': NULL::STRUCT(id BIGINT), 'after': {'id': 9::BIGINT}})
         ) AS t(value)";
 
-    fn shard(date: &str, tables: &[TableId]) -> Course {
-        Course::Shard {
-            date: date.parse().unwrap(),
-            tables: match tables {
+    fn shard(date: &str, tables: &[TableId]) -> RunCommand {
+        RunCommand::Build(Target::new(
+            None,
+            None,
+            Some(date.parse().unwrap()),
+            match tables {
                 [] => Tables::Every,
                 named => Tables::Named(named.iter().cloned().collect()),
             },
-        }
+        ))
     }
 
     pub(crate) fn settle(
         pipeline: &Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig>,
         client: &DuckDbClient,
-        course: &Course,
+        command: &RunCommand,
         now: &str,
     ) -> Result<Journal, Unrunnable> {
         let source = pipeline.sources().next().unwrap();
@@ -249,7 +261,7 @@ pub(crate) mod tests {
         let settlement = Build::new(sink, source, at(now)).unwrap();
         let mut journal = Journal::default();
 
-        course.settle(
+        command.settle(
             sink,
             source,
             at(now),
@@ -298,7 +310,7 @@ pub(crate) mod tests {
         let pipeline = pipeline();
         let client = logged(PEOPLE, &[]);
 
-        settle(&pipeline, &client, &Course::CatchUp { to: None }, NOW).unwrap();
+        settle(&pipeline, &client, &RunCommand::CatchUp { to: None }, NOW).unwrap();
 
         assert_eq!(
             rows(
@@ -355,7 +367,7 @@ pub(crate) mod tests {
             PERSON_PROCESSED_PAST_THE_MIDNIGHT_ITS_EVENT_TIME_FALLS_BEFORE,
             &[],
         );
-        let to = Course::CatchUp {
+        let to = RunCommand::CatchUp {
             to: Some("2026-09-20".parse().unwrap()),
         };
 
@@ -374,7 +386,7 @@ pub(crate) mod tests {
     fn changes_within_a_shard_are_folded_in_the_order_of_their_processing_time() {
         let pipeline = pipeline();
         let client = logged(PERSON_DELETED_AT_AN_EVENT_TIME_BEFORE_ITS_CREATION, &[]);
-        let to = Course::CatchUp {
+        let to = RunCommand::CatchUp {
             to: Some("2026-09-20".parse().unwrap()),
         };
 
@@ -412,31 +424,179 @@ pub(crate) mod tests {
         assert_eq!(built(&client), [folded("mysql_shop.people_19700101", "")]);
     }
 
-    #[test]
-    fn a_shard_nothing_was_recorded_closing_before_is_not_built() {
-        let pipeline = pipeline();
-        let client = logged(PEOPLE, &[]);
-
-        let baseless = settle(&pipeline, &client, &shard("2026-09-20", &[]), NOW);
-
-        assert!(matches!(
-            baseless,
-            Err(Unrunnable::Baseless { tables, .. }) if tables == [TableId::new("shop", "people")]
-        ));
+    fn failed(client: &DuckDbClient) -> Vec<(String, String)> {
+        rows(
+            client,
+            "SELECT target, error FROM mysql_shop._lithify_log WHERE status = 'failed' ORDER BY id",
+        )
     }
 
     #[test]
-    fn a_shard_is_refused_naming_the_table_nothing_was_built_for_closing_at_its_opening() {
+    fn a_shard_nothing_was_recorded_closing_before_is_logged_as_failed_rather_than_built() {
+        let pipeline = pipeline();
+        let client = logged(PEOPLE, &[]);
+
+        let journal = settle(&pipeline, &client, &shard("2026-09-20", &[]), NOW).unwrap();
+
+        assert!(!journal.complete());
+        assert_eq!(built(&client), []);
+        assert_eq!(
+            failed(&client),
+            [(
+                "mysql_shop.people_20260920".to_owned(),
+                UnbuildableArtifact::WithoutBase(TableId::new("shop", "people")).to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn a_shard_with_a_table_nothing_was_built_for_closing_at_its_opening_fails_that_table_alone() {
         let pipeline = pipeline();
         let client = logged(BUILT_CHANGE_LOGS, &[built_before("people", CAPTURE)]);
 
-        let baseless = settle(&pipeline, &client, &shard("2026-09-20", &[]), NOW);
+        settle(&pipeline, &client, &shard("2026-09-20", &[]), NOW).unwrap();
 
-        assert!(matches!(
-            baseless,
-            Err(Unrunnable::Baseless { tables, .. }) if tables == [TableId::new("shop", "pets")]
-        ));
+        assert_eq!(
+            built(&client),
+            [
+                folded("mysql_shop.people_20260919", ""),
+                folded("mysql_shop.people_20260920", "mysql_shop.people_20260919"),
+            ]
+        );
+        assert_eq!(
+            failed(&client)
+                .into_iter()
+                .map(|(target, _)| target)
+                .collect::<Vec<_>>(),
+            ["mysql_shop.pets_20260920"]
+        );
+    }
+
+    fn next(artifact: Option<&'static str>) -> RunCommand {
+        RunCommand::Build(Target::new(artifact, None, None, Tables::Every))
+    }
+
+    #[test]
+    fn a_build_named_nothing_takes_the_one_step_the_build_log_says_is_next() {
+        let pipeline = pipeline();
+        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]);
+
+        settle(&pipeline, &client, &next(None), NOW).unwrap();
+
+        assert_eq!(
+            built(&client),
+            [
+                folded("mysql_shop.people_20260919", ""),
+                folded("mysql_shop.people_20260920", "mysql_shop.people_20260919"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_build_named_an_artifact_takes_the_next_step_of_that_artifact() {
+        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]);
+        let pipeline = crate::plan::tests::opened(
+            "next-scd2",
+            &format!(
+                "[artifact.scd2]\nshard = \"%Y%m%d\"\n{}place.scd2 = [{{ prefix = \"mysql_shop_scd2\" }}]\n",
+                crate::plan::tests::INFRA
+            ),
+            "[default]\nartifacts = [\"snapshot\", \"scd2\"]\n",
+        );
+
+        settle(&pipeline, &client, &next(Some("scd2")), NOW).unwrap();
+
         assert_eq!(built(&client), [folded("mysql_shop.people_20260919", "")]);
+        assert_eq!(
+            rows(
+                &client,
+                "SELECT target, '' FROM mysql_shop_scd2._lithify_log WHERE status = 'succeeded'"
+            ),
+            [(
+                "mysql_shop_scd2.people_open_20260921".to_owned(),
+                String::new()
+            )]
+        );
+    }
+
+    #[test]
+    fn an_scd1_built_for_a_date_holds_everything_after_the_snapshot_of_that_date() {
+        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]);
+        let pipeline = crate::plan::tests::opened(
+            "dated-scd1",
+            &format!(
+                "[artifact.scd1]\n{}place.scd1 = [{{ prefix = \"mysql_shop_scd1\" }}]\n",
+                crate::plan::tests::INFRA
+            ),
+            "[default]\nartifacts = [\"snapshot\", \"scd1\"]\n",
+        );
+        let dated = RunCommand::Build(Target::new(
+            Some("scd1"),
+            None,
+            Some("2026-09-19".parse().unwrap()),
+            Tables::Every,
+        ));
+
+        settle(&pipeline, &client, &dated, NOW).unwrap();
+
+        assert_eq!(
+            rows(
+                &client,
+                "SELECT target, base FROM mysql_shop_scd1._lithify_log WHERE status = 'succeeded'"
+            ),
+            [(
+                "mysql_shop_scd1.people".to_owned(),
+                "mysql_shop.people_20260919".to_owned()
+            )]
+        );
+    }
+
+    const PETS_STANDING_BEFORE_THEY_WERE_BUILT: &str = "CREATE SCHEMA mysql_shop_cdc;
+        CREATE TABLE mysql_shop_cdc.mysql AS SELECT * FROM (VALUES
+          ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
+            'ddl': 'CREATE TABLE people (id BIGINT)',
+            'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
+              'table': {'primaryKeyColumnNames': ['id'], 'columns': [
+                {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
+                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]}),
+          ({'source': {'file': 'binlog.000001', 'pos': 2::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
+            'ddl': 'CREATE TABLE pets (id BIGINT)',
+            'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"pets\"',
+              'table': {'primaryKeyColumnNames': ['id'], 'columns': [
+                {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
+                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]})
+        ) AS t(value);
+        CREATE TABLE mysql_shop_cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
+          ({'op': 'c', 'ts_ms': 1789862400001::BIGINT,
+            'source': {'file': 'binlog.000001', 'pos': 3::BIGINT, 'gtid': NULL, 'ts_ms': 1789862400001::BIGINT},
+            'before': NULL::STRUCT(id BIGINT), 'after': {'id': 8::BIGINT}})
+        ) AS t(value);
+        CREATE TABLE mysql_shop_cdc.\"mysql.shop.pets\" AS SELECT * FROM (VALUES
+          ({'op': 'c', 'ts_ms': 1000::BIGINT,
+            'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL, 'ts_ms': 1000::BIGINT},
+            'before': NULL::STRUCT(id BIGINT), 'after': {'id': 9::BIGINT}})
+        ) AS t(value)";
+
+    #[test]
+    fn a_catch_up_builds_a_table_with_nothing_to_fold_onto_again_from_the_start_of_its_source() {
+        let pipeline = pipeline();
+        let client = logged(
+            PETS_STANDING_BEFORE_THEY_WERE_BUILT,
+            &[built_before("people", CAPTURE)],
+        );
+
+        settle(&pipeline, &client, &RunCommand::CatchUp { to: None }, NOW).unwrap();
+
+        assert_eq!(
+            built(&client),
+            [
+                folded("mysql_shop.people_20260919", ""),
+                folded("mysql_shop.people_20260920", "mysql_shop.people_20260919"),
+                folded("mysql_shop.pets_20260921", ""),
+                folded("mysql_shop.people_20260921", "mysql_shop.people_20260920"),
+            ]
+        );
+        assert_eq!(ids(&client, "pets_20260921"), ["9"]);
     }
 
     #[test]
@@ -473,7 +633,7 @@ pub(crate) mod tests {
 
     fn caught_up(changes: &str, now: &str) -> DuckDbClient {
         let client = logged(changes, &[built_before("people", CAPTURE)]);
-        settle(&pipeline(), &client, &Course::CatchUp { to: None }, now).unwrap();
+        settle(&pipeline(), &client, &RunCommand::CatchUp { to: None }, now).unwrap();
 
         client
     }
@@ -487,7 +647,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_catch_up_after_a_narrowed_shard_rebuilds_the_tables_the_shard_left_behind() {
+    fn a_catch_up_after_a_narrowed_shard_builds_only_the_tables_the_shard_left_behind() {
         let pipeline = pipeline();
         let client = caught_up(PETS_CREATED_ON_20260920, "2026-09-21T05:00:00Z");
 
@@ -498,7 +658,7 @@ pub(crate) mod tests {
             NOW,
         )
         .unwrap();
-        settle(&pipeline, &client, &Course::CatchUp { to: None }, NOW).unwrap();
+        settle(&pipeline, &client, &RunCommand::CatchUp { to: None }, NOW).unwrap();
 
         assert_eq!(
             built(&client),
@@ -506,7 +666,6 @@ pub(crate) mod tests {
                 folded("mysql_shop.people_20260919", ""),
                 folded("mysql_shop.people_20260920", "mysql_shop.people_20260919"),
                 folded("mysql_shop.pets_20260920", ""),
-                folded("mysql_shop.people_20260921", "mysql_shop.people_20260920"),
                 folded("mysql_shop.people_20260921", "mysql_shop.people_20260920"),
                 folded("mysql_shop.pets_20260921", "mysql_shop.pets_20260920"),
             ]
@@ -520,7 +679,7 @@ pub(crate) mod tests {
         let rewound = caught_up(PETS_CREATED_ON_20260920, NOW);
 
         settle(&pipeline, &rewound, &shard("2026-09-20", &[]), NOW).unwrap();
-        let rebuilt = settle(&pipeline, &rewound, &Course::CatchUp { to: None }, NOW).unwrap();
+        let rebuilt = settle(&pipeline, &rewound, &RunCommand::CatchUp { to: None }, NOW).unwrap();
 
         assert_eq!(
             windows(rebuilt),
@@ -551,7 +710,7 @@ pub(crate) mod tests {
         assert_eq!(ids(&client, "people_20260920"), ["7", "8"]);
         assert_eq!(ids(&client, "pets_20260920"), ["9"]);
         assert_eq!(
-            windows(settle(&pipeline, &client, &Course::CatchUp { to: None }, NOW).unwrap()),
+            windows(settle(&pipeline, &client, &RunCommand::CatchUp { to: None }, NOW).unwrap()),
             ["window 2026-09-21T00:00:00+00:00 .. 2026-09-22T00:00:00+00:00"]
         );
     }
@@ -620,7 +779,7 @@ pub(crate) mod tests {
             &[built_before("people", CAPTURE)],
         );
 
-        settle(&pipeline, &client, &Course::CatchUp { to: None }, NOW).unwrap();
+        settle(&pipeline, &client, &RunCommand::CatchUp { to: None }, NOW).unwrap();
 
         assert_eq!(
             rows(
@@ -666,7 +825,7 @@ pub(crate) mod tests {
             ],
         );
 
-        settle(&pipeline, &client, &Course::CatchUp { to: None }, NOW).unwrap();
+        settle(&pipeline, &client, &RunCommand::CatchUp { to: None }, NOW).unwrap();
 
         assert_eq!(
             rows(
@@ -733,9 +892,9 @@ pub(crate) mod tests {
         let pipeline = pipeline();
         let client = logged(PEOPLE, &[built_before("people", CAPTURE)]);
 
-        settle(&pipeline, &client, &Course::CatchUp { to: None }, NOW).unwrap();
+        settle(&pipeline, &client, &RunCommand::CatchUp { to: None }, NOW).unwrap();
         settle(&pipeline, &client, &shard("2026-09-20", &[]), NOW).unwrap();
-        settle(&pipeline, &client, &Course::CatchUp { to: None }, NOW).unwrap();
+        settle(&pipeline, &client, &RunCommand::CatchUp { to: None }, NOW).unwrap();
 
         assert_eq!(
             built(&client),

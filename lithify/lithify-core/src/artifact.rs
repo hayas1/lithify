@@ -3,9 +3,11 @@ use std::fmt;
 use crate::build_log::{BuildLog, Outcome, Run, Series};
 use crate::listener::SchemaChangeListener;
 use crate::model::TableId;
+use crate::schedule::Timeline;
 use crate::sink::{TablePath, UnsupportedColumn, Warehouse};
 use crate::source::RowChangeLog;
 use crate::sql::SqlString;
+use crate::ts::{Event, Ts};
 use crate::window::Window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,6 +15,7 @@ pub enum UnbuildableArtifact {
     WithoutPrimaryKey(TableId),
     PrimaryKeyChanged(TableId),
     WithoutEra(TableId),
+    WithoutBase(TableId),
     AcrossEras(TableId),
     UnsupportedColumn(UnsupportedColumn),
 }
@@ -35,6 +38,10 @@ impl fmt::Display for UnbuildableArtifact {
             Self::WithoutEra(table) => {
                 write!(formatter, "{table} lived through no era of the window")
             }
+            Self::WithoutBase(table) => write!(
+                formatter,
+                "{table} stood before its window opened but nothing built of it closes then to fold onto"
+            ),
             Self::AcrossEras(table) => write!(
                 formatter,
                 "{table} changed its schema within the window, which SCD type 2 does not carry its versions across yet"
@@ -64,10 +71,22 @@ pub trait Artifact {
 
     fn series(&self) -> Series;
 
-    fn windows(&self, daily: &Window) -> Vec<Window>;
+    fn window(&self, day: &Window) -> Option<Window> {
+        Some(day.clone())
+    }
 
-    fn open_ended(&self) -> bool {
-        false
+    fn next(
+        &self,
+        timeline: &Timeline,
+        built: Option<&Window>,
+        _base: Option<Ts<Event>>,
+    ) -> Option<Window> {
+        let day = match built {
+            Some(built) => timeline.after(built)?,
+            None => timeline.first()?,
+        };
+
+        self.window(&day).filter(|window| timeline.reached(window))
     }
 
     fn base<'b>(

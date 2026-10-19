@@ -155,10 +155,6 @@ impl Artifact for Snapshot {
         Self::days()
     }
 
-    fn windows(&self, daily: &Window) -> Vec<Window> {
-        vec![daily.clone()]
-    }
-
     fn base<'b>(
         &self,
         built: &'b [BuildLog],
@@ -491,7 +487,11 @@ impl<L: RowChangeLog, W: Warehouse> ArtifactBuilder for SnapshotBuilder<'_, L, W
 
 #[cfg(test)]
 mod tests {
+    use lithify_core::schedule::Timeline;
+
     use super::*;
+
+    const DAY: i64 = 86_400_000;
 
     fn built(artifact: &str, schedule: &str, table: &str, (from, to): (i64, i64)) -> BuildLog {
         BuildLog::new(
@@ -534,12 +534,37 @@ mod tests {
     }
 
     #[test]
-    fn a_snapshot_closes_one_window_for_each_daily_window() {
-        let daily = Window::new(Ts::try_from(0).unwrap(), Ts::try_from(10).unwrap());
+    fn a_snapshot_never_built_is_built_first_in_one_window_spanning_every_day_closed() {
+        let timeline = Timeline::new(
+            Schedule::default(),
+            Ts::try_from(0).unwrap(),
+            Ts::try_from(DAY * 3 + 5).unwrap(),
+        );
 
         assert_eq!(
-            Snapshot::new("mysql_shop", "%Y%m%d").windows(&daily),
-            [daily]
+            Snapshot::new("mysql_shop", "%Y%m%d").next(&timeline, None, None),
+            Some(Window::new(
+                Ts::try_from(0).unwrap(),
+                Ts::try_from(DAY * 3).unwrap()
+            ))
+        );
+    }
+
+    #[test]
+    fn a_snapshot_is_built_next_into_the_day_after_the_last_it_was_built_into() {
+        let timeline = Timeline::new(
+            Schedule::default(),
+            Ts::try_from(0).unwrap(),
+            Ts::try_from(DAY * 3 + 5).unwrap(),
+        );
+        let built = Window::new(Ts::try_from(0).unwrap(), Ts::try_from(DAY).unwrap());
+
+        assert_eq!(
+            Snapshot::new("mysql_shop", "%Y%m%d").next(&timeline, Some(&built), None),
+            Some(Window::new(
+                Ts::try_from(DAY).unwrap(),
+                Ts::try_from(DAY * 2).unwrap()
+            ))
         );
     }
 

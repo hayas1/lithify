@@ -121,3 +121,34 @@ A pipeline declares each kind at most once, so what an artifact is built from is
 No crate but the command line enumerates the kinds of artifact there are.
 As a capture is configured by `CdcFormat::Config` and a warehouse by `OpenWarehouse::Config`, each kind of artifact defines its own configuration in the crate that implements it, and the command line gathers them into one enum the way it gathers `CaptureConfig` and `WarehouseConfig`, so another kind is added without touching the configuration crate.
 The build log records each series by the kind of its artifact and by what makes it advance, such as the instant of the day it is cut at, so the `artifact` and `schedule` columns read whatever the artifact writes into them.
+
+## Running
+
+### A build takes one step, and a catch-up repeats it
+
+`lithify build` takes one step: it builds one window of one series for the tables that window is next for, onto what the build log records them built from, and logs each table.
+Named nothing, it takes the step the build log says is next; `--artifact` and `--at` name the series, `--date` the day, and `--table` the tables, so a window is rebuilt by naming it.
+`--dry-run` writes the statements of the step rather than running them, and logs nothing.
+
+`lithify catch-up` repeats `lithify build` named nothing, reading the build log afresh before each step, until no step is left.
+The series of a sink are stepped in the order they are built from one another: the `snapshot`, each `instant`, the `scd2`, then the `scd1`, so an artifact built from another steps once what it is built from has stepped as far as it can.
+
+### Each table advances on its own
+
+The build log says, for each series and each table, how far the table was last built; the table's next window follows from there, so tables may stand at different days.
+A step takes the earliest next window of the series and builds every table it is next for; a table the build log has never seen is built with whatever step its window opens in, and one it saw but never built starts again from the source's `since` in one window spanning every day closed since.
+A table is never built into a window after one it was not built into, since each window folds onto the one before.
+
+The window a step builds is the artifact's own, read off the day it steps into: the build log closes a day at the instant the `snapshot` is cut at, and each artifact says which window of that day it holds.
+
+- a `snapshot` and an `scd2` hold the day itself, and step into the day after the last they were built into, or, never built, into one window spanning every day closed since `since`;
+- an `instant` holds the day up to the instant it is cut at, once that instant has passed;
+- an `scd1` holds everything after the day, as a window left open, so it is built once onto each day its `snapshot` is built for;
+- one built from the `snapshot` steps into the day after the last it was built onto, or, never built, into the last day the `snapshot` was built for, and only once the `snapshot` is built up to where its window opens.
+
+### A table that fails stops itself alone
+
+A table that fails is logged as failed and stays where it was, while the other tables of the step advance.
+A catch-up takes no window twice: a step whose window it has already taken leaves out the tables it was taken for, so a table that failed is tried again by the next catch-up rather than within the same one.
+A step that cannot run at all, such as one whose warehouse is out of reach or whose capture changed since the build log was written, stops the catch-up of the sink.
+A table with nothing to fold onto is logged as failed rather than refusing the step, and so starts again from `since` at the next step it is taken into.

@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use ulid::Ulid;
 
 use lithify_config::infra::{Sink, Source};
-use lithify_core::artifact::ArtifactBuilder;
+use lithify_core::artifact::{ArtifactBuilder, UnbuildableArtifact};
 use lithify_core::build_log::{BuildLog, Outcome, Run, Series, Status};
 use lithify_core::sink::{Namespace, WarehouseClient};
 use lithify_core::sql::SqlString;
@@ -18,7 +18,12 @@ use crate::unrunnable::Unrunnable;
 pub trait Settlement {
     type Output;
 
-    fn settle<K, B>(&self, client: &K, builders: &[B]) -> Result<Self::Output, Unrunnable>
+    fn settle<K, B>(
+        &self,
+        client: &K,
+        window: &Window,
+        builders: &[B],
+    ) -> Result<Self::Output, Unrunnable>
     where
         K: WarehouseClient,
         Unrunnable: From<K::Error>,
@@ -31,7 +36,7 @@ pub trait Settlement {
         window: &Window,
         output: Self::Output,
         journal: &mut Journal,
-    ) -> Result<Option<Vec<BuildLog>>, Unrunnable>;
+    ) -> Result<(), Unrunnable>;
 }
 
 pub struct DryRun {
@@ -75,12 +80,29 @@ impl Settlement for DryRun {
         }
     }
 
-    fn settle<K, B>(&self, client: &K, builders: &[B]) -> Result<Self::Output, Unrunnable>
+    fn settle<K, B>(
+        &self,
+        client: &K,
+        window: &Window,
+        builders: &[B],
+    ) -> Result<Self::Output, Unrunnable>
     where
         K: WarehouseClient,
         Unrunnable: From<K::Error>,
         B: ArtifactBuilder,
     {
+        let baseless: Vec<_> = builders
+            .iter()
+            .filter_map(ArtifactBuilder::missing_base)
+            .cloned()
+            .collect();
+        if !baseless.is_empty() {
+            return Err(Unrunnable::Baseless {
+                window: window.clone(),
+                tables: baseless,
+            });
+        }
+
         Ok(builders
             .iter()
             .map(|builder| builder.create(client.warehouse()))
@@ -93,7 +115,7 @@ impl Settlement for DryRun {
         window: &Window,
         output: Self::Output,
         journal: &mut Journal,
-    ) -> Result<Option<Vec<BuildLog>>, Unrunnable> {
+    ) -> Result<(), Unrunnable> {
         let path = self.into.join(self.named(window));
 
         std::fs::create_dir_all(&self.into)?;
@@ -111,7 +133,7 @@ impl Settlement for DryRun {
             path.display()
         ));
 
-        Ok(None)
+        Ok(())
     }
 }
 
@@ -147,7 +169,11 @@ impl Build {
         K: WarehouseClient,
         Unrunnable: From<K::Error>,
     {
-        let status = match client.build::<Unrunnable>(builder) {
+        let built = match builder.missing_base() {
+            Some(table) => Err(UnbuildableArtifact::WithoutBase(table.clone()).into()),
+            None => client.build::<Unrunnable>(builder),
+        };
+        let status = match built {
             Ok(()) => Status::Succeeded,
             Err(unbuilt) => Status::Failed(unbuilt.to_string()),
         };
@@ -166,7 +192,12 @@ impl Settlement for Build {
         }
     }
 
-    fn settle<K, B>(&self, client: &K, builders: &[B]) -> Result<Self::Output, Unrunnable>
+    fn settle<K, B>(
+        &self,
+        client: &K,
+        _: &Window,
+        builders: &[B],
+    ) -> Result<Self::Output, Unrunnable>
     where
         K: WarehouseClient,
         Unrunnable: From<K::Error>,
@@ -190,14 +221,11 @@ impl Settlement for Build {
         _: &Window,
         output: Self::Output,
         journal: &mut Journal,
-    ) -> Result<Option<Vec<BuildLog>>, Unrunnable> {
+    ) -> Result<(), Unrunnable> {
         for log in &output {
             journal.built(log);
         }
 
-        Ok(output
-            .iter()
-            .all(|log| !log.status().failed())
-            .then_some(output))
+        Ok(())
     }
 }

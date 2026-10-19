@@ -62,6 +62,12 @@ impl Schedule {
             Self::Daily(cut) => Some(Window::new(from, cut.after(from)?)),
         }
     }
+
+    pub fn containing(self, instant: Ts<Event>) -> Option<Window> {
+        match self {
+            Self::Daily(cut) => Some(Window::new(cut.before(instant)?, cut.after(instant)?)),
+        }
+    }
 }
 
 impl Display for Schedule {
@@ -69,6 +75,57 @@ impl Display for Schedule {
         match self {
             Self::Daily(_) => formatter.write_str("daily"),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Timeline {
+    schedule: Schedule,
+    since: Ts<Event>,
+    until: Ts<Event>,
+}
+
+impl Timeline {
+    pub fn new(schedule: Schedule, since: Ts<Event>, until: Ts<Event>) -> Self {
+        Self {
+            schedule,
+            since,
+            until,
+        }
+    }
+
+    pub fn until(&self) -> Ts<Event> {
+        self.until
+    }
+
+    pub fn first(&self) -> Option<Window> {
+        self.schedule.span(self.since, self.until)
+    }
+
+    pub fn onto(&self, base: Ts<Event>, built: Option<&Window>) -> Option<Window> {
+        match built {
+            Some(built) => self.after(built),
+            None => self.containing(Window::until(base).last()),
+        }
+    }
+
+    pub fn reached(&self, window: &Window) -> bool {
+        window.is_open() || *window.to() <= self.until
+    }
+
+    pub fn after(&self, built: &Window) -> Option<Window> {
+        match built.is_open() {
+            true => self.day(*built.from()),
+            false => self.day(*self.containing(built.last())?.to()),
+        }
+    }
+
+    pub fn containing(&self, instant: Ts<Event>) -> Option<Window> {
+        self.schedule.containing(instant)
+    }
+
+    pub fn day(&self, from: Ts<Event>) -> Option<Window> {
+        self.schedule.window(from)
     }
 }
 
@@ -101,6 +158,15 @@ impl Cut {
         }
     }
 
+    fn before(self, instant: Ts<Event>) -> Option<Ts<Event>> {
+        let date = self.local(instant).date_naive();
+
+        match self.on(date)? {
+            cut if cut <= instant => Some(cut),
+            _ => self.on(date.pred_opt()?),
+        }
+    }
+
     fn closing(self, date: NaiveDate) -> Option<Ts<Event>> {
         let midnight = self
             .zone
@@ -117,6 +183,72 @@ mod tests {
 
     fn at(rfc3339: &str) -> Ts<Event> {
         Ts::from(rfc3339.parse::<DateTime<Utc>>().unwrap())
+    }
+
+    fn timeline() -> Timeline {
+        Timeline::new(
+            Schedule::default(),
+            at("2026-09-18T10:00:00Z"),
+            at("2026-09-22T05:00:00Z"),
+        )
+    }
+
+    #[test]
+    fn a_timeline_first_spans_every_day_closed_since_it_began() {
+        assert_eq!(
+            timeline().first(),
+            Some(Window::new(
+                at("2026-09-18T10:00:00Z"),
+                at("2026-09-22T00:00:00Z")
+            ))
+        );
+    }
+
+    fn day(from: &str, to: &str) -> Window {
+        Window::new(at(from), at(to))
+    }
+
+    #[test]
+    fn a_timeline_steps_onto_the_day_after_the_last_a_window_holds() {
+        let built = day("2026-09-20T00:00:00Z", "2026-09-21T00:00:00Z");
+        let cut = day("2026-09-20T00:00:00Z", "2026-09-20T09:00:00Z");
+        let next = day("2026-09-21T00:00:00Z", "2026-09-22T00:00:00Z");
+
+        assert_eq!(timeline().after(&built), Some(next.clone()));
+        assert_eq!(timeline().after(&cut), Some(next));
+    }
+
+    #[test]
+    fn a_timeline_steps_onto_the_day_a_window_left_open_opens_in() {
+        let open = Window::open(at("2026-09-21T00:00:00Z"));
+
+        assert_eq!(
+            timeline().after(&open),
+            Some(day("2026-09-21T00:00:00Z", "2026-09-22T00:00:00Z"))
+        );
+    }
+
+    #[test]
+    fn a_timeline_reads_the_day_an_instant_falls_in() {
+        assert_eq!(
+            timeline().containing(at("2026-09-21T09:00:00Z")),
+            Some(day("2026-09-21T00:00:00Z", "2026-09-22T00:00:00Z"))
+        );
+        assert_eq!(
+            timeline().containing(at("2026-09-21T00:00:00Z")),
+            Some(day("2026-09-21T00:00:00Z", "2026-09-22T00:00:00Z"))
+        );
+    }
+
+    #[test]
+    fn a_timeline_reads_the_day_opening_at_an_instant_whether_or_not_it_has_closed() {
+        assert_eq!(
+            timeline().day(at("2026-09-22T00:00:00Z")),
+            Some(Window::new(
+                at("2026-09-22T00:00:00Z"),
+                at("2026-09-23T00:00:00Z")
+            ))
+        );
     }
 
     #[test]

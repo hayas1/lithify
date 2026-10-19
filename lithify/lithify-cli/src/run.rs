@@ -14,7 +14,7 @@ use lithify_protocol::sink::{bigquery, duckdb};
 use lithify_protocol::{BigQueryWarehouse, DuckDbWarehouse};
 
 use crate::artifacts::{ArtifactConfig, DeclaredSnapshot};
-use crate::course::Course;
+use crate::command::RunCommand;
 use crate::credential::Credentials;
 use crate::journal::Journal;
 use crate::pipeline::{CaptureConfig, Reached, WarehouseConfig};
@@ -45,10 +45,10 @@ impl Run {
         }
     }
 
-    pub fn plan(&self, course: &Course, into: &Path) -> Result<Journal, Unrunnable> {
+    pub fn plan(&self, command: &RunCommand, into: &Path) -> Result<Journal, Unrunnable> {
         self.each_sink(|sink, source, listing, journal| {
             self.settle(
-                course,
+                command,
                 sink,
                 source,
                 listing,
@@ -58,10 +58,10 @@ impl Run {
         })
     }
 
-    pub fn build(&self, course: &Course) -> Result<Journal, Unrunnable> {
+    pub fn build(&self, command: &RunCommand) -> Result<Journal, Unrunnable> {
         self.each_sink(|sink, source, listing, journal| {
             self.settle(
-                course,
+                command,
                 sink,
                 source,
                 listing,
@@ -145,7 +145,7 @@ impl Run {
 
     fn settle<S: Settlement>(
         &self,
-        course: &Course,
+        command: &RunCommand,
         sink: &Sink<WarehouseConfig, ArtifactConfig>,
         source: &Source<CaptureConfig>,
         listing: &table::Tables,
@@ -165,7 +165,7 @@ impl Run {
             Reached::DuckDb(config, change_log) => {
                 let client = self.duckdb(config, change_log)?;
 
-                course.settle(
+                command.settle(
                     sink,
                     source,
                     self.now,
@@ -177,7 +177,7 @@ impl Run {
             Reached::BigQuery(config, change_log) => {
                 let client = self.bigquery(config, change_log)?;
 
-                course.settle(
+                command.settle(
                     sink,
                     source,
                     self.now,

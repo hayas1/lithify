@@ -69,10 +69,6 @@ impl Artifact for Scd2 {
         Series::new(Self::KIND, &Schedule::default().to_string())
     }
 
-    fn windows(&self, daily: &Window) -> Vec<Window> {
-        vec![daily.clone()]
-    }
-
     fn base<'b>(
         &self,
         built: &'b [BuildLog],
@@ -365,5 +361,32 @@ impl<L: RowChangeLog, W: Warehouse> ArtifactBuilder for Scd2Builder<'_, L, W> {
             self.window.clone(),
             outcome,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use lithify_core::schedule::Timeline;
+    use lithify_core::ts::Ts;
+
+    use super::*;
+
+    const DAY: i64 = 86_400_000;
+
+    #[test]
+    fn an_scd2_appends_each_day_after_the_last_it_appended_as_a_snapshot_is_built() {
+        let scd2 = Scd2::new(Namespace::from("mysql_shop_scd2"), "%Y%m%d", Tz::UTC);
+        let timeline = Timeline::new(
+            Schedule::default(),
+            Ts::try_from(0).unwrap(),
+            Ts::try_from(DAY * 3 + 5).unwrap(),
+        );
+        let first = scd2.next(&timeline, None, None).unwrap();
+
+        assert_eq!(
+            first,
+            Window::new(Ts::try_from(0).unwrap(), Ts::try_from(DAY * 3).unwrap())
+        );
+        assert_eq!(scd2.next(&timeline, Some(&first), None), None);
     }
 }

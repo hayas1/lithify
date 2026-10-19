@@ -1,3 +1,4 @@
+use chrono::{NaiveDate, NaiveTime};
 use chrono_tz::Tz;
 use serde::Deserialize;
 
@@ -9,10 +10,16 @@ use lithify_config::infra::Sink;
 use lithify_config::{Declaration, Place};
 use lithify_core::artifact::Artifact;
 use lithify_core::build_log::Series;
+use lithify_core::progress::Step;
 use lithify_core::schedule::Schedule;
-use lithify_core::sink::Namespace;
+use lithify_core::sink::{Namespace, WarehouseClient};
+use lithify_core::window::Window;
 
+use crate::journal::Journal;
 use crate::pipeline::{LocationConfig, WarehouseConfig};
+use crate::plan::{Planner, Tables};
+use crate::settlement::Settlement;
+use crate::stepping::Stepping;
 use crate::unrunnable::Unrunnable;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -286,6 +293,134 @@ impl<'a> DeclaredScd2<'a> {
             self.config.shard(),
             self.placement.time_zone,
         )
+    }
+}
+
+pub enum Declared<'a> {
+    Snapshot(DeclaredSnapshot<'a>),
+    Instant(DeclaredInstant<'a>),
+    Scd2(DeclaredScd2<'a>),
+    Scd1(DeclaredScd1<'a>),
+}
+
+impl<'a> Declared<'a> {
+    pub const KINDS: [&'static str; 4] = [
+        DeclaredSnapshot::ARTIFACT,
+        DeclaredInstant::ARTIFACT,
+        DeclaredScd1::ARTIFACT,
+        DeclaredScd2::ARTIFACT,
+    ];
+
+    pub fn of(sink: &'a Sink<WarehouseConfig, ArtifactConfig>) -> Result<Vec<Self>, Unrunnable> {
+        Ok(std::iter::once(Self::Snapshot(DeclaredSnapshot::of(sink)?))
+            .chain(DeclaredInstant::of(sink)?.into_iter().map(Self::Instant))
+            .chain(DeclaredScd2::of(sink)?.map(Self::Scd2))
+            .chain(DeclaredScd1::of(sink)?.map(Self::Scd1))
+            .collect())
+    }
+
+    pub fn series(&self) -> Series {
+        match self {
+            Self::Snapshot(declared) => declared.series(),
+            Self::Instant(declared) => declared.series(),
+            Self::Scd2(declared) => declared.series(),
+            Self::Scd1(declared) => declared.series(),
+        }
+    }
+
+    pub fn is(&self, artifact: &str, at: Option<NaiveTime>) -> bool {
+        let series = self.series();
+
+        series.artifact() == artifact && at.is_none_or(|at| series.schedule() == Instant::cut(at))
+    }
+
+    pub fn on<P>(&self, stepping: &Stepping<P>, date: NaiveDate) -> Option<Window>
+    where
+        P: Planner,
+        Unrunnable: From<<P::Client as WarehouseClient>::Error>,
+    {
+        let day = stepping.shard(date)?;
+
+        match self {
+            Self::Snapshot(declared) => declared.artifact().window(&day),
+            Self::Instant(declared) => declared.artifact().window(&day),
+            Self::Scd2(declared) => declared.artifact().window(&day),
+            Self::Scd1(declared) => declared.artifact().window(&day),
+        }
+    }
+
+    pub fn next<P>(
+        &self,
+        stepping: &Stepping<P>,
+        taken: &[Window],
+    ) -> Result<Option<Step>, Unrunnable>
+    where
+        P: Planner,
+        Unrunnable: From<<P::Client as WarehouseClient>::Error>,
+    {
+        match self {
+            Self::Snapshot(declared) => {
+                stepping.next(&declared.artifact(), declared.namespace(), taken)
+            }
+            Self::Instant(declared) => {
+                stepping.next(&declared.artifact(), declared.namespace(), taken)
+            }
+            Self::Scd2(declared) => {
+                stepping.next(&declared.artifact(), declared.namespace(), taken)
+            }
+            Self::Scd1(declared) => {
+                stepping.next(&declared.artifact(), declared.namespace(), taken)
+            }
+        }
+    }
+
+    pub fn take<P, S>(
+        &self,
+        stepping: &Stepping<P>,
+        window: &Window,
+        tables: &Tables,
+        settlement: &S,
+        journal: &mut Journal,
+    ) -> Result<(), Unrunnable>
+    where
+        P: Planner,
+        Unrunnable: From<<P::Client as WarehouseClient>::Error>,
+        S: Settlement,
+    {
+        match self {
+            Self::Snapshot(declared) => stepping.take(
+                &declared.artifact(),
+                declared.namespace(),
+                window,
+                tables,
+                settlement,
+                journal,
+            ),
+            Self::Instant(declared) => stepping.take(
+                &declared.artifact(),
+                declared.namespace(),
+                window,
+                tables,
+                settlement,
+                journal,
+            ),
+            Self::Scd2(declared) => stepping.take(
+                &declared.artifact(),
+                declared.namespace(),
+                window,
+                tables,
+                settlement,
+                journal,
+            ),
+            Self::Scd1(declared) => stepping.take(
+                &declared.artifact(),
+                declared.namespace(),
+                window,
+                tables,
+                settlement,
+                journal,
+            ),
+        }
     }
 }
 
