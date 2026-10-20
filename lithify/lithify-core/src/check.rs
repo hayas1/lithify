@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::fmt::{self, Display, Formatter};
 
-use crate::build_log::{BuildLog, Latest};
+use crate::build_log::{BuildLog, Latest, Series, UnreadableBuildLog};
 use crate::model::TableId;
 use crate::schedule::Schedule;
 use crate::sink::{Namespace, TablePath, WarehouseClient};
@@ -105,11 +105,16 @@ impl Expectation {
         }
     }
 
-    pub fn read<K: WarehouseClient>(
+    pub fn read<K, E>(
         &self,
         client: &K,
         namespace: &Namespace,
-    ) -> Result<Inspection, K::Error> {
+        series: &Series,
+    ) -> Result<Inspection, E>
+    where
+        K: WarehouseClient,
+        E: From<K::Error> + From<UnreadableBuildLog>,
+    {
         if !client.exists(&BuildLog::path(namespace))? {
             return Ok(Inspection {
                 schedule: self.schedule,
@@ -118,8 +123,8 @@ impl Expectation {
             });
         }
 
-        let latest = client.build_logs(namespace, &Latest::Attempted.into())?;
-        let succeeded = client.build_logs(namespace, &Latest::Succeeded.into())?;
+        let latest = client.build_logs::<E>(namespace, series, &Latest::Attempted.into())?;
+        let succeeded = client.build_logs::<E>(namespace, series, &Latest::Succeeded.into())?;
         let mut present = BTreeSet::new();
         for target in succeeded.iter().filter_map(BuildLog::target) {
             if client.exists(target)? {
@@ -243,6 +248,10 @@ mod tests {
 
     fn at(rfc3339: &str) -> Ts<Event> {
         Ts::from(rfc3339.parse::<DateTime<Utc>>().unwrap())
+    }
+
+    fn daily() -> Series {
+        Series::new("snapshot", "daily")
     }
 
     fn day(date: &str) -> Window {
@@ -430,7 +439,11 @@ mod tests {
 
         assert_eq!(
             expected("2026-09-21T05:00:00Z")
-                .read(&client, &Namespace::from("mysql_shop"))
+                .read::<_, Box<dyn std::error::Error>>(
+                    &client,
+                    &Namespace::from("mysql_shop"),
+                    &daily()
+                )
                 .unwrap()
                 .discrepancies(),
             [Discrepancy::Missing {
@@ -444,9 +457,10 @@ mod tests {
     fn a_warehouse_holding_no_build_log_was_never_built() {
         assert_eq!(
             expected("2026-09-21T05:00:00Z")
-                .read(
+                .read::<_, Box<dyn std::error::Error>>(
                     &Recorder::new(Engine::default()),
-                    &Namespace::from("mysql_shop")
+                    &Namespace::from("mysql_shop"),
+                    &daily()
                 )
                 .unwrap()
                 .discrepancies(),
@@ -467,12 +481,13 @@ mod tests {
 
         assert_eq!(
             expected("2026-09-21T05:00:00Z")
-                .read(
+                .read::<_, Box<dyn std::error::Error>>(
                     &Recorder::new(Engine::default()).logging(
                         &Namespace::from("mysql_shop"),
                         std::slice::from_ref(&failed)
                     ),
-                    &Namespace::from("mysql_shop")
+                    &Namespace::from("mysql_shop"),
+                    &daily()
                 )
                 .unwrap()
                 .latest(),

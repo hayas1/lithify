@@ -17,6 +17,7 @@ use lithify_core::schedule::Schedule;
 use lithify_core::sink::{Namespace, TablePath, Warehouse};
 use lithify_core::source::RowChangeLog;
 use lithify_core::sql::SqlString;
+use lithify_core::ts::{Event, Ts};
 use lithify_core::window::Window;
 
 use fold::Fold;
@@ -64,20 +65,30 @@ pub struct Snapshot {
     namespace: Namespace,
     copies: Vec<Namespace>,
     shard: Shard,
-    zone: Tz,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Shard {
-    Dated(String),
+    Dated(String, Schedule),
+    Cut(String, Tz),
     Current,
 }
 
 impl Shard {
-    fn name(&self, table: &TableId, at: DateTime<Tz>) -> String {
+    fn name(&self, table: &TableId, closed: Ts<Event>) -> String {
+        match (self, self.stamp(closed)) {
+            (Self::Dated(format, _) | Self::Cut(format, _), Some(stamp)) => {
+                format!("{}_{}", table.table(), stamp.format(format))
+            }
+            _ => table.table().to_owned(),
+        }
+    }
+
+    fn stamp(&self, closed: Ts<Event>) -> Option<DateTime<Tz>> {
         match self {
-            Self::Dated(format) => format!("{}_{}", table.table(), at.format(format)),
-            Self::Current => table.table().to_owned(),
+            Self::Dated(_, schedule) => schedule.dawn(schedule.date(closed)?),
+            Self::Cut(_, zone) => Some(DateTime::<Utc>::from(closed).with_timezone(zone)),
+            Self::Current => None,
         }
     }
 
@@ -88,7 +99,7 @@ impl Shard {
         select: &SqlString,
     ) -> SqlString {
         match self {
-            Self::Dated(_) => warehouse.create_table_as(target, select),
+            Self::Dated(..) | Self::Cut(..) => warehouse.create_table_as(target, select),
             Self::Current => warehouse.create_view(target, select),
         }
     }
@@ -96,20 +107,26 @@ impl Shard {
 
 impl Snapshot {
     pub fn new(namespace: impl Into<Namespace>, shard: &str) -> Self {
-        Self {
-            namespace: namespace.into(),
-            copies: Vec::new(),
-            shard: Shard::Dated(shard.to_owned()),
-            zone: Tz::UTC,
-        }
+        Self::dated(namespace, shard, Schedule::default())
+    }
+
+    pub fn dated(namespace: impl Into<Namespace>, shard: &str, schedule: Schedule) -> Self {
+        Self::sharded(namespace, Shard::Dated(shard.to_owned(), schedule))
+    }
+
+    pub fn cut(namespace: impl Into<Namespace>, shard: &str, zone: Tz) -> Self {
+        Self::sharded(namespace, Shard::Cut(shard.to_owned(), zone))
     }
 
     pub fn current(namespace: impl Into<Namespace>) -> Self {
+        Self::sharded(namespace, Shard::Current)
+    }
+
+    fn sharded(namespace: impl Into<Namespace>, shard: Shard) -> Self {
         Self {
             namespace: namespace.into(),
             copies: Vec::new(),
-            shard: Shard::Current,
-            zone: Tz::UTC,
+            shard,
         }
     }
 
@@ -117,30 +134,26 @@ impl Snapshot {
         Self { copies, ..self }
     }
 
-    pub fn named_in(self, zone: Tz) -> Self {
-        Self { zone, ..self }
-    }
-
     pub fn days() -> Series {
         Series::new(Self::KIND, &Schedule::default().to_string())
     }
 
-    pub fn shard_before<'b>(
+    pub fn shard_closing<'b>(
         built: &'b [BuildLog],
         table: &TableId,
-        window: &Window,
+        at: Ts<Event>,
     ) -> Option<&'b BuildLog> {
         built.iter().find(|log| {
-            log.advances(&Self::days())
-                && log.table_to() == Some(table)
-                && log.window().to() == window.from()
+            log.advances(&Self::days()) && log.table_to() == Some(table) && *log.window().to() == at
         })
     }
 
-    fn named(&self, namespace: &Namespace, table: &TableId, window: &Window) -> TablePath {
-        let at = DateTime::<Utc>::from(window.last()).with_timezone(&self.zone);
+    pub(crate) fn placed(&self, table: &TableId, window: &Window) -> TablePath {
+        self.named(&self.namespace, table, window)
+    }
 
-        TablePath::new(namespace.clone(), &self.shard.name(table, at))
+    fn named(&self, namespace: &Namespace, table: &TableId, window: &Window) -> TablePath {
+        TablePath::new(namespace.clone(), &self.shard.name(table, *window.to()))
     }
 }
 
@@ -149,11 +162,19 @@ impl Artifact for Snapshot {
 
     type From = Self;
 
+    type Open = ();
+
     type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = SnapshotBuilder<'a, L, W>;
 
     fn series(&self) -> Series {
         Self::days()
     }
+
+    fn window(&self, interval: &Window, _: Ts<Event>) -> Option<Window> {
+        Some(interval.clone())
+    }
+
+    fn open(&self, _: &Window) -> Self::Open {}
 
     fn base<'b>(
         &self,
@@ -161,11 +182,11 @@ impl Artifact for Snapshot {
         table: &TableId,
         window: &Window,
     ) -> Option<&'b BuildLog> {
-        Self::shard_before(built, table, window)
+        Self::shard_closing(built, table, *window.from())
     }
 
     fn target(&self, table: &TableId, window: &Window) -> Result<TablePath, UnbuildableArtifact> {
-        Ok(self.named(&self.namespace, table, window))
+        Ok(self.placed(table, window))
     }
 
     fn builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>(
@@ -173,15 +194,16 @@ impl Artifact for Snapshot {
         log: &'a L,
         table: TableId,
         window: &'a Window,
+        _: Self::Open,
         previous: Option<&BuildLog>,
     ) -> Result<Self::Builder<'a, L, W>, UnbuildableArtifact> {
-        SnapshotBuilder::new(
+        Ok(SnapshotBuilder::new(
             self,
             log,
             table,
             window.clone(),
             previous.and_then(BuildLog::target).cloned(),
-        )
+        ))
     }
 }
 
@@ -206,11 +228,11 @@ impl<'a, L: RowChangeLog, W: Warehouse> SnapshotBuilder<'a, L, W> {
         table: TableId,
         window: Window,
         base: Option<TablePath>,
-    ) -> Result<Self, UnbuildableArtifact> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             snapshot,
             query: ChangeLogQuery::new(log),
-            target: Some(snapshot.target(&table, &window)?),
+            target: Some(snapshot.placed(&table, &window)),
             table_from: Some(table.clone()),
             table,
             appearance: None,
@@ -219,7 +241,7 @@ impl<'a, L: RowChangeLog, W: Warehouse> SnapshotBuilder<'a, L, W> {
             begun: false,
             fold: Fold::default(),
             warehouse: PhantomData,
-        })
+        }
     }
 
     fn begin(&mut self, warehouse: &W, table: &TableModel) -> Result<(), UnbuildableArtifact> {
@@ -393,7 +415,7 @@ impl<L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Position>
     ) -> Result<(), UnbuildableArtifact> {
         self.begin(warehouse, event.before())?;
         self.table = event.after().id().clone();
-        self.target = Some(self.snapshot.target(&self.table, &self.window)?);
+        self.target = Some(self.snapshot.placed(&self.table, &self.window));
 
         Ok(())
     }
@@ -521,13 +543,11 @@ mod tests {
             built("instant", "09:00", "people", (0, 10)),
             built("snapshot", "daily", "people", (0, 10)),
         ];
-        let window = Window::new(Ts::try_from(10).unwrap(), Ts::try_from(20).unwrap());
-
         assert_eq!(
             Snapshot::new("mysql_shop", "%Y%m%d").base(
                 &built,
                 &TableId::new("shop", "people"),
-                &window
+                &Window::new(Ts::try_from(10).unwrap(), Ts::try_from(20).unwrap())
             ),
             Some(&built[3])
         );
@@ -759,18 +779,15 @@ mod tests {
     ) -> Result<Vec<SnapshotBuilder<'static, Log, W>>, Untold> {
         let mut catalog = CatalogModel::default();
         catalog.accept::<OutOfOrder, _>(&(), &change(1, TableChange::Created(created)), &mut ())?;
-        let mut tracker = EraTracker::new(
-            Window::new(Ts::try_from(100).unwrap(), Ts::try_from(200).unwrap()),
-            |table: &TableId| {
-                Ok::<_, Untold>(SnapshotBuilder::new(
-                    shop(),
-                    &Log,
-                    table.clone(),
-                    window(),
-                    base(),
-                )?)
-            },
-        );
+        let mut tracker = EraTracker::new(&window(), |table: &TableId| {
+            Ok::<_, Untold>(SnapshotBuilder::new(
+                shop(),
+                &Log,
+                table.clone(),
+                window(),
+                base(),
+            ))
+        });
         for change in &within {
             catalog.accept::<Untold, _>(warehouse, change, &mut tracker)?;
         }
@@ -1614,8 +1631,7 @@ mod tests {
             TableId::new("shop", "customers"),
             window(),
             None,
-        )
-        .unwrap();
+        );
 
         assert_eq!(
             snapshot.create(&Engine::default()).unwrap_err(),
@@ -1646,7 +1662,7 @@ mod tests {
     fn a_snapshot_hands_a_builder_that_builds_it_from_the_eras_it_is_told_of() {
         let window = window();
         let mut fold = shop()
-            .builder::<Log, Engine>(&Log, TableId::new("shop", "customers"), &window, None)
+            .builder::<Log, Engine>(&Log, TableId::new("shop", "customers"), &window, (), None)
             .unwrap();
 
         fold.era_boundary(
@@ -1694,6 +1710,7 @@ mod tests {
                 &Log,
                 TableId::new("shop", "customers"),
                 &window,
+                (),
                 Some(&previous),
             )
             .unwrap();
@@ -1952,7 +1969,7 @@ mod tests {
             .copied_into(vec![lithify_core::sink::Namespace::from("analytics.shop")]);
         let window = window();
         let mut snapshot = artifact
-            .builder::<Log, Engine>(&Log, customers().id().clone(), &window, None)
+            .builder::<Log, Engine>(&Log, customers().id().clone(), &window, (), None)
             .unwrap();
         SchemaChangeListener::<Offset>::era_boundary(
             &mut snapshot,
@@ -1977,17 +1994,42 @@ mod tests {
     }
 
     #[test]
-    fn a_snapshot_names_its_shard_after_the_last_instant_it_holds_in_its_time_zone() {
+    fn a_snapshot_names_its_shard_after_the_date_its_schedule_gives_it() {
         let window = Window::new(
-            Ts::try_from(1789945200000).unwrap(),
-            Ts::try_from(1790031600000).unwrap(),
+            Ts::try_from(1790002800000).unwrap(),
+            Ts::try_from(1790089200000).unwrap(),
         );
 
         assert_eq!(
-            Snapshot::new("mysql_shop", "%Y%m%d")
-                .named_in(chrono_tz::Asia::Tokyo)
-                .target(&TableId::new("shop", "people"), &window)
-                .unwrap(),
+            Snapshot::dated(
+                "mysql_shop",
+                "%Y%m%d",
+                Schedule::daily(NaiveTime::MIN, chrono_tz::Asia::Tokyo)
+            )
+            .target(&TableId::new("shop", "people"), &window)
+            .unwrap(),
+            TablePath::new("mysql_shop", "people_20260922")
+        );
+    }
+
+    #[test]
+    fn a_snapshot_cut_after_midnight_names_its_shard_after_the_date_it_closes_on() {
+        let window = Window::new(
+            Ts::try_from(1789948800000).unwrap(),
+            Ts::try_from(1790035200000).unwrap(),
+        );
+
+        assert_eq!(
+            Snapshot::dated(
+                "mysql_shop",
+                "%Y%m%d",
+                Schedule::daily(
+                    NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
+                    chrono_tz::Asia::Tokyo
+                )
+            )
+            .target(&TableId::new("shop", "people"), &window)
+            .unwrap(),
             TablePath::new("mysql_shop", "people_20260922")
         );
     }

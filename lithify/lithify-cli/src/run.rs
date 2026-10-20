@@ -19,7 +19,7 @@ use crate::credential::Credentials;
 use crate::journal::Journal;
 use crate::pipeline::{CaptureConfig, Reached, WarehouseConfig};
 use crate::plan::Planning;
-use crate::settlement::{Build, DryRun, Settlement};
+use crate::report::{DryRun, Report};
 use crate::unrunnable::Unrunnable;
 use lithify_core::check::{Expectation, Inspection};
 
@@ -65,7 +65,7 @@ impl Run {
                 sink,
                 source,
                 listing,
-                &Build::new(sink, source, self.now)?,
+                &DeclaredSnapshot::of(sink)?.build(source, self.now)?,
                 journal,
             )
         })
@@ -93,15 +93,19 @@ impl Run {
             &source.capture().to_json()?,
             Ts::from(self.now),
         );
-        let namespace = snapshot.namespace();
+        let (namespace, series) = (snapshot.namespace(), snapshot.series());
 
         match Self::reach(sink)? {
-            Reached::DuckDb(config, change_log) => {
-                Ok(expectation.read(&self.duckdb(config, change_log)?, namespace)?)
-            }
-            Reached::BigQuery(config, change_log) => {
-                Ok(expectation.read(&self.bigquery(config, change_log)?, namespace)?)
-            }
+            Reached::DuckDb(config, change_log) => expectation.read::<_, Unrunnable>(
+                &self.duckdb(config, change_log)?,
+                namespace,
+                &series,
+            ),
+            Reached::BigQuery(config, change_log) => expectation.read::<_, Unrunnable>(
+                &self.bigquery(config, change_log)?,
+                namespace,
+                &series,
+            ),
         }
     }
 
@@ -143,13 +147,13 @@ impl Run {
         Ok(journal)
     }
 
-    fn settle<S: Settlement>(
+    fn settle<R: Report>(
         &self,
         command: &RunCommand,
         sink: &Sink<WarehouseConfig, ArtifactConfig>,
         source: &Source<CaptureConfig>,
         listing: &table::Tables,
-        settlement: &S,
+        runner: &R,
         journal: &mut Journal,
     ) -> Result<(), Unrunnable> {
         let Some(topic_prefix) = source.topic_prefix() else {
@@ -170,7 +174,7 @@ impl Run {
                     source,
                     self.now,
                     &Planning::new(&client, source.capture(), topic_prefix, listing),
-                    settlement,
+                    runner,
                     journal,
                 )
             }
@@ -182,7 +186,7 @@ impl Run {
                     source,
                     self.now,
                     &Planning::new(&client, source.capture(), topic_prefix, listing),
-                    settlement,
+                    runner,
                     journal,
                 )
             }

@@ -1,75 +1,32 @@
-use std::collections::BTreeSet;
-
 use duckdb::types::FromSql;
 use google_cloud_bigquery::error::RowError;
 use google_cloud_bigquery::query::Row;
 
-use lithify_core::artifact::{Artifact, ArtifactBuilder};
+use lithify_config::table;
+use lithify_core::artifact::Artifact;
 use lithify_core::build_log::BuildLog;
-use lithify_core::era::EraTracker;
-use lithify_core::model::TableId;
-use lithify_core::sink::WarehouseClient;
-use lithify_core::source::{ChangeLogs, SchemaChangeLog, SchemaChangeStream};
+use lithify_core::runner::{Planner, Replay, Runner, Tables};
+use lithify_core::source::{ChangeLogs, SchemaChangeLog};
 use lithify_core::window::Window;
 use lithify_protocol::sink::bigquery::client::{
     BigQueryCapture, BigQueryChangeLogsFn, BigQueryClient,
 };
 use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbChangeLogsFn, DuckDbClient};
 
-use lithify_config::table;
-
 use crate::pipeline::CaptureConfig;
-use crate::settlement::Settlement;
 use crate::unrunnable::Unrunnable;
 
-type BuilderOf<'b, A, C, K> =
-    <A as Artifact>::Builder<'b, <C as ChangeLogs>::Row, <K as WarehouseClient>::Warehouse>;
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum Tables {
-    #[default]
-    Every,
-    Named(BTreeSet<TableId>),
-    Except(BTreeSet<TableId>),
-}
-
-impl Tables {
-    fn narrow<B: ArtifactBuilder>(&self, mut builders: Vec<B>) -> Result<Vec<B>, Unrunnable> {
-        match self {
-            Self::Every => Ok(builders),
-            Self::Named(tables) => {
-                let unknown: Vec<_> = tables
-                    .iter()
-                    .filter(|table| !builders.iter().any(|builder| builder.table() == *table))
-                    .cloned()
-                    .collect();
-                if !unknown.is_empty() {
-                    return Err(Unrunnable::UnknownTables(unknown));
-                }
-                builders.retain(|builder| tables.contains(builder.table()));
-
-                Ok(builders)
-            }
-            Self::Except(tables) => {
-                builders.retain(|builder| !tables.contains(builder.table()));
-
-                Ok(builders)
-            }
-        }
-    }
-}
-
-pub struct Plan<'a, K, S, A> {
+pub struct Plan<'a, K, R, A> {
     client: &'a K,
     artifact: &'a A,
     window: &'a Window,
     previous: &'a [BuildLog],
     tables: &'a Tables,
     listing: &'a table::Tables,
-    settlement: &'a S,
+    runner: &'a R,
 }
 
-impl<'a, K, S: Settlement, A: Artifact> Plan<'a, K, S, A> {
+impl<'a, K, R: Runner, A: Artifact> Plan<'a, K, R, A> {
     pub fn new(
         client: &'a K,
         artifact: &'a A,
@@ -77,7 +34,7 @@ impl<'a, K, S: Settlement, A: Artifact> Plan<'a, K, S, A> {
         previous: &'a [BuildLog],
         tables: &'a Tables,
         listing: &'a table::Tables,
-        settlement: &'a S,
+        runner: &'a R,
     ) -> Self {
         Self {
             client,
@@ -86,68 +43,9 @@ impl<'a, K, S: Settlement, A: Artifact> Plan<'a, K, S, A> {
             previous,
             tables,
             listing,
-            settlement,
+            runner,
         }
     }
-
-    fn settle<C>(self, logs: C) -> Result<S::Output, Unrunnable>
-    where
-        C: ChangeLogs,
-        K: SchemaChangeStream<C::Schema> + WarehouseClient,
-        <K as SchemaChangeStream<C::Schema>>::Error: Into<Unrunnable>,
-        Unrunnable: From<<K as WarehouseClient>::Error>,
-    {
-        let mut builders = self.tables.narrow(self.builders(&logs)?)?;
-        builders.retain(|builder| self.listing.table(builder.table()).builds(A::KIND));
-
-        self.settlement.settle(self.client, self.window, &builders)
-    }
-
-    fn builders<'b, C>(&self, logs: &'b C) -> Result<Vec<BuilderOf<'b, A, C, K>>, Unrunnable>
-    where
-        'a: 'b,
-        C: ChangeLogs,
-        K: SchemaChangeStream<C::Schema> + WarehouseClient,
-        <K as SchemaChangeStream<C::Schema>>::Error: Into<Unrunnable>,
-    {
-        let window: &'b Window = self.window;
-        let artifact: &'b A = self.artifact;
-        let tracker = EraTracker::new(window.clone(), |table: &TableId| {
-            artifact.builder::<_, K::Warehouse>(
-                logs.row_changes(),
-                table.clone(),
-                window,
-                artifact.base(self.previous, table, window),
-            )
-        });
-        let mut tracker = match window.is_open() {
-            true => tracker.open_ended(),
-            false => tracker,
-        };
-        let catalog = self.client.replay::<Unrunnable, _>(
-            self.client.warehouse(),
-            logs.schema_changes(),
-            window,
-            &mut tracker,
-        )?;
-
-        Ok(tracker.finish(self.client.warehouse(), &catalog)?)
-    }
-}
-
-pub trait Planner {
-    type Client: WarehouseClient;
-
-    fn client(&self) -> &Self::Client;
-
-    fn plan<A: Artifact, S: Settlement>(
-        &self,
-        artifact: &A,
-        window: &Window,
-        previous: &[BuildLog],
-        tables: &Tables,
-        settlement: &S,
-    ) -> Result<S::Output, Unrunnable>;
 }
 
 pub struct Planning<'a, K> {
@@ -175,19 +73,20 @@ impl<'a, K> Planning<'a, K> {
 
 impl Planner for Planning<'_, DuckDbClient> {
     type Client = DuckDbClient;
+    type Error = Unrunnable;
 
     fn client(&self) -> &DuckDbClient {
         self.client
     }
 
-    fn plan<A: Artifact, S: Settlement>(
+    fn plan<A: Artifact, R: Runner>(
         &self,
         artifact: &A,
         window: &Window,
         previous: &[BuildLog],
         tables: &Tables,
-        settlement: &S,
-    ) -> Result<S::Output, Unrunnable> {
+        runner: &R,
+    ) -> Result<R::Output, Unrunnable> {
         self.capture.with_duckdb_change_logs(
             self.topic_prefix,
             Plan::new(
@@ -197,7 +96,7 @@ impl Planner for Planning<'_, DuckDbClient> {
                 previous,
                 tables,
                 self.listing,
-                settlement,
+                runner,
             ),
         )
     }
@@ -205,19 +104,20 @@ impl Planner for Planning<'_, DuckDbClient> {
 
 impl Planner for Planning<'_, BigQueryClient> {
     type Client = BigQueryClient;
+    type Error = Unrunnable;
 
     fn client(&self) -> &BigQueryClient {
         self.client
     }
 
-    fn plan<A: Artifact, S: Settlement>(
+    fn plan<A: Artifact, R: Runner>(
         &self,
         artifact: &A,
         window: &Window,
         previous: &[BuildLog],
         tables: &Tables,
-        settlement: &S,
-    ) -> Result<S::Output, Unrunnable> {
+        runner: &R,
+    ) -> Result<R::Output, Unrunnable> {
         self.capture.with_bigquery_change_logs(
             self.topic_prefix,
             Plan::new(
@@ -227,33 +127,47 @@ impl Planner for Planning<'_, BigQueryClient> {
                 previous,
                 tables,
                 self.listing,
-                settlement,
+                runner,
             ),
         )
     }
 }
 
-impl<S: Settlement, A: Artifact> DuckDbChangeLogsFn for Plan<'_, DuckDbClient, S, A> {
-    type Output = Result<S::Output, Unrunnable>;
+impl<R: Runner, A: Artifact> DuckDbChangeLogsFn for Plan<'_, DuckDbClient, R, A> {
+    type Output = Result<R::Output, Unrunnable>;
 
     fn call_duckdb<C>(self, logs: C) -> Self::Output
     where
         C: ChangeLogs,
         <C::Schema as SchemaChangeLog>::Record: FromSql,
     {
-        self.settle(logs)
+        Replay::new(self.client, &logs).run(
+            self.artifact,
+            self.window,
+            self.previous,
+            self.tables,
+            |table| self.listing.table(table).builds(A::KIND),
+            self.runner,
+        )
     }
 }
 
-impl<S: Settlement, A: Artifact> BigQueryChangeLogsFn for Plan<'_, BigQueryClient, S, A> {
-    type Output = Result<S::Output, Unrunnable>;
+impl<R: Runner, A: Artifact> BigQueryChangeLogsFn for Plan<'_, BigQueryClient, R, A> {
+    type Output = Result<R::Output, Unrunnable>;
 
     fn call_bigquery<C>(self, logs: C) -> Self::Output
     where
         C: ChangeLogs,
         <C::Schema as SchemaChangeLog>::Record: TryFrom<Row, Error = RowError>,
     {
-        self.settle(logs)
+        Replay::new(self.client, &logs).run(
+            self.artifact,
+            self.window,
+            self.previous,
+            self.tables,
+            |table| self.listing.table(table).builds(A::KIND),
+            self.runner,
+        )
     }
 }
 
@@ -277,10 +191,12 @@ pub(crate) mod tests {
     use super::*;
     use crate::artifacts::{ArtifactConfig, DeclaredSnapshot};
     use crate::pipeline::{CaptureConfig, WarehouseConfig};
-    use crate::settlement::{Build, DryRun};
+    use crate::report::DryRun;
     use lithify_artifact::snapshot::Snapshot;
     use lithify_config::infra::Sink;
     use lithify_core::build_log::{BuildLog, Latest, Outcome, Run, Status};
+    use lithify_core::model::TableId;
+    use lithify_core::runner::{Tables, Unsteppable};
 
     const CHANGE_LOGS: &str = "CREATE SCHEMA mysql_shop_cdc;
         CREATE TABLE mysql_shop_cdc.mysql AS SELECT * FROM (VALUES
@@ -426,7 +342,7 @@ place.snapshot = [{ prefix = "mysql_shop" }]
 
         assert!(matches!(
             baseless,
-            Err(Unrunnable::Baseless { tables, .. }) if tables == [TableId::new("shop", "people")]
+            Err(Unrunnable::Unsteppable(Unsteppable::Baseless { tables, .. })) if tables == [TableId::new("shop", "people")]
         ));
     }
 
@@ -619,7 +535,10 @@ place.snapshot = [{ prefix = "mysql_shop" }]
                     &[],
                     &Tables::Every,
                     pipeline.tables(),
-                    &Build::new(sink, source, at("2026-09-22T05:00:00Z")).unwrap(),
+                    &DeclaredSnapshot::of(sink)
+                        .unwrap()
+                        .build(source, at("2026-09-22T05:00:00Z"))
+                        .unwrap(),
                 ),
             )
             .unwrap()
@@ -685,7 +604,11 @@ place.snapshot = [{ prefix = "mysql_shop" }]
         assert_eq!(rows(&client, snapshot), built_once);
         assert_ne!(once[0].run_id(), twice[0].run_id());
         let latest = client
-            .build_logs(&Namespace::from("mysql_shop"), &Latest::Attempted.into())
+            .build_logs::<Unrunnable>(
+                &Namespace::from("mysql_shop"),
+                &Snapshot::days(),
+                &Latest::Attempted.into(),
+            )
             .unwrap();
         assert_eq!(
             latest

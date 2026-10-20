@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::build_log::{BuildLog, Series};
+use crate::build_log::BuildLog;
 use crate::model::TableId;
 use crate::ts::{Event, Ts};
 use crate::window::Window;
@@ -12,21 +12,15 @@ pub struct Progress {
 }
 
 impl Progress {
-    pub fn read(latest: &[BuildLog], succeeded: &[BuildLog], series: &Series) -> Self {
-        let latest: Vec<_> = latest.iter().filter(|log| log.advances(series)).collect();
-        let succeeded: Vec<_> = succeeded
-            .iter()
-            .filter(|log| log.advances(series))
-            .cloned()
-            .collect();
-        let last_run = latest.iter().map(|log| log.run_id()).max();
+    pub fn read(latest: &[BuildLog], succeeded: &[BuildLog]) -> Self {
+        let last_run = latest.iter().map(BuildLog::run_id).max();
 
         Self {
             built: latest
                 .iter()
                 .filter_map(|log| {
                     let built = log
-                        .last_success(&succeeded)
+                        .last_success(succeeded)
                         .map(|built| built.window().clone());
 
                     Some((log.table_to()?.clone(), built))
@@ -62,6 +56,7 @@ impl Progress {
         taken: &[Window],
         next: impl Fn(Option<&Window>, Option<Ts<Event>>) -> Option<Window>,
     ) -> Option<Step> {
+        let untaken = |next: &Window| !taken.contains(next);
         let tables: BTreeSet<_> = self
             .built
             .keys()
@@ -73,14 +68,11 @@ impl Progress {
                 let built = self.built.get(table).and_then(Option::as_ref);
                 let base = base.and_then(|base| base.frontier(table));
 
-                (
-                    table,
-                    next(built, base).filter(|next| !taken.contains(next)),
-                )
+                (table, next(built, base).filter(untaken))
             })
             .collect();
         let window = match nexts.is_empty() {
-            true => next(None, None).filter(|next| !taken.contains(next))?,
+            true => next(None, None).filter(untaken)?,
             false => nexts
                 .values()
                 .flatten()
@@ -120,7 +112,7 @@ mod tests {
     use chrono::DateTime;
     use ulid::Ulid;
 
-    use crate::build_log::{Outcome, Run, Status};
+    use crate::build_log::{Outcome, Run, Series, Status};
     use crate::sink::TablePath;
 
     use super::*;
@@ -180,7 +172,7 @@ mod tests {
             .cloned()
             .collect();
 
-        Progress::read(logs, &succeeded, &daily())
+        Progress::read(logs, &succeeded)
     }
 
     fn following(built: Option<&Window>, _: Option<Ts<Event>>) -> Option<Window> {
@@ -293,7 +285,7 @@ mod tests {
         )]);
         let cut = |built: Option<&Window>, base: Option<Ts<Event>>| match built {
             Some(_) => None,
-            None => base.map(|base| Window::new(base, base)),
+            None => base.map(Window::until),
         };
 
         assert_eq!(
@@ -301,16 +293,8 @@ mod tests {
                 .step(Some(&base), &[], cut)
                 .unwrap()
                 .window(),
-            &Window::new(*day(3).to(), *day(3).to())
+            &Window::until(*day(3).to())
         );
-    }
-
-    #[test]
-    fn the_progress_of_a_series_is_read_apart_from_any_other_series() {
-        let other = Series::new("instant", "09:00");
-        let progress = progress(&[logged(1, &other, Some("people"), day(3), Status::Succeeded)]);
-
-        assert_eq!(progress, Progress::default());
     }
 
     #[test]

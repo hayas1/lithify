@@ -63,7 +63,13 @@ fn statements<W: Warehouse>(warehouse: &W) -> String {
         .nth(2)
         .map(|shard| previous(&window, &shard));
     let mut snapshot = artifact
-        .builder::<_, W>(&log, customers().id().clone(), &window, previous.as_ref())
+        .builder::<_, W>(
+            &log,
+            customers().id().clone(),
+            &window,
+            (),
+            previous.as_ref(),
+        )
         .unwrap();
 
     SchemaChangeListener::<MySqlPosition>::era_boundary(

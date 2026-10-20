@@ -278,8 +278,8 @@ impl<'a> SinkEnd<'a> {
         model: &TableModel,
         watch: &Watch,
     ) -> Result<Rows, Unverifiable> {
-        let target = DeclaredSnapshot::of(self.config)?
-            .artifact()
+        let artifact = DeclaredSnapshot::of(self.config)?.artifact();
+        let target = artifact
             .target(model.id(), &watch.changes())
             .map_err(Unbuildable::from)?;
 

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use lithify_config::infra::{Sink, Source};
 use lithify_config::{Declaration, Pipeline, Place, Placing};
-use lithify_core::build_log::{BuildLog, BuildLogQuery, Latest};
+use lithify_core::build_log::{BuildLog, BuildLogQuery, Latest, Series};
 use lithify_core::check::{Expectation, Inspection};
 use lithify_core::schedule::Schedule;
 use lithify_core::sink::{Namespace, SinkWarehouse, WarehouseClient, WarehouseFn};
@@ -299,6 +299,7 @@ where
         let expectation = Expectation::new(schedule, source.since(), capture, now);
         let reading = Reading {
             expectation: &expectation,
+            series: Series::new(Self::SNAPSHOT, &schedule.to_string()),
             namespace: sink
                 .place(Self::SNAPSHOT)
                 .and_then(Place::as_whole)
@@ -316,20 +317,26 @@ where
 
 struct Reading<'a> {
     expectation: &'a Expectation,
+    series: Series,
     namespace: Namespace,
     view: BuildLogView,
 }
 
 impl Reading<'_> {
-    fn read<K: WarehouseClient>(&self, client: &K) -> Result<SinkInspection, K::Error> {
-        let inspection = self.expectation.read(client, &self.namespace)?;
+    fn read<K: WarehouseClient>(&self, client: &K) -> Result<SinkInspection, Misread> {
+        let inspection =
+            self.expectation
+                .read::<K, Misread>(client, &self.namespace, &self.series)?;
         let unbuilt = inspection.latest().is_empty();
         let inspection = SinkInspection::from(inspection);
 
         match (self.view, unbuilt) {
             (BuildLogView::Latest, _) | (BuildLogView::All, true) => Ok(inspection),
-            (BuildLogView::All, false) => Ok(inspection
-                .showing(client.build_logs(&self.namespace, &BuildLogQuery::from(self.view))?)),
+            (BuildLogView::All, false) => Ok(inspection.showing(client.build_logs::<Misread>(
+                &self.namespace,
+                &self.series,
+                &BuildLogQuery::from(self.view),
+            )?)),
         }
     }
 }
@@ -338,7 +345,15 @@ impl WarehouseFn for Reading<'_> {
     type Output = Result<SinkInspection, String>;
 
     fn call<K: WarehouseClient>(self, client: &K) -> Self::Output {
-        self.read(client).map_err(|unread| unread.to_string())
+        self.read(client).map_err(|Misread(unread)| unread)
+    }
+}
+
+struct Misread(String);
+
+impl<E: std::error::Error> From<E> for Misread {
+    fn from(cause: E) -> Self {
+        Self(cause.to_string())
     }
 }
 

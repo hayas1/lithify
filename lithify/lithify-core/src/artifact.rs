@@ -64,6 +64,8 @@ pub trait Artifact {
 
     type From: Artifact;
 
+    type Open;
+
     type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>: ArtifactBuilder
         + SchemaChangeListener<L::Position, Context = W, Error = UnbuildableArtifact>
     where
@@ -71,9 +73,9 @@ pub trait Artifact {
 
     fn series(&self) -> Series;
 
-    fn window(&self, day: &Window) -> Option<Window> {
-        Some(day.clone())
-    }
+    fn window(&self, interval: &Window, until: Ts<Event>) -> Option<Window>;
+
+    fn open(&self, window: &Window) -> Self::Open;
 
     fn next(
         &self,
@@ -81,12 +83,13 @@ pub trait Artifact {
         built: Option<&Window>,
         _base: Option<Ts<Event>>,
     ) -> Option<Window> {
-        let day = match built {
+        let interval = match built {
             Some(built) => timeline.after(built)?,
             None => timeline.first()?,
         };
 
-        self.window(&day).filter(|window| timeline.reached(window))
+        self.window(&interval, timeline.until())
+            .filter(|window| timeline.reached(window))
     }
 
     fn base<'b>(
@@ -103,6 +106,7 @@ pub trait Artifact {
         log: &'a L,
         table: TableId,
         window: &'a Window,
+        open: Self::Open,
         previous: Option<&BuildLog>,
     ) -> Result<Self::Builder<'a, L, W>, UnbuildableArtifact>;
 }

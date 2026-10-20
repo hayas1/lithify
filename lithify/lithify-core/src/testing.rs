@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 
-use crate::build_log::{BuildLog, BuildLogQuery, Latest};
+use crate::build_log::{BuildLog, BuildLogQuery, BuildLogRow, Latest};
 use crate::model::ColumnType;
 use crate::sink::{
     ChangeLogSql, Namespace, OpenWarehouse, TablePath, UnsupportedColumn, Warehouse,
@@ -121,7 +121,7 @@ impl OpenWarehouse for Engine {
 
 pub struct Recorder<W> {
     warehouse: W,
-    logged: Vec<BuildLog>,
+    logged: Vec<BuildLogRow>,
     present: BTreeSet<TablePath>,
     executed: RefCell<Vec<String>>,
 }
@@ -137,7 +137,7 @@ impl<W> Recorder<W> {
     }
 
     pub fn logging(mut self, namespace: &Namespace, logs: &[BuildLog]) -> Self {
-        self.logged.extend_from_slice(logs);
+        self.logged.extend(logs.iter().map(BuildLogRow::from));
         self.present.insert(BuildLog::path(namespace));
 
         self
@@ -168,20 +168,22 @@ impl<W: Warehouse> WarehouseClient for Recorder<W> {
         Ok(())
     }
 
-    fn build_logs(
+    fn build_log_rows(
         &self,
         _: &Namespace,
         query: &BuildLogQuery,
-    ) -> Result<Vec<BuildLog>, Self::Error> {
+    ) -> Result<Vec<BuildLogRow>, Self::Error> {
         let logged = self.logged.iter().cloned();
 
         Ok(match query {
             BuildLogQuery::Latest(Latest::Attempted) => logged.collect(),
             BuildLogQuery::Latest(Latest::Succeeded) => {
-                logged.filter(|log| !log.status().failed()).collect()
+                logged.filter(|row| row.status == "succeeded").collect()
             }
             BuildLogQuery::Latest(Latest::SucceededUntil(to)) => logged
-                .filter(|log| !log.status().failed() && log.window().to() == to)
+                .filter(|row| {
+                    row.status == "succeeded" && row.window_to == to.milliseconds_since_epoch()
+                })
                 .collect(),
             BuildLogQuery::All => logged.rev().collect(),
         })

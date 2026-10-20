@@ -139,12 +139,16 @@ The build log says, for each series and each table, how far the table was last b
 A step takes the earliest next window of the series and builds every table it is next for; a table the build log has never seen is built with whatever step its window opens in, and one it saw but never built starts again from the source's `since` in one window spanning every day closed since.
 A table is never built into a window after one it was not built into, since each window folds onto the one before.
 
-The window a step builds is the artifact's own, read off the day it steps into: the build log closes a day at the instant the `snapshot` is cut at, and each artifact says which window of that day it holds.
+A step advances by an interval: the build log closes one at the instant the `snapshot` is cut at, a day, or, for a series never built, one interval spanning every day closed since `since`.
+Each artifact cuts the interval into its own window, the closed range of the change log it updates for, and the build log records that window for each table.
 
-- a `snapshot` and an `scd2` hold the day itself, and step into the day after the last they were built into, or, never built, into one window spanning every day closed since `since`;
-- an `instant` holds the day up to the instant it is cut at, once that instant has passed;
-- an `scd1` holds everything after the day, as a window left open, so it is built once onto each day its `snapshot` is built for;
-- one built from the `snapshot` steps into the day after the last it was built onto, or, never built, into the last day the `snapshot` was built for, and only once the `snapshot` is built up to where its window opens.
+- a `snapshot` and an `scd2` take the interval itself as their window, and step into the interval after the last they were built into;
+- an `instant` takes the interval up to the instant it is cut at, once that instant has passed, so it may be built by a batch running more often than daily;
+- an `scd1` takes the window from the end of the interval its `snapshot` was built for up to when it is built, and stays open past it, reading every row change since the window opened, so it is built once onto each interval its `snapshot` is built for;
+- one built from the `snapshot` folds onto the shard closing as its window opens, and is not built before the `snapshot` stands there.
+
+The schema changes of a build are replayed over its window, which is always closed, and split it into eras.
+Only an artifact left open, the `scd1`, reads the row changes of the last era past the window, rather than stop at an instant taken when the build runs; every other artifact is done with the change log once its window closes.
 
 ### A table that fails stops itself alone
 

@@ -1,6 +1,5 @@
 use std::marker::PhantomData;
 
-use chrono_tz::Tz;
 use serde::Deserialize;
 
 use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
@@ -15,6 +14,7 @@ use lithify_core::schedule::Schedule;
 use lithify_core::sink::{Namespace, TablePath, Warehouse};
 use lithify_core::source::RowChangeLog;
 use lithify_core::sql::SqlString;
+use lithify_core::ts::{Event, Ts};
 use lithify_core::window::Window;
 
 use crate::snapshot::Snapshot;
@@ -42,10 +42,10 @@ impl Scd2 {
     pub const VALID_FROM: &'static str = "_valid_from";
     pub const VALID_TO: &'static str = "_valid_to";
 
-    pub fn new(namespace: Namespace, shard: &str, zone: Tz) -> Self {
+    pub fn new(namespace: Namespace, shard: &str, schedule: Schedule) -> Self {
         Self {
-            open: Snapshot::new(namespace.clone(), &format!("open_{shard}")).named_in(zone),
-            closed: Snapshot::new(namespace, &format!("closed_{shard}")).named_in(zone),
+            open: Snapshot::dated(namespace.clone(), &format!("open_{shard}"), schedule),
+            closed: Snapshot::dated(namespace, &format!("closed_{shard}"), schedule),
         }
     }
 
@@ -54,7 +54,7 @@ impl Scd2 {
         table: &TableId,
         window: &Window,
     ) -> Result<TablePath, UnbuildableArtifact> {
-        self.closed.target(table, window)
+        Ok(self.closed.placed(table, window))
     }
 }
 
@@ -63,11 +63,19 @@ impl Artifact for Scd2 {
 
     type From = Self;
 
+    type Open = ();
+
     type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = Scd2Builder<'a, L, W>;
 
     fn series(&self) -> Series {
         Series::new(Self::KIND, &Schedule::default().to_string())
     }
+
+    fn window(&self, interval: &Window, _: Ts<Event>) -> Option<Window> {
+        Some(interval.clone())
+    }
+
+    fn open(&self, _: &Window) -> Self::Open {}
 
     fn base<'b>(
         &self,
@@ -83,7 +91,7 @@ impl Artifact for Scd2 {
     }
 
     fn target(&self, table: &TableId, window: &Window) -> Result<TablePath, UnbuildableArtifact> {
-        self.open.target(table, window)
+        Ok(self.open.placed(table, window))
     }
 
     fn builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>(
@@ -91,12 +99,13 @@ impl Artifact for Scd2 {
         log: &'a L,
         table: TableId,
         window: &'a Window,
+        _: Self::Open,
         previous: Option<&BuildLog>,
     ) -> Result<Self::Builder<'a, L, W>, UnbuildableArtifact> {
         Ok(Scd2Builder {
             scd2: self,
             query: ChangeLogQuery::new(log),
-            target: Some(self.target(&table, window)?),
+            target: Some(self.open.placed(&table, window)),
             table_from: Some(table.clone()),
             table,
             appearance: None,
@@ -375,7 +384,11 @@ mod tests {
 
     #[test]
     fn an_scd2_appends_each_day_after_the_last_it_appended_as_a_snapshot_is_built() {
-        let scd2 = Scd2::new(Namespace::from("mysql_shop_scd2"), "%Y%m%d", Tz::UTC);
+        let scd2 = Scd2::new(
+            Namespace::from("mysql_shop_scd2"),
+            "%Y%m%d",
+            Schedule::default(),
+        );
         let timeline = Timeline::new(
             Schedule::default(),
             Ts::try_from(0).unwrap(),

@@ -37,7 +37,7 @@ impl Schedule {
     pub fn shard(self, since: Ts<Event>, date: NaiveDate) -> Option<Window> {
         let first = self.window(since)?;
 
-        match date.cmp(&self.date(&first)?) {
+        match date.cmp(&self.date(*first.to())?) {
             Ordering::Less => None,
             Ordering::Equal => Some(first),
             Ordering::Greater => match self {
@@ -51,9 +51,30 @@ impl Schedule {
         }
     }
 
-    pub fn date(self, shard: &Window) -> Option<NaiveDate> {
+    pub fn date(self, closed: Ts<Event>) -> Option<NaiveDate> {
         match self {
-            Self::Daily(cut) => Some(cut.local(shard.last()).date_naive()),
+            Self::Daily(cut) => cut.date(closed),
+        }
+    }
+
+    pub fn dawn(self, date: NaiveDate) -> Option<DateTime<Tz>> {
+        match self {
+            Self::Daily(cut) => cut
+                .zone
+                .from_local_datetime(&date.and_time(NaiveTime::MIN))
+                .earliest(),
+        }
+    }
+
+    pub fn ending(self, closed: Ts<Event>) -> Option<Window> {
+        match self {
+            Self::Daily(cut) => Some(Window::new(cut.before(closed)?, closed)),
+        }
+    }
+
+    pub fn following(self, instant: Ts<Event>) -> Option<Window> {
+        match self {
+            Self::Daily(cut) => self.window(cut.at_or_after(instant)?),
         }
     }
 
@@ -65,7 +86,7 @@ impl Schedule {
 
     pub fn containing(self, instant: Ts<Event>) -> Option<Window> {
         match self {
-            Self::Daily(cut) => Some(Window::new(cut.before(instant)?, cut.after(instant)?)),
+            Self::Daily(cut) => Some(Window::new(cut.at_or_before(instant)?, cut.after(instant)?)),
         }
     }
 }
@@ -98,6 +119,14 @@ impl Timeline {
         self.until
     }
 
+    pub fn up_to(self, until: Ts<Event>) -> Self {
+        Self { until, ..self }
+    }
+
+    pub fn shard(&self, date: NaiveDate) -> Option<Window> {
+        self.schedule.shard(self.since, date)
+    }
+
     pub fn first(&self) -> Option<Window> {
         self.schedule.span(self.since, self.until)
     }
@@ -105,19 +134,20 @@ impl Timeline {
     pub fn onto(&self, base: Ts<Event>, built: Option<&Window>) -> Option<Window> {
         match built {
             Some(built) => self.after(built),
-            None => self.containing(Window::until(base).last()),
+            None => self.ending(base),
         }
     }
 
     pub fn reached(&self, window: &Window) -> bool {
-        window.is_open() || *window.to() <= self.until
+        *window.to() <= self.until
     }
 
     pub fn after(&self, built: &Window) -> Option<Window> {
-        match built.is_open() {
-            true => self.day(*built.from()),
-            false => self.day(*self.containing(built.last())?.to()),
-        }
+        self.schedule.following(*built.to())
+    }
+
+    pub fn ending(&self, closed: Ts<Event>) -> Option<Window> {
+        self.schedule.ending(closed)
     }
 
     pub fn containing(&self, instant: Ts<Event>) -> Option<Window> {
@@ -158,7 +188,25 @@ impl Cut {
         }
     }
 
+    fn at_or_after(self, instant: Ts<Event>) -> Option<Ts<Event>> {
+        let date = self.local(instant).date_naive();
+
+        match self.on(date)? {
+            cut if cut >= instant => Some(cut),
+            _ => self.on(date.checked_add_days(Days::new(1))?),
+        }
+    }
+
     fn before(self, instant: Ts<Event>) -> Option<Ts<Event>> {
+        let date = self.local(instant).date_naive();
+
+        match self.on(date)? {
+            cut if cut < instant => Some(cut),
+            _ => self.on(date.pred_opt()?),
+        }
+    }
+
+    fn at_or_before(self, instant: Ts<Event>) -> Option<Ts<Event>> {
         let date = self.local(instant).date_naive();
 
         match self.on(date)? {
@@ -174,6 +222,16 @@ impl Cut {
             .earliest()?;
 
         self.after(Ts::from(midnight.with_timezone(&Utc)))
+    }
+
+    fn date(self, closed: Ts<Event>) -> Option<NaiveDate> {
+        let cut = self.at_or_after(closed)?;
+        let date = self.local(cut).date_naive();
+
+        match self.closing(date)? {
+            closing if closing == cut => Some(date),
+            _ => date.pred_opt(),
+        }
     }
 }
 
@@ -211,20 +269,32 @@ mod tests {
     #[test]
     fn a_timeline_steps_onto_the_day_after_the_last_a_window_holds() {
         let built = day("2026-09-20T00:00:00Z", "2026-09-21T00:00:00Z");
+        let next = day("2026-09-21T00:00:00Z", "2026-09-22T00:00:00Z");
+
+        assert_eq!(timeline().after(&built), Some(next));
+    }
+
+    #[test]
+    fn a_timeline_steps_onto_the_day_after_the_one_a_window_was_cut_within() {
         let cut = day("2026-09-20T00:00:00Z", "2026-09-20T09:00:00Z");
         let next = day("2026-09-21T00:00:00Z", "2026-09-22T00:00:00Z");
 
-        assert_eq!(timeline().after(&built), Some(next.clone()));
         assert_eq!(timeline().after(&cut), Some(next));
     }
 
     #[test]
-    fn a_timeline_steps_onto_the_day_a_window_left_open_opens_in() {
-        let open = Window::open(at("2026-09-21T00:00:00Z"));
+    fn a_timeline_steps_onto_the_day_after_a_window_spanning_many_days() {
+        let first = day("2026-09-18T10:00:00Z", "2026-09-21T00:00:00Z");
+        let next = day("2026-09-21T00:00:00Z", "2026-09-22T00:00:00Z");
 
+        assert_eq!(timeline().after(&first), Some(next));
+    }
+
+    #[test]
+    fn a_timeline_reads_the_day_closing_at_an_instant() {
         assert_eq!(
-            timeline().after(&open),
-            Some(day("2026-09-21T00:00:00Z", "2026-09-22T00:00:00Z"))
+            timeline().ending(at("2026-09-21T00:00:00Z")),
+            Some(day("2026-09-20T00:00:00Z", "2026-09-21T00:00:00Z"))
         );
     }
 
@@ -325,7 +395,10 @@ mod tests {
                 .shard(at(since), self::date(date))
                 .unwrap();
 
-            assert_eq!(Schedule::default().date(&window), Some(self::date(date)));
+            assert_eq!(
+                Schedule::default().date(*window.to()),
+                Some(self::date(date))
+            );
         }
     }
 
@@ -333,7 +406,18 @@ mod tests {
     fn a_daily_shard_spanning_many_days_is_dated_by_the_last_day_it_holds() {
         let window = Window::new(at("1970-01-01T00:00:00Z"), at("2026-09-21T00:00:00Z"));
 
-        assert_eq!(Schedule::default().date(&window), Some(date("2026-09-20")));
+        assert_eq!(
+            Schedule::default().date(*window.to()),
+            Some(date("2026-09-20"))
+        );
+    }
+
+    #[test]
+    fn a_window_closing_within_a_day_is_dated_by_that_day() {
+        assert_eq!(
+            Schedule::default().date(at("2026-09-20T10:00:00Z")),
+            Some(date("2026-09-20"))
+        );
     }
 
     #[test]
@@ -381,7 +465,10 @@ mod tests {
             window,
             Window::new(at("2026-09-20T15:00:00Z"), at("2026-09-21T15:00:00Z"))
         );
-        assert_eq!(tokyo("00:00:00").date(&window), Some(date("2026-09-21")));
+        assert_eq!(
+            tokyo("00:00:00").date(*window.to()),
+            Some(date("2026-09-21"))
+        );
     }
 
     #[test]
@@ -394,7 +481,10 @@ mod tests {
             window,
             Window::new(at("2026-09-20T00:00:00Z"), at("2026-09-21T00:00:00Z"))
         );
-        assert_eq!(tokyo("09:00:00").date(&window), Some(date("2026-09-21")));
+        assert_eq!(
+            tokyo("09:00:00").date(*window.to()),
+            Some(date("2026-09-21"))
+        );
     }
 
     #[test]

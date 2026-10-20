@@ -581,6 +581,10 @@ pub struct BuildLogRow {
 }
 
 impl BuildLogRow {
+    pub fn advances(&self, series: &Series) -> bool {
+        self.artifact == series.artifact && self.schedule == series.schedule
+    }
+
     fn path(written: &str) -> Result<TablePath, UnreadableBuildLog> {
         written
             .rsplit_once('.')
@@ -607,6 +611,30 @@ impl BuildLogRow {
             "succeeded" => Ok(Status::Succeeded),
             "failed" => Ok(Status::Failed(self.error.clone().unwrap_or_default())),
             unknown => Err(UnreadableBuildLog(format!("{unknown} is no status"))),
+        }
+    }
+}
+
+impl From<&BuildLog> for BuildLogRow {
+    fn from(log: &BuildLog) -> Self {
+        Self {
+            run_id: log.run.run_id.to_string(),
+            started_at: log.run.started_at.timestamp_millis(),
+            artifact: log.run.artifact.clone(),
+            schedule: log.run.schedule.clone(),
+            source: log.run.source.clone(),
+            capture: log.run.capture.clone(),
+            table_from: log.table_from.as_ref().map(ToString::to_string),
+            table_to: log.table_to.as_ref().map(ToString::to_string),
+            lifecycle: log.lifecycle().as_ref().map(ToString::to_string),
+            base: log.base.as_ref().map(ToString::to_string),
+            target: log.target.as_ref().map(ToString::to_string),
+            window_from: log.window.from().milliseconds_since_epoch(),
+            window_to: log.window.to().milliseconds_since_epoch(),
+            status: log.outcome.status.to_string(),
+            finished_at: log.outcome.finished_at.timestamp_millis(),
+            error: log.outcome.status.error().map(str::to_owned),
+            version: log.run.version.clone(),
         }
     }
 }

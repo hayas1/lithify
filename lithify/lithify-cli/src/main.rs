@@ -14,10 +14,10 @@ use lithify_cli::credential::Credentials;
 use lithify_cli::journal::Journal;
 #[cfg(feature = "serve")]
 use lithify_cli::pipeline::{CaptureConfig, WarehouseConfig};
-use lithify_cli::plan::Tables;
 use lithify_cli::run::Run;
 use lithify_cli::unrunnable::Unrunnable;
 use lithify_core::model::TableId;
+use lithify_core::runner::Tables;
 use lithify_protocol::sink::duckdb::store::{S3Credential, Secret};
 #[cfg(feature = "serve")]
 use lithify_ui::pipelines::Pipelines;

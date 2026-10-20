@@ -13,6 +13,7 @@ use lithify_core::build_log::{BuildLog, Outcome, Run, Status};
 use lithify_core::era::{Bound, Era};
 use lithify_core::listener::SchemaChangeListener;
 use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
+use lithify_core::schedule::Schedule;
 use lithify_core::sink::{Namespace, TablePath, WarehouseClient};
 use lithify_core::sql::SqlString;
 use lithify_core::testing::{Mutation, Replica, Row};
@@ -131,7 +132,13 @@ impl Shards {
     ) -> BuildLog {
         let log = Debezium::under("value", "mysql", MySql);
         let mut snapshot = artifact
-            .builder::<_, DuckDbWarehouse>(&log, people().id().clone(), window, previous)
+            .builder::<_, DuckDbWarehouse>(
+                &log,
+                people().id().clone(),
+                window,
+                artifact.open(window),
+                previous,
+            )
             .unwrap();
         snapshot
             .era_boundary(
@@ -139,10 +146,7 @@ impl Shards {
                 &Era::new(
                     people(),
                     Bound::EventTime(*window.from()),
-                    match window.is_open() {
-                        true => Bound::Open,
-                        false => Bound::EventTime(*window.to()),
-                    },
+                    Bound::EventTime(*window.to()),
                 ),
             )
             .unwrap();
@@ -230,15 +234,15 @@ fn an_instant_holds_what_the_source_held_as_it_was_cut() {
     let six = Instant::new(
         NaiveTime::from_hms_opt(6, 0, 0).unwrap(),
         chrono_tz::Tz::UTC,
-        Snapshot::new("shop_instant", "%Y%m%d%H"),
+        Snapshot::cut("shop_instant", "%Y%m%d%H", chrono_tz::Tz::UTC),
     );
     let first = shards.build(&day(0), None);
-    let cut = &six.window(&day(1)).unwrap();
+    let cut = six.window(&day(1), *day(2).to()).unwrap();
 
     let instant = shards.build_into(
         &six,
-        cut,
-        six.base(std::slice::from_ref(&first), people().id(), cut),
+        &cut,
+        six.base(std::slice::from_ref(&first), people().id(), &cut),
     );
 
     assert_eq!(shards.rows(&instant), replica.at(*cut.to()));
@@ -250,18 +254,17 @@ fn an_scd1_holds_what_the_source_holds_now_onto_the_last_daily_snapshot() {
     let shards = Shards::over(&replica);
     let scd1 = Scd1::new(Snapshot::current("shop_scd1"));
     let first = shards.build(&day(0), None);
-    let opened = scd1.window(&day(0)).unwrap();
+    let built = Ts::try_from(DAY + 1_500).unwrap();
+    let now = Ts::try_from(i64::from(i32::MAX)).unwrap();
+    let window = scd1.window(&day(0), built).unwrap();
 
     let current = shards.build_into(
         &scd1,
-        &opened,
-        scd1.base(std::slice::from_ref(&first), people().id(), &opened),
+        &window,
+        scd1.base(std::slice::from_ref(&first), people().id(), &window),
     );
 
-    assert_eq!(
-        shards.rows(&current),
-        replica.at(Ts::try_from(i64::from(i32::MAX)).unwrap())
-    );
+    assert_eq!(shards.rows(&current), replica.at(now));
 }
 
 impl Shards {
@@ -297,7 +300,7 @@ impl Shards {
 }
 
 fn scd2() -> Scd2 {
-    Scd2::new(Namespace::from("shop_scd2"), "%Y%m%d", chrono_tz::Tz::UTC)
+    Scd2::new(Namespace::from("shop_scd2"), "%Y%m%d", Schedule::default())
 }
 
 #[test]
@@ -363,7 +366,7 @@ fn an_scd2_whose_table_changed_its_schema_within_the_window_is_refused() {
     let log = Debezium::under("value", "mysql", MySql);
     let window = day(0);
     let mut versions = scd2
-        .builder::<_, DuckDbWarehouse>(&log, people().id().clone(), &window, None)
+        .builder::<_, DuckDbWarehouse>(&log, people().id().clone(), &window, (), None)
         .unwrap();
     let era = Era::new(
         people(),

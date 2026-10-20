@@ -41,18 +41,21 @@ impl Artifact for Instant {
 
     type From = Snapshot;
 
+    type Open = ();
+
     type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = SnapshotBuilder<'a, L, W>;
 
     fn series(&self) -> Series {
         Series::new(Self::KIND, &Self::cut(self.at))
     }
 
-    fn window(&self, day: &Window) -> Option<Window> {
-        self.cut
-            .windows(*day.from(), *day.to())
-            .next()
-            .map(|cut| Window::new(*day.from(), *cut.to()))
+    fn window(&self, interval: &Window, _: Ts<Event>) -> Option<Window> {
+        let cut = self.cut.windows(*interval.from(), *interval.to()).next()?;
+
+        Some(Window::new(*interval.from(), *cut.to()))
     }
+
+    fn open(&self, _: &Window) -> Self::Open {}
 
     fn next(
         &self,
@@ -61,8 +64,9 @@ impl Artifact for Instant {
         base: Option<Ts<Event>>,
     ) -> Option<Window> {
         let base = base?;
+        let interval = timeline.onto(base, built)?;
 
-        self.window(&timeline.onto(base, built)?)
+        self.window(&interval, timeline.until())
             .filter(|window| *window.from() <= base && timeline.reached(window))
     }
 
@@ -72,11 +76,11 @@ impl Artifact for Instant {
         table: &TableId,
         window: &Window,
     ) -> Option<&'b BuildLog> {
-        Snapshot::shard_before(built, table, window)
+        Snapshot::shard_closing(built, table, *window.from())
     }
 
     fn target(&self, table: &TableId, window: &Window) -> Result<TablePath, UnbuildableArtifact> {
-        self.snapshot.target(table, window)
+        Ok(self.snapshot.placed(table, window))
     }
 
     fn builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>(
@@ -84,9 +88,16 @@ impl Artifact for Instant {
         log: &'a L,
         table: TableId,
         window: &'a Window,
+        _: Self::Open,
         previous: Option<&BuildLog>,
     ) -> Result<Self::Builder<'a, L, W>, UnbuildableArtifact> {
-        self.snapshot.builder(log, table, window, previous)
+        Ok(SnapshotBuilder::new(
+            &self.snapshot,
+            log,
+            table,
+            window.clone(),
+            previous.and_then(BuildLog::target).cloned(),
+        ))
     }
 }
 
@@ -109,7 +120,7 @@ mod tests {
         Instant::new(
             NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
             chrono_tz::Asia::Tokyo,
-            Snapshot::new("mysql_shop_0900", "%Y%m%d%H").named_in(chrono_tz::Asia::Tokyo),
+            Snapshot::cut("mysql_shop_0900", "%Y%m%d%H", chrono_tz::Asia::Tokyo),
         )
     }
 
@@ -142,22 +153,30 @@ mod tests {
         assert_eq!(nine_in_tokyo().series(), Series::new("instant", "09:00"));
     }
 
+    fn cut() -> Window {
+        Window::new(at("2026-09-20T15:00:00Z"), at("2026-09-21T00:00:00Z"))
+    }
+
+    fn cut_before() -> Window {
+        Window::new(at("2026-09-19T15:00:00Z"), at("2026-09-20T00:00:00Z"))
+    }
+
     #[test]
-    fn an_instant_holds_a_daily_window_up_to_the_instant_it_is_cut_at() {
+    fn an_instant_cuts_an_interval_at_the_instant_it_is_cut_at() {
         assert_eq!(
-            nine_in_tokyo().window(&day()),
-            Some(Window::new(
-                at("2026-09-20T15:00:00Z"),
-                at("2026-09-21T00:00:00Z")
-            ))
+            nine_in_tokyo().window(&day(), at("2026-09-22T00:00:00Z")),
+            Some(cut())
         );
     }
 
     #[test]
-    fn an_instant_cut_after_a_daily_window_closes_holds_nothing_of_it() {
+    fn an_instant_cut_after_an_interval_closes_holds_nothing_of_it() {
         let early = Window::new(at("2026-09-20T15:00:00Z"), at("2026-09-20T23:00:00Z"));
 
-        assert_eq!(nine_in_tokyo().window(&early), None);
+        assert_eq!(
+            nine_in_tokyo().window(&early, at("2026-09-22T00:00:00Z")),
+            None
+        );
     }
 
     fn days_in_tokyo(until: &str) -> Timeline {
@@ -170,40 +189,34 @@ mod tests {
 
     #[test]
     fn an_instant_never_cut_is_cut_first_in_the_last_day_its_snapshot_was_built_for() {
-        let before = Window::new(at("2026-09-19T15:00:00Z"), at("2026-09-20T15:00:00Z"));
-
         assert_eq!(
             nine_in_tokyo().next(
                 &days_in_tokyo("2026-09-21T01:00:00Z"),
                 None,
                 Some(at("2026-09-20T15:00:00Z"))
             ),
-            nine_in_tokyo().window(&before)
+            Some(cut_before())
         );
     }
 
     #[test]
     fn an_instant_is_cut_next_in_the_day_after_the_one_it_was_last_cut_in() {
-        let cut = Window::new(at("2026-09-19T15:00:00Z"), at("2026-09-20T00:00:00Z"));
-
         assert_eq!(
             nine_in_tokyo().next(
                 &days_in_tokyo("2026-09-21T01:00:00Z"),
-                Some(&cut),
+                Some(&cut_before()),
                 Some(at("2026-09-21T15:00:00Z"))
             ),
-            nine_in_tokyo().window(&day())
+            Some(cut())
         );
     }
 
     #[test]
     fn an_instant_waits_for_its_snapshot_to_stand_at_the_day_it_is_cut_in() {
-        let cut = Window::new(at("2026-09-19T15:00:00Z"), at("2026-09-20T00:00:00Z"));
-
         assert_eq!(
             nine_in_tokyo().next(
                 &days_in_tokyo("2026-09-21T01:00:00Z"),
-                Some(&cut),
+                Some(&cut_before()),
                 Some(at("2026-09-19T15:00:00Z"))
             ),
             None
@@ -216,12 +229,10 @@ mod tests {
 
     #[test]
     fn an_instant_not_yet_reached_is_not_cut() {
-        let cut = Window::new(at("2026-09-19T15:00:00Z"), at("2026-09-20T00:00:00Z"));
-
         assert_eq!(
             nine_in_tokyo().next(
                 &days_in_tokyo("2026-09-20T23:00:00Z"),
-                Some(&cut),
+                Some(&cut_before()),
                 Some(at("2026-09-20T15:00:00Z"))
             ),
             None
@@ -244,11 +255,7 @@ mod tests {
         ];
 
         assert_eq!(
-            nine_in_tokyo().base(
-                &built,
-                &TableId::new("shop", "people"),
-                &nine_in_tokyo().window(&day()).unwrap()
-            ),
+            nine_in_tokyo().base(&built, &TableId::new("shop", "people"), &cut()),
             Some(&built[1])
         );
     }
@@ -257,12 +264,9 @@ mod tests {
     fn an_instant_is_named_after_the_instant_it_is_cut_at() {
         assert_eq!(
             nine_in_tokyo()
-                .target(
-                    &TableId::new("shop", "people"),
-                    &nine_in_tokyo().window(&day()).unwrap()
-                )
+                .target(&TableId::new("shop", "people"), &cut())
                 .unwrap(),
-            TablePath::new("mysql_shop_0900", "people_2026092108")
+            TablePath::new("mysql_shop_0900", "people_2026092109")
         );
     }
 }

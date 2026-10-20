@@ -182,7 +182,7 @@ impl TableRow {
             table: log.table()?.clone(),
             status: log.status().clone(),
             values: log.values(),
-            shard: schedule.date(log.window()),
+            shard: schedule.date(*log.window().to()),
         })
     }
 

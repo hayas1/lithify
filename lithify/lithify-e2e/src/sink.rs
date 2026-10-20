@@ -5,10 +5,10 @@ use duckdb::types::{FromSql, TimeUnit, Value};
 
 use lithify_artifact::snapshot::Snapshot;
 use lithify_cli::pipeline::{self, CaptureConfig};
-use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
-use lithify_core::era::EraTracker;
+use lithify_core::artifact::{ArtifactBuilder, UnbuildableArtifact};
 use lithify_core::listener::OutOfOrder;
 use lithify_core::model::{TableId, TableModel};
+use lithify_core::runner::Replay;
 use lithify_core::sink::{ChangeLogSql, TablePath, WarehouseClient, WarehouseSql};
 use lithify_core::source::{
     ChangeLog, ChangeLogs, ColumnPath, RowChangeLog, SchemaChangeLog, SchemaChangeStream,
@@ -16,7 +16,6 @@ use lithify_core::source::{
 use lithify_core::sql::SqlString;
 use lithify_core::ts::{Event, Processing, Ts};
 use lithify_core::window::Window;
-use lithify_protocol::DuckDbWarehouse;
 use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbChangeLogsFn, DuckDbClient};
 use lithify_protocol::sink::duckdb::config::Location;
 use lithify_protocol::sink::duckdb::store::ObjectStore;
@@ -288,22 +287,8 @@ impl DuckDbChangeLogsFn for SnapshotBuild<'_> {
         C: ChangeLogs,
         <C::Schema as SchemaChangeLog>::Record: FromSql,
     {
-        let mut tracker = EraTracker::new(self.window.clone(), |table: &TableId| {
-            Ok::<_, Unbuildable>(self.artifact.builder::<_, DuckDbWarehouse>(
-                logs.row_changes(),
-                table.clone(),
-                self.window,
-                None,
-            )?)
-        });
-        let catalog = self.client.replay::<Unbuildable, _>(
-            self.client.warehouse(),
-            logs.schema_changes(),
-            self.window,
-            &mut tracker,
-        )?;
-        let snapshot = tracker
-            .finish(self.client.warehouse(), &catalog)?
+        let snapshot = Replay::new(self.client, &logs)
+            .builders::<_, Unbuildable>(self.artifact, self.window, &[])?
             .into_iter()
             .find(|snapshot| snapshot.table() == self.table)
             .ok_or_else(|| Unbuildable::UnknownTable(self.table.clone()))?;

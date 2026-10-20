@@ -60,7 +60,7 @@ impl<P> Era<P> {
 }
 
 pub struct EraTracker<F, L, E, P> {
-    window: Window,
+    from: Ts<Event>,
     end: Bound<P>,
     at: Bound<P>,
     open: F,
@@ -129,22 +129,15 @@ impl<L, P: Position> Track<L, P> {
 }
 
 impl<F, L, E, P: Position> EraTracker<F, L, E, P> {
-    pub fn new(window: Window, open: F) -> Self {
+    pub fn new(window: &Window, open: F) -> Self {
         Self {
             at: Bound::EventTime(*window.from()),
             end: Bound::EventTime(*window.to()),
-            window,
+            from: *window.from(),
             open,
             tables: BTreeMap::new(),
             dropped: Vec::new(),
             error: PhantomData,
-        }
-    }
-
-    pub fn open_ended(self) -> Self {
-        Self {
-            end: Bound::Open,
-            ..self
         }
     }
 
@@ -159,7 +152,7 @@ impl<F, L, E, P: Position> EraTracker<F, L, E, P> {
             .map(|table| {
                 let track = match self.tables.remove(table.id()) {
                     Some(track) => track,
-                    None => self.open(table.id(), Bound::EventTime(*self.window.from()), None)?,
+                    None => self.open(table.id(), Bound::EventTime(self.from), None)?,
                 };
 
                 Ok(track.finish(context, table, &self.end)?)
@@ -189,7 +182,7 @@ impl<F, L, E, P: Position> EraTracker<F, L, E, P> {
         F: FnMut(&TableId) -> Result<L, E>,
         E: From<L::Error>,
     {
-        let from = Bound::EventTime(*self.window.from());
+        let from = Bound::EventTime(self.from);
         let Self { open, tables, .. } = self;
 
         match tables.entry(table.clone()) {
@@ -271,11 +264,7 @@ where
     ) -> Result<(), Self::Error> {
         let mut track = match self.tables.remove(event.table().id()) {
             Some(track) => track,
-            None => self.open(
-                event.table().id(),
-                Bound::EventTime(*self.window.from()),
-                None,
-            )?,
+            None => self.open(event.table().id(), Bound::EventTime(self.from), None)?,
         };
 
         track.listener.table_dropped(context, event)?;
@@ -431,6 +420,10 @@ mod tests {
         )
     }
 
+    fn ten_to_twenty() -> Window {
+        Window::new(Ts::try_from(10).unwrap(), Ts::try_from(20).unwrap())
+    }
+
     fn change(at: i64, tables: Vec<TableChange>) -> SchemaChange<Offset> {
         hinted(at, Vec::new(), tables)
     }
@@ -455,15 +448,12 @@ mod tests {
                 .accept::<OutOfOrder, _>(&(), change, &mut ())
                 .unwrap();
         }
-        let mut tracker = EraTracker::new(
-            Window::new(Ts::try_from(10).unwrap(), Ts::try_from(20).unwrap()),
-            |table: &TableId| {
-                Ok::<_, Untold>(Story {
-                    table: table.clone(),
-                    told: Vec::new(),
-                })
-            },
-        );
+        let mut tracker = EraTracker::new(&ten_to_twenty(), |table: &TableId| {
+            Ok::<_, Untold>(Story {
+                table: table.clone(),
+                told: Vec::new(),
+            })
+        });
         for change in &within {
             catalog
                 .accept::<Untold, _>(&(), change, &mut tracker)
@@ -476,33 +466,6 @@ mod tests {
             .into_iter()
             .map(|story| (story.table, story.told))
             .collect()
-    }
-
-    #[test]
-    fn an_open_ended_tracker_leaves_the_last_era_of_each_table_open() {
-        let mut catalog = CatalogModel::default();
-        catalog
-            .accept::<OutOfOrder, _>(
-                &(),
-                &change(1, vec![TableChange::Created(table(people(), &["id"]))]),
-                &mut (),
-            )
-            .unwrap();
-        let tracker = EraTracker::new(
-            Window::new(Ts::try_from(10).unwrap(), Ts::try_from(20).unwrap()),
-            |table: &TableId| {
-                Ok::<_, Untold>(Story {
-                    table: table.clone(),
-                    told: Vec::new(),
-                })
-            },
-        )
-        .open_ended();
-
-        assert_eq!(
-            tracker.finish(&(), &catalog).unwrap()[0].told,
-            ["era [\"id\"] 10..open"]
-        );
     }
 
     #[test]
@@ -838,10 +801,9 @@ mod tests {
                 &mut (),
             )
             .unwrap();
-        let tracker = EraTracker::new(
-            Window::new(Ts::try_from(10).unwrap(), Ts::try_from(20).unwrap()),
-            |table: &TableId| Err::<Story, _>(Untold::Unopened(table.clone())),
-        );
+        let tracker = EraTracker::new(&ten_to_twenty(), |table: &TableId| {
+            Err::<Story, _>(Untold::Unopened(table.clone()))
+        });
 
         assert_eq!(
             tracker.finish(&(), &catalog).unwrap_err(),

@@ -1,25 +1,28 @@
-use chrono::{NaiveDate, NaiveTime};
+use std::collections::BTreeMap;
+
+use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use chrono_tz::Tz;
 use serde::Deserialize;
+use ulid::Ulid;
 
 use lithify_artifact::instant::{self, Instant};
 use lithify_artifact::scd1::{self, Scd1};
 use lithify_artifact::scd2::{self, Scd2};
 use lithify_artifact::snapshot::{self, Snapshot};
-use lithify_config::infra::Sink;
+use lithify_config::infra::{Sink, Source};
 use lithify_config::{Declaration, Place};
 use lithify_core::artifact::Artifact;
-use lithify_core::build_log::Series;
+use lithify_core::build_log::{Run, Series};
 use lithify_core::progress::Step;
+use lithify_core::runner::{Build, Planner, Tables, Unsteppable};
 use lithify_core::schedule::Schedule;
-use lithify_core::sink::{Namespace, WarehouseClient};
+use lithify_core::sink::Namespace;
+use lithify_core::stepping::{SeriesLog, Stepping};
 use lithify_core::window::Window;
 
 use crate::journal::Journal;
-use crate::pipeline::{LocationConfig, WarehouseConfig};
-use crate::plan::{Planner, Tables};
-use crate::settlement::Settlement;
-use crate::stepping::Stepping;
+use crate::pipeline::{CaptureConfig, LocationConfig, WarehouseConfig};
+use crate::report::Report;
 use crate::unrunnable::Unrunnable;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -126,8 +129,12 @@ impl<'a> Placement<'a> {
         &self.namespace
     }
 
-    fn dated(&self, shard: &str) -> Snapshot {
-        self.placed(Snapshot::new(self.namespace.clone(), shard))
+    fn dated(&self, shard: &str, schedule: Schedule) -> Snapshot {
+        self.placed(Snapshot::dated(self.namespace.clone(), shard, schedule))
+    }
+
+    fn cut(&self, shard: &str) -> Snapshot {
+        self.placed(Snapshot::cut(self.namespace.clone(), shard, self.time_zone))
     }
 
     fn current(&self) -> Snapshot {
@@ -135,7 +142,7 @@ impl<'a> Placement<'a> {
     }
 
     fn placed(&self, snapshot: Snapshot) -> Snapshot {
-        snapshot.named_in(self.time_zone).copied_into(
+        snapshot.copied_into(
             self.places
                 .iter()
                 .skip(1)
@@ -181,7 +188,29 @@ impl<'a> DeclaredSnapshot<'a> {
     }
 
     pub fn artifact(&self) -> Snapshot {
-        self.placement.dated(self.config.shard())
+        self.placement.dated(self.config.shard(), self.schedule())
+    }
+
+    pub fn build(
+        &self,
+        source: &Source<CaptureConfig>,
+        now: DateTime<Utc>,
+    ) -> Result<Build, Unrunnable> {
+        let series = self.series();
+
+        Ok(Build::new(
+            self.namespace().clone(),
+            Run::new(
+                Ulid::from_datetime(now.into()),
+                now,
+                series.artifact(),
+                series.schedule(),
+                source.name(),
+                &source.capture().to_json()?,
+                env!("CARGO_PKG_VERSION"),
+            ),
+            Utc::now,
+        ))
     }
 }
 
@@ -223,7 +252,7 @@ impl<'a> DeclaredInstant<'a> {
         Instant::new(
             self.config.at(),
             self.placement.time_zone,
-            self.placement.dated(self.config.shard()),
+            self.placement.cut(self.config.shard()),
         )
     }
 }
@@ -262,6 +291,7 @@ impl<'a> DeclaredScd1<'a> {
 pub struct DeclaredScd2<'a> {
     config: &'a scd2::Config,
     placement: Placement<'a>,
+    schedule: Schedule,
 }
 
 impl<'a> DeclaredScd2<'a> {
@@ -274,6 +304,7 @@ impl<'a> DeclaredScd2<'a> {
                 Ok(Self {
                     config,
                     placement: Placement::whole(sink, Self::ARTIFACT)?,
+                    schedule: DeclaredSnapshot::of(sink)?.schedule(),
                 })
             })
             .transpose()
@@ -291,7 +322,7 @@ impl<'a> DeclaredScd2<'a> {
         Scd2::new(
             self.placement.namespace.clone(),
             self.config.shard(),
-            self.placement.time_zone,
+            self.schedule,
         )
     }
 }
@@ -311,14 +342,6 @@ impl<'a> Declared<'a> {
         DeclaredScd2::ARTIFACT,
     ];
 
-    pub fn of(sink: &'a Sink<WarehouseConfig, ArtifactConfig>) -> Result<Vec<Self>, Unrunnable> {
-        Ok(std::iter::once(Self::Snapshot(DeclaredSnapshot::of(sink)?))
-            .chain(DeclaredInstant::of(sink)?.into_iter().map(Self::Instant))
-            .chain(DeclaredScd2::of(sink)?.map(Self::Scd2))
-            .chain(DeclaredScd1::of(sink)?.map(Self::Scd1))
-            .collect())
-    }
-
     pub fn series(&self) -> Series {
         match self {
             Self::Snapshot(declared) => declared.series(),
@@ -334,93 +357,171 @@ impl<'a> Declared<'a> {
         series.artifact() == artifact && at.is_none_or(|at| series.schedule() == Instant::cut(at))
     }
 
-    pub fn on<P>(&self, stepping: &Stepping<P>, date: NaiveDate) -> Option<Window>
-    where
-        P: Planner,
-        Unrunnable: From<<P::Client as WarehouseClient>::Error>,
-    {
-        let day = stepping.shard(date)?;
+    fn log(&self) -> SeriesLog {
+        let namespace = match self {
+            Self::Snapshot(declared) => declared.namespace(),
+            Self::Instant(declared) => declared.namespace(),
+            Self::Scd2(declared) => declared.namespace(),
+            Self::Scd1(declared) => declared.namespace(),
+        };
 
+        SeriesLog::new(namespace.clone(), self.series())
+    }
+
+    fn base<'s>(&self, snapshot: &'s SeriesLog) -> Option<&'s SeriesLog> {
         match self {
-            Self::Snapshot(declared) => declared.artifact().window(&day),
-            Self::Instant(declared) => declared.artifact().window(&day),
-            Self::Scd2(declared) => declared.artifact().window(&day),
-            Self::Scd1(declared) => declared.artifact().window(&day),
+            Self::Snapshot(_) | Self::Scd2(_) => None,
+            Self::Instant(_) | Self::Scd1(_) => Some(snapshot),
         }
     }
 
-    pub fn next<P>(
+    fn next<P: Planner<Error = Unrunnable>>(
         &self,
         stepping: &Stepping<P>,
+        snapshot: &SeriesLog,
         taken: &[Window],
-    ) -> Result<Option<Step>, Unrunnable>
-    where
-        P: Planner,
-        Unrunnable: From<<P::Client as WarehouseClient>::Error>,
-    {
+    ) -> Result<Option<Step>, Unrunnable> {
+        let (log, base) = (self.log(), self.base(snapshot));
+
         match self {
-            Self::Snapshot(declared) => {
-                stepping.next(&declared.artifact(), declared.namespace(), taken)
-            }
-            Self::Instant(declared) => {
-                stepping.next(&declared.artifact(), declared.namespace(), taken)
-            }
-            Self::Scd2(declared) => {
-                stepping.next(&declared.artifact(), declared.namespace(), taken)
-            }
-            Self::Scd1(declared) => {
-                stepping.next(&declared.artifact(), declared.namespace(), taken)
-            }
+            Self::Snapshot(declared) => stepping.next(&declared.artifact(), &log, base, taken),
+            Self::Instant(declared) => stepping.next(&declared.artifact(), &log, base, taken),
+            Self::Scd2(declared) => stepping.next(&declared.artifact(), &log, base, taken),
+            Self::Scd1(declared) => stepping.next(&declared.artifact(), &log, base, taken),
         }
     }
 
-    pub fn take<P, S>(
+    fn on<P: Planner<Error = Unrunnable>>(
         &self,
         stepping: &Stepping<P>,
+        date: NaiveDate,
+    ) -> Result<Window, Unsteppable> {
+        match self {
+            Self::Snapshot(declared) => stepping.on(&declared.artifact(), date),
+            Self::Instant(declared) => stepping.on(&declared.artifact(), date),
+            Self::Scd2(declared) => stepping.on(&declared.artifact(), date),
+            Self::Scd1(declared) => stepping.on(&declared.artifact(), date),
+        }
+    }
+
+    fn take<P: Planner<Error = Unrunnable>, R: Report>(
+        &self,
+        stepping: &Stepping<P>,
+        snapshot: &SeriesLog,
         window: &Window,
         tables: &Tables,
-        settlement: &S,
+        runner: &R,
         journal: &mut Journal,
-    ) -> Result<(), Unrunnable>
-    where
-        P: Planner,
-        Unrunnable: From<<P::Client as WarehouseClient>::Error>,
-        S: Settlement,
-    {
-        match self {
-            Self::Snapshot(declared) => stepping.take(
-                &declared.artifact(),
-                declared.namespace(),
-                window,
-                tables,
-                settlement,
-                journal,
-            ),
-            Self::Instant(declared) => stepping.take(
-                &declared.artifact(),
-                declared.namespace(),
-                window,
-                tables,
-                settlement,
-                journal,
-            ),
-            Self::Scd2(declared) => stepping.take(
-                &declared.artifact(),
-                declared.namespace(),
-                window,
-                tables,
-                settlement,
-                journal,
-            ),
-            Self::Scd1(declared) => stepping.take(
-                &declared.artifact(),
-                declared.namespace(),
-                window,
-                tables,
-                settlement,
-                journal,
-            ),
+    ) -> Result<(), Unrunnable> {
+        let (log, base) = (self.log(), self.base(snapshot));
+        journal.window(window);
+        let output = match self {
+            Self::Snapshot(declared) => {
+                stepping.take(&declared.artifact(), &log, base, window, tables, runner)
+            }
+            Self::Instant(declared) => {
+                stepping.take(&declared.artifact(), &log, base, window, tables, runner)
+            }
+            Self::Scd2(declared) => {
+                stepping.take(&declared.artifact(), &log, base, window, tables, runner)
+            }
+            Self::Scd1(declared) => {
+                stepping.take(&declared.artifact(), &log, base, window, tables, runner)
+            }
+        }?;
+
+        runner.report(log.series(), window, output, journal)
+    }
+}
+
+pub struct Lineup<'a> {
+    snapshot: SeriesLog,
+    declared: Vec<Declared<'a>>,
+}
+
+impl<'a> Lineup<'a> {
+    pub fn of(sink: &'a Sink<WarehouseConfig, ArtifactConfig>) -> Result<Self, Unrunnable> {
+        let snapshot = Declared::Snapshot(DeclaredSnapshot::of(sink)?);
+
+        Ok(Self {
+            snapshot: snapshot.log(),
+            declared: std::iter::once(snapshot)
+                .chain(
+                    DeclaredInstant::of(sink)?
+                        .into_iter()
+                        .map(Declared::Instant),
+                )
+                .chain(DeclaredScd2::of(sink)?.map(Declared::Scd2))
+                .chain(DeclaredScd1::of(sink)?.map(Declared::Scd1))
+                .collect(),
+        })
+    }
+
+    pub fn snapshot(&self) -> &SeriesLog {
+        &self.snapshot
+    }
+
+    pub fn catch_up<P: Planner<Error = Unrunnable>, R: Report>(
+        &self,
+        stepping: &Stepping<P>,
+        runner: &R,
+        journal: &mut Journal,
+    ) -> Result<(), Unrunnable> {
+        let mut taken: BTreeMap<Series, Vec<Window>> = BTreeMap::new();
+
+        while let Some((series, window)) = self.step(stepping, |_| true, &taken, runner, journal)? {
+            taken.entry(series).or_default().push(window);
         }
+
+        Ok(())
+    }
+
+    pub fn step<P: Planner<Error = Unrunnable>, R: Report>(
+        &self,
+        stepping: &Stepping<P>,
+        named: impl Fn(&Declared) -> bool,
+        taken: &BTreeMap<Series, Vec<Window>>,
+        runner: &R,
+        journal: &mut Journal,
+    ) -> Result<Option<(Series, Window)>, Unrunnable> {
+        for declared in self.declared.iter().filter(|declared| named(declared)) {
+            let series = declared.series();
+            let taken = taken.get(&series).map(Vec::as_slice).unwrap_or_default();
+
+            if let Some(step) = declared.next(stepping, &self.snapshot, taken)? {
+                let tables = Tables::Except(step.left_out().clone());
+                declared.take(
+                    stepping,
+                    &self.snapshot,
+                    step.window(),
+                    &tables,
+                    runner,
+                    journal,
+                )?;
+
+                return Ok(Some((series, step.window().clone())));
+            }
+        }
+
+        Ok(None)
+    }
+
+    pub fn dated<P: Planner<Error = Unrunnable>, R: Report>(
+        &self,
+        stepping: &Stepping<P>,
+        named: impl Fn(&Declared) -> bool,
+        date: NaiveDate,
+        tables: &Tables,
+        runner: &R,
+        journal: &mut Journal,
+    ) -> Result<bool, Unrunnable> {
+        let Some(declared) = self.declared.iter().find(|declared| named(declared)) else {
+            return Ok(false);
+        };
+        let window = declared.on(stepping, date)?;
+        declared.take(stepping, &self.snapshot, &window, tables, runner, journal)?;
+
+        Ok(true)
     }
 }
 
@@ -451,10 +552,10 @@ mod tests {
             Ts::try_from(1789948800000).unwrap(),
         );
 
+        let artifact = DeclaredSnapshot::of(sink).unwrap().artifact();
+
         assert_eq!(
-            DeclaredSnapshot::of(sink)
-                .unwrap()
-                .artifact()
+            artifact
                 .target(&TableId::new("shop", "customers"), &window)
                 .unwrap(),
             TablePath::new("mysql_shop", "customers_20260920")

@@ -1,7 +1,7 @@
 use duckdb::types::{FromSql, Type};
 use duckdb::{Connection, Error, Statement};
 
-use lithify_core::build_log::{BuildLog, BuildLogQuery, BuildLogRow};
+use lithify_core::build_log::{BuildLogQuery, BuildLogRow};
 use lithify_core::sink::{ChangeLogSql, Namespace, TablePath, WarehouseClient, WarehouseSql};
 use lithify_core::source::{
     ChangeLogs, SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed,
@@ -65,11 +65,11 @@ impl WarehouseClient for DuckDbClient {
         Ok(count > 0)
     }
 
-    fn build_logs(
+    fn build_log_rows(
         &self,
         namespace: &Namespace,
         query: &BuildLogQuery,
-    ) -> Result<Vec<BuildLog>, Self::Error> {
+    ) -> Result<Vec<BuildLogRow>, Self::Error> {
         self.connection
             .prepare(query.select(&self.warehouse, namespace).as_str())?
             .query_map([], |row| {
@@ -93,11 +93,6 @@ impl WarehouseClient for DuckDbClient {
                     version: row.get("version")?,
                 })
             })?
-            .map(|row| {
-                BuildLog::try_from(row?).map_err(|unreadable| {
-                    Error::FromSqlConversionFailure(0, Type::Any, Box::new(unreadable))
-                })
-            })
             .collect()
     }
 }
@@ -163,7 +158,7 @@ mod tests {
     use chrono::DateTime;
     use lithify_core::artifact::UnbuildableArtifact;
     use lithify_core::build_log::Latest;
-    use lithify_core::build_log::{Outcome, Run, Status};
+    use lithify_core::build_log::{BuildLog, Outcome, Run, Series, Status, UnreadableBuildLog};
     use lithify_core::event::{MalformedEvent, SchemaChange};
     use lithify_core::listener::OutOfOrder;
     use lithify_core::model::TableId;
@@ -378,7 +373,7 @@ mod tests {
 
     fn latest(client: &DuckDbClient, latest: Latest) -> Vec<BuildLog> {
         client
-            .build_logs(&Namespace::from("mysql_shop"), &latest.into())
+            .build_logs::<Logged>(&Namespace::from("mysql_shop"), &daily(), &latest.into())
             .unwrap()
     }
 
@@ -395,6 +390,16 @@ mod tests {
         fn from(_: UnbuildableArtifact) -> Self {
             Self
         }
+    }
+
+    impl From<UnreadableBuildLog> for Logged {
+        fn from(_: UnreadableBuildLog) -> Self {
+            Self
+        }
+    }
+
+    fn daily() -> Series {
+        Series::new("snapshot", "daily")
     }
 
     fn history() -> Vec<BuildLog> {
@@ -444,7 +449,11 @@ mod tests {
 
         assert_eq!(
             logging(&history)
-                .build_logs(&Namespace::from("mysql_shop"), &BuildLogQuery::All)
+                .build_logs::<Logged>(
+                    &Namespace::from("mysql_shop"),
+                    &daily(),
+                    &BuildLogQuery::All
+                )
                 .unwrap(),
             history.into_iter().rev().collect::<Vec<_>>()
         );
