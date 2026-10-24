@@ -7,7 +7,6 @@ use crate::schedule::Timeline;
 use crate::sink::{TablePath, UnsupportedColumn, Warehouse};
 use crate::source::RowChangeLog;
 use crate::sql::SqlString;
-use crate::ts::{Event, Ts};
 use crate::window::Window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,24 +72,9 @@ pub trait Artifact {
 
     fn series(&self) -> Series;
 
-    fn window(&self, interval: &Window, until: Ts<Event>) -> Option<Window>;
+    fn window(&self, day: &Window, timeline: &Timeline) -> Option<Window>;
 
     fn open(&self, window: &Window) -> Self::Open;
-
-    fn next(
-        &self,
-        timeline: &Timeline,
-        built: Option<&Window>,
-        _base: Option<Ts<Event>>,
-    ) -> Option<Window> {
-        let interval = match built {
-            Some(built) => timeline.after(built)?,
-            None => timeline.first()?,
-        };
-
-        self.window(&interval, timeline.until())
-            .filter(|window| timeline.reached(window))
-    }
 
     fn base<'b>(
         &self,

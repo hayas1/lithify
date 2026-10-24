@@ -8,7 +8,6 @@ use lithify_core::schedule::Schedule;
 use lithify_core::schedule::Timeline;
 use lithify_core::sink::{TablePath, Warehouse};
 use lithify_core::source::RowChangeLog;
-use lithify_core::ts::{Event, Ts};
 use lithify_core::window::Window;
 
 use crate::snapshot::{Snapshot, SnapshotBuilder};
@@ -49,26 +48,11 @@ impl Artifact for Instant {
         Series::new(Self::KIND, &Self::cut(self.at))
     }
 
-    fn window(&self, interval: &Window, _: Ts<Event>) -> Option<Window> {
-        let cut = self.cut.windows(*interval.from(), *interval.to()).next()?;
-
-        Some(Window::new(*interval.from(), *cut.to()))
+    fn window(&self, day: &Window, _: &Timeline) -> Option<Window> {
+        self.cut.window(*day.from())
     }
 
     fn open(&self, _: &Window) -> Self::Open {}
-
-    fn next(
-        &self,
-        timeline: &Timeline,
-        built: Option<&Window>,
-        base: Option<Ts<Event>>,
-    ) -> Option<Window> {
-        let base = base?;
-        let interval = timeline.onto(base, built)?;
-
-        self.window(&interval, timeline.until())
-            .filter(|window| *window.from() <= base && timeline.reached(window))
-    }
 
     fn base<'b>(
         &self,
@@ -124,10 +108,6 @@ mod tests {
         )
     }
 
-    fn day() -> Window {
-        Window::new(at("2026-09-20T15:00:00Z"), at("2026-09-21T15:00:00Z"))
-    }
-
     fn built(artifact: &str, schedule: &str, (from, to): (&str, &str)) -> BuildLog {
         BuildLog::new(
             &Run::new(
@@ -157,86 +137,18 @@ mod tests {
         Window::new(at("2026-09-20T15:00:00Z"), at("2026-09-21T00:00:00Z"))
     }
 
-    fn cut_before() -> Window {
-        Window::new(at("2026-09-19T15:00:00Z"), at("2026-09-20T00:00:00Z"))
-    }
-
-    #[test]
-    fn an_instant_cuts_an_interval_at_the_instant_it_is_cut_at() {
-        assert_eq!(
-            nine_in_tokyo().window(&day(), at("2026-09-22T00:00:00Z")),
-            Some(cut())
-        );
-    }
-
-    #[test]
-    fn an_instant_cut_after_an_interval_closes_holds_nothing_of_it() {
-        let early = Window::new(at("2026-09-20T15:00:00Z"), at("2026-09-20T23:00:00Z"));
-
-        assert_eq!(
-            nine_in_tokyo().window(&early, at("2026-09-22T00:00:00Z")),
-            None
-        );
-    }
-
-    fn days_in_tokyo(until: &str) -> Timeline {
+    fn days_in_tokyo() -> Timeline {
         Timeline::new(
             Schedule::daily(NaiveTime::MIN, chrono_tz::Asia::Tokyo),
-            at("1970-01-01T00:00:00Z"),
-            at(until),
+            at("1970-01-01T00:00:00Z")..at("2026-09-22T00:00:00Z"),
         )
     }
 
     #[test]
-    fn an_instant_never_cut_is_cut_first_in_the_last_day_its_snapshot_was_built_for() {
-        assert_eq!(
-            nine_in_tokyo().next(
-                &days_in_tokyo("2026-09-21T01:00:00Z"),
-                None,
-                Some(at("2026-09-20T15:00:00Z"))
-            ),
-            Some(cut_before())
-        );
-    }
+    fn an_instant_cuts_its_day_at_the_instant_it_is_cut_at() {
+        let day = Window::new(at("2026-09-20T15:00:00Z"), at("2026-09-21T15:00:00Z"));
 
-    #[test]
-    fn an_instant_is_cut_next_in_the_day_after_the_one_it_was_last_cut_in() {
-        assert_eq!(
-            nine_in_tokyo().next(
-                &days_in_tokyo("2026-09-21T01:00:00Z"),
-                Some(&cut_before()),
-                Some(at("2026-09-21T15:00:00Z"))
-            ),
-            Some(cut())
-        );
-    }
-
-    #[test]
-    fn an_instant_waits_for_its_snapshot_to_stand_at_the_day_it_is_cut_in() {
-        assert_eq!(
-            nine_in_tokyo().next(
-                &days_in_tokyo("2026-09-21T01:00:00Z"),
-                Some(&cut_before()),
-                Some(at("2026-09-19T15:00:00Z"))
-            ),
-            None
-        );
-        assert_eq!(
-            nine_in_tokyo().next(&days_in_tokyo("2026-09-21T01:00:00Z"), None, None),
-            None
-        );
-    }
-
-    #[test]
-    fn an_instant_not_yet_reached_is_not_cut() {
-        assert_eq!(
-            nine_in_tokyo().next(
-                &days_in_tokyo("2026-09-20T23:00:00Z"),
-                Some(&cut_before()),
-                Some(at("2026-09-20T15:00:00Z"))
-            ),
-            None
-        );
+        assert_eq!(nine_in_tokyo().window(&day, &days_in_tokyo()), Some(cut()));
     }
 
     #[test]

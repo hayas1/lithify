@@ -47,24 +47,15 @@ impl Artifact for Scd1 {
         Series::new(Self::KIND, "current")
     }
 
-    fn window(&self, interval: &Window, until: Ts<Event>) -> Option<Window> {
-        (*interval.to() < until).then(|| Window::new(*interval.to(), until))
+    fn window(&self, day: &Window, timeline: &Timeline) -> Option<Window> {
+        match timeline.reached(day) {
+            true => None,
+            false => timeline.rest(*day.from()),
+        }
     }
 
     fn open(&self, window: &Window) -> Self::Open {
         *window.to()..
-    }
-
-    fn next(
-        &self,
-        timeline: &Timeline,
-        built: Option<&Window>,
-        base: Option<Ts<Event>>,
-    ) -> Option<Window> {
-        let interval = timeline.ending(base?)?;
-
-        self.window(&interval, timeline.until())
-            .filter(|window| built.is_none_or(|built| built.from() < window.from()))
     }
 
     fn base<'b>(
@@ -228,19 +219,11 @@ mod tests {
     fn until(until: i64) -> Timeline {
         Timeline::new(
             Schedule::default(),
-            Ts::try_from(0).unwrap(),
-            Ts::try_from(until).unwrap(),
+            Ts::try_from(0).unwrap()..Ts::try_from(until).unwrap(),
         )
     }
 
     const DAY: i64 = 86_400_000;
-
-    fn day(from: i64) -> Window {
-        Window::new(
-            Ts::try_from(from * DAY).unwrap(),
-            Ts::try_from((from + 1) * DAY).unwrap(),
-        )
-    }
 
     fn scd1() -> Scd1 {
         Scd1::new(Snapshot::current("mysql_shop_scd1"))
@@ -251,12 +234,14 @@ mod tests {
     }
 
     #[test]
-    fn an_scd1_updates_from_the_end_of_the_day_it_is_built_onto_up_to_now() {
+    fn an_scd1_updates_from_the_start_of_the_day_still_open_up_to_now() {
+        let today = Window::new(ts(DAY), ts(2 * DAY));
+
         assert_eq!(
-            scd1().window(&day(0), ts(DAY + 5)),
+            scd1().window(&today, &until(DAY + 5)),
             Some(Window::new(ts(DAY), ts(DAY + 5)))
         );
-        assert_eq!(scd1().window(&day(0), ts(DAY)), None);
+        assert_eq!(scd1().window(&today, &until(2 * DAY)), None);
     }
 
     #[test]
@@ -265,24 +250,5 @@ mod tests {
             scd1().open(&Window::new(ts(DAY), ts(DAY + 5))),
             ts(DAY + 5)..
         );
-    }
-
-    #[test]
-    fn an_scd1_is_built_once_onto_each_day_its_snapshot_is_built_for() {
-        let built = Window::new(ts(DAY), ts(DAY + 5));
-
-        assert_eq!(
-            scd1().next(&until(DAY + 5), None, Some(ts(DAY))),
-            Some(built.clone())
-        );
-        assert_eq!(
-            scd1().next(&until(DAY + 7), Some(&built), Some(ts(DAY))),
-            None
-        );
-        assert_eq!(
-            scd1().next(&until(2 * DAY + 5), Some(&built), Some(ts(2 * DAY))),
-            Some(Window::new(ts(2 * DAY), ts(2 * DAY + 5)))
-        );
-        assert_eq!(scd1().next(&until(DAY + 5), None, None), None);
     }
 }

@@ -127,11 +127,12 @@ The build log records each series by the kind of its artifact and by what makes 
 ### A build takes one step, and a catch-up repeats it
 
 `lithify build` takes one step: it builds one window of one series for the tables that window is next for, onto what the build log records them built from, and logs each table.
-Named nothing, it takes the step the build log says is next; `--artifact` and `--at` name the series, `--date` the day, and `--table` the tables, so a window is rebuilt by naming it.
+Named nothing, it takes the step the build log says is next; `--artifact` and `--at` name the series.
 `--dry-run` writes the statements of the step rather than running them, and logs nothing.
 
-`lithify catch-up` repeats `lithify build` named nothing, reading the build log afresh before each step, until no step is left.
-The series of a sink are stepped in the order they are built from one another: the `snapshot`, each `instant`, the `scd2`, then the `scd1`, so an artifact built from another steps once what it is built from has stepped as far as it can.
+`lithify catch-up` repeats `lithify build`, reading the build log afresh before each step, until no step is left.
+Named an artifact with `--artifact` and `--at`, it advances that series alone, so each artifact may be run by a process of its own at the times that suit it, such as an `instant` after the instant it is cut at.
+Named nothing, it advances the series of a sink in the order they are built from one another: the `snapshot`, each `instant`, the `scd2`, then the `scd1`, each as far as it can.
 
 ### Each table advances on its own
 
@@ -139,13 +140,14 @@ The build log says, for each series and each table, how far the table was last b
 A step takes the earliest next window of the series and builds every table it is next for; a table the build log has never seen is built with whatever step its window opens in, and one it saw but never built starts again from the source's `since` in one window spanning every day closed since.
 A table is never built into a window after one it was not built into, since each window folds onto the one before.
 
-A step advances by an interval: the build log closes one at the instant the `snapshot` is cut at, a day, or, for a series never built, one interval spanning every day closed since `since`.
-Each artifact cuts the interval into its own window, the closed range of the change log it updates for, and the build log records that window for each table.
+Every series advances day by day: a day closes at the instant the `snapshot` of the sink is cut at, and the first day of a series never built spans every day closed since `since`.
+Each series steps into the day after the one its last window opened in; one built from the `snapshot` steps no further than the day the `snapshot` stands at, and, never built, starts there.
+Each artifact maps the day onto its own window, the closed range of the change log it updates for, which always opens as the day does, and the build log records that window for each table.
 
-- a `snapshot` and an `scd2` take the interval itself as their window, and step into the interval after the last they were built into;
-- an `instant` takes the interval up to the instant it is cut at, once that instant has passed, so it may be built by a batch running more often than daily;
-- an `scd1` takes the window from the end of the interval its `snapshot` was built for up to when it is built, and stays open past it, reading every row change since the window opened, so it is built once onto each interval its `snapshot` is built for;
-- one built from the `snapshot` folds onto the shard closing as its window opens, and is not built before the `snapshot` stands there.
+- a `snapshot` and an `scd2` take the day itself;
+- an `instant` takes the day up to the instant it is cut at, once that instant has passed, so it may be built by a batch running more often than daily;
+- an `scd1` takes only the day still open, from where it opens up to when it is built, and stays open past it, reading every row change since the window opened, so it is built once each time its `snapshot` stands at a new day;
+- one built from the `snapshot` folds onto the shard closing as its window opens.
 
 The schema changes of a build are replayed over its window, which is always closed, and split it into eras.
 Only an artifact left open, the `scd1`, reads the row changes of the last era past the window, rather than stop at an instant taken when the build runs; every other artifact is done with the change log once its window closes.

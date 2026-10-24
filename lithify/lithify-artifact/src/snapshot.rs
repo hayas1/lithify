@@ -13,7 +13,7 @@ use lithify_core::listener::{
     TableRenamed,
 };
 use lithify_core::model::{ColumnModel, TableId, TableModel};
-use lithify_core::schedule::Schedule;
+use lithify_core::schedule::{Schedule, Timeline};
 use lithify_core::sink::{Namespace, TablePath, Warehouse};
 use lithify_core::source::RowChangeLog;
 use lithify_core::sql::SqlString;
@@ -170,8 +170,8 @@ impl Artifact for Snapshot {
         Self::days()
     }
 
-    fn window(&self, interval: &Window, _: Ts<Event>) -> Option<Window> {
-        Some(interval.clone())
+    fn window(&self, day: &Window, _: &Timeline) -> Option<Window> {
+        Some(day.clone())
     }
 
     fn open(&self, _: &Window) -> Self::Open {}
@@ -554,37 +554,16 @@ mod tests {
     }
 
     #[test]
-    fn a_snapshot_never_built_is_built_first_in_one_window_spanning_every_day_closed() {
+    fn a_snapshot_holds_the_day_it_is_built_for() {
         let timeline = Timeline::new(
             Schedule::default(),
-            Ts::try_from(0).unwrap(),
-            Ts::try_from(DAY * 3 + 5).unwrap(),
+            Ts::try_from(0).unwrap()..Ts::try_from(DAY * 3 + 5).unwrap(),
         );
+        let day = Window::new(Ts::try_from(0).unwrap(), Ts::try_from(DAY * 3).unwrap());
 
         assert_eq!(
-            Snapshot::new("mysql_shop", "%Y%m%d").next(&timeline, None, None),
-            Some(Window::new(
-                Ts::try_from(0).unwrap(),
-                Ts::try_from(DAY * 3).unwrap()
-            ))
-        );
-    }
-
-    #[test]
-    fn a_snapshot_is_built_next_into_the_day_after_the_last_it_was_built_into() {
-        let timeline = Timeline::new(
-            Schedule::default(),
-            Ts::try_from(0).unwrap(),
-            Ts::try_from(DAY * 3 + 5).unwrap(),
-        );
-        let built = Window::new(Ts::try_from(0).unwrap(), Ts::try_from(DAY).unwrap());
-
-        assert_eq!(
-            Snapshot::new("mysql_shop", "%Y%m%d").next(&timeline, Some(&built), None),
-            Some(Window::new(
-                Ts::try_from(DAY).unwrap(),
-                Ts::try_from(DAY * 2).unwrap()
-            ))
+            Snapshot::new("mysql_shop", "%Y%m%d").window(&day, &timeline),
+            Some(day)
         );
     }
 

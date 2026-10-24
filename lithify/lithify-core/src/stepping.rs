@@ -32,7 +32,6 @@ impl SeriesLog {
 pub struct Stepping<'a, P> {
     planner: &'a P,
     timeline: Timeline,
-    now: Ts<Event>,
     capture: String,
 }
 
@@ -40,14 +39,20 @@ impl<'a, P: Planner> Stepping<'a, P> {
     pub fn new(planner: &'a P, timeline: Timeline, capture: String) -> Self {
         Self {
             planner,
-            now: timeline.until(),
             timeline,
             capture,
         }
     }
 
     pub fn up_to(self, date: NaiveDate, snapshot: &SeriesLog) -> Result<Self, P::Error> {
-        let until = *self.dated(self.timeline.shard(date), date)?.to();
+        let shard = self
+            .timeline
+            .shard(date)
+            .ok_or(Unsteppable::Unsharded(date))?;
+        if !self.timeline.reached(&shard) {
+            return Err(Unsteppable::Unclosed(shard).into());
+        }
+        let until = *shard.to();
         let standing = self.progress(snapshot)?.standing();
 
         match standing.filter(|standing| *standing > until) {
@@ -67,11 +72,33 @@ impl<'a, P: Planner> Stepping<'a, P> {
         taken: &[Window],
     ) -> Result<Option<Step>, P::Error> {
         let progress = self.progress(log)?;
+        let derived = base.is_some();
         let base = base.map(|base| self.progress(base)).transpose()?;
 
         Ok(progress.step(base.as_ref(), taken, |built, base| {
-            artifact.next(&self.timeline, built, base)
+            self.window(artifact, built, base, derived)
         }))
+    }
+
+    fn window<A: Artifact>(
+        &self,
+        artifact: &A,
+        built: Option<&Window>,
+        base: Option<Ts<Event>>,
+        derived: bool,
+    ) -> Option<Window> {
+        let from = match (built, derived) {
+            (Some(built), _) => *built.to(),
+            (None, false) => self.timeline.range().start,
+            (None, true) => base?,
+        };
+        let window = self
+            .timeline
+            .days(from)
+            .take_while(|day| !derived || base.is_some_and(|base| *day.from() <= base))
+            .find_map(|day| artifact.window(&day, &self.timeline))?;
+
+        self.timeline.reached(&window).then_some(window)
     }
 
     pub fn take<A: Artifact, R: Runner>(
@@ -92,26 +119,6 @@ impl<'a, P: Planner> Stepping<'a, P> {
             tables,
             &runner.advancing(log.namespace(), log.series()),
         )
-    }
-
-    pub fn on<A: Artifact>(&self, artifact: &A, date: NaiveDate) -> Result<Window, Unsteppable> {
-        let interval = self
-            .timeline
-            .shard(date)
-            .ok_or(Unsteppable::Unsharded(date))?;
-        let window = artifact
-            .window(&interval, self.now)
-            .ok_or_else(|| Unsteppable::Unclosed(interval.clone()))?;
-
-        self.dated(Some(window), date)
-    }
-
-    fn dated(&self, window: Option<Window>, date: NaiveDate) -> Result<Window, Unsteppable> {
-        match window {
-            None => Err(Unsteppable::Unsharded(date)),
-            Some(window) if *window.to() > self.now => Err(Unsteppable::Unclosed(window)),
-            Some(window) => Ok(window),
-        }
     }
 
     fn built(&self, log: &SeriesLog, closing: Ts<Event>) -> Result<Vec<BuildLog>, P::Error> {

@@ -10,11 +10,10 @@ use lithify_core::listener::{
     TableRenamed,
 };
 use lithify_core::model::TableId;
-use lithify_core::schedule::Schedule;
+use lithify_core::schedule::{Schedule, Timeline};
 use lithify_core::sink::{Namespace, TablePath, Warehouse};
 use lithify_core::source::RowChangeLog;
 use lithify_core::sql::SqlString;
-use lithify_core::ts::{Event, Ts};
 use lithify_core::window::Window;
 
 use crate::snapshot::Snapshot;
@@ -71,8 +70,8 @@ impl Artifact for Scd2 {
         Series::new(Self::KIND, &Schedule::default().to_string())
     }
 
-    fn window(&self, interval: &Window, _: Ts<Event>) -> Option<Window> {
-        Some(interval.clone())
+    fn window(&self, day: &Window, _: &Timeline) -> Option<Window> {
+        Some(day.clone())
     }
 
     fn open(&self, _: &Window) -> Self::Open {}
@@ -383,7 +382,7 @@ mod tests {
     const DAY: i64 = 86_400_000;
 
     #[test]
-    fn an_scd2_appends_each_day_after_the_last_it_appended_as_a_snapshot_is_built() {
+    fn an_scd2_appends_the_day_it_is_built_for() {
         let scd2 = Scd2::new(
             Namespace::from("mysql_shop_scd2"),
             "%Y%m%d",
@@ -391,15 +390,10 @@ mod tests {
         );
         let timeline = Timeline::new(
             Schedule::default(),
-            Ts::try_from(0).unwrap(),
-            Ts::try_from(DAY * 3 + 5).unwrap(),
+            Ts::try_from(0).unwrap()..Ts::try_from(DAY * 3 + 5).unwrap(),
         );
-        let first = scd2.next(&timeline, None, None).unwrap();
+        let day = Window::new(Ts::try_from(DAY).unwrap(), Ts::try_from(DAY * 2).unwrap());
 
-        assert_eq!(
-            first,
-            Window::new(Ts::try_from(0).unwrap(), Ts::try_from(DAY * 3).unwrap())
-        );
-        assert_eq!(scd2.next(&timeline, Some(&first), None), None);
+        assert_eq!(scd2.window(&day, &timeline), Some(day));
     }
 }

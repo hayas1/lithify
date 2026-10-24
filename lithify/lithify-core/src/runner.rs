@@ -33,7 +33,6 @@ pub enum Unsteppable {
         window: Window,
         tables: Vec<TableId>,
     },
-    UnknownTables(Vec<TableId>),
 }
 
 impl Unsteppable {
@@ -71,11 +70,6 @@ impl Display for Unsteppable {
                 window.from(),
                 window.to()
             ),
-            Self::UnknownTables(tables) => write!(
-                formatter,
-                "the window holds no table named {}",
-                Self::listed(tables)
-            ),
         }
     }
 }
@@ -86,31 +80,17 @@ impl std::error::Error for Unsteppable {}
 pub enum Tables {
     #[default]
     Every,
-    Named(BTreeSet<TableId>),
     Except(BTreeSet<TableId>),
 }
 
 impl Tables {
-    pub fn narrow<B: ArtifactBuilder>(&self, mut builders: Vec<B>) -> Result<Vec<B>, Unsteppable> {
+    pub fn narrow<B: ArtifactBuilder>(&self, mut builders: Vec<B>) -> Vec<B> {
         match self {
-            Self::Every => Ok(builders),
-            Self::Named(tables) => {
-                let unknown: Vec<_> = tables
-                    .iter()
-                    .filter(|table| !builders.iter().any(|builder| builder.table() == *table))
-                    .cloned()
-                    .collect();
-                if !unknown.is_empty() {
-                    return Err(Unsteppable::UnknownTables(unknown));
-                }
-                builders.retain(|builder| tables.contains(builder.table()));
-
-                Ok(builders)
-            }
+            Self::Every => builders,
             Self::Except(tables) => {
                 builders.retain(|builder| !tables.contains(builder.table()));
 
-                Ok(builders)
+                builders
             }
         }
     }
@@ -293,7 +273,7 @@ where
             + From<<K as WarehouseClient>::Error>,
         <K as SchemaChangeStream<C::Schema>>::Error: Into<E>,
     {
-        let mut builders = tables.narrow(self.builders::<A, E>(artifact, window, previous)?)?;
+        let mut builders = tables.narrow(self.builders::<A, E>(artifact, window, previous)?);
         builders.retain(|builder| builds(builder.table()));
 
         runner.run(self.client, window, &builders)

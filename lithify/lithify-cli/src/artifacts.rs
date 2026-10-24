@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
+use chrono::{DateTime, NaiveTime, Utc};
 use chrono_tz::Tz;
 use serde::Deserialize;
 use ulid::Ulid;
@@ -14,7 +14,7 @@ use lithify_config::{Declaration, Place};
 use lithify_core::artifact::Artifact;
 use lithify_core::build_log::{Run, Series};
 use lithify_core::progress::Step;
-use lithify_core::runner::{Build, Planner, Tables, Unsteppable};
+use lithify_core::runner::{Build, Planner, Tables};
 use lithify_core::schedule::Schedule;
 use lithify_core::sink::Namespace;
 use lithify_core::stepping::{SeriesLog, Stepping};
@@ -391,19 +391,6 @@ impl<'a> Declared<'a> {
         }
     }
 
-    fn on<P: Planner<Error = Unrunnable>>(
-        &self,
-        stepping: &Stepping<P>,
-        date: NaiveDate,
-    ) -> Result<Window, Unsteppable> {
-        match self {
-            Self::Snapshot(declared) => stepping.on(&declared.artifact(), date),
-            Self::Instant(declared) => stepping.on(&declared.artifact(), date),
-            Self::Scd2(declared) => stepping.on(&declared.artifact(), date),
-            Self::Scd1(declared) => stepping.on(&declared.artifact(), date),
-        }
-    }
-
     fn take<P: Planner<Error = Unrunnable>, R: Report>(
         &self,
         stepping: &Stepping<P>,
@@ -464,12 +451,13 @@ impl<'a> Lineup<'a> {
     pub fn catch_up<P: Planner<Error = Unrunnable>, R: Report>(
         &self,
         stepping: &Stepping<P>,
+        named: impl Fn(&Declared) -> bool,
         runner: &R,
         journal: &mut Journal,
     ) -> Result<(), Unrunnable> {
         let mut taken: BTreeMap<Series, Vec<Window>> = BTreeMap::new();
 
-        while let Some((series, window)) = self.step(stepping, |_| true, &taken, runner, journal)? {
+        while let Some((series, window)) = self.step(stepping, &named, &taken, runner, journal)? {
             taken.entry(series).or_default().push(window);
         }
 
@@ -504,24 +492,6 @@ impl<'a> Lineup<'a> {
         }
 
         Ok(None)
-    }
-
-    pub fn dated<P: Planner<Error = Unrunnable>, R: Report>(
-        &self,
-        stepping: &Stepping<P>,
-        named: impl Fn(&Declared) -> bool,
-        date: NaiveDate,
-        tables: &Tables,
-        runner: &R,
-        journal: &mut Journal,
-    ) -> Result<bool, Unrunnable> {
-        let Some(declared) = self.declared.iter().find(|declared| named(declared)) else {
-            return Ok(false);
-        };
-        let window = declared.on(stepping, date)?;
-        declared.take(stepping, &self.snapshot, &window, tables, runner, journal)?;
-
-        Ok(true)
     }
 }
 

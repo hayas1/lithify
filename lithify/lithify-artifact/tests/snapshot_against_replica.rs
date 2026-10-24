@@ -13,7 +13,7 @@ use lithify_core::build_log::{BuildLog, Outcome, Run, Status};
 use lithify_core::era::{Bound, Era};
 use lithify_core::listener::SchemaChangeListener;
 use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
-use lithify_core::schedule::Schedule;
+use lithify_core::schedule::{Schedule, Timeline};
 use lithify_core::sink::{Namespace, TablePath, WarehouseClient};
 use lithify_core::sql::SqlString;
 use lithify_core::testing::{Mutation, Replica, Row};
@@ -237,7 +237,8 @@ fn an_instant_holds_what_the_source_held_as_it_was_cut() {
         Snapshot::cut("shop_instant", "%Y%m%d%H", chrono_tz::Tz::UTC),
     );
     let first = shards.build(&day(0), None);
-    let cut = six.window(&day(1), *day(2).to()).unwrap();
+    let timeline = Timeline::new(Schedule::default(), *day(0).from()..*day(2).to());
+    let cut = six.window(&day(1), &timeline).unwrap();
 
     let instant = shards.build_into(
         &six,
@@ -256,7 +257,8 @@ fn an_scd1_holds_what_the_source_holds_now_onto_the_last_daily_snapshot() {
     let first = shards.build(&day(0), None);
     let built = Ts::try_from(DAY + 1_500).unwrap();
     let now = Ts::try_from(i64::from(i32::MAX)).unwrap();
-    let window = scd1.window(&day(0), built).unwrap();
+    let timeline = Timeline::new(Schedule::default(), *day(0).from()..built);
+    let window = scd1.window(&day(1), &timeline).unwrap();
 
     let current = shards.build_into(
         &scd1,

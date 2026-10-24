@@ -16,8 +16,6 @@ use lithify_cli::journal::Journal;
 use lithify_cli::pipeline::{CaptureConfig, WarehouseConfig};
 use lithify_cli::run::Run;
 use lithify_cli::unrunnable::Unrunnable;
-use lithify_core::model::TableId;
-use lithify_core::runner::Tables;
 use lithify_protocol::sink::duckdb::store::{S3Credential, Secret};
 #[cfg(feature = "serve")]
 use lithify_ui::pipelines::Pipelines;
@@ -147,29 +145,7 @@ impl PipelineArguments {
 }
 
 #[derive(clap::Args)]
-struct CatchUpArguments {
-    #[command(flatten)]
-    pipeline: PipelineArguments,
-    #[arg(
-        long,
-        value_name = "DATE",
-        help = "The date of the last shard to build, rather than the latest one that has closed"
-    )]
-    to: Option<NaiveDate>,
-}
-
-impl CatchUpArguments {
-    fn journal(self) -> Result<Journal, Unrunnable> {
-        self.pipeline
-            .run()
-            .build(&RunCommand::CatchUp { to: self.to })
-    }
-}
-
-#[derive(clap::Args)]
-struct BuildArguments {
-    #[command(flatten)]
-    pipeline: PipelineArguments,
+struct TargetArguments {
     #[arg(
         long,
         value_name = "ARTIFACT",
@@ -184,20 +160,43 @@ struct BuildArguments {
         help = "The instant of the day the instant to build is cut at, out of every one the sink places when none is named"
     )]
     at: Option<NaiveTime>,
+}
+
+impl TargetArguments {
+    fn target(&self) -> Target {
+        Target::new(self.artifact, self.at)
+    }
+}
+
+#[derive(clap::Args)]
+struct CatchUpArguments {
+    #[command(flatten)]
+    pipeline: PipelineArguments,
+    #[command(flatten)]
+    target: TargetArguments,
     #[arg(
         long,
         value_name = "DATE",
-        help = "The date of the shard to build, folding onto what the build log recorded closing as it opens, rather than the step the build log says is next"
+        help = "The date of the last shard to build, rather than the latest one that has closed"
     )]
-    date: Option<NaiveDate>,
-    #[arg(
-        long,
-        value_name = "SCHEMA.TABLE",
-        requires = "date",
-        value_parser = |table: &str| TableId::try_from(table),
-        help = "A table to build the shard of, out of every table the window holds when none is named"
-    )]
-    table: Vec<TableId>,
+    to: Option<NaiveDate>,
+}
+
+impl CatchUpArguments {
+    fn journal(self) -> Result<Journal, Unrunnable> {
+        self.pipeline.run().build(&RunCommand::CatchUp {
+            target: self.target.target(),
+            to: self.to,
+        })
+    }
+}
+
+#[derive(clap::Args)]
+struct BuildArguments {
+    #[command(flatten)]
+    pipeline: PipelineArguments,
+    #[command(flatten)]
+    target: TargetArguments,
     #[arg(
         long,
         value_name = "DIRECTORY",
@@ -208,15 +207,7 @@ struct BuildArguments {
 
 impl BuildArguments {
     fn journal(self) -> Result<Journal, Unrunnable> {
-        let command = RunCommand::Build(Target::new(
-            self.artifact,
-            self.at,
-            self.date,
-            match self.table.is_empty() {
-                true => Tables::Every,
-                false => Tables::Named(self.table.into_iter().collect()),
-            },
-        ));
+        let command = RunCommand::Build(self.target.target());
         let run = self.pipeline.run();
 
         match self.dry_run {
@@ -298,7 +289,7 @@ mod tests {
     }
 
     fn build_arguments(extra: &[&str]) -> BuildArguments {
-        match parsed("build", &[&["--date", "2026-09-20"][..], extra].concat()).unwrap() {
+        match parsed("build", extra).unwrap() {
             Command::Build(arguments) => arguments,
             _ => unreachable!("build was named"),
         }
@@ -329,30 +320,18 @@ mod tests {
         };
 
         assert_eq!(latest.to, None);
+        assert_eq!(latest.target.artifact, None);
         assert_eq!(past.to, Some("2026-09-20".parse::<NaiveDate>().unwrap()));
         assert!(parsed("catch-up", &["--from", "2026-09-20T00:00:00Z"]).is_err());
         assert!(parsed("catch-up", &["--onto", "2026-09-19T00:00:00Z"]).is_err());
         assert!(parsed("catch-up", &["--dry-run", "plans"]).is_err());
-    }
-
-    #[test]
-    fn a_build_is_given_the_shard_it_builds_every_table_of() {
-        let built = build_arguments(&[]);
-
-        assert_eq!(built.date, Some("2026-09-20".parse::<NaiveDate>().unwrap()));
-        assert_eq!(built.artifact, None);
-        assert_eq!(built.table, []);
-        assert_eq!(built.dry_run, None);
-    }
-
-    #[test]
-    fn a_build_is_narrowed_to_the_tables_it_names() {
-        let narrowed = build_arguments(&["--table", "shop.people", "--table", "shop.pets"]);
-
-        assert_eq!(
-            narrowed.table,
-            [TableId::new("shop", "people"), TableId::new("shop", "pets")]
-        );
+        let Ok(Command::CatchUp(cut)) =
+            parsed("catch-up", &["--artifact", "instant", "--at", "06:00"])
+        else {
+            panic!("catch-up was named");
+        };
+        assert_eq!(cut.target.artifact, Some("instant"));
+        assert_eq!(cut.target.at, NaiveTime::from_hms_opt(6, 0, 0));
     }
 
     #[test]
@@ -361,16 +340,17 @@ mod tests {
             panic!("build was named");
         };
 
-        assert_eq!(next.date, None);
-        assert!(parsed("build", &["--table", "shop.people"]).is_err());
+        assert_eq!(next.target.artifact, None);
+        assert_eq!(next.dry_run, None);
+        assert!(parsed("build", &["--date", "2026-09-20"]).is_err());
     }
 
     #[test]
     fn a_build_is_named_the_artifact_and_the_instant_it_is_cut_at() {
         let cut = build_arguments(&["--artifact", "instant", "--at", "12:00"]);
 
-        assert_eq!(cut.artifact, Some("instant"));
-        assert_eq!(cut.at, NaiveTime::from_hms_opt(12, 0, 0));
+        assert_eq!(cut.target.artifact, Some("instant"));
+        assert_eq!(cut.target.at, NaiveTime::from_hms_opt(12, 0, 0));
         assert!(parsed("build", &["--artifact", "masked"]).is_err());
         assert!(parsed("build", &["--at", "12:00"]).is_err());
     }

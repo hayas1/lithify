@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::fmt::{self, Display, Formatter};
+use std::ops::Range;
 
 use chrono::{DateTime, Days, NaiveDate, NaiveTime, TimeZone, Utc};
 use chrono_tz::Tz;
@@ -66,12 +67,6 @@ impl Schedule {
         }
     }
 
-    pub fn ending(self, closed: Ts<Event>) -> Option<Window> {
-        match self {
-            Self::Daily(cut) => Some(Window::new(cut.before(closed)?, closed)),
-        }
-    }
-
     pub fn following(self, instant: Ts<Event>) -> Option<Window> {
         match self {
             Self::Daily(cut) => self.window(cut.at_or_after(instant)?),
@@ -81,12 +76,6 @@ impl Schedule {
     pub fn window(self, from: Ts<Event>) -> Option<Window> {
         match self {
             Self::Daily(cut) => Some(Window::new(from, cut.after(from)?)),
-        }
-    }
-
-    pub fn containing(self, instant: Ts<Event>) -> Option<Window> {
-        match self {
-            Self::Daily(cut) => Some(Window::new(cut.at_or_before(instant)?, cut.after(instant)?)),
         }
     }
 }
@@ -99,63 +88,50 @@ impl Display for Schedule {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Timeline {
     schedule: Schedule,
-    since: Ts<Event>,
-    until: Ts<Event>,
+    range: Range<Ts<Event>>,
 }
 
 impl Timeline {
-    pub fn new(schedule: Schedule, since: Ts<Event>, until: Ts<Event>) -> Self {
-        Self {
-            schedule,
-            since,
-            until,
-        }
+    pub fn new(schedule: Schedule, range: Range<Ts<Event>>) -> Self {
+        Self { schedule, range }
     }
 
-    pub fn until(&self) -> Ts<Event> {
-        self.until
+    pub fn range(&self) -> &Range<Ts<Event>> {
+        &self.range
     }
 
     pub fn up_to(self, until: Ts<Event>) -> Self {
-        Self { until, ..self }
-    }
-
-    pub fn shard(&self, date: NaiveDate) -> Option<Window> {
-        self.schedule.shard(self.since, date)
-    }
-
-    pub fn first(&self) -> Option<Window> {
-        self.schedule.span(self.since, self.until)
-    }
-
-    pub fn onto(&self, base: Ts<Event>, built: Option<&Window>) -> Option<Window> {
-        match built {
-            Some(built) => self.after(built),
-            None => self.ending(base),
+        Self {
+            range: self.range.start..until,
+            ..self
         }
     }
 
+    pub fn shard(&self, date: NaiveDate) -> Option<Window> {
+        self.schedule.shard(self.range.start, date)
+    }
+
+    pub fn days(&self, from: Ts<Event>) -> impl Iterator<Item = Window> {
+        let schedule = self.schedule;
+        let until = self.range.end;
+        let first = match from == self.range.start {
+            true => schedule.span(from, until),
+            false => schedule.following(from),
+        };
+
+        std::iter::successors(first, move |day| schedule.window(*day.to()))
+            .take_while(move |day| *day.from() < until)
+    }
+
+    pub fn rest(&self, from: Ts<Event>) -> Option<Window> {
+        (from < self.range.end).then(|| Window::new(from, self.range.end))
+    }
+
     pub fn reached(&self, window: &Window) -> bool {
-        *window.to() <= self.until
-    }
-
-    pub fn after(&self, built: &Window) -> Option<Window> {
-        self.schedule.following(*built.to())
-    }
-
-    pub fn ending(&self, closed: Ts<Event>) -> Option<Window> {
-        self.schedule.ending(closed)
-    }
-
-    pub fn containing(&self, instant: Ts<Event>) -> Option<Window> {
-        self.schedule.containing(instant)
-    }
-
-    pub fn day(&self, from: Ts<Event>) -> Option<Window> {
-        self.schedule.window(from)
+        *window.to() <= self.range.end
     }
 }
 
@@ -197,24 +173,6 @@ impl Cut {
         }
     }
 
-    fn before(self, instant: Ts<Event>) -> Option<Ts<Event>> {
-        let date = self.local(instant).date_naive();
-
-        match self.on(date)? {
-            cut if cut < instant => Some(cut),
-            _ => self.on(date.pred_opt()?),
-        }
-    }
-
-    fn at_or_before(self, instant: Ts<Event>) -> Option<Ts<Event>> {
-        let date = self.local(instant).date_naive();
-
-        match self.on(date)? {
-            cut if cut <= instant => Some(cut),
-            _ => self.on(date.pred_opt()?),
-        }
-    }
-
     fn closing(self, date: NaiveDate) -> Option<Ts<Event>> {
         let midnight = self
             .zone
@@ -246,20 +204,8 @@ mod tests {
     fn timeline() -> Timeline {
         Timeline::new(
             Schedule::default(),
-            at("2026-09-18T10:00:00Z"),
-            at("2026-09-22T05:00:00Z"),
+            at("2026-09-18T10:00:00Z")..at("2026-09-22T05:00:00Z"),
         )
-    }
-
-    #[test]
-    fn a_timeline_first_spans_every_day_closed_since_it_began() {
-        assert_eq!(
-            timeline().first(),
-            Some(Window::new(
-                at("2026-09-18T10:00:00Z"),
-                at("2026-09-22T00:00:00Z")
-            ))
-        );
     }
 
     fn day(from: &str, to: &str) -> Window {
@@ -267,58 +213,53 @@ mod tests {
     }
 
     #[test]
-    fn a_timeline_steps_onto_the_day_after_the_last_a_window_holds() {
-        let built = day("2026-09-20T00:00:00Z", "2026-09-21T00:00:00Z");
-        let next = day("2026-09-21T00:00:00Z", "2026-09-22T00:00:00Z");
-
-        assert_eq!(timeline().after(&built), Some(next));
-    }
-
-    #[test]
-    fn a_timeline_steps_onto_the_day_after_the_one_a_window_was_cut_within() {
-        let cut = day("2026-09-20T00:00:00Z", "2026-09-20T09:00:00Z");
-        let next = day("2026-09-21T00:00:00Z", "2026-09-22T00:00:00Z");
-
-        assert_eq!(timeline().after(&cut), Some(next));
-    }
-
-    #[test]
-    fn a_timeline_steps_onto_the_day_after_a_window_spanning_many_days() {
-        let first = day("2026-09-18T10:00:00Z", "2026-09-21T00:00:00Z");
-        let next = day("2026-09-21T00:00:00Z", "2026-09-22T00:00:00Z");
-
-        assert_eq!(timeline().after(&first), Some(next));
-    }
-
-    #[test]
-    fn a_timeline_reads_the_day_closing_at_an_instant() {
+    fn a_timeline_begins_its_days_with_one_spanning_every_day_closed_since_it_began() {
         assert_eq!(
-            timeline().ending(at("2026-09-21T00:00:00Z")),
-            Some(day("2026-09-20T00:00:00Z", "2026-09-21T00:00:00Z"))
+            timeline()
+                .days(at("2026-09-18T10:00:00Z"))
+                .collect::<Vec<_>>(),
+            [
+                day("2026-09-18T10:00:00Z", "2026-09-22T00:00:00Z"),
+                day("2026-09-22T00:00:00Z", "2026-09-23T00:00:00Z"),
+            ]
         );
     }
 
     #[test]
-    fn a_timeline_reads_the_day_an_instant_falls_in() {
+    fn a_timeline_steps_day_by_day_from_the_first_day_opening_at_or_after_an_instant() {
         assert_eq!(
-            timeline().containing(at("2026-09-21T09:00:00Z")),
-            Some(day("2026-09-21T00:00:00Z", "2026-09-22T00:00:00Z"))
+            timeline()
+                .days(at("2026-09-20T09:00:00Z"))
+                .collect::<Vec<_>>(),
+            [
+                day("2026-09-21T00:00:00Z", "2026-09-22T00:00:00Z"),
+                day("2026-09-22T00:00:00Z", "2026-09-23T00:00:00Z"),
+            ]
         );
         assert_eq!(
-            timeline().containing(at("2026-09-21T00:00:00Z")),
-            Some(day("2026-09-21T00:00:00Z", "2026-09-22T00:00:00Z"))
+            timeline()
+                .days(at("2026-09-21T00:00:00Z"))
+                .collect::<Vec<_>>(),
+            [
+                day("2026-09-21T00:00:00Z", "2026-09-22T00:00:00Z"),
+                day("2026-09-22T00:00:00Z", "2026-09-23T00:00:00Z"),
+            ]
         );
     }
 
     #[test]
-    fn a_timeline_reads_the_day_opening_at_an_instant_whether_or_not_it_has_closed() {
+    fn a_timeline_holds_the_rest_of_itself_from_an_instant() {
         assert_eq!(
-            timeline().day(at("2026-09-22T00:00:00Z")),
-            Some(Window::new(
-                at("2026-09-22T00:00:00Z"),
-                at("2026-09-23T00:00:00Z")
-            ))
+            timeline().rest(at("2026-09-21T00:00:00Z")),
+            Some(day("2026-09-21T00:00:00Z", "2026-09-22T05:00:00Z"))
         );
+        assert_eq!(timeline().rest(at("2026-09-22T05:00:00Z")), None);
+    }
+
+    #[test]
+    fn a_timeline_reaches_a_window_closing_by_its_end() {
+        assert!(timeline().reached(&day("2026-09-21T00:00:00Z", "2026-09-22T05:00:00Z")));
+        assert!(!timeline().reached(&day("2026-09-21T00:00:00Z", "2026-09-22T06:00:00Z")));
     }
 
     #[test]
