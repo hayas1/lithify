@@ -10,7 +10,6 @@ use crate::listener::OutOfOrder;
 use crate::model::TableId;
 use crate::sink::{Namespace, WarehouseClient};
 use crate::source::{ChangeLogs, SchemaChangeStream};
-use crate::sql::SqlString;
 use crate::table_listeners::{TableListeners, Track};
 use crate::ts::{Event, Ts};
 use crate::window::Window;
@@ -30,20 +29,6 @@ pub enum Unsteppable {
         date: NaiveDate,
         built_until: Ts<Event>,
     },
-    Baseless {
-        window: Window,
-        tables: Vec<TableId>,
-    },
-}
-
-impl Unsteppable {
-    fn listed(tables: &[TableId]) -> String {
-        tables
-            .iter()
-            .map(TableId::to_string)
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
 }
 
 impl Display for Unsteppable {
@@ -61,13 +46,6 @@ impl Display for Unsteppable {
             Self::Overtaken { date, built_until } => write!(
                 formatter,
                 "the build log has built past {date}, up to {built_until}"
-            ),
-            Self::Baseless { window, tables } => write!(
-                formatter,
-                "nothing was built for {} closing at {}, which the window to {} folds onto; build the windows before it first",
-                Self::listed(tables),
-                window.from(),
-                window.to()
             ),
         }
     }
@@ -112,50 +90,6 @@ pub trait Runner {
         K: WarehouseClient,
         B: ArtifactBuilder,
         E: From<K::Error> + From<UnbuildableArtifact> + From<Unsteppable>;
-}
-
-pub struct Rehearsal;
-
-impl Runner for Rehearsal {
-    type Output = Vec<SqlString>;
-
-    fn advancing(&self, _: &Namespace, _: &Series) -> Self {
-        Self
-    }
-
-    fn run<K, B, E>(
-        &self,
-        client: &K,
-        window: &Window,
-        builders: &[Built<B>],
-    ) -> Result<Self::Output, E>
-    where
-        K: WarehouseClient,
-        B: ArtifactBuilder,
-        E: From<K::Error> + From<UnbuildableArtifact> + From<Unsteppable>,
-    {
-        if let Some(failure) = builders.iter().find_map(Built::failure) {
-            return Err(failure.clone().into());
-        }
-        let baseless: Vec<_> = builders
-            .iter()
-            .filter_map(|built| built.listener().missing_base())
-            .cloned()
-            .collect();
-        if !baseless.is_empty() {
-            return Err(Unsteppable::Baseless {
-                window: window.clone(),
-                tables: baseless,
-            }
-            .into());
-        }
-
-        Ok(builders
-            .iter()
-            .map(|built| built.listener().create(client.warehouse()))
-            .collect::<Result<Vec<_>, _>>()?
-            .concat())
-    }
 }
 
 pub struct Build {

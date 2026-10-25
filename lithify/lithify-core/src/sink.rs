@@ -293,6 +293,10 @@ pub trait WarehouseClient {
     where
         E: From<Self::Error> + From<UnreadableBuildLog>,
     {
+        if !self.exists(&BuildLog::path(namespace))? {
+            return Ok(Vec::new());
+        }
+
         self.build_log_rows(namespace, query)?
             .into_iter()
             .filter(|row| row.advances(series))

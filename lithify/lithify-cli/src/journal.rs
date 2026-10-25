@@ -64,11 +64,11 @@ mod tests {
     fn a_note_is_reported_as_it_stands() {
         let mut journal = Journal::default();
 
-        journal.note("wrote 3 statements to plans/rustfs.sql");
+        journal.note("wrote 3 statements to dry-run/rustfs.sql");
 
         assert_eq!(
             journal.entries().collect::<Vec<_>>(),
-            ["wrote 3 statements to plans/rustfs.sql"]
+            ["wrote 3 statements to dry-run/rustfs.sql"]
         );
         assert!(journal.complete());
     }

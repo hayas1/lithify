@@ -281,7 +281,7 @@ mod tests {
             std::fs::create_dir_all(root.join(configured)).unwrap();
             std::fs::write(root.join(configured).join("infra.toml"), "").unwrap();
         }
-        std::fs::create_dir_all(root.join("plans")).unwrap();
+        std::fs::create_dir_all(root.join("dry-run")).unwrap();
 
         assert_eq!(
             Pipeline::<Capture, Sunk, Made>::directories(&root).unwrap(),

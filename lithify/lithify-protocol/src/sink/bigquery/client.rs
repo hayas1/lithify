@@ -21,6 +21,7 @@ use lithify_core::window::Window;
 use crate::sink::bigquery::BigQueryWarehouse;
 use crate::sink::bigquery::config::{Config, Credentials, Location};
 use crate::sink::bigquery::from_sql::{BigQueryBuildLogRow, BigQueryCount};
+use crate::sink::execution::{Apply, DryRun};
 
 pub trait BigQueryChangeLogsFn {
     type Output;
@@ -39,10 +40,45 @@ pub trait BigQueryCapture {
     ) -> F::Output;
 }
 
-pub struct BigQueryClient {
+pub trait BigQueryExecution {
+    fn execute(
+        &self,
+        client: &BigQuery,
+        runtime: &Runtime,
+        statement: &SqlString,
+    ) -> Result<(), Unqueryable>;
+}
+
+impl BigQueryExecution for Apply {
+    fn execute(
+        &self,
+        client: &BigQuery,
+        runtime: &Runtime,
+        statement: &SqlString,
+    ) -> Result<(), Unqueryable> {
+        runtime.block_on(async {
+            client.query(statement.as_str()).until_done().await?;
+
+            Ok(())
+        })
+    }
+}
+
+// TODO: send the statement to BigQuery as a dry run, so it is checked and its scan estimated
+// rather than only recorded.
+impl BigQueryExecution for DryRun {
+    fn execute(&self, _: &BigQuery, _: &Runtime, statement: &SqlString) -> Result<(), Unqueryable> {
+        self.record(statement);
+
+        Ok(())
+    }
+}
+
+pub struct BigQueryClient<R = Apply> {
     warehouse: BigQueryWarehouse,
     client: BigQuery,
     runtime: Runtime,
+    execution: R,
 }
 
 impl BigQueryClient {
@@ -66,19 +102,35 @@ impl BigQueryClient {
             ),
             client,
             runtime,
+            execution: Apply,
         })
     }
+}
 
-    fn records<R>(&self, query: &SqlString) -> Result<Vec<R>, Unqueryable>
+impl<R> BigQueryClient<R> {
+    pub fn execution(&self) -> &R {
+        &self.execution
+    }
+
+    pub fn executing<S>(self, execution: S) -> BigQueryClient<S> {
+        BigQueryClient {
+            warehouse: self.warehouse,
+            client: self.client,
+            runtime: self.runtime,
+            execution,
+        }
+    }
+
+    fn records<T>(&self, query: &SqlString) -> Result<Vec<T>, Unqueryable>
     where
-        R: TryFrom<Row, Error = RowError>,
+        T: TryFrom<Row, Error = RowError>,
     {
         self.runtime.block_on(async {
             let mut read = self.client.query(query.as_str()).until_done().await?.read();
             let mut records = Vec::new();
 
             while let Some(row) = read.next().await.transpose()? {
-                records.push(R::try_from(row)?);
+                records.push(T::try_from(row)?);
             }
 
             Ok(records)
@@ -98,7 +150,7 @@ impl OpenWarehouse for BigQueryWarehouse {
     }
 }
 
-impl WarehouseClient for BigQueryClient {
+impl<R: BigQueryExecution> WarehouseClient for BigQueryClient<R> {
     type Warehouse = BigQueryWarehouse;
     type Error = Unqueryable;
 
@@ -107,11 +159,8 @@ impl WarehouseClient for BigQueryClient {
     }
 
     fn execute(&self, statement: &SqlString) -> Result<(), Self::Error> {
-        self.runtime.block_on(async {
-            self.client.query(statement.as_str()).until_done().await?;
-
-            Ok(())
-        })
+        self.execution
+            .execute(&self.client, &self.runtime, statement)
     }
 
     fn exists(&self, table: &TablePath) -> Result<bool, Self::Error> {
@@ -152,7 +201,7 @@ impl<L: SchemaChangeLog> SchemaChanges<L> for BigQuerySchemaChanges<'_, L> {
     }
 }
 
-impl<L> SchemaChangeStream<L> for BigQueryClient
+impl<L, R> SchemaChangeStream<L> for BigQueryClient<R>
 where
     L: SchemaChangeLog,
     L::Record: TryFrom<Row, Error = RowError>,
@@ -161,7 +210,8 @@ where
     type Changes<'a>
         = BigQuerySchemaChanges<'a, L>
     where
-        L: 'a;
+        L: 'a,
+        R: 'a;
 
     fn schema_changes<'a>(
         &'a self,

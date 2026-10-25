@@ -9,9 +9,11 @@ use lithify_core::runner::{Planner, Replay, Runner, Tables};
 use lithify_core::source::{ChangeLogs, SchemaChangeLog};
 use lithify_core::window::Window;
 use lithify_protocol::sink::bigquery::client::{
-    BigQueryCapture, BigQueryChangeLogsFn, BigQueryClient,
+    BigQueryCapture, BigQueryChangeLogsFn, BigQueryClient, BigQueryExecution,
 };
-use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbChangeLogsFn, DuckDbClient};
+use lithify_protocol::sink::duckdb::client::{
+    DuckDbCapture, DuckDbChangeLogsFn, DuckDbClient, DuckDbExecution,
+};
 
 use crate::pipeline::CaptureConfig;
 use crate::unrunnable::Unrunnable;
@@ -71,11 +73,11 @@ impl<'a, K> Planning<'a, K> {
     }
 }
 
-impl Planner for Planning<'_, DuckDbClient> {
-    type Client = DuckDbClient;
+impl<X: DuckDbExecution> Planner for Planning<'_, DuckDbClient<X>> {
+    type Client = DuckDbClient<X>;
     type Error = Unrunnable;
 
-    fn client(&self) -> &DuckDbClient {
+    fn client(&self) -> &DuckDbClient<X> {
         self.client
     }
 
@@ -102,11 +104,11 @@ impl Planner for Planning<'_, DuckDbClient> {
     }
 }
 
-impl Planner for Planning<'_, BigQueryClient> {
-    type Client = BigQueryClient;
+impl<X: BigQueryExecution> Planner for Planning<'_, BigQueryClient<X>> {
+    type Client = BigQueryClient<X>;
     type Error = Unrunnable;
 
-    fn client(&self) -> &BigQueryClient {
+    fn client(&self) -> &BigQueryClient<X> {
         self.client
     }
 
@@ -133,7 +135,9 @@ impl Planner for Planning<'_, BigQueryClient> {
     }
 }
 
-impl<R: Runner, A: Artifact> DuckDbChangeLogsFn for Plan<'_, DuckDbClient, R, A> {
+impl<X: DuckDbExecution, R: Runner, A: Artifact> DuckDbChangeLogsFn
+    for Plan<'_, DuckDbClient<X>, R, A>
+{
     type Output = Result<R::Output, Unrunnable>;
 
     fn call_duckdb<C>(self, logs: C) -> Self::Output
@@ -152,7 +156,9 @@ impl<R: Runner, A: Artifact> DuckDbChangeLogsFn for Plan<'_, DuckDbClient, R, A>
     }
 }
 
-impl<R: Runner, A: Artifact> BigQueryChangeLogsFn for Plan<'_, BigQueryClient, R, A> {
+impl<X: BigQueryExecution, R: Runner, A: Artifact> BigQueryChangeLogsFn
+    for Plan<'_, BigQueryClient<X>, R, A>
+{
     type Output = Result<R::Output, Unrunnable>;
 
     fn call_bigquery<C>(self, logs: C) -> Self::Output
@@ -173,8 +179,6 @@ impl<R: Runner, A: Artifact> BigQueryChangeLogsFn for Plan<'_, BigQueryClient, R
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::path::Path;
-
     use duckdb::Connection;
 
     use lithify_config::Pipeline;
@@ -191,12 +195,13 @@ pub(crate) mod tests {
     use super::*;
     use crate::artifacts::{ArtifactConfig, DeclaredSnapshot};
     use crate::pipeline::{CaptureConfig, WarehouseConfig};
-    use crate::report::DryRun;
     use lithify_artifact::snapshot::Snapshot;
     use lithify_config::infra::Sink;
+    use lithify_core::artifact::UnbuildableArtifact;
     use lithify_core::build_log::{BuildLog, Latest, Outcome, Run, Status};
     use lithify_core::model::TableId;
-    use lithify_core::runner::{Tables, Unsteppable};
+    use lithify_core::runner::{Build, Tables};
+    use lithify_protocol::sink::execution::DryRun;
 
     const CHANGE_LOGS: &str = "CREATE SCHEMA mysql_shop_cdc;
         CREATE TABLE mysql_shop_cdc.mysql AS SELECT * FROM (VALUES
@@ -261,25 +266,57 @@ place.snapshot = [{ prefix = "mysql_shop" }]
         opened("pipeline", INFRA, "")
     }
 
+    fn dry_run(sink: &Sink<WarehouseConfig, ArtifactConfig>) -> DuckDbClient<DryRun> {
+        let client = DuckDbClient::new(
+            Connection::open_in_memory().unwrap(),
+            DuckDbWarehouse::new(sink.change_log().clone()),
+        );
+        client.execute(&SqlString::from(CHANGE_LOGS)).unwrap();
+
+        client.executing(DryRun::default())
+    }
+
+    fn snapshot_build() -> Build {
+        Build::new(
+            Namespace::from("mysql_shop"),
+            Run::new(
+                Ulid::nil(),
+                DateTime::UNIX_EPOCH,
+                "snapshot",
+                "daily",
+                "primary",
+                CAPTURE,
+                "0.1.0",
+            ),
+            || DateTime::UNIX_EPOCH,
+        )
+    }
+
+    fn statements(client: &DuckDbClient<DryRun>, starting: &str) -> Vec<String> {
+        client
+            .execution()
+            .take()
+            .iter()
+            .map(SqlString::to_string)
+            .filter(|statement| statement.starts_with(starting))
+            .collect()
+    }
+
     #[test]
-    fn a_plan_holds_the_snapshot_of_every_table_the_schema_changes_left_standing() {
+    fn a_dry_run_records_the_snapshot_of_every_table_the_schema_changes_left_standing() {
         let pipeline = pipeline();
         let source = pipeline.sources().next().unwrap();
         let sink = pipeline
             .sinks()
             .find(|sink| sink.name() == "duckdb_s3")
             .unwrap();
-        let client = DuckDbClient::new(
-            Connection::open_in_memory().unwrap(),
-            DuckDbWarehouse::new(sink.change_log().clone()),
-        );
-        client.execute(&SqlString::from(CHANGE_LOGS)).unwrap();
+        let client = dry_run(sink);
         let window = Window::new(
             Ts::try_from(0).unwrap(),
             Ts::try_from(1789948800000).unwrap(),
         );
 
-        let statements = source
+        source
             .capture()
             .with_duckdb_change_logs(
                 source.topic_prefix().unwrap(),
@@ -290,82 +327,119 @@ place.snapshot = [{ prefix = "mysql_shop" }]
                     &[],
                     &Tables::Every,
                     pipeline.tables(),
-                    &DryRun::new(Path::new("plans"), "rustfs"),
+                    &snapshot_build(),
                 ),
             )
             .unwrap();
+        let created = statements(&client, "CREATE OR REPLACE TABLE \"mysql_shop\".\"people_");
 
-        assert_eq!(statements[0], "CREATE SCHEMA IF NOT EXISTS \"mysql_shop\"");
+        assert_eq!(created.len(), 1);
         assert!(
-            statements[1]
-                .as_str()
-                .starts_with("CREATE OR REPLACE TABLE \"mysql_shop\".\"people_20260920\" AS")
+            created[0].starts_with("CREATE OR REPLACE TABLE \"mysql_shop\".\"people_20260920\" AS")
         );
+        assert!(created[0].contains("FROM \"mysql_shop_cdc\".\"mysql.shop.people\""));
         assert!(
-            statements[1]
-                .as_str()
-                .contains("FROM \"mysql_shop_cdc\".\"mysql.shop.people\"")
+            !client
+                .exists(&TablePath::new("mysql_shop", "people_20260920"))
+                .unwrap()
         );
-        assert_eq!(statements.len(), 2);
     }
 
     #[test]
-    fn a_plan_nothing_was_built_before_finds_the_tables_standing_when_it_opens_baseless() {
+    fn a_dry_run_records_the_build_log_it_would_write_without_writing_it() {
         let pipeline = pipeline();
         let source = pipeline.sources().next().unwrap();
         let sink = pipeline
             .sinks()
             .find(|sink| sink.name() == "duckdb_s3")
             .unwrap();
-        let client = DuckDbClient::new(
-            Connection::open_in_memory().unwrap(),
-            DuckDbWarehouse::new(sink.change_log().clone()),
+        let client = dry_run(sink);
+        let window = Window::new(
+            Ts::try_from(0).unwrap(),
+            Ts::try_from(1789948800000).unwrap(),
         );
-        client.execute(&SqlString::from(CHANGE_LOGS)).unwrap();
+
+        source
+            .capture()
+            .with_duckdb_change_logs(
+                source.topic_prefix().unwrap(),
+                Plan::new(
+                    &client,
+                    &snapshot(sink),
+                    &window,
+                    &[],
+                    &Tables::Every,
+                    pipeline.tables(),
+                    &snapshot_build(),
+                ),
+            )
+            .unwrap();
+
+        assert_eq!(
+            statements(&client, "INSERT INTO \"mysql_shop\".\"_lithify_log\"").len(),
+            1
+        );
+        assert!(
+            !client
+                .exists(&BuildLog::path(&Namespace::from("mysql_shop")))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_dry_run_logs_a_table_with_nothing_to_fold_onto_as_failed_as_a_build_does() {
+        let pipeline = pipeline();
+        let source = pipeline.sources().next().unwrap();
+        let sink = pipeline
+            .sinks()
+            .find(|sink| sink.name() == "duckdb_s3")
+            .unwrap();
+        let client = dry_run(sink);
         let window = Window::new(
             Ts::try_from(1789862400000).unwrap(),
             Ts::try_from(1789948800000).unwrap(),
         );
 
-        let baseless = source.capture().with_duckdb_change_logs(
-            source.topic_prefix().unwrap(),
-            Plan::new(
-                &client,
-                &snapshot(sink),
-                &window,
-                &[],
-                &Tables::Every,
-                pipeline.tables(),
-                &DryRun::new(Path::new("plans"), "rustfs"),
-            ),
-        );
+        let logs = source
+            .capture()
+            .with_duckdb_change_logs(
+                source.topic_prefix().unwrap(),
+                Plan::new(
+                    &client,
+                    &snapshot(sink),
+                    &window,
+                    &[],
+                    &Tables::Every,
+                    pipeline.tables(),
+                    &snapshot_build(),
+                ),
+            )
+            .unwrap();
 
-        assert!(matches!(
-            baseless,
-            Err(Unrunnable::Unsteppable(Unsteppable::Baseless { tables, .. })) if tables == [TableId::new("shop", "people")]
-        ));
+        assert_eq!(
+            logs.iter().map(BuildLog::status).collect::<Vec<_>>(),
+            [&Status::Failed(
+                UnbuildableArtifact::WithoutBase(TableId::new("shop", "people")).to_string()
+            )]
+        );
     }
 
     #[test]
-    fn a_plan_folds_each_table_onto_the_shard_its_last_build_log_targeted() {
+    fn a_dry_run_folds_each_table_onto_the_shard_its_last_build_log_targeted() {
         let pipeline = pipeline();
         let source = pipeline.sources().next().unwrap();
         let sink = pipeline
             .sinks()
             .find(|sink| sink.name() == "duckdb_s3")
             .unwrap();
-        let client = DuckDbClient::new(
-            Connection::open_in_memory().unwrap(),
-            DuckDbWarehouse::new(sink.change_log().clone()),
-        );
-        client.execute(&SqlString::from(CHANGE_LOGS)).unwrap();
+        let client = dry_run(sink);
         let window = Window::new(
             Ts::try_from(1789862400000).unwrap(),
             Ts::try_from(1789948800000).unwrap(),
         );
         let previous = [built_before("people", CAPTURE)];
 
-        let statements = source
+        source
             .capture()
             .with_duckdb_change_logs(
                 source.topic_prefix().unwrap(),
@@ -376,14 +450,13 @@ place.snapshot = [{ prefix = "mysql_shop" }]
                     &previous,
                     &Tables::Every,
                     pipeline.tables(),
-                    &DryRun::new(Path::new("plans"), "rustfs"),
+                    &snapshot_build(),
                 ),
             )
             .unwrap();
 
         assert!(
-            statements[1]
-                .as_str()
+            statements(&client, "CREATE OR REPLACE TABLE \"mysql_shop\".\"people_")[0]
                 .contains("  FROM \"mysql_shop\".\"people_20260919\"\n")
         );
     }

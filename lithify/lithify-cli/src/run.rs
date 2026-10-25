@@ -19,7 +19,7 @@ use crate::credential::Credentials;
 use crate::journal::Journal;
 use crate::pipeline::{CaptureConfig, Reached, WarehouseConfig};
 use crate::plan::Planning;
-use crate::report::{DryRun, Report};
+use crate::report::{DryRunBuild, Report};
 use crate::unrunnable::Unrunnable;
 use lithify_core::check::{Expectation, Inspection};
 
@@ -45,14 +45,16 @@ impl Run {
         }
     }
 
-    pub fn plan(&self, command: &RunCommand, into: &Path) -> Result<Journal, Unrunnable> {
+    pub fn dry_run(&self, command: &RunCommand, into: &Path) -> Result<Journal, Unrunnable> {
         self.each_sink(|sink, source, listing, journal| {
+            let build = DeclaredSnapshot::of(sink)?.build(source, self.now)?;
+
             self.settle(
                 command,
                 sink,
                 source,
                 listing,
-                &DryRun::new(into, sink.name()),
+                &DryRunBuild::new(build, into, sink.name()),
                 journal,
             )
         })
@@ -167,7 +169,9 @@ impl Run {
 
         match Self::reach(sink)? {
             Reached::DuckDb(config, change_log) => {
-                let client = self.duckdb(config, change_log)?;
+                let client = self
+                    .duckdb(config, change_log)?
+                    .executing(runner.execution());
 
                 command.settle(
                     sink,
@@ -179,7 +183,9 @@ impl Run {
                 )
             }
             Reached::BigQuery(config, change_log) => {
-                let client = self.bigquery(config, change_log)?;
+                let client = self
+                    .bigquery(config, change_log)?
+                    .executing(runner.execution());
 
                 command.settle(
                     sink,

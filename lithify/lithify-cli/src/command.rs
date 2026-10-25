@@ -1520,12 +1520,14 @@ mod derived {
         )
         .unwrap();
 
-        assert_eq!(
-            rows(
+        assert!(
+            !lithify_core::sink::WarehouseClient::exists(
                 &client,
-                "SELECT target, '' FROM mysql_shop_instant._lithify_log WHERE target LIKE '%20260922%'"
-            ),
-            []
+                &lithify_core::build_log::BuildLog::path(&lithify_core::sink::Namespace::from(
+                    "mysql_shop_instant"
+                )),
+            )
+            .unwrap()
         );
     }
 }

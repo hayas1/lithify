@@ -121,10 +121,7 @@ impl<'a, P: Planner> Stepping<'a, P> {
     }
 
     fn built(&self, log: &SeriesLog, closing: Ts<Event>) -> Result<Vec<BuildLog>, P::Error> {
-        let client = self.planner.client();
-        client.create_build_log::<P::Error>(log.namespace())?;
-
-        client.build_logs::<P::Error>(
+        self.planner.client().build_logs::<P::Error>(
             log.namespace(),
             log.series(),
             &Latest::SucceededUntil(closing).into(),
@@ -133,7 +130,6 @@ impl<'a, P: Planner> Stepping<'a, P> {
 
     fn progress(&self, log: &SeriesLog) -> Result<Progress, P::Error> {
         let client = self.planner.client();
-        client.create_build_log::<P::Error>(log.namespace())?;
         let read = |latest: Latest| {
             client.build_logs::<P::Error>(log.namespace(), log.series(), &latest.into())
         };

@@ -128,7 +128,7 @@ The build log records each series by the kind of its artifact and by what makes 
 
 `lithify build` takes one step: it builds one window of one series for the tables that window is next for, onto what the build log records them built from, and logs each table.
 Named nothing, it takes the step the build log says is next; `--artifact` and `--at` name the series.
-`--dry-run` writes the statements of the step rather than running them, and logs nothing.
+`--dry-run` takes the step as a build does, but on a client that records the statements it would run, the build log it would write among them, rather than running them, and writes them into one file for the step; a table that fails fails the dry run as it would the build, while the statements of the other tables are still written.
 
 `lithify catch-up` repeats `lithify build`, reading the build log afresh before each step, until no step is left.
 Named an artifact with `--artifact` and `--at`, it advances that series alone, so each artifact may be run by a process of its own at the times that suit it, such as an `instant` after the instant it is cut at.

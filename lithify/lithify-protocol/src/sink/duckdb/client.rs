@@ -10,6 +10,7 @@ use lithify_core::sql::SqlString;
 use lithify_core::window::Window;
 
 use crate::sink::duckdb::DuckDbWarehouse;
+use crate::sink::execution::{Apply, DryRun};
 
 pub trait DuckDbChangeLogsFn {
     type Output;
@@ -25,9 +26,28 @@ pub trait DuckDbCapture {
     -> F::Output;
 }
 
-pub struct DuckDbClient {
+pub trait DuckDbExecution {
+    fn execute(&self, connection: &Connection, statement: &SqlString) -> Result<(), Error>;
+}
+
+impl DuckDbExecution for Apply {
+    fn execute(&self, connection: &Connection, statement: &SqlString) -> Result<(), Error> {
+        connection.execute_batch(statement.as_str())
+    }
+}
+
+impl DuckDbExecution for DryRun {
+    fn execute(&self, _: &Connection, statement: &SqlString) -> Result<(), Error> {
+        self.record(statement);
+
+        Ok(())
+    }
+}
+
+pub struct DuckDbClient<R = Apply> {
     connection: Connection,
     warehouse: DuckDbWarehouse,
+    execution: R,
 }
 
 impl DuckDbClient {
@@ -35,15 +55,30 @@ impl DuckDbClient {
         Self {
             connection,
             warehouse,
+            execution: Apply,
         }
-    }
-
-    pub fn connection(&self) -> &Connection {
-        &self.connection
     }
 }
 
-impl WarehouseClient for DuckDbClient {
+impl<R> DuckDbClient<R> {
+    pub fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
+    pub fn execution(&self) -> &R {
+        &self.execution
+    }
+
+    pub fn executing<S>(self, execution: S) -> DuckDbClient<S> {
+        DuckDbClient {
+            connection: self.connection,
+            warehouse: self.warehouse,
+            execution,
+        }
+    }
+}
+
+impl<R: DuckDbExecution> WarehouseClient for DuckDbClient<R> {
     type Warehouse = DuckDbWarehouse;
     type Error = Error;
 
@@ -52,7 +87,7 @@ impl WarehouseClient for DuckDbClient {
     }
 
     fn execute(&self, statement: &SqlString) -> Result<(), Self::Error> {
-        self.connection.execute_batch(statement.as_str())
+        self.execution.execute(&self.connection, statement)
     }
 
     fn exists(&self, table: &TablePath) -> Result<bool, Self::Error> {
@@ -125,7 +160,7 @@ where
     }
 }
 
-impl<L> SchemaChangeStream<L> for DuckDbClient
+impl<L, R> SchemaChangeStream<L> for DuckDbClient<R>
 where
     L: SchemaChangeLog,
     L::Record: FromSql,
@@ -134,7 +169,8 @@ where
     type Changes<'a>
         = DuckDbSchemaChanges<'a, L>
     where
-        L: 'a;
+        L: 'a,
+        R: 'a;
 
     fn schema_changes<'a>(
         &'a self,

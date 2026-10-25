@@ -211,7 +211,7 @@ impl BuildArguments {
         let run = self.pipeline.run();
 
         match self.dry_run {
-            Some(into) => run.plan(&command, &into),
+            Some(into) => run.dry_run(&command, &into),
             None => run.build(&command),
         }
     }
@@ -324,7 +324,7 @@ mod tests {
         assert_eq!(past.to, Some("2026-09-20".parse::<NaiveDate>().unwrap()));
         assert!(parsed("catch-up", &["--from", "2026-09-20T00:00:00Z"]).is_err());
         assert!(parsed("catch-up", &["--onto", "2026-09-19T00:00:00Z"]).is_err());
-        assert!(parsed("catch-up", &["--dry-run", "plans"]).is_err());
+        assert!(parsed("catch-up", &["--dry-run", "dry-run"]).is_err());
         let Ok(Command::CatchUp(cut)) =
             parsed("catch-up", &["--artifact", "instant", "--at", "06:00"])
         else {
@@ -356,10 +356,10 @@ mod tests {
     }
 
     #[test]
-    fn a_dry_run_names_the_directory_the_plans_are_written_into() {
-        let planned = build_arguments(&["--dry-run", "plans"]);
+    fn a_dry_run_names_the_directory_the_statements_are_written_into() {
+        let dry_run = build_arguments(&["--dry-run", "dry-run"]);
 
-        assert_eq!(planned.dry_run, Some(PathBuf::from("plans")));
+        assert_eq!(dry_run.dry_run, Some(PathBuf::from("dry-run")));
     }
 
     #[test]
