@@ -5,7 +5,7 @@ use google_cloud_bigquery::query::Row;
 use lithify_config::table;
 use lithify_core::artifact::Artifact;
 use lithify_core::build_log::BuildLog;
-use lithify_core::runner::{Planner, Replay, Runner, Tables};
+use lithify_core::runner::{BuildLogWriter, Replayer, StepTaker, Tables};
 use lithify_core::source::{ChangeLogs, SchemaChangeLog};
 use lithify_core::window::Window;
 use lithify_protocol::sink::bigquery::client::{
@@ -18,17 +18,17 @@ use lithify_protocol::sink::duckdb::client::{
 use crate::pipeline::CaptureConfig;
 use crate::unrunnable::Unrunnable;
 
-pub struct Plan<'a, K, R, A> {
+pub struct Replaying<'a, K, B, A> {
     client: &'a K,
     artifact: &'a A,
     window: &'a Window,
     previous: &'a [BuildLog],
     tables: &'a Tables,
     listing: &'a table::Tables,
-    runner: &'a R,
+    writer: &'a B,
 }
 
-impl<'a, K, R: Runner, A: Artifact> Plan<'a, K, R, A> {
+impl<'a, K, B: BuildLogWriter, A: Artifact> Replaying<'a, K, B, A> {
     pub fn new(
         client: &'a K,
         artifact: &'a A,
@@ -36,7 +36,7 @@ impl<'a, K, R: Runner, A: Artifact> Plan<'a, K, R, A> {
         previous: &'a [BuildLog],
         tables: &'a Tables,
         listing: &'a table::Tables,
-        runner: &'a R,
+        writer: &'a B,
     ) -> Self {
         Self {
             client,
@@ -45,19 +45,19 @@ impl<'a, K, R: Runner, A: Artifact> Plan<'a, K, R, A> {
             previous,
             tables,
             listing,
-            runner,
+            writer,
         }
     }
 }
 
-pub struct Planning<'a, K> {
+pub struct Taking<'a, K> {
     client: &'a K,
     capture: &'a CaptureConfig,
     topic_prefix: &'a str,
     listing: &'a table::Tables,
 }
 
-impl<'a, K> Planning<'a, K> {
+impl<'a, K> Taking<'a, K> {
     pub fn new(
         client: &'a K,
         capture: &'a CaptureConfig,
@@ -73,7 +73,7 @@ impl<'a, K> Planning<'a, K> {
     }
 }
 
-impl<X: DuckDbExecution> Planner for Planning<'_, DuckDbClient<X>> {
+impl<X: DuckDbExecution> StepTaker for Taking<'_, DuckDbClient<X>> {
     type Client = DuckDbClient<X>;
     type Error = Unrunnable;
 
@@ -81,30 +81,30 @@ impl<X: DuckDbExecution> Planner for Planning<'_, DuckDbClient<X>> {
         self.client
     }
 
-    fn plan<A: Artifact, R: Runner>(
+    fn take<A: Artifact, B: BuildLogWriter>(
         &self,
         artifact: &A,
         window: &Window,
         previous: &[BuildLog],
         tables: &Tables,
-        runner: &R,
-    ) -> Result<R::Output, Unrunnable> {
+        writer: &B,
+    ) -> Result<B::Output, Unrunnable> {
         self.capture.with_duckdb_change_logs(
             self.topic_prefix,
-            Plan::new(
+            Replaying::new(
                 self.client,
                 artifact,
                 window,
                 previous,
                 tables,
                 self.listing,
-                runner,
+                writer,
             ),
         )
     }
 }
 
-impl<X: BigQueryExecution> Planner for Planning<'_, BigQueryClient<X>> {
+impl<X: BigQueryExecution> StepTaker for Taking<'_, BigQueryClient<X>> {
     type Client = BigQueryClient<X>;
     type Error = Unrunnable;
 
@@ -112,67 +112,67 @@ impl<X: BigQueryExecution> Planner for Planning<'_, BigQueryClient<X>> {
         self.client
     }
 
-    fn plan<A: Artifact, R: Runner>(
+    fn take<A: Artifact, B: BuildLogWriter>(
         &self,
         artifact: &A,
         window: &Window,
         previous: &[BuildLog],
         tables: &Tables,
-        runner: &R,
-    ) -> Result<R::Output, Unrunnable> {
+        writer: &B,
+    ) -> Result<B::Output, Unrunnable> {
         self.capture.with_bigquery_change_logs(
             self.topic_prefix,
-            Plan::new(
+            Replaying::new(
                 self.client,
                 artifact,
                 window,
                 previous,
                 tables,
                 self.listing,
-                runner,
+                writer,
             ),
         )
     }
 }
 
-impl<X: DuckDbExecution, R: Runner, A: Artifact> DuckDbChangeLogsFn
-    for Plan<'_, DuckDbClient<X>, R, A>
+impl<X: DuckDbExecution, B: BuildLogWriter, A: Artifact> DuckDbChangeLogsFn
+    for Replaying<'_, DuckDbClient<X>, B, A>
 {
-    type Output = Result<R::Output, Unrunnable>;
+    type Output = Result<B::Output, Unrunnable>;
 
     fn call_duckdb<C>(self, logs: C) -> Self::Output
     where
         C: ChangeLogs,
         <C::Schema as SchemaChangeLog>::Record: FromSql,
     {
-        Replay::new(self.client, &logs).run(
+        Replayer::new(self.client, &logs).run(
             self.artifact,
             self.window,
             self.previous,
             self.tables,
             |table| self.listing.table(table).builds(A::KIND),
-            self.runner,
+            self.writer,
         )
     }
 }
 
-impl<X: BigQueryExecution, R: Runner, A: Artifact> BigQueryChangeLogsFn
-    for Plan<'_, BigQueryClient<X>, R, A>
+impl<X: BigQueryExecution, B: BuildLogWriter, A: Artifact> BigQueryChangeLogsFn
+    for Replaying<'_, BigQueryClient<X>, B, A>
 {
-    type Output = Result<R::Output, Unrunnable>;
+    type Output = Result<B::Output, Unrunnable>;
 
     fn call_bigquery<C>(self, logs: C) -> Self::Output
     where
         C: ChangeLogs,
         <C::Schema as SchemaChangeLog>::Record: TryFrom<Row, Error = RowError>,
     {
-        Replay::new(self.client, &logs).run(
+        Replayer::new(self.client, &logs).run(
             self.artifact,
             self.window,
             self.previous,
             self.tables,
             |table| self.listing.table(table).builds(A::KIND),
-            self.runner,
+            self.writer,
         )
     }
 }
@@ -200,7 +200,7 @@ pub(crate) mod tests {
     use lithify_core::artifact::UnbuildableArtifact;
     use lithify_core::build_log::{BuildLog, Latest, Outcome, Run, Status};
     use lithify_core::model::TableId;
-    use lithify_core::runner::{Build, Tables};
+    use lithify_core::runner::{BuildLogWrite, Tables};
     use lithify_protocol::sink::execution::DryRun;
 
     const CHANGE_LOGS: &str = "CREATE SCHEMA mysql_shop_cdc;
@@ -276,8 +276,8 @@ place.snapshot = [{ prefix = "mysql_shop" }]
         client.executing(DryRun::default())
     }
 
-    fn snapshot_build() -> Build {
-        Build::new(
+    fn snapshot_build() -> BuildLogWrite {
+        BuildLogWrite::new(
             Namespace::from("mysql_shop"),
             Run::new(
                 Ulid::nil(),
@@ -320,7 +320,7 @@ place.snapshot = [{ prefix = "mysql_shop" }]
             .capture()
             .with_duckdb_change_logs(
                 source.topic_prefix().unwrap(),
-                Plan::new(
+                Replaying::new(
                     &client,
                     &snapshot(sink),
                     &window,
@@ -363,7 +363,7 @@ place.snapshot = [{ prefix = "mysql_shop" }]
             .capture()
             .with_duckdb_change_logs(
                 source.topic_prefix().unwrap(),
-                Plan::new(
+                Replaying::new(
                     &client,
                     &snapshot(sink),
                     &window,
@@ -404,7 +404,7 @@ place.snapshot = [{ prefix = "mysql_shop" }]
             .capture()
             .with_duckdb_change_logs(
                 source.topic_prefix().unwrap(),
-                Plan::new(
+                Replaying::new(
                     &client,
                     &snapshot(sink),
                     &window,
@@ -443,7 +443,7 @@ place.snapshot = [{ prefix = "mysql_shop" }]
             .capture()
             .with_duckdb_change_logs(
                 source.topic_prefix().unwrap(),
-                Plan::new(
+                Replaying::new(
                     &client,
                     &snapshot(sink),
                     &window,
@@ -599,7 +599,7 @@ place.snapshot = [{ prefix = "mysql_shop" }]
             .capture()
             .with_duckdb_change_logs(
                 source.topic_prefix().unwrap(),
-                Plan::new(
+                Replaying::new(
                     client,
                     &snapshot(sink),
                     &window,

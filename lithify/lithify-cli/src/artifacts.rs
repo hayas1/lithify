@@ -15,7 +15,7 @@ use lithify_config::{Declaration, Place};
 use lithify_core::artifact::Artifact;
 use lithify_core::build_log::{Run, Series};
 use lithify_core::progress::Step;
-use lithify_core::runner::{Build, Planner, Tables};
+use lithify_core::runner::{BuildLogWrite, StepTaker, Tables};
 use lithify_core::schedule::Schedule;
 use lithify_core::sink::Namespace;
 use lithify_core::stepping::{SeriesLog, Stepping};
@@ -190,10 +190,10 @@ impl<'a> DeclaredSnapshot<'a> {
         &self,
         source: &Source<CaptureConfig>,
         now: DateTime<Utc>,
-    ) -> Result<Build, Unrunnable> {
+    ) -> Result<BuildLogWrite, Unrunnable> {
         let series = self.series();
 
-        Ok(Build::new(
+        Ok(BuildLogWrite::new(
             self.namespace().clone(),
             Run::new(
                 Ulid::from_datetime(now.into()),
@@ -380,7 +380,7 @@ impl<'a> Declared<'a> {
         }
     }
 
-    fn next<P: Planner<Error = Unrunnable>>(
+    fn next<P: StepTaker<Error = Unrunnable>>(
         &self,
         stepping: &Stepping<P>,
         snapshot: &SeriesLog,
@@ -396,33 +396,33 @@ impl<'a> Declared<'a> {
         }
     }
 
-    fn take<P: Planner<Error = Unrunnable>, R: Report>(
+    fn take<P: StepTaker<Error = Unrunnable>, B: Report>(
         &self,
         stepping: &Stepping<P>,
         snapshot: &SeriesLog,
         window: &Window,
         tables: &Tables,
-        runner: &R,
+        writer: &B,
         journal: &mut Journal,
     ) -> Result<(), Unrunnable> {
         let (log, base) = (self.log(), self.base(snapshot));
         journal.window(window);
         let output = match self {
             Self::Snapshot(declared) => {
-                stepping.take(&declared.artifact(), &log, base, window, tables, runner)
+                stepping.take(&declared.artifact(), &log, base, window, tables, writer)
             }
             Self::Instant(declared) => {
-                stepping.take(&declared.artifact(), &log, base, window, tables, runner)
+                stepping.take(&declared.artifact(), &log, base, window, tables, writer)
             }
             Self::Scd2(declared) => {
-                stepping.take(&declared.artifact(), &log, base, window, tables, runner)
+                stepping.take(&declared.artifact(), &log, base, window, tables, writer)
             }
             Self::Scd1(declared) => {
-                stepping.take(&declared.artifact(), &log, base, window, tables, runner)
+                stepping.take(&declared.artifact(), &log, base, window, tables, writer)
             }
         }?;
 
-        runner.report(log.series(), window, output, journal)
+        writer.report(log.series(), window, output, journal)
     }
 }
 
@@ -453,28 +453,28 @@ impl<'a> Lineup<'a> {
         &self.snapshot
     }
 
-    pub fn catch_up<P: Planner<Error = Unrunnable>, R: Report>(
+    pub fn catch_up<P: StepTaker<Error = Unrunnable>, B: Report>(
         &self,
         stepping: &Stepping<P>,
         named: impl Fn(&Declared) -> bool,
-        runner: &R,
+        writer: &B,
         journal: &mut Journal,
     ) -> Result<(), Unrunnable> {
         let mut taken: BTreeMap<Series, Vec<Window>> = BTreeMap::new();
 
-        while let Some((series, window)) = self.step(stepping, &named, &taken, runner, journal)? {
+        while let Some((series, window)) = self.step(stepping, &named, &taken, writer, journal)? {
             taken.entry(series).or_default().push(window);
         }
 
         Ok(())
     }
 
-    pub fn step<P: Planner<Error = Unrunnable>, R: Report>(
+    pub fn step<P: StepTaker<Error = Unrunnable>, B: Report>(
         &self,
         stepping: &Stepping<P>,
         named: impl Fn(&Declared) -> bool,
         taken: &BTreeMap<Series, Vec<Window>>,
-        runner: &R,
+        writer: &B,
         journal: &mut Journal,
     ) -> Result<Option<(Series, Window)>, Unrunnable> {
         for declared in self.declared.iter().filter(|declared| named(declared)) {
@@ -488,7 +488,7 @@ impl<'a> Lineup<'a> {
                     &self.snapshot,
                     step.window(),
                     &tables,
-                    runner,
+                    writer,
                     journal,
                 )?;
 
@@ -513,7 +513,7 @@ mod tests {
 
     use super::*;
     use crate::pipeline::CaptureConfig;
-    use crate::plan::tests::{INFRA, opened};
+    use crate::step::tests::{INFRA, opened};
 
     #[test]
     fn a_sink_builds_its_snapshots_in_the_namespace_and_shards_the_pipeline_names() {

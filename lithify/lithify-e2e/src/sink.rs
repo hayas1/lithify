@@ -10,7 +10,7 @@ use lithify_core::artifact::UnbuildableArtifact;
 use lithify_core::build_log::Status;
 use lithify_core::listener::OutOfOrder;
 use lithify_core::model::{TableId, TableModel};
-use lithify_core::runner::Replay;
+use lithify_core::runner::Replayer;
 use lithify_core::sink::{ChangeLogSql, TablePath, WarehouseClient, WarehouseSql};
 use lithify_core::source::{
     ChangeLog, ChangeLogs, ColumnPath, RowChangeLog, SchemaChangeLog, SchemaChangeStream,
@@ -289,7 +289,7 @@ impl DuckDbChangeLogsFn for SnapshotBuild<'_> {
         C: ChangeLogs,
         <C::Schema as SchemaChangeLog>::Record: FromSql,
     {
-        let built = Replay::new(self.client, &logs)
+        let built = Replayer::new(self.client, &logs)
             .built::<_, Unbuildable>(self.artifact, self.window, &[], |table| table == self.table)?
             .into_iter()
             .find(|built| built.table() == Some(self.table))

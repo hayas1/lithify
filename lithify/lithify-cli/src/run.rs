@@ -18,8 +18,8 @@ use crate::command::RunCommand;
 use crate::credential::Credentials;
 use crate::journal::Journal;
 use crate::pipeline::{CaptureConfig, Reached, WarehouseConfig};
-use crate::plan::Planning;
-use crate::report::{DryRunBuild, Report};
+use crate::report::{DryRunBuildLogWrite, Report};
+use crate::step::Taking;
 use crate::unrunnable::Unrunnable;
 use lithify_core::check::{Expectation, Inspection};
 
@@ -54,7 +54,7 @@ impl Run {
                 sink,
                 source,
                 listing,
-                &DryRunBuild::new(build, into, sink.name()),
+                &DryRunBuildLogWrite::new(build, into, sink.name()),
                 journal,
             )
         })
@@ -149,13 +149,13 @@ impl Run {
         Ok(journal)
     }
 
-    fn settle<R: Report>(
+    fn settle<B: Report>(
         &self,
         command: &RunCommand,
         sink: &Sink<WarehouseConfig, ArtifactConfig>,
         source: &Source<CaptureConfig>,
         listing: &table::Tables,
-        runner: &R,
+        writer: &B,
         journal: &mut Journal,
     ) -> Result<(), Unrunnable> {
         let Some(topic_prefix) = source.topic_prefix() else {
@@ -171,28 +171,28 @@ impl Run {
             Reached::DuckDb(config, change_log) => {
                 let client = self
                     .duckdb(config, change_log)?
-                    .executing(runner.execution());
+                    .executing(writer.execution());
 
                 command.settle(
                     sink,
                     source,
                     self.now,
-                    &Planning::new(&client, source.capture(), topic_prefix, listing),
-                    runner,
+                    &Taking::new(&client, source.capture(), topic_prefix, listing),
+                    writer,
                     journal,
                 )
             }
             Reached::BigQuery(config, change_log) => {
                 let client = self
                     .bigquery(config, change_log)?
-                    .executing(runner.execution());
+                    .executing(writer.execution());
 
                 command.settle(
                     sink,
                     source,
                     self.now,
-                    &Planning::new(&client, source.capture(), topic_prefix, listing),
-                    runner,
+                    &Taking::new(&client, source.capture(), topic_prefix, listing),
+                    writer,
                     journal,
                 )
             }

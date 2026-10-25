@@ -3,7 +3,7 @@ pub mod command;
 pub mod credential;
 pub mod journal;
 pub mod pipeline;
-pub mod plan;
 pub mod report;
 pub mod run;
+pub mod step;
 pub mod unrunnable;

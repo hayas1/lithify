@@ -3,7 +3,7 @@ use chrono::NaiveDate;
 use crate::artifact::Artifact;
 use crate::build_log::{BuildLog, Latest, Series};
 use crate::progress::{Progress, Step};
-use crate::runner::{Planner, Runner, Tables, Unsteppable};
+use crate::runner::{BuildLogWriter, StepTaker, Tables, Unsteppable};
 use crate::schedule::Timeline;
 use crate::sink::{Namespace, WarehouseClient};
 use crate::ts::{Event, Ts};
@@ -30,15 +30,15 @@ impl SeriesLog {
 }
 
 pub struct Stepping<'a, P> {
-    planner: &'a P,
+    taker: &'a P,
     timeline: Timeline,
     capture: String,
 }
 
-impl<'a, P: Planner> Stepping<'a, P> {
-    pub fn new(planner: &'a P, timeline: Timeline, capture: String) -> Self {
+impl<'a, P: StepTaker> Stepping<'a, P> {
+    pub fn new(taker: &'a P, timeline: Timeline, capture: String) -> Self {
         Self {
-            planner,
+            taker,
             timeline,
             capture,
         }
@@ -100,28 +100,28 @@ impl<'a, P: Planner> Stepping<'a, P> {
         self.timeline.reached(&window).then_some(window)
     }
 
-    pub fn take<A: Artifact, R: Runner>(
+    pub fn take<A: Artifact, B: BuildLogWriter>(
         &self,
         artifact: &A,
         log: &SeriesLog,
         base: Option<&SeriesLog>,
         window: &Window,
         tables: &Tables,
-        runner: &R,
-    ) -> Result<R::Output, P::Error> {
+        writer: &B,
+    ) -> Result<B::Output, P::Error> {
         let previous = self.built(base.unwrap_or(log), *window.from())?;
 
-        self.planner.plan(
+        self.taker.take(
             artifact,
             window,
             &previous,
             tables,
-            &runner.advancing(log.namespace(), log.series()),
+            &writer.advancing(log.namespace(), log.series()),
         )
     }
 
     fn built(&self, log: &SeriesLog, closing: Ts<Event>) -> Result<Vec<BuildLog>, P::Error> {
-        self.planner.client().build_logs::<P::Error>(
+        self.taker.client().build_logs::<P::Error>(
             log.namespace(),
             log.series(),
             &Latest::SucceededUntil(closing).into(),
@@ -129,7 +129,7 @@ impl<'a, P: Planner> Stepping<'a, P> {
     }
 
     fn progress(&self, log: &SeriesLog) -> Result<Progress, P::Error> {
-        let client = self.planner.client();
+        let client = self.taker.client();
         let read = |latest: Latest| {
             client.build_logs::<P::Error>(log.namespace(), log.series(), &latest.into())
         };

@@ -67,24 +67,24 @@ impl Tables {
     }
 }
 
-pub trait Runner {
+pub trait BuildLogWriter {
     type Output;
 
     fn advancing(&self, namespace: &Namespace, series: &Series) -> Self;
 
-    fn run<K, E>(&self, client: &K, built: Vec<TableBuilt>) -> Result<Self::Output, E>
+    fn write<K, E>(&self, client: &K, built: Vec<TableBuilt>) -> Result<Self::Output, E>
     where
         K: WarehouseClient,
         E: From<K::Error> + From<UnbuildableArtifact>;
 }
 
-pub struct Build {
+pub struct BuildLogWrite {
     namespace: Namespace,
     run: Run,
     clock: fn() -> DateTime<Utc>,
 }
 
-impl Build {
+impl BuildLogWrite {
     pub fn new(namespace: Namespace, run: Run, clock: fn() -> DateTime<Utc>) -> Self {
         Self {
             namespace,
@@ -94,7 +94,7 @@ impl Build {
     }
 }
 
-impl Runner for Build {
+impl BuildLogWriter for BuildLogWrite {
     type Output = Vec<BuildLog>;
 
     fn advancing(&self, namespace: &Namespace, series: &Series) -> Self {
@@ -105,7 +105,7 @@ impl Runner for Build {
         }
     }
 
-    fn run<K, E>(&self, client: &K, built: Vec<TableBuilt>) -> Result<Self::Output, E>
+    fn write<K, E>(&self, client: &K, built: Vec<TableBuilt>) -> Result<Self::Output, E>
     where
         K: WarehouseClient,
         E: From<K::Error> + From<UnbuildableArtifact>,
@@ -122,12 +122,12 @@ impl Runner for Build {
     }
 }
 
-pub struct Replay<'a, K, C> {
+pub struct Replayer<'a, K, C> {
     client: &'a K,
     logs: &'a C,
 }
 
-impl<'a, K, C> Replay<'a, K, C>
+impl<'a, K, C> Replayer<'a, K, C>
 where
     C: ChangeLogs,
     K: SchemaChangeStream<C::Schema> + WarehouseClient,
@@ -172,15 +172,15 @@ where
             .collect())
     }
 
-    pub fn run<A: Artifact, R: Runner, E>(
+    pub fn run<A: Artifact, B: BuildLogWriter, E>(
         &self,
         artifact: &'a A,
         window: &'a Window,
         previous: &[BuildLog],
         tables: &Tables,
         builds: impl Fn(&TableId) -> bool,
-        runner: &R,
-    ) -> Result<R::Output, E>
+        writer: &B,
+    ) -> Result<B::Output, E>
     where
         E: From<OutOfOrder>
             + From<Infallible>
@@ -192,11 +192,11 @@ where
             tables.includes(table) && builds(table)
         })?;
 
-        runner.run(self.client, built)
+        writer.write(self.client, built)
     }
 }
 
-pub trait Planner {
+pub trait StepTaker {
     type Client: WarehouseClient;
     type Error: From<<Self::Client as WarehouseClient>::Error>
         + From<UnbuildableArtifact>
@@ -205,12 +205,12 @@ pub trait Planner {
 
     fn client(&self) -> &Self::Client;
 
-    fn plan<A: Artifact, R: Runner>(
+    fn take<A: Artifact, B: BuildLogWriter>(
         &self,
         artifact: &A,
         window: &Window,
         previous: &[BuildLog],
         tables: &Tables,
-        runner: &R,
-    ) -> Result<R::Output, Self::Error>;
+        writer: &B,
+    ) -> Result<B::Output, Self::Error>;
 }

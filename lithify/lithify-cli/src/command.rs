@@ -1,7 +1,7 @@
 use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 
 use lithify_config::infra::{Sink, Source};
-use lithify_core::runner::Planner;
+use lithify_core::runner::StepTaker;
 use lithify_core::schedule::Timeline;
 use lithify_core::stepping::Stepping;
 use lithify_core::ts::Ts;
@@ -21,22 +21,22 @@ pub enum RunCommand {
 }
 
 impl RunCommand {
-    pub fn settle<P, R>(
+    pub fn settle<P, B>(
         &self,
         sink: &Sink<WarehouseConfig, ArtifactConfig>,
         source: &Source<CaptureConfig>,
         now: DateTime<Utc>,
-        planner: &P,
-        runner: &R,
+        taker: &P,
+        writer: &B,
         journal: &mut Journal,
     ) -> Result<(), Unrunnable>
     where
-        P: Planner<Error = Unrunnable>,
-        R: Report,
+        P: StepTaker<Error = Unrunnable>,
+        B: Report,
     {
         let lineup = Lineup::of(sink)?;
         let stepping = Stepping::new(
-            planner,
+            taker,
             Timeline::new(
                 DeclaredSnapshot::of(sink)?.schedule(),
                 source.since()..Ts::from(now),
@@ -46,7 +46,7 @@ impl RunCommand {
 
         match self {
             Self::CatchUp { target, to: None } => {
-                lineup.catch_up(&stepping, target.named(), runner, journal)
+                lineup.catch_up(&stepping, target.named(), writer, journal)
             }
             Self::CatchUp {
                 target,
@@ -54,10 +54,10 @@ impl RunCommand {
             } => lineup.catch_up(
                 &stepping.up_to(*date, lineup.snapshot())?,
                 target.named(),
-                runner,
+                writer,
                 journal,
             ),
-            Self::Build(target) => target.build(&lineup, &stepping, runner, journal),
+            Self::Build(target) => target.build(&lineup, &stepping, writer, journal),
         }
     }
 }
@@ -80,19 +80,19 @@ impl Target {
         }
     }
 
-    fn build<P, R>(
+    fn build<P, B>(
         &self,
         lineup: &Lineup,
         stepping: &Stepping<P>,
-        runner: &R,
+        writer: &B,
         journal: &mut Journal,
     ) -> Result<(), Unrunnable>
     where
-        P: Planner<Error = Unrunnable>,
-        R: Report,
+        P: StepTaker<Error = Unrunnable>,
+        B: Report,
     {
         if lineup
-            .step(stepping, self.named(), &Default::default(), runner, journal)?
+            .step(stepping, self.named(), &Default::default(), writer, journal)?
             .is_none()
         {
             journal.note("nothing is left to build");
@@ -112,8 +112,8 @@ pub(crate) mod tests {
     use super::*;
     use lithify_core::ts::Ts;
 
-    use crate::plan::Planning;
-    use crate::plan::tests::{CAPTURE, PEOPLE, at, built_before, logged, pipeline, rows};
+    use crate::step::Taking;
+    use crate::step::tests::{CAPTURE, PEOPLE, at, built_before, logged, pipeline, rows};
     use lithify_artifact::snapshot::Snapshot;
     use lithify_core::check::Expectation;
     use lithify_core::schedule::Schedule;
@@ -327,7 +327,7 @@ pub(crate) mod tests {
             .sinks()
             .find(|sink| sink.name() == "duckdb_s3")
             .unwrap();
-        let runner = DeclaredSnapshot::of(sink)
+        let writer = DeclaredSnapshot::of(sink)
             .unwrap()
             .build(source, at(now))
             .unwrap();
@@ -337,13 +337,13 @@ pub(crate) mod tests {
             sink,
             source,
             at(now),
-            &Planning::new(
+            &Taking::new(
                 client,
                 source.capture(),
                 source.topic_prefix().unwrap(),
                 pipeline.tables(),
             ),
-            &runner,
+            &writer,
             &mut journal,
         )?;
 
@@ -530,11 +530,11 @@ pub(crate) mod tests {
     #[test]
     fn a_build_named_an_artifact_takes_the_next_step_of_that_artifact() {
         let client = logged(PEOPLE, &[built_before("people", CAPTURE)]);
-        let pipeline = crate::plan::tests::opened(
+        let pipeline = crate::step::tests::opened(
             "next-scd2",
             &format!(
                 "[artifact.scd2]\nshard = \"%Y%m%d\"\n{}place.scd2 = [{{ prefix = \"mysql_shop_scd2\" }}]\n",
-                crate::plan::tests::INFRA
+                crate::step::tests::INFRA
             ),
             "[default]\nartifacts = [\"snapshot\", \"scd2\"]\n",
         );
@@ -856,7 +856,7 @@ mod catch_up {
 
     use crate::command::tests::settle;
     use crate::command::{RunCommand, Target};
-    use crate::plan::tests::{
+    use crate::step::tests::{
         BUILT_CHANGE_LOGS, CAPTURE, PEOPLE, built_before, logged, pipeline, rows,
     };
     use crate::unrunnable::Unrunnable;
@@ -1226,7 +1226,7 @@ mod derived {
     use crate::command::tests::settle;
     use crate::command::{RunCommand, Target};
     use crate::pipeline::CaptureConfig;
-    use crate::plan::tests::{CAPTURE, INFRA, PEOPLE, built_before, logged, opened, rows};
+    use crate::step::tests::{CAPTURE, INFRA, PEOPLE, built_before, logged, opened, rows};
 
     use super::*;
 

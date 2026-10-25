@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use lithify_core::artifact::UnbuildableArtifact;
 use lithify_core::build_log::{BuildLog, Series, TableBuilt};
-use lithify_core::runner::{Build, Runner};
+use lithify_core::runner::{BuildLogWrite, BuildLogWriter};
 use lithify_core::sink::{Namespace, WarehouseClient};
 use lithify_core::window::Window;
 use lithify_protocol::sink::bigquery::client::BigQueryExecution;
@@ -12,7 +12,7 @@ use lithify_protocol::sink::execution::{Apply, DryRun};
 use crate::journal::Journal;
 use crate::unrunnable::Unrunnable;
 
-pub trait Report: Runner {
+pub trait Report: BuildLogWriter {
     type Execution: DuckDbExecution + BigQueryExecution;
 
     fn execution(&self) -> Self::Execution;
@@ -26,7 +26,7 @@ pub trait Report: Runner {
     ) -> Result<(), Unrunnable>;
 }
 
-impl Report for Build {
+impl Report for BuildLogWrite {
     type Execution = Apply;
 
     fn execution(&self) -> Apply {
@@ -48,15 +48,15 @@ impl Report for Build {
     }
 }
 
-pub struct DryRunBuild {
-    build: Build,
+pub struct DryRunBuildLogWrite {
+    build: BuildLogWrite,
     dry_run: DryRun,
     into: PathBuf,
     sink: String,
 }
 
-impl DryRunBuild {
-    pub fn new(build: Build, into: &Path, sink: &str) -> Self {
+impl DryRunBuildLogWrite {
+    pub fn new(build: BuildLogWrite, into: &Path, sink: &str) -> Self {
         Self {
             build,
             dry_run: DryRun::default(),
@@ -76,7 +76,7 @@ impl DryRunBuild {
     }
 }
 
-impl Runner for DryRunBuild {
+impl BuildLogWriter for DryRunBuildLogWrite {
     type Output = Vec<BuildLog>;
 
     fn advancing(&self, namespace: &Namespace, series: &Series) -> Self {
@@ -88,16 +88,16 @@ impl Runner for DryRunBuild {
         }
     }
 
-    fn run<K, E>(&self, client: &K, built: Vec<TableBuilt>) -> Result<Self::Output, E>
+    fn write<K, E>(&self, client: &K, built: Vec<TableBuilt>) -> Result<Self::Output, E>
     where
         K: WarehouseClient,
         E: From<K::Error> + From<UnbuildableArtifact>,
     {
-        self.build.run(client, built)
+        self.build.write(client, built)
     }
 }
 
-impl Report for DryRunBuild {
+impl Report for DryRunBuildLogWrite {
     type Execution = DryRun;
 
     fn execution(&self) -> DryRun {
@@ -180,8 +180,8 @@ mod tests {
     #[test]
     fn a_dry_run_writes_what_its_step_recorded_and_reports_a_table_that_failed_as_a_build_does() {
         let into = std::env::temp_dir().join(format!("lithify-dry-run-{}", Ulid::generate()));
-        let dry_run = DryRunBuild::new(
-            Build::new(Namespace::from("mysql_shop"), run(), || {
+        let dry_run = DryRunBuildLogWrite::new(
+            BuildLogWrite::new(Namespace::from("mysql_shop"), run(), || {
                 DateTime::UNIX_EPOCH
             }),
             &into,
