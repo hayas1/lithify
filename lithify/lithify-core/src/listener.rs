@@ -30,16 +30,6 @@ pub trait SchemaChangeListener<P> {
         Ok(())
     }
 
-    fn replay_ended(
-        &mut self,
-        context: &Self::Context,
-        table: &TableModel,
-    ) -> Result<(), Self::Error> {
-        let _ = (context, table);
-
-        Ok(())
-    }
-
     fn table_created(
         &mut self,
         context: &Self::Context,
@@ -84,6 +74,64 @@ pub trait SchemaChangeListener<P> {
 impl<P> SchemaChangeListener<P> for () {
     type Context = ();
     type Error = Infallible;
+}
+
+pub trait Finish<P>: SchemaChangeListener<P> {
+    type Input;
+    type Output;
+    type FinishError;
+
+    fn finish(
+        self,
+        context: &Self::Context,
+        input: Self::Input,
+    ) -> Result<Self::Output, Self::FinishError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayEnd<E> {
+    remains: Remains,
+    refusal: Option<E>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Remains {
+    Standing(TableModel),
+    Dropped(TableId),
+}
+
+impl<E> ReplayEnd<E> {
+    pub fn standing(table: TableModel, refusal: Option<E>) -> Self {
+        Self {
+            remains: Remains::Standing(table),
+            refusal,
+        }
+    }
+
+    pub fn dropped(table: TableId, refusal: Option<E>) -> Self {
+        Self {
+            remains: Remains::Dropped(table),
+            refusal,
+        }
+    }
+
+    pub fn table(&self) -> &TableId {
+        match &self.remains {
+            Remains::Standing(table) => table.id(),
+            Remains::Dropped(table) => table,
+        }
+    }
+
+    pub fn model(&self) -> Option<&TableModel> {
+        match &self.remains {
+            Remains::Standing(table) => Some(table),
+            Remains::Dropped(_) => None,
+        }
+    }
+
+    pub fn refusal(&self) -> Option<&E> {
+        self.refusal.as_ref()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -443,6 +491,10 @@ impl<P: Position> CatalogModel<P> {
 
     pub fn tables(&self) -> impl Iterator<Item = &TableModel> {
         self.tables.values()
+    }
+
+    pub fn remove(&mut self, id: &TableId) -> Option<TableModel> {
+        self.tables.remove(id)
     }
 
     pub fn accept<E, L>(

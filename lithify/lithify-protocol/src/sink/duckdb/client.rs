@@ -398,11 +398,9 @@ mod tests {
         client
             .create_build_log::<Logged>(&Namespace::from("mysql_shop"))
             .unwrap();
-        for log in logs {
-            client
-                .append_build_log(&Namespace::from("mysql_shop"), log)
-                .unwrap();
-        }
+        client
+            .append_build_logs(&Namespace::from("mysql_shop"), logs)
+            .unwrap();
 
         client
     }

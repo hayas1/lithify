@@ -3,9 +3,9 @@ use ulid::Ulid;
 
 use lithify_artifact::shard::Shard;
 use lithify_artifact::snapshot::Snapshot;
-use lithify_core::artifact::{Artifact, ArtifactBuilder};
+use lithify_core::artifact::Artifact;
 use lithify_core::build_log::{BuildLog, Outcome, Run, Status};
-use lithify_core::listener::SchemaChangeListener;
+use lithify_core::listener::{Finish, ReplayEnd};
 use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
 use lithify_core::sink::{TablePath, Warehouse};
 use lithify_core::ts::Ts;
@@ -52,7 +52,7 @@ fn previous(window: &Window, shard: &str) -> BuildLog {
     )
 }
 
-fn statements<W: Warehouse>(warehouse: &W) -> String {
+fn statements<W: Warehouse>(warehouse: W) -> String {
     let log = Debezium::new("mysql", MySql);
     let window = Window::new(
         Ts::try_from(1789862400000).unwrap(),
@@ -62,21 +62,30 @@ fn statements<W: Warehouse>(warehouse: &W) -> String {
     let previous = std::env::args()
         .nth(2)
         .map(|shard| previous(&window, &shard));
-    let mut snapshot =
+    let snapshot =
         artifact.builder::<_, W>(&log, customers().id().clone(), &window, previous.as_ref());
+    let build = Finish::<MySqlPosition>::finish(
+        snapshot,
+        &warehouse,
+        ReplayEnd::standing(customers(), None),
+    )
+    .unwrap();
 
-    SchemaChangeListener::<MySqlPosition>::replay_ended(&mut snapshot, warehouse, &customers())
-        .unwrap();
-
-    snapshot.create(warehouse).unwrap().join(";\n")
+    build
+        .statements()
+        .unwrap()
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(";\n")
 }
 
 fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("bigquery") => println!(
             "{}",
-            statements(&BigQueryWarehouse::new("local-project", "mysql_shop_cdc"))
+            statements(BigQueryWarehouse::new("local-project", "mysql_shop_cdc"))
         ),
-        _ => println!("{}", statements(&DuckDbWarehouse::new("mysql_shop_cdc"))),
+        _ => println!("{}", statements(DuckDbWarehouse::new("mysql_shop_cdc"))),
     }
 }

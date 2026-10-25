@@ -1,7 +1,8 @@
+use std::convert::Infallible;
 use std::fmt;
 
-use crate::build_log::{BuildLog, Outcome, Run, Series};
-use crate::listener::SchemaChangeListener;
+use crate::build_log::{BuildLog, Series, TableBuild};
+use crate::listener::{Finish, ReplayEnd, SchemaChangeListener};
 use crate::model::TableId;
 use crate::schedule::Timeline;
 use crate::sink::{TablePath, UnsupportedColumn, Warehouse};
@@ -63,8 +64,7 @@ pub trait Artifact {
 
     type From: Artifact;
 
-    type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>: ArtifactBuilder
-        + SchemaChangeListener<L::Position, Context = W, Error = UnbuildableArtifact>
+    type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>: ArtifactBuilder<L::Position, W>
     where
         Self: 'a;
 
@@ -90,14 +90,18 @@ pub trait Artifact {
     ) -> Self::Builder<'a, L, W>;
 }
 
-pub trait ArtifactBuilder {
-    fn table(&self) -> &TableId;
+pub trait ArtifactBuilder<P, W>: SchemaChangeListener<P, Context = W, Error = UnbuildableArtifact>
+    + Finish<P, Input = ReplayEnd<UnbuildableArtifact>, Output = TableBuild, FinishError = Infallible>
+{
+    fn select(
+        &self,
+        warehouse: &W,
+        end: &ReplayEnd<UnbuildableArtifact>,
+    ) -> Result<SqlString, UnbuildableArtifact>;
 
-    fn missing_base(&self) -> Option<&TableId>;
-
-    fn select(&self) -> Result<SqlString, UnbuildableArtifact>;
-
-    fn create<W: Warehouse>(&self, warehouse: &W) -> Result<Vec<SqlString>, UnbuildableArtifact>;
-
-    fn build_log(&self, run: &Run, outcome: Outcome) -> BuildLog;
+    fn create(
+        &self,
+        warehouse: &W,
+        end: &ReplayEnd<UnbuildableArtifact>,
+    ) -> Result<Vec<SqlString>, UnbuildableArtifact>;
 }

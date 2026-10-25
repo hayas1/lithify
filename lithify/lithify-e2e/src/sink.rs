@@ -6,7 +6,8 @@ use duckdb::types::{FromSql, TimeUnit, Value};
 
 use lithify_artifact::snapshot::Snapshot;
 use lithify_cli::pipeline::{self, CaptureConfig};
-use lithify_core::artifact::{ArtifactBuilder, UnbuildableArtifact};
+use lithify_core::artifact::UnbuildableArtifact;
+use lithify_core::build_log::Status;
 use lithify_core::listener::OutOfOrder;
 use lithify_core::model::{TableId, TableModel};
 use lithify_core::runner::Replay;
@@ -288,13 +289,16 @@ impl DuckDbChangeLogsFn for SnapshotBuild<'_> {
         C: ChangeLogs,
         <C::Schema as SchemaChangeLog>::Record: FromSql,
     {
-        let snapshot = Replay::new(self.client, &logs)
-            .builders::<_, Unbuildable>(self.artifact, self.window, &[])?
+        let built = Replay::new(self.client, &logs)
+            .built::<_, Unbuildable>(self.artifact, self.window, &[], |table| table == self.table)?
             .into_iter()
-            .find(|snapshot| snapshot.listener().table() == self.table)
+            .find(|built| built.table() == Some(self.table))
             .ok_or_else(|| Unbuildable::UnknownTable(self.table.clone()))?;
 
-        self.client.build(&Result::from(snapshot)?)
+        match built.status() {
+            Status::Succeeded => Ok(()),
+            Status::Failed(cause) => Err(Unbuildable::Unbuilt(cause.clone())),
+        }
     }
 }
 
@@ -305,6 +309,7 @@ pub enum Unbuildable {
     Unverified(&'static str),
     Unreached,
     Unwritable(UnbuildableArtifact),
+    Unbuilt(String),
     OutOfOrder(OutOfOrder),
 }
 
@@ -319,6 +324,7 @@ impl Display for Unbuildable {
                 "the change log lies in a warehouse other than the one it is sunk into"
             ),
             Self::Unwritable(cause) => write!(formatter, "{cause}"),
+            Self::Unbuilt(cause) => write!(formatter, "{cause}"),
             Self::OutOfOrder(cause) => write!(formatter, "{cause}"),
         }
     }

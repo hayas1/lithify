@@ -1,7 +1,10 @@
 use std::fmt;
 
-use crate::artifact::{ArtifactBuilder, UnbuildableArtifact};
-use crate::build_log::{BuildLog, BuildLogQuery, BuildLogRow, Series, UnreadableBuildLog};
+use crate::artifact::UnbuildableArtifact;
+use crate::build_log::{
+    BuildLog, BuildLogQuery, BuildLogRow, Series, Status, TableBuild, TableBuilt,
+    UnreadableBuildLog,
+};
 use crate::model::{ColumnModel, ColumnType};
 use crate::source::{ColumnPath, SchemaChangeLog};
 use crate::sql::SqlString;
@@ -320,94 +323,68 @@ pub trait WarehouseClient {
 
     fn exists(&self, table: &TablePath) -> Result<bool, Self::Error>;
 
-    fn append_build_log(&self, namespace: &Namespace, log: &BuildLog) -> Result<(), Self::Error> {
-        self.execute(&log.insert(self.warehouse(), namespace))
+    fn append_build_logs(
+        &self,
+        namespace: &Namespace,
+        logs: &[BuildLog],
+    ) -> Result<(), Self::Error> {
+        match BuildLog::insert(logs, self.warehouse(), namespace) {
+            Some(insert) => self.execute(&insert),
+            None => Ok(()),
+        }
     }
 
-    fn build<E>(&self, builder: &impl ArtifactBuilder) -> Result<(), E>
-    where
-        E: From<Self::Error> + From<UnbuildableArtifact>,
-    {
-        for statement in builder.create(self.warehouse())? {
-            self.execute(&statement)?;
-        }
+    fn build(&self, build: TableBuild) -> TableBuilt {
+        let status = match build.refusal() {
+            Some(refused) => Status::Failed(refused.to_string()),
+            None => match build
+                .statements()
+                .unwrap_or_default()
+                .iter()
+                .try_for_each(|statement| self.execute(statement))
+            {
+                Ok(()) => Status::Succeeded,
+                Err(failed) => Status::Failed(failed.to_string()),
+            },
+        };
 
-        Ok(())
+        build.built(status)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::build_log::{Outcome, Run};
+    use crate::build_log::Base;
     use crate::model::TableId;
     use crate::testing::{Engine, Recorder};
     use crate::ts::Ts;
 
-    struct Namespaced(TableId);
-
-    impl ArtifactBuilder for Namespaced {
-        fn table(&self) -> &TableId {
-            &self.0
-        }
-
-        fn missing_base(&self) -> Option<&TableId> {
-            None
-        }
-
-        fn select(&self) -> Result<SqlString, UnbuildableArtifact> {
-            Ok(SqlString::from("SELECT 1 AS id"))
-        }
-
-        fn create<W: Warehouse>(
-            &self,
-            warehouse: &W,
-        ) -> Result<Vec<SqlString>, UnbuildableArtifact> {
-            Ok(vec![
-                warehouse.create_namespace(&Namespace::from("shop")),
-                SqlString::from("CREATE TABLE shop.people (id BIGINT)"),
-            ])
-        }
-
-        fn build_log(&self, run: &Run, outcome: Outcome) -> BuildLog {
-            BuildLog::new(
-                run,
-                Some(self.0.clone()),
-                Some(self.0.clone()),
-                None,
-                Some(TablePath::new("shop", "people")),
-                Window::until(Ts::try_from(1).unwrap()),
-                outcome,
-            )
-        }
+    fn people(base: Base, making: Result<Vec<SqlString>, UnbuildableArtifact>) -> TableBuild {
+        TableBuild::new(
+            Some(TableId::new("shop", "people")),
+            Some(TableId::new("shop", "people")),
+            base,
+            Some(TablePath::new("shop", "people")),
+            Window::until(Ts::try_from(1).unwrap()),
+            making,
+        )
     }
 
-    #[derive(Debug)]
-    enum Unbuilt {
-        Unexecuted,
-        Unbuildable,
-    }
-
-    impl From<std::fmt::Error> for Unbuilt {
-        fn from(_: std::fmt::Error) -> Self {
-            Self::Unexecuted
-        }
-    }
-
-    impl From<UnbuildableArtifact> for Unbuilt {
-        fn from(_: UnbuildableArtifact) -> Self {
-            Self::Unbuildable
-        }
+    fn statements() -> Vec<SqlString> {
+        vec![
+            SqlString::from("CREATE SCHEMA IF NOT EXISTS \"shop\""),
+            SqlString::from("CREATE TABLE shop.people (id BIGINT)"),
+        ]
     }
 
     #[test]
-    fn a_client_builds_an_artifact_by_running_its_statements_in_order() {
+    fn a_client_builds_a_table_by_running_its_statements_in_order() {
         let client = Recorder::new(Engine::default());
 
-        client
-            .build::<Unbuilt>(&Namespaced(TableId::new("shop", "people")))
-            .unwrap();
+        let built = client.build(people(Base::ChangeLog, Ok(statements())));
 
+        assert_eq!(built.status(), &Status::Succeeded);
         assert_eq!(
             client.executed(),
             [
@@ -415,6 +392,32 @@ mod tests {
                 "CREATE TABLE shop.people (id BIGINT)"
             ]
         );
+    }
+
+    #[test]
+    fn a_client_builds_nothing_of_a_table_with_nothing_to_fold_onto() {
+        let client = Recorder::new(Engine::default());
+
+        let built = client.build(people(Base::Missing, Ok(statements())));
+
+        assert_eq!(
+            built.status(),
+            &Status::Failed(
+                UnbuildableArtifact::WithoutBase(TableId::new("shop", "people")).to_string()
+            )
+        );
+        assert_eq!(client.executed(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_client_builds_nothing_of_a_table_its_builder_refused() {
+        let client = Recorder::new(Engine::default());
+        let refused = UnbuildableArtifact::PrimaryKeyChanged(TableId::new("shop", "people"));
+
+        let built = client.build(people(Base::ChangeLog, Err(refused.clone())));
+
+        assert_eq!(built.status(), &Status::Failed(refused.to_string()));
+        assert_eq!(client.executed(), Vec::<String>::new());
     }
 
     #[test]

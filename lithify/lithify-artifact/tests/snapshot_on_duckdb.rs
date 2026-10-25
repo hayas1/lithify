@@ -6,7 +6,7 @@ use lithify_artifact::shard::Shard;
 use lithify_artifact::snapshot::Snapshot;
 use lithify_core::artifact::{Artifact, UnbuildableArtifact};
 use lithify_core::listener::OutOfOrder;
-use lithify_core::listener::SchemaChangeListener;
+use lithify_core::listener::{Finish, ReplayEnd};
 use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
 use lithify_core::sink::WarehouseClient;
 use lithify_core::source::SchemaChangeStream;
@@ -50,16 +50,15 @@ fn a_snapshot_holds_each_key_as_the_change_log_last_left_it() {
     let log = Debezium::under("value", "mysql", MySql);
     let window = Window::new(Ts::try_from(0).unwrap(), Ts::try_from(10).unwrap());
     let artifact = Snapshot::new("shop_snapshot", Shard::new("%Y%m%d", chrono_tz::Tz::UTC));
-    let mut snapshot =
-        artifact.builder::<_, DuckDbWarehouse>(&log, people().id().clone(), &window, None);
-    SchemaChangeListener::<MySqlPosition>::replay_ended(
-        &mut snapshot,
+    let build = Finish::<MySqlPosition>::finish(
+        artifact.builder::<_, DuckDbWarehouse>(&log, people().id().clone(), &window, None),
         client.warehouse(),
-        &people(),
+        ReplayEnd::standing(people(), None),
     )
     .unwrap();
-
-    client.build::<Unbuilt>(&snapshot).unwrap();
+    for statement in build.statements().unwrap() {
+        client.execute(statement).unwrap();
+    }
 
     let rows: Vec<(i64, String)> = client
         .connection()
@@ -118,16 +117,17 @@ fn rows(client: &DuckDbClient, query: &str) -> Vec<String> {
 fn build_snapshots(client: &DuckDbClient, window: &Window) {
     let log = Debezium::under("value", "mysql", MySql);
     let artifact = Snapshot::new("shop_snapshot", Shard::new("%Y%m%d", chrono_tz::Tz::UTC));
-    let mut tracker = TableListeners::new(|table: &TableId| {
-        artifact.builder::<_, DuckDbWarehouse>(&log, table.clone(), window, None)
-    });
+    let mut listeners = TableListeners::new(
+        |table: &TableId| artifact.builder::<_, DuckDbWarehouse>(&log, table.clone(), window, None),
+        |_: &TableId| true,
+    );
     let catalog = client
-        .replay::<Unbuilt, _>(client.warehouse(), &log, window, &mut tracker)
+        .replay::<Unbuilt, _>(client.warehouse(), &log, window, &mut listeners)
         .unwrap();
-    for snapshot in tracker.finish(client.warehouse(), &catalog) {
-        client
-            .build::<Unbuilt>(&Result::from(snapshot).unwrap())
-            .unwrap();
+    for build in listeners.finish(client.warehouse(), catalog).unwrap() {
+        for statement in build.statements().unwrap() {
+            client.execute(statement).unwrap();
+        }
     }
 }
 

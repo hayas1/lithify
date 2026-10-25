@@ -506,11 +506,9 @@ place.snapshot = [{ prefix = "mysql_shop" }]
         client
             .create_build_log::<Unrunnable>(&Namespace::from("mysql_shop"))
             .unwrap();
-        for log in before {
-            client
-                .append_build_log(&Namespace::from("mysql_shop"), log)
-                .unwrap();
-        }
+        client
+            .append_build_logs(&Namespace::from("mysql_shop"), before)
+            .unwrap();
 
         client
     }

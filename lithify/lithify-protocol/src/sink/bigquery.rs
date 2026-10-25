@@ -220,7 +220,12 @@ mod tests {
         );
 
         assert_eq!(
-            log.insert(&bigquery(), &Namespace::from("mysql_shop")),
+            BuildLog::insert(
+                std::slice::from_ref(&log),
+                &bigquery(),
+                &Namespace::from("mysql_shop")
+            )
+            .unwrap(),
             "INSERT INTO `local-project`.`mysql_shop`.`_lithify_log` (`id`, `run_id`, `started_at`, `artifact`, `schedule`, `source`, `capture`, `table_from`, `table_to`, `lifecycle`, `base`, `target`, `window_from`, `window_to`, `status`, `finished_at`, `error`, `version`)\nSELECT COALESCE(MAX(`id`), 0) + 1, '00000000000000000000000000', TIMESTAMP_MILLIS(0), 'snapshot', 'daily', 'primary', '{}', 'shop.customers', 'shop.clients', 'renamed', 'mysql_shop.customers_20260919', 'mysql_shop.customers_20260920', TIMESTAMP_MILLIS(1789862400000), TIMESTAMP_MILLIS(1789948800000), 'succeeded', TIMESTAMP_MILLIS(1789949000000), NULL, '0.1.0'\nFROM `local-project`.`mysql_shop`.`_lithify_log`"
         );
     }

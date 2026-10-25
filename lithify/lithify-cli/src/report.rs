@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use lithify_core::artifact::{ArtifactBuilder, UnbuildableArtifact};
-use lithify_core::build_log::{BuildLog, Series};
-use lithify_core::runner::{Build, Built, Runner, Unsteppable};
+use lithify_core::artifact::UnbuildableArtifact;
+use lithify_core::build_log::{BuildLog, Series, TableBuilt};
+use lithify_core::runner::{Build, Runner};
 use lithify_core::sink::{Namespace, WarehouseClient};
 use lithify_core::window::Window;
 use lithify_protocol::sink::bigquery::client::BigQueryExecution;
@@ -88,18 +88,12 @@ impl Runner for DryRunBuild {
         }
     }
 
-    fn run<K, B, E>(
-        &self,
-        client: &K,
-        window: &Window,
-        builders: &[Built<B>],
-    ) -> Result<Self::Output, E>
+    fn run<K, E>(&self, client: &K, built: Vec<TableBuilt>) -> Result<Self::Output, E>
     where
         K: WarehouseClient,
-        B: ArtifactBuilder,
-        E: From<K::Error> + From<UnbuildableArtifact> + From<Unsteppable>,
+        E: From<K::Error> + From<UnbuildableArtifact>,
     {
-        self.build.run(client, window, builders)
+        self.build.run(client, built)
     }
 }
 

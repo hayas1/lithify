@@ -1,6 +1,6 @@
 use lithify_core::sql::SqlString;
 
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub(super) struct Fold {
     named: Vec<(SqlString, SqlString)>,
     steps: usize,

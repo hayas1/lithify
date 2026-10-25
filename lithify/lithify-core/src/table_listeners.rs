@@ -3,25 +3,25 @@ use std::collections::btree_map::Entry;
 use std::convert::Infallible;
 
 use crate::listener::{
-    Appearance, CatalogModel, SchemaChangeListener, TableAltered, TableCreated, TableDropped,
-    TableRenamed,
+    Appearance, CatalogModel, Finish, ReplayEnd, SchemaChangeListener, TableAltered, TableCreated,
+    TableDropped, TableRenamed,
 };
-use crate::model::TableId;
+use crate::model::{TableId, TableModel};
 use crate::position::Position;
 
-pub struct TableListeners<F, L, E> {
+pub struct TableListeners<F, G, L, E> {
     make_listener: F,
+    finishes: G,
     standing: BTreeMap<TableId, Track<L, E>>,
-    dropped: Vec<Track<L, E>>,
+    dropped: Vec<(TableId, Track<L, E>)>,
 }
 
 // One table as the listeners follow it: its listener and, once that listener has refused a
 // schema change, why, so the table stops alone while the others go on.
-#[derive(Debug)]
-pub struct Track<L, E> {
+struct Track<L, E> {
     listener: L,
     appearance: Option<Appearance>,
-    failure: Option<E>,
+    refusal: Option<E>,
 }
 
 impl<L, E> Track<L, E> {
@@ -29,21 +29,13 @@ impl<L, E> Track<L, E> {
         Self {
             listener,
             appearance,
-            failure: None,
+            refusal: None,
         }
     }
 
-    pub fn listener(&self) -> &L {
-        &self.listener
-    }
-
-    pub fn failure(&self) -> Option<&E> {
-        self.failure.as_ref()
-    }
-
     fn tell(&mut self, visit: impl FnOnce(&mut L) -> Result<(), E>) {
-        if self.failure.is_none() {
-            self.failure = visit(&mut self.listener).err();
+        if self.refusal.is_none() {
+            self.refusal = visit(&mut self.listener).err();
         }
     }
 
@@ -51,21 +43,30 @@ impl<L, E> Track<L, E> {
         self.appearance
             .is_some_and(|appearance| appearance.is_creation())
     }
-}
 
-impl<L, E> From<Track<L, E>> for Result<L, E> {
-    fn from(track: Track<L, E>) -> Self {
-        match track.failure {
-            Some(failure) => Err(failure),
-            None => Ok(track.listener),
-        }
+    fn finish<P>(
+        self,
+        context: &L::Context,
+        table: TableId,
+        standing: Option<TableModel>,
+    ) -> Result<L::Output, L::FinishError>
+    where
+        L: Finish<P, Error = E, Input = ReplayEnd<E>>,
+    {
+        let end = match standing {
+            Some(model) => ReplayEnd::standing(model, self.refusal),
+            None => ReplayEnd::dropped(table, self.refusal),
+        };
+
+        self.listener.finish(context, end)
     }
 }
 
-impl<F, L, E> TableListeners<F, L, E> {
-    pub fn new(make_listener: F) -> Self {
+impl<F, G, L, E> TableListeners<F, G, L, E> {
+    pub fn new(make_listener: F, finishes: G) -> Self {
         Self {
             make_listener,
+            finishes,
             standing: BTreeMap::new(),
             dropped: Vec::new(),
         }
@@ -78,35 +79,10 @@ impl<F, L, E> TableListeners<F, L, E> {
     }
 }
 
-impl<F, L, E> TableListeners<F, L, E>
+impl<F, G, L, E> TableListeners<F, G, L, E>
 where
     F: FnMut(&TableId) -> L,
 {
-    pub fn finish<P>(
-        mut self,
-        context: &<L as SchemaChangeListener<P>>::Context,
-        catalog: &CatalogModel<P>,
-    ) -> Vec<Track<L, E>>
-    where
-        P: Position,
-        L: SchemaChangeListener<P, Error = E>,
-    {
-        let finished: Vec<_> = catalog
-            .tables()
-            .map(|table| {
-                let mut track = self
-                    .standing
-                    .remove(table.id())
-                    .unwrap_or_else(|| Track::new((self.make_listener)(table.id()), None));
-                track.tell(|listener| listener.replay_ended(context, table));
-
-                track
-            })
-            .collect();
-
-        self.dropped.into_iter().chain(finished).collect()
-    }
-
     fn track(&mut self, table: &TableId) -> &mut Track<L, E> {
         let Self {
             make_listener,
@@ -121,7 +97,7 @@ where
     }
 }
 
-impl<P, F, L, E> SchemaChangeListener<P> for TableListeners<F, L, E>
+impl<P, F, G, L, E> SchemaChangeListener<P> for TableListeners<F, G, L, E>
 where
     P: Position,
     F: FnMut(&TableId) -> L,
@@ -151,15 +127,16 @@ where
         context: &Self::Context,
         event: &TableDropped<'_, P>,
     ) -> Result<(), Self::Error> {
+        let table = event.table().id();
         let mut track = self
             .standing
-            .remove(event.table().id())
-            .unwrap_or_else(|| Track::new((self.make_listener)(event.table().id()), None));
+            .remove(table)
+            .unwrap_or_else(|| Track::new((self.make_listener)(table), None));
 
         track.tell(|listener| listener.table_dropped(context, event));
         // A table created within the window and gone by its end left nothing to build or resume.
         if !track.is_created_within() {
-            self.dropped.push(track);
+            self.dropped.push((table.clone(), track));
         }
 
         Ok(())
@@ -189,6 +166,47 @@ where
     }
 }
 
+impl<P, F, G, L, E> Finish<P> for TableListeners<F, G, L, E>
+where
+    P: Position,
+    F: FnMut(&TableId) -> L,
+    G: Fn(&TableId) -> bool,
+    L: Finish<P, Error = E, Input = ReplayEnd<E>>,
+{
+    type Input = CatalogModel<P>;
+    type Output = Vec<L::Output>;
+    type FinishError = L::FinishError;
+
+    fn finish(
+        mut self,
+        context: &Self::Context,
+        mut catalog: CatalogModel<P>,
+    ) -> Result<Self::Output, Self::FinishError> {
+        let standing: Vec<_> = catalog.tables().map(|table| table.id().clone()).collect();
+        let dropped = std::mem::take(&mut self.dropped)
+            .into_iter()
+            .filter(|(table, _)| (self.finishes)(table))
+            .map(|(table, track)| track.finish(context, table, None))
+            .collect::<Result<Vec<_>, _>>()?;
+        let finished = standing
+            .into_iter()
+            .filter(|table| (self.finishes)(table))
+            .map(|table| {
+                let track = self
+                    .standing
+                    .remove(&table)
+                    .unwrap_or_else(|| Track::new((self.make_listener)(&table), None));
+
+                let standing = catalog.remove(&table);
+
+                track.finish(context, table, standing)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(dropped.into_iter().chain(finished).collect())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,7 +230,7 @@ mod tests {
         }
     }
 
-    #[derive(Debug, PartialEq, Eq)]
+    #[derive(Debug, Clone, PartialEq, Eq)]
     enum Untold {
         Refused(TableId),
     }
@@ -242,13 +260,6 @@ mod tests {
     impl SchemaChangeListener<Offset> for Story {
         type Context = ();
         type Error = Untold;
-
-        fn replay_ended(&mut self, _: &(), table: &TableModel) -> Result<(), Untold> {
-            let last_era = self.eras.last(table, Bound::Open);
-            self.tell(&last_era);
-
-            Ok(())
-        }
 
         fn table_created(
             &mut self,
@@ -311,6 +322,21 @@ mod tests {
         }
     }
 
+    impl Finish<Offset> for Story {
+        type Input = ReplayEnd<Untold>;
+        type Output = (TableId, Vec<String>, Option<Untold>);
+        type FinishError = Infallible;
+
+        fn finish(mut self, _: &(), finish: ReplayEnd<Untold>) -> Result<Self::Output, Infallible> {
+            if let (None, Some(table)) = (finish.refusal(), finish.model()) {
+                let last_era = self.eras.last(table, Bound::Open);
+                self.tell(&last_era);
+            }
+
+            Ok((self.table, self.told, finish.refusal().cloned()))
+        }
+    }
+
     fn people() -> TableId {
         TableId::new("shop", "people")
     }
@@ -358,12 +384,15 @@ mod tests {
                 .accept::<OutOfOrder, _>(&(), change, &mut ())
                 .unwrap();
         }
-        let mut tracker = TableListeners::new(|table: &TableId| Story {
-            table: table.clone(),
-            eras: EraTracker::since(Bound::EventTime(*ten_to_twenty().from())),
-            refusing: false,
-            told: Vec::new(),
-        });
+        let mut tracker = TableListeners::new(
+            |table: &TableId| Story {
+                table: table.clone(),
+                eras: EraTracker::since(Bound::EventTime(*ten_to_twenty().from())),
+                refusing: false,
+                told: Vec::new(),
+            },
+            |_: &TableId| true,
+        );
         for change in &within {
             catalog
                 .accept::<OutOfOrder, _>(&(), change, &mut tracker)
@@ -371,14 +400,10 @@ mod tests {
         }
 
         tracker
-            .finish(&(), &catalog)
+            .finish(&(), catalog)
+            .unwrap()
             .into_iter()
-            .map(|track| {
-                (
-                    track.listener().table.clone(),
-                    track.listener().told.clone(),
-                )
-            })
+            .map(|(table, told, _)| (table, told))
             .collect()
     }
 
@@ -398,12 +423,15 @@ mod tests {
                 &mut (),
             )
             .unwrap();
-        let mut listeners = TableListeners::new(|table: &TableId| Story {
-            table: table.clone(),
-            eras: EraTracker::since(Bound::EventTime(*ten_to_twenty().from())),
-            refusing: *table == people(),
-            told: Vec::new(),
-        });
+        let mut listeners = TableListeners::new(
+            |table: &TableId| Story {
+                table: table.clone(),
+                eras: EraTracker::since(Bound::EventTime(*ten_to_twenty().from())),
+                refusing: *table == people(),
+                told: Vec::new(),
+            },
+            |_: &TableId| true,
+        );
         for change in [
             change(
                 15,
@@ -427,17 +455,9 @@ mod tests {
         }
 
         assert_eq!(
-            listeners
-                .finish(&(), &catalog)
-                .iter()
-                .map(|track| (
-                    track.listener().table.clone(),
-                    track.listener().told.clone(),
-                    track.failure()
-                ))
-                .collect::<Vec<_>>(),
+            listeners.finish(&(), catalog).unwrap(),
             [
-                (people(), vec![], Some(&Untold::Refused(people()))),
+                (people(), vec![], Some(Untold::Refused(people()))),
                 (
                     pets(),
                     vec![
@@ -448,6 +468,43 @@ mod tests {
                     None
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn a_table_the_listeners_are_told_to_leave_out_is_not_finished() {
+        let mut catalog = CatalogModel::default();
+        catalog
+            .accept::<OutOfOrder, _>(
+                &(),
+                &change(
+                    1,
+                    vec![
+                        TableChange::Created(table(people(), &["id"])),
+                        TableChange::Created(table(pets(), &["id"])),
+                    ],
+                ),
+                &mut (),
+            )
+            .unwrap();
+        let listeners = TableListeners::new(
+            |table: &TableId| Story {
+                table: table.clone(),
+                eras: EraTracker::since(Bound::EventTime(*ten_to_twenty().from())),
+                refusing: false,
+                told: Vec::new(),
+            },
+            |table: &TableId| *table != pets(),
+        );
+
+        assert_eq!(
+            listeners
+                .finish(&(), catalog)
+                .unwrap()
+                .into_iter()
+                .map(|(table, ..)| table)
+                .collect::<Vec<_>>(),
+            [people()]
         );
     }
 

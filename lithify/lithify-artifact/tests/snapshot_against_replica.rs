@@ -9,9 +9,9 @@ use lithify_artifact::scd1::Scd1;
 use lithify_artifact::scd2::Scd2;
 use lithify_artifact::shard::Shard;
 use lithify_artifact::snapshot::Snapshot;
-use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
-use lithify_core::build_log::{BuildLog, Outcome, Run, Status};
-use lithify_core::listener::SchemaChangeListener;
+use lithify_core::artifact::Artifact;
+use lithify_core::build_log::{BuildLog, Run, Status};
+use lithify_core::listener::{Finish, ReplayEnd};
 use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
 use lithify_core::schedule::{Schedule, Timeline};
 use lithify_core::sink::{Namespace, TablePath, WarehouseClient};
@@ -23,21 +23,6 @@ use lithify_protocol::sink::duckdb::client::DuckDbClient;
 use lithify_protocol::{Debezium, DuckDbWarehouse, MySql};
 
 const DAY: i64 = 86_400_000;
-
-#[derive(Debug)]
-struct Unbuilt;
-
-impl From<duckdb::Error> for Unbuilt {
-    fn from(_: duckdb::Error) -> Self {
-        Self
-    }
-}
-
-impl From<UnbuildableArtifact> for Unbuilt {
-    fn from(_: UnbuildableArtifact) -> Self {
-        Self
-    }
-}
 
 fn people() -> TableModel {
     TableModel::new(
@@ -131,14 +116,15 @@ impl Shards {
         previous: Option<&BuildLog>,
     ) -> BuildLog {
         let log = Debezium::under("value", "mysql", MySql);
-        let mut snapshot =
-            artifact.builder::<_, DuckDbWarehouse>(&log, people().id().clone(), window, previous);
-        snapshot
-            .replay_ended(self.client.warehouse(), &people())
+        let build = artifact
+            .builder::<_, DuckDbWarehouse>(&log, people().id().clone(), window, previous)
+            .finish(self.client.warehouse(), ReplayEnd::standing(people(), None))
             .unwrap();
-        self.client.build::<Unbuilt>(&snapshot).unwrap();
+        for statement in build.statements().unwrap() {
+            self.client.execute(statement).unwrap();
+        }
 
-        snapshot.build_log(
+        build.built(Status::Succeeded).logged(
             &Run::new(
                 Ulid::nil(),
                 DateTime::UNIX_EPOCH,
@@ -148,7 +134,7 @@ impl Shards {
                 "{}",
                 "0.1.0",
             ),
-            Outcome::new(Status::Succeeded, DateTime::UNIX_EPOCH),
+            DateTime::UNIX_EPOCH,
         )
     }
 
