@@ -133,7 +133,9 @@ impl Shards {
         let log = Debezium::under("value", "mysql", MySql);
         let mut snapshot =
             artifact.builder::<_, DuckDbWarehouse>(&log, people().id().clone(), window, previous);
-        snapshot.finish(self.client.warehouse(), &people()).unwrap();
+        snapshot
+            .replay_ended(self.client.warehouse(), &people())
+            .unwrap();
         self.client.build::<Unbuilt>(&snapshot).unwrap();
 
         snapshot.build_log(

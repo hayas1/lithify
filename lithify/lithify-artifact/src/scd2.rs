@@ -310,12 +310,12 @@ impl<L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Position> for Scd2Bu
         Ok(())
     }
 
-    fn finish(&mut self, warehouse: &W, table: &TableModel) -> Result<(), Self::Error> {
+    fn replay_ended(&mut self, warehouse: &W, table: &TableModel) -> Result<(), Self::Error> {
         self.table = table.id().clone();
         if table.primary_key().next().is_none() {
             return Err(UnbuildableArtifact::WithoutPrimaryKey(self.table.clone()));
         }
-        let era = self.eras.finish(table, Bound::EventTime(*self.window.to()));
+        let era = self.eras.last(table, Bound::EventTime(*self.window.to()));
         self.versions = Some(self.versions(warehouse, &era)?);
 
         Ok(())

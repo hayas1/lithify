@@ -83,7 +83,7 @@ impl<P: Position> EraTracker<P> {
         self.close(event.before(), Bound::from(event.change()))
     }
 
-    pub fn finish(&self, table: &TableModel, to: Bound<P>) -> Era<P> {
+    pub fn last(&self, table: &TableModel, to: Bound<P>) -> Era<P> {
         Era::new(table.clone(), self.since.clone(), to)
     }
 

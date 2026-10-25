@@ -65,7 +65,8 @@ fn statements<W: Warehouse>(warehouse: &W) -> String {
     let mut snapshot =
         artifact.builder::<_, W>(&log, customers().id().clone(), &window, previous.as_ref());
 
-    SchemaChangeListener::<MySqlPosition>::finish(&mut snapshot, warehouse, &customers()).unwrap();
+    SchemaChangeListener::<MySqlPosition>::replay_ended(&mut snapshot, warehouse, &customers())
+        .unwrap();
 
     snapshot.create(warehouse).unwrap().join(";\n")
 }

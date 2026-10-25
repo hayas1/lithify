@@ -98,7 +98,7 @@ where
                     .standing
                     .remove(table.id())
                     .unwrap_or_else(|| Track::new((self.make_listener)(table.id()), None));
-                track.tell(|listener| listener.finish(context, table));
+                track.tell(|listener| listener.replay_ended(context, table));
 
                 track
             })
@@ -243,8 +243,8 @@ mod tests {
         type Context = ();
         type Error = Untold;
 
-        fn finish(&mut self, _: &(), table: &TableModel) -> Result<(), Untold> {
-            let last_era = self.eras.finish(table, Bound::Open);
+        fn replay_ended(&mut self, _: &(), table: &TableModel) -> Result<(), Untold> {
+            let last_era = self.eras.last(table, Bound::Open);
             self.tell(&last_era);
 
             Ok(())

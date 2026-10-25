@@ -52,8 +52,12 @@ fn a_snapshot_holds_each_key_as_the_change_log_last_left_it() {
     let artifact = Snapshot::new("shop_snapshot", Shard::new("%Y%m%d", chrono_tz::Tz::UTC));
     let mut snapshot =
         artifact.builder::<_, DuckDbWarehouse>(&log, people().id().clone(), &window, None);
-    SchemaChangeListener::<MySqlPosition>::finish(&mut snapshot, client.warehouse(), &people())
-        .unwrap();
+    SchemaChangeListener::<MySqlPosition>::replay_ended(
+        &mut snapshot,
+        client.warehouse(),
+        &people(),
+    )
+    .unwrap();
 
     client.build::<Unbuilt>(&snapshot).unwrap();
 

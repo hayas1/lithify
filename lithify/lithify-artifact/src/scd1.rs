@@ -370,14 +370,18 @@ impl<A: Overwrite, L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Positi
         Ok(())
     }
 
-    fn finish(&mut self, warehouse: &W, table: &TableModel) -> Result<(), UnbuildableArtifact> {
+    fn replay_ended(
+        &mut self,
+        warehouse: &W,
+        table: &TableModel,
+    ) -> Result<(), UnbuildableArtifact> {
         let until = self
             .artifact
             .until(&self.window)
             .map_or(Bound::Open, Bound::EventTime);
         self.table = table.id().clone();
 
-        self.fold_era(warehouse, &self.eras.finish(table, until))
+        self.fold_era(warehouse, &self.eras.last(table, until))
     }
 
     fn table_renamed(
@@ -1492,7 +1496,7 @@ mod tests {
         let mut fold =
             shop().builder::<Log, Engine>(&Log, TableId::new("shop", "customers"), &window, None);
 
-        fold.finish(&Engine::default(), &customers()).unwrap();
+        fold.replay_ended(&Engine::default(), &customers()).unwrap();
 
         assert!(
             fold.create(&Engine::default()).unwrap()[1]
@@ -1786,8 +1790,12 @@ mod tests {
         let window = window();
         let mut snapshot =
             artifact.builder::<Log, Engine>(&Log, customers().id().clone(), &window, None);
-        SchemaChangeListener::<Offset>::finish(&mut snapshot, &Engine::default(), &customers())
-            .unwrap();
+        SchemaChangeListener::<Offset>::replay_ended(
+            &mut snapshot,
+            &Engine::default(),
+            &customers(),
+        )
+        .unwrap();
 
         let statements = snapshot.create(&Engine::default()).unwrap();
 

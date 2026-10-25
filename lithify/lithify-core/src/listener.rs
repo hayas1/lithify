@@ -30,7 +30,11 @@ pub trait SchemaChangeListener<P> {
         Ok(())
     }
 
-    fn finish(&mut self, context: &Self::Context, table: &TableModel) -> Result<(), Self::Error> {
+    fn replay_ended(
+        &mut self,
+        context: &Self::Context,
+        table: &TableModel,
+    ) -> Result<(), Self::Error> {
         let _ = (context, table);
 
         Ok(())

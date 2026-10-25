@@ -17,7 +17,7 @@ How the code is laid out and the rules it keeps, as opposed to the [design](desi
 
 ### The replay tells a builder everything it needs
 
-A schema change reaches a builder through `SchemaChangeListener`: the table as it is created, dropped, renamed or altered, each with the schema change that did it and so where it falls in the change log, and, once the replay is over, the table as it stands through `finish`.
+A schema change reaches a builder through `SchemaChangeListener`: the table as it is created, dropped, renamed or altered, each with the schema change that did it and so where it falls in the change log, and, once the replay is over, the table as it stands through `replay_ended`.
 `TableListeners` hands each table its own builder, following it through a rename and setting aside the one of a table dropped, and keeps each on a `Track` with what it refused, so a table whose builder refuses a schema change stops alone and is logged as failed while the replay goes on for the others.
 
 A builder folds what it is told into the SQL it builds as it is told it, and keeps nothing else: no copy of a table model or of a name it can be told again.
@@ -29,7 +29,7 @@ When a builder seems to need something more, look first for the listener call th
 
 ### The last era ends where the artifact says
 
-No schema change ends the last era, so the builder closes it at `finish` where the artifact says, a `snapshot` or an `instant` where its window closes, an `scd1` nowhere so as to read the change log up to now.
+No schema change ends the last era, so the builder closes it at `replay_ended` where the artifact says, a `snapshot` or an `instant` where its window closes, an `scd1` nowhere so as to read the change log up to now.
 
 ### An artifact names its tables and says how they are created
 
