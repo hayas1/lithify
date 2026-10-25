@@ -53,7 +53,7 @@ impl Journal {
 mod tests {
     use chrono::DateTime;
 
-    use lithify_core::build_log::{Outcome, Run, Status};
+    use lithify_core::build_log::{Run, Status, TableBuilt};
     use lithify_core::model::TableId;
     use lithify_core::sink::TablePath;
     use lithify_core::ts::Ts;
@@ -97,16 +97,7 @@ mod tests {
     }
 
     fn logged(status: Status) -> BuildLog {
-        BuildLog::new(
-            &Run::new(
-                ulid::Ulid::nil(),
-                Ts::from(DateTime::UNIX_EPOCH),
-                "snapshot",
-                "daily",
-                "primary",
-                "{}",
-                "0.1.0",
-            ),
+        TableBuilt::new(
             Some(TableId::new("shop", "people")),
             Some(TableId::new("shop", "people")),
             None,
@@ -115,11 +106,18 @@ mod tests {
                 Ts::try_from(1789862400000).unwrap(),
                 Ts::try_from(1789948800000).unwrap(),
             ),
-            Outcome::new(
-                status,
-                Ts::from(DateTime::from_timestamp_millis(1789949000000).unwrap()),
-            ),
+            status,
+            Ts::from(DateTime::from_timestamp_millis(1789949000000).unwrap()),
         )
+        .logged(&Run::new(
+            ulid::Ulid::nil(),
+            Ts::from(DateTime::UNIX_EPOCH),
+            "snapshot",
+            "daily",
+            "primary",
+            "{}",
+            "0.1.0",
+        ))
     }
 
     #[test]

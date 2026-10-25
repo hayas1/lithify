@@ -103,21 +103,6 @@ impl Status {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Outcome {
-    status: Status,
-    finished_at: Ts<Replay>,
-}
-
-impl Outcome {
-    pub fn new(status: Status, finished_at: Ts<Replay>) -> Self {
-        Self {
-            status,
-            finished_at,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Base {
     Built(TablePath),
     Missing,
@@ -188,14 +173,15 @@ impl TableBuild {
         }
     }
 
-    pub fn built(self, outcome: Outcome) -> TableBuilt {
+    pub fn built(self, status: Status, finished_at: Ts<Replay>) -> TableBuilt {
         TableBuilt::new(
             self.table_from,
             self.table_to,
             self.base.as_built().cloned(),
             self.target,
             self.window,
-            outcome,
+            status,
+            finished_at,
         )
     }
 }
@@ -207,7 +193,8 @@ pub struct TableBuilt {
     base: Option<TablePath>,
     target: Option<TablePath>,
     window: Window,
-    outcome: Outcome,
+    status: Status,
+    finished_at: Ts<Replay>,
 }
 
 impl TableBuilt {
@@ -217,7 +204,8 @@ impl TableBuilt {
         base: Option<TablePath>,
         target: Option<TablePath>,
         window: Window,
-        outcome: Outcome,
+        status: Status,
+        finished_at: Ts<Replay>,
     ) -> Self {
         Self {
             table_from,
@@ -225,7 +213,8 @@ impl TableBuilt {
             base,
             target,
             window,
-            outcome,
+            status,
+            finished_at,
         }
     }
 
@@ -241,7 +230,7 @@ impl TableBuilt {
     }
 
     pub fn status(&self) -> &Status {
-        &self.outcome.status
+        &self.status
     }
 
     fn lifecycle(&self) -> Option<Lifecycle> {
@@ -275,18 +264,6 @@ impl BuildLog {
         ("error", ColumnType::Text),
         ("version", ColumnType::Text),
     ];
-
-    pub fn new(
-        run: &Run,
-        table_from: Option<TableId>,
-        table_to: Option<TableId>,
-        base: Option<TablePath>,
-        target: Option<TablePath>,
-        window: Window,
-        outcome: Outcome,
-    ) -> Self {
-        TableBuilt::new(table_from, table_to, base, target, window, outcome).logged(run)
-    }
 
     pub fn create_table<W: WarehouseSql + ?Sized>(
         warehouse: &W,
@@ -418,7 +395,7 @@ impl BuildLog {
     }
 
     pub fn status(&self) -> &Status {
-        &self.built.outcome.status
+        &self.built.status
     }
 
     pub fn cells<W: WarehouseSql + ?Sized>(
@@ -439,10 +416,9 @@ impl BuildLog {
             Self::nullable(warehouse, self.built.target.as_ref()),
             warehouse.timestamp_millis(self.built.window.from().milliseconds_since_epoch()),
             warehouse.timestamp_millis(self.built.window.to().milliseconds_since_epoch()),
-            warehouse.literal(&self.built.outcome.status.to_string()),
-            warehouse.timestamp_millis(self.built.outcome.finished_at.milliseconds_since_epoch()),
+            warehouse.literal(&self.built.status.to_string()),
+            warehouse.timestamp_millis(self.built.finished_at.milliseconds_since_epoch()),
             self.built
-                .outcome
                 .status
                 .error()
                 .map_or_else(|| SqlString::from("NULL"), |error| warehouse.literal(error)),
@@ -465,9 +441,9 @@ impl BuildLog {
             self.built.target.as_ref().map(ToString::to_string),
             Some(self.built.window.from().to_string()),
             Some(self.built.window.to().to_string()),
-            Some(self.built.outcome.status.to_string()),
-            Some(self.built.outcome.finished_at.to_string()),
-            self.built.outcome.status.error().map(str::to_owned),
+            Some(self.built.status.to_string()),
+            Some(self.built.finished_at.to_string()),
+            self.built.status.error().map(str::to_owned),
             Some(self.run.version.clone()),
         ]
     }
@@ -493,7 +469,7 @@ impl Display for BuildLog {
             .map(ToString::to_string)
             .unwrap_or_default();
 
-        match (&self.built.outcome.status, self.lifecycle()) {
+        match (&self.built.status, self.lifecycle()) {
             (Status::Succeeded, Some(Lifecycle::Dropped)) => write!(formatter, "dropped {table}"),
             (Status::Failed(error), Some(Lifecycle::Dropped)) => {
                 write!(formatter, "failed to drop {table}: {error}")
@@ -764,9 +740,9 @@ impl From<&BuildLog> for BuildLogRow {
             target: log.built.target.as_ref().map(ToString::to_string),
             window_from: log.built.window.from().milliseconds_since_epoch(),
             window_to: log.built.window.to().milliseconds_since_epoch(),
-            status: log.built.outcome.status.to_string(),
-            finished_at: log.built.outcome.finished_at.milliseconds_since_epoch(),
-            error: log.built.outcome.status.error().map(str::to_owned),
+            status: log.built.status.to_string(),
+            finished_at: log.built.finished_at.milliseconds_since_epoch(),
+            error: log.built.status.error().map(str::to_owned),
             version: log.run.version.clone(),
         }
     }
@@ -788,7 +764,8 @@ impl TryFrom<BuildLogRow> for BuildLog {
                 BuildLogRow::ts(row.window_from)?,
                 BuildLogRow::ts(row.window_to)?,
             ),
-            Outcome::new(row.status()?, BuildLogRow::ts(row.finished_at)?),
+            row.status()?,
+            BuildLogRow::ts(row.finished_at)?,
         )
         .logged(&Run::new(
             run_id,
@@ -838,26 +815,24 @@ mod tests {
     use super::*;
 
     fn logged(from: Option<&str>, to: Option<&str>) -> BuildLog {
-        BuildLog::new(
-            &Run::new(
-                Ulid::nil(),
-                Ts::from(DateTime::UNIX_EPOCH),
-                "snapshot",
-                "daily",
-                "primary",
-                "{}",
-                "0.1.0",
-            ),
+        TableBuilt::new(
             from.map(|table| TableId::new("shop", table)),
             to.map(|table| TableId::new("shop", table)),
             None,
             to.map(|_| TablePath::new("mysql_shop", "people_20260920")),
             Window::new(Ts::try_from(0).unwrap(), Ts::try_from(1).unwrap()),
-            Outcome::new(
-                Status::Succeeded,
-                Ts::from(DateTime::from_timestamp_millis(1).unwrap()),
-            ),
+            Status::Succeeded,
+            Ts::from(DateTime::from_timestamp_millis(1).unwrap()),
         )
+        .logged(&Run::new(
+            Ulid::nil(),
+            Ts::from(DateTime::UNIX_EPOCH),
+            "snapshot",
+            "daily",
+            "primary",
+            "{}",
+            "0.1.0",
+        ))
     }
 
     #[test]
@@ -877,7 +852,8 @@ mod tests {
             None,
             Some(TablePath::new("mysql_shop", "people_20260920")),
             Window::new(Ts::try_from(0).unwrap(), Ts::try_from(1).unwrap()),
-            Outcome::new(Status::Succeeded, Ts::try_from(1).unwrap()),
+            Status::Succeeded,
+            Ts::try_from(1).unwrap(),
         );
 
         assert_eq!(built.logged(&run), logged(Some("people"), Some("people")));
@@ -892,7 +868,8 @@ mod tests {
                 None,
                 None,
                 Window::new(Ts::try_from(0).unwrap(), Ts::try_from(1).unwrap()),
-                Outcome::new(Status::Succeeded, Ts::try_from(1).unwrap()),
+                Status::Succeeded,
+                Ts::try_from(1).unwrap(),
             )
         };
 
@@ -1071,7 +1048,7 @@ mod tests {
     #[test]
     fn a_drop_that_failed_reads_as_the_table_it_failed_to_drop() {
         let mut failed = logged(Some("pets"), None);
-        failed.built.outcome.status = Status::Failed("no such table".to_owned());
+        failed.built.status = Status::Failed("no such table".to_owned());
 
         assert_eq!(
             failed.to_string(),

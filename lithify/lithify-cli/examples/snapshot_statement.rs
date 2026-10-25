@@ -4,7 +4,7 @@ use ulid::Ulid;
 use lithify_artifact::shard::Shard;
 use lithify_artifact::snapshot::Snapshot;
 use lithify_core::artifact::Artifact;
-use lithify_core::build_log::{BuildLog, Outcome, Run, Status};
+use lithify_core::build_log::{BuildLog, Run, Status, TableBuilt};
 use lithify_core::listener::{Finish, ReplayEnd};
 use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
 use lithify_core::sink::{TablePath, Warehouse};
@@ -33,23 +33,24 @@ fn customers() -> TableModel {
 }
 
 fn previous(window: &Window, shard: &str) -> BuildLog {
-    BuildLog::new(
-        &Run::new(
-            Ulid::nil(),
-            Ts::from(DateTime::UNIX_EPOCH),
-            "snapshot",
-            "daily",
-            "primary",
-            "{}",
-            "0.1.0",
-        ),
+    TableBuilt::new(
         Some(customers().id().clone()),
         Some(customers().id().clone()),
         None,
         Some(TablePath::new("mysql_shop", shard)),
         Window::new(Ts::try_from(0).unwrap(), *window.from()),
-        Outcome::new(Status::Succeeded, Ts::from(DateTime::UNIX_EPOCH)),
+        Status::Succeeded,
+        Ts::from(DateTime::UNIX_EPOCH),
     )
+    .logged(&Run::new(
+        Ulid::nil(),
+        Ts::from(DateTime::UNIX_EPOCH),
+        "snapshot",
+        "daily",
+        "primary",
+        "{}",
+        "0.1.0",
+    ))
 }
 
 fn statements<W: Warehouse>(warehouse: W) -> String {

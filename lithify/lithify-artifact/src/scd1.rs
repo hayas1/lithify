@@ -474,7 +474,7 @@ mod tests {
     use chrono::DateTime;
     use chrono_tz::Tz;
 
-    use lithify_core::build_log::{Outcome, Run};
+    use lithify_core::build_log::{Run, TableBuilt};
     use lithify_core::schedule::{Schedule, Timeline};
 
     use super::*;
@@ -693,7 +693,7 @@ mod tests {
     ) -> BuildLog {
         snapshot
             .build()
-            .built(Outcome::new(Status::Succeeded, Ts::from(finished_at)))
+            .built(Status::Succeeded, Ts::from(finished_at))
             .logged(run)
     }
 
@@ -1597,15 +1597,16 @@ mod tests {
             "0.1.0",
         );
         let finished_at = DateTime::from_timestamp_millis(1789949000000).unwrap();
-        let previous = BuildLog::new(
-            &run,
+        let previous = TableBuilt::new(
             Some(TableId::new("shop", "customers")),
             Some(TableId::new("shop", "customers")),
             None,
             Some(base.clone()),
             Window::new(Ts::try_from(0).unwrap(), Ts::try_from(100).unwrap()),
-            Outcome::new(Status::Succeeded, Ts::from(finished_at)),
-        );
+            Status::Succeeded,
+            Ts::from(finished_at),
+        )
+        .logged(&run);
         let builder = shop().builder::<Log, Engine>(
             &Log,
             TableId::new("shop", "customers"),
@@ -1623,15 +1624,16 @@ mod tests {
                 &run,
                 finished_at
             ),
-            BuildLog::new(
-                &run,
+            TableBuilt::new(
                 Some(TableId::new("shop", "customers")),
                 Some(TableId::new("shop", "customers")),
                 Some(base),
                 Some(TablePath::new("mysql_shop", "customers_20260920")),
                 window,
-                Outcome::new(Status::Succeeded, Ts::from(finished_at)),
+                Status::Succeeded,
+                Ts::from(finished_at)
             )
+            .logged(&run)
         );
     }
 
@@ -1652,15 +1654,16 @@ mod tests {
 
         assert_eq!(
             logged(renamed, &run, finished_at),
-            BuildLog::new(
-                &run,
+            TableBuilt::new(
                 Some(TableId::new("shop", "customers")),
                 Some(TableId::new("shop", "clients")),
                 Some(base.clone()),
                 Some(TablePath::new("mysql_shop", "clients_20260920")),
                 window(),
-                Outcome::new(Status::Succeeded, Ts::from(finished_at)),
+                Status::Succeeded,
+                Ts::from(finished_at)
             )
+            .logged(&run)
         );
     }
 
@@ -1693,15 +1696,16 @@ mod tests {
 
         assert_eq!(
             logged(created, &run, finished_at),
-            BuildLog::new(
-                &run,
+            TableBuilt::new(
                 None,
                 Some(TableId::new("shop", "orders")),
                 None,
                 Some(TablePath::new("mysql_shop", "orders_20260920")),
                 window(),
-                Outcome::new(Status::Succeeded, Ts::from(finished_at)),
+                Status::Succeeded,
+                Ts::from(finished_at)
             )
+            .logged(&run)
         );
     }
 
@@ -1765,15 +1769,16 @@ mod tests {
         assert_eq!(dropped.create().unwrap(), Vec::<SqlString>::new());
         assert_eq!(
             logged(dropped, &run, finished_at),
-            BuildLog::new(
-                &run,
+            TableBuilt::new(
                 Some(TableId::new("shop", "customers")),
                 None,
                 Some(base),
                 None,
                 window(),
-                Outcome::new(Status::Succeeded, Ts::from(finished_at)),
+                Status::Succeeded,
+                Ts::from(finished_at)
             )
+            .logged(&run)
         );
     }
 

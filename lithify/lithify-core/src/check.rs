@@ -243,7 +243,7 @@ mod tests {
     use chrono::{DateTime, Utc};
 
     use super::*;
-    use crate::build_log::{Outcome, Run, Status};
+    use crate::build_log::{Run, Status, TableBuilt};
     use crate::testing::{Engine, Recorder};
 
     fn at<A>(rfc3339: &str) -> Ts<A> {
@@ -264,16 +264,7 @@ mod tests {
     }
 
     fn logged(run: u64, table: &str, window: Window, status: Status) -> BuildLog {
-        BuildLog::new(
-            &Run::new(
-                Ulid::from_parts(run, 0),
-                Ts::from(DateTime::UNIX_EPOCH),
-                "snapshot",
-                "daily",
-                "primary",
-                "{}",
-                "0.1.0",
-            ),
+        TableBuilt::new(
             Some(TableId::new("shop", table)),
             Some(TableId::new("shop", table)),
             None,
@@ -282,11 +273,18 @@ mod tests {
                 &format!("{table}_{}", window.from().milliseconds_since_epoch()),
             )),
             window,
-            Outcome::new(
-                status,
-                Ts::from(DateTime::from_timestamp_millis(0).unwrap()),
-            ),
+            status,
+            Ts::from(DateTime::from_timestamp_millis(0).unwrap()),
         )
+        .logged(&Run::new(
+            Ulid::from_parts(run, 0),
+            Ts::from(DateTime::UNIX_EPOCH),
+            "snapshot",
+            "daily",
+            "primary",
+            "{}",
+            "0.1.0",
+        ))
     }
 
     fn expected(now: &str) -> Expectation {

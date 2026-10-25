@@ -606,7 +606,7 @@ mod tests {
     use chrono::DateTime;
     use ulid::Ulid;
 
-    use lithify_core::build_log::{Outcome, Run};
+    use lithify_core::build_log::{Run, TableBuilt};
     use lithify_core::sink::TablePath;
     use lithify_core::ts::Ts;
     use lithify_core::window::Window;
@@ -653,16 +653,7 @@ mod tests {
     #[test]
     fn a_table_renamed_within_its_window_is_listed_under_its_new_name_as_renamed() {
         let at = |rfc3339: &str| rfc3339.parse::<DateTime<chrono::Utc>>().unwrap();
-        let renamed = BuildLog::new(
-            &Run::new(
-                Ulid::from_parts(1, 0),
-                Ts::from(DateTime::UNIX_EPOCH),
-                "snapshot",
-                "daily",
-                "primary",
-                "{}",
-                "0.1.0",
-            ),
+        let renamed = TableBuilt::new(
             Some(TableId::new("shop", "people")),
             Some(TableId::new("shop", "persons")),
             None,
@@ -671,8 +662,18 @@ mod tests {
                 Ts::from(at("2026-09-20T00:00:00Z")),
                 Ts::from(at("2026-09-21T00:00:00Z")),
             ),
-            Outcome::new(Status::Succeeded, Ts::from(at("2026-09-21T00:10:00Z"))),
-        );
+            Status::Succeeded,
+            Ts::from(at("2026-09-21T00:10:00Z")),
+        )
+        .logged(&Run::new(
+            Ulid::from_parts(1, 0),
+            Ts::from(DateTime::UNIX_EPOCH),
+            "snapshot",
+            "daily",
+            "primary",
+            "{}",
+            "0.1.0",
+        ));
         let rows = listed(vec![renamed]);
 
         assert_eq!(rows[0].table, TableId::new("shop", "persons"));

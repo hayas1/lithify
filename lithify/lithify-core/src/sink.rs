@@ -2,7 +2,7 @@ use std::fmt;
 
 use crate::artifact::UnbuildableArtifact;
 use crate::build_log::{
-    BuildLog, BuildLogQuery, BuildLogRow, Outcome, Series, Status, TableBuild, TableBuilt,
+    BuildLog, BuildLogQuery, BuildLogRow, Series, Status, TableBuild, TableBuilt,
     UnreadableBuildLog,
 };
 use crate::model::{ColumnModel, ColumnType};
@@ -349,7 +349,7 @@ pub trait WarehouseClient {
             },
         };
 
-        build.built(Outcome::new(status, Ts::now()))
+        build.built(status, Ts::now())
     }
 }
 

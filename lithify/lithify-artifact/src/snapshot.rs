@@ -159,30 +159,31 @@ impl Overwrite for Snapshot {
 mod tests {
     use chrono::DateTime;
 
-    use lithify_core::build_log::{Outcome, Run, Status};
+    use lithify_core::build_log::{Run, Status, TableBuilt};
 
     use super::*;
 
     const DAY: i64 = 86_400_000;
 
     fn built(artifact: &str, schedule: &str, table: &str, (from, to): (i64, i64)) -> BuildLog {
-        BuildLog::new(
-            &Run::new(
-                ulid::Ulid::nil(),
-                Ts::from(DateTime::UNIX_EPOCH),
-                artifact,
-                schedule,
-                "primary",
-                "{}",
-                "0.1.0",
-            ),
+        TableBuilt::new(
             Some(TableId::new("shop", table)),
             Some(TableId::new("shop", table)),
             None,
             Some(TablePath::new("mysql_shop", &format!("{table}_{to}"))),
             Window::new(Ts::try_from(from).unwrap(), Ts::try_from(to).unwrap()),
-            Outcome::new(Status::Succeeded, Ts::from(DateTime::UNIX_EPOCH)),
+            Status::Succeeded,
+            Ts::from(DateTime::UNIX_EPOCH),
         )
+        .logged(&Run::new(
+            ulid::Ulid::nil(),
+            Ts::from(DateTime::UNIX_EPOCH),
+            artifact,
+            schedule,
+            "primary",
+            "{}",
+            "0.1.0",
+        ))
     }
 
     #[test]

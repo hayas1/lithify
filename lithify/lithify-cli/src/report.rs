@@ -138,7 +138,7 @@ mod tests {
     use chrono::DateTime;
     use ulid::Ulid;
 
-    use lithify_core::build_log::{Outcome, Run, Status};
+    use lithify_core::build_log::{Run, Status, TableBuilt};
     use lithify_core::model::TableId;
     use lithify_core::sink::TablePath;
     use lithify_core::sql::SqlString;
@@ -166,18 +166,16 @@ mod tests {
     }
 
     fn failed() -> BuildLog {
-        BuildLog::new(
-            &run(),
+        TableBuilt::new(
             Some(TableId::new("shop", "people")),
             Some(TableId::new("shop", "people")),
             None,
             Some(TablePath::new("mysql_shop", "people_20260920")),
             window(),
-            Outcome::new(
-                Status::Failed("no era".to_owned()),
-                Ts::from(DateTime::UNIX_EPOCH),
-            ),
+            Status::Failed("no era".to_owned()),
+            Ts::from(DateTime::UNIX_EPOCH),
         )
+        .logged(&run())
     }
 
     #[test]

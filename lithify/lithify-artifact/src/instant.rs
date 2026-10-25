@@ -128,7 +128,7 @@ impl Overwrite for Instant {
 mod tests {
     use ulid::Ulid;
 
-    use lithify_core::build_log::{Outcome, Run, Status};
+    use lithify_core::build_log::{Run, Status, TableBuilt};
     use lithify_core::schedule::Timeline;
 
     use super::*;
@@ -147,23 +147,24 @@ mod tests {
     }
 
     fn built(artifact: &str, schedule: &str, (from, to): (&str, &str)) -> BuildLog {
-        BuildLog::new(
-            &Run::new(
-                Ulid::nil(),
-                Ts::from(DateTime::UNIX_EPOCH),
-                artifact,
-                schedule,
-                "primary",
-                "{}",
-                "0.1.0",
-            ),
+        TableBuilt::new(
             Some(TableId::new("shop", "people")),
             Some(TableId::new("shop", "people")),
             None,
             Some(TablePath::new("mysql_shop", "people")),
             Window::new(at(from), at(to)),
-            Outcome::new(Status::Succeeded, Ts::from(DateTime::UNIX_EPOCH)),
+            Status::Succeeded,
+            Ts::from(DateTime::UNIX_EPOCH),
         )
+        .logged(&Run::new(
+            Ulid::nil(),
+            Ts::from(DateTime::UNIX_EPOCH),
+            artifact,
+            schedule,
+            "primary",
+            "{}",
+            "0.1.0",
+        ))
     }
 
     #[test]

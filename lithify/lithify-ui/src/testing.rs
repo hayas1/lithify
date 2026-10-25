@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
-use lithify_core::build_log::{BuildLog, Outcome, Run, Status};
+use lithify_core::build_log::{BuildLog, Run, Status, TableBuilt};
 use lithify_core::model::TableId;
 use lithify_core::sink::{Namespace, SinkWarehouse, TablePath, WarehouseFn};
 use lithify_core::testing::{Engine, Recorder};
@@ -83,16 +83,7 @@ impl Kept {
     pub fn logs() -> Vec<BuildLog> {
         let at = |rfc3339: &str| rfc3339.parse::<DateTime<Utc>>().unwrap();
         let built = |table: &str, opened: &str, closed: &str, base: Option<&str>, status| {
-            BuildLog::new(
-                &Run::new(
-                    Ulid::from_parts(1, 0),
-                    Ts::from(DateTime::UNIX_EPOCH),
-                    "snapshot",
-                    "daily",
-                    "primary",
-                    "{}",
-                    "0.1.0",
-                ),
+            TableBuilt::new(
                 Some(TableId::new("shop", table)),
                 Some(TableId::new("shop", table)),
                 base.map(|base| TablePath::new("mysql_shop", base)),
@@ -101,8 +92,18 @@ impl Kept {
                     &format!("{table}_{}", at(opened).format("%Y%m%d")),
                 )),
                 Window::new(Ts::from(at(opened)), Ts::from(at(closed))),
-                Outcome::new(status, Ts::from(at(closed))),
+                status,
+                Ts::from(at(closed)),
             )
+            .logged(&Run::new(
+                Ulid::from_parts(1, 0),
+                Ts::from(DateTime::UNIX_EPOCH),
+                "snapshot",
+                "daily",
+                "primary",
+                "{}",
+                "0.1.0",
+            ))
         };
 
         vec![

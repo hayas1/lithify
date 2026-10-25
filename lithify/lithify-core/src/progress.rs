@@ -112,7 +112,7 @@ mod tests {
     use chrono::DateTime;
     use ulid::Ulid;
 
-    use crate::build_log::{Outcome, Run, Series, Status};
+    use crate::build_log::{Run, Series, Status, TableBuilt};
     use crate::sink::TablePath;
 
     use super::*;
@@ -134,23 +134,24 @@ mod tests {
         window: Window,
         status: Status,
     ) -> BuildLog {
-        BuildLog::new(
-            &Run::new(
-                Ulid::from_parts(run, 0),
-                Ts::from(DateTime::UNIX_EPOCH),
-                series.artifact(),
-                series.schedule(),
-                "primary",
-                CAPTURE,
-                "0.1.0",
-            ),
+        TableBuilt::new(
             Some(TableId::new("shop", table.unwrap_or("pets"))),
             table.map(|table| TableId::new("shop", table)),
             None,
             Some(TablePath::new("mysql_shop", "people")),
             window,
-            Outcome::new(status, Ts::from(DateTime::UNIX_EPOCH)),
+            status,
+            Ts::from(DateTime::UNIX_EPOCH),
         )
+        .logged(&Run::new(
+            Ulid::from_parts(run, 0),
+            Ts::from(DateTime::UNIX_EPOCH),
+            series.artifact(),
+            series.schedule(),
+            "primary",
+            CAPTURE,
+            "0.1.0",
+        ))
     }
 
     fn daily() -> Series {

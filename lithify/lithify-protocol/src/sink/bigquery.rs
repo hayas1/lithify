@@ -155,7 +155,7 @@ mod tests {
     use crate::source::debezium::mysql::MySql;
 
     use chrono::DateTime;
-    use lithify_core::build_log::{BuildLog, BuildLogQuery, Latest, Outcome, Run, Status};
+    use lithify_core::build_log::{BuildLog, BuildLogQuery, Latest, Run, Status, TableBuilt};
     use lithify_core::model::{ColumnType, TableId};
     use lithify_core::sink::{ChangeLogSql, TablePath, UnsupportedColumn};
     use lithify_core::ts::Ts;
@@ -195,16 +195,7 @@ mod tests {
 
     #[test]
     fn a_build_log_is_appended_under_the_next_id_with_its_instants_in_milliseconds() {
-        let log = BuildLog::new(
-            &Run::new(
-                Ulid::nil(),
-                Ts::from(DateTime::UNIX_EPOCH),
-                "snapshot",
-                "daily",
-                "primary",
-                "{}",
-                "0.1.0",
-            ),
+        let log = TableBuilt::new(
             Some(TableId::new("shop", "customers")),
             Some(TableId::new("shop", "clients")),
             Some(TablePath::new("mysql_shop", "customers_20260919")),
@@ -213,11 +204,18 @@ mod tests {
                 Ts::try_from(1789862400000).unwrap(),
                 Ts::try_from(1789948800000).unwrap(),
             ),
-            Outcome::new(
-                Status::Succeeded,
-                Ts::from(chrono::DateTime::from_timestamp_millis(1789949000000).unwrap()),
-            ),
-        );
+            Status::Succeeded,
+            Ts::from(chrono::DateTime::from_timestamp_millis(1789949000000).unwrap()),
+        )
+        .logged(&Run::new(
+            Ulid::nil(),
+            Ts::from(DateTime::UNIX_EPOCH),
+            "snapshot",
+            "daily",
+            "primary",
+            "{}",
+            "0.1.0",
+        ));
 
         assert_eq!(
             BuildLog::insert(

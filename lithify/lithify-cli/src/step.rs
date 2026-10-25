@@ -198,7 +198,7 @@ pub(crate) mod tests {
     use lithify_artifact::snapshot::Snapshot;
     use lithify_config::infra::Sink;
     use lithify_core::artifact::UnbuildableArtifact;
-    use lithify_core::build_log::{BuildLog, Latest, Outcome, Run, Status};
+    use lithify_core::build_log::{BuildLog, Latest, Run, Status, TableBuilt};
     use lithify_core::model::TableId;
     use lithify_core::runner::{BuildLogWrite, Tables};
     use lithify_protocol::sink::execution::DryRun;
@@ -467,16 +467,7 @@ place.snapshot = [{ prefix = "mysql_shop" }]
     }
 
     pub(crate) fn built_before(table: &str, capture: &str) -> BuildLog {
-        BuildLog::new(
-            &Run::new(
-                Ulid::from_parts(1, 0),
-                Ts::from(DateTime::UNIX_EPOCH),
-                "snapshot",
-                "daily",
-                "primary",
-                capture,
-                "0.1.0",
-            ),
+        TableBuilt::new(
             Some(TableId::new("shop", table)),
             Some(TableId::new("shop", table)),
             None,
@@ -485,8 +476,18 @@ place.snapshot = [{ prefix = "mysql_shop" }]
                 Ts::from(at("2026-09-19T00:00:00Z")),
                 Ts::from(at("2026-09-20T00:00:00Z")),
             ),
-            Outcome::new(Status::Succeeded, Ts::from(at("2026-09-20T00:10:00Z"))),
+            Status::Succeeded,
+            Ts::from(at("2026-09-20T00:10:00Z")),
         )
+        .logged(&Run::new(
+            Ulid::from_parts(1, 0),
+            Ts::from(DateTime::UNIX_EPOCH),
+            "snapshot",
+            "daily",
+            "primary",
+            capture,
+            "0.1.0",
+        ))
     }
 
     pub(crate) fn logged(change_logs: &str, before: &[BuildLog]) -> DuckDbClient {

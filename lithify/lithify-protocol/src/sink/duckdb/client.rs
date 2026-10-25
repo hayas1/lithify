@@ -194,7 +194,7 @@ mod tests {
     use chrono::DateTime;
     use lithify_core::artifact::UnbuildableArtifact;
     use lithify_core::build_log::Latest;
-    use lithify_core::build_log::{BuildLog, Outcome, Run, Series, Status, UnreadableBuildLog};
+    use lithify_core::build_log::{BuildLog, Run, Series, Status, TableBuilt, UnreadableBuildLog};
     use lithify_core::event::{MalformedEvent, SchemaChange};
     use lithify_core::listener::OutOfOrder;
     use lithify_core::model::TableId;
@@ -368,26 +368,24 @@ mod tests {
     ) -> BuildLog {
         let table = table_to.or(table_from).unwrap();
 
-        BuildLog::new(
-            &Run::new(
-                Ulid::from_parts(finished_at, 0),
-                Ts::from(DateTime::UNIX_EPOCH),
-                "snapshot",
-                "daily",
-                "primary",
-                r#"{"debezium":{"dialect":"mysql"}}"#,
-                "0.1.0",
-            ),
+        TableBuilt::new(
             table_from.map(|table| TableId::new("shop", table)),
             table_to.map(|table| TableId::new("shop", table)),
             Some(TablePath::new("mysql_shop", &format!("{table}_base"))),
             table_to.map(|_| TablePath::new("mysql_shop", &format!("{table}_{from}"))),
             window(from, to),
-            Outcome::new(
-                status,
-                Ts::from(DateTime::from_timestamp_millis(finished_at as i64).unwrap()),
-            ),
+            status,
+            Ts::from(DateTime::from_timestamp_millis(finished_at as i64).unwrap()),
         )
+        .logged(&Run::new(
+            Ulid::from_parts(finished_at, 0),
+            Ts::from(DateTime::UNIX_EPOCH),
+            "snapshot",
+            "daily",
+            "primary",
+            r#"{"debezium":{"dialect":"mysql"}}"#,
+            "0.1.0",
+        ))
     }
 
     fn logging(logs: &[BuildLog]) -> DuckDbClient {
