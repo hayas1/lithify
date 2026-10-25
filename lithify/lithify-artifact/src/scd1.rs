@@ -693,8 +693,8 @@ mod tests {
     ) -> BuildLog {
         snapshot
             .build()
-            .built(Status::Succeeded)
-            .logged(run, finished_at)
+            .built(Outcome::new(Status::Succeeded, Ts::from(finished_at)))
+            .logged(run)
     }
 
     fn snapshots_in<W: Warehouse + Clone>(
@@ -1589,7 +1589,7 @@ mod tests {
         let base = TablePath::new("mysql_shop", "customers_20260919");
         let run = Run::new(
             ulid::Ulid::nil(),
-            DateTime::UNIX_EPOCH,
+            Ts::from(DateTime::UNIX_EPOCH),
             "snapshot",
             "daily",
             "primary",
@@ -1604,7 +1604,7 @@ mod tests {
             None,
             Some(base.clone()),
             Window::new(Ts::try_from(0).unwrap(), Ts::try_from(100).unwrap()),
-            Outcome::new(Status::Succeeded, finished_at),
+            Outcome::new(Status::Succeeded, Ts::from(finished_at)),
         );
         let builder = shop().builder::<Log, Engine>(
             &Log,
@@ -1630,7 +1630,7 @@ mod tests {
                 Some(base),
                 Some(TablePath::new("mysql_shop", "customers_20260920")),
                 window,
-                Outcome::new(Status::Succeeded, finished_at),
+                Outcome::new(Status::Succeeded, Ts::from(finished_at)),
             )
         );
     }
@@ -1639,7 +1639,7 @@ mod tests {
     fn a_table_renamed_within_the_window_is_logged_from_its_first_name_to_its_last() {
         let run = Run::new(
             ulid::Ulid::nil(),
-            DateTime::UNIX_EPOCH,
+            Ts::from(DateTime::UNIX_EPOCH),
             "snapshot",
             "daily",
             "primary",
@@ -1659,7 +1659,7 @@ mod tests {
                 Some(base.clone()),
                 Some(TablePath::new("mysql_shop", "clients_20260920")),
                 window(),
-                Outcome::new(Status::Succeeded, finished_at),
+                Outcome::new(Status::Succeeded, Ts::from(finished_at)),
             )
         );
     }
@@ -1668,7 +1668,7 @@ mod tests {
     fn a_table_created_within_the_window_is_logged_as_opening_it_under_no_name() {
         let run = Run::new(
             ulid::Ulid::nil(),
-            DateTime::UNIX_EPOCH,
+            Ts::from(DateTime::UNIX_EPOCH),
             "snapshot",
             "daily",
             "primary",
@@ -1700,7 +1700,7 @@ mod tests {
                 None,
                 Some(TablePath::new("mysql_shop", "orders_20260920")),
                 window(),
-                Outcome::new(Status::Succeeded, finished_at),
+                Outcome::new(Status::Succeeded, Ts::from(finished_at)),
             )
         );
     }
@@ -1709,7 +1709,7 @@ mod tests {
     fn a_table_captured_within_the_window_is_logged_as_opening_it_under_its_name() {
         let run = Run::new(
             ulid::Ulid::nil(),
-            DateTime::UNIX_EPOCH,
+            Ts::from(DateTime::UNIX_EPOCH),
             "snapshot",
             "daily",
             "primary",
@@ -1742,7 +1742,7 @@ mod tests {
     fn a_table_dropped_within_the_window_is_logged_without_a_target() {
         let run = Run::new(
             ulid::Ulid::nil(),
-            DateTime::UNIX_EPOCH,
+            Ts::from(DateTime::UNIX_EPOCH),
             "snapshot",
             "daily",
             "primary",
@@ -1772,7 +1772,7 @@ mod tests {
                 Some(base),
                 None,
                 window(),
-                Outcome::new(Status::Succeeded, finished_at),
+                Outcome::new(Status::Succeeded, Ts::from(finished_at)),
             )
         );
     }
@@ -1781,7 +1781,7 @@ mod tests {
     fn a_table_renamed_and_then_dropped_within_the_window_is_logged_from_its_first_name() {
         let run = Run::new(
             ulid::Ulid::nil(),
-            DateTime::UNIX_EPOCH,
+            Ts::from(DateTime::UNIX_EPOCH),
             "snapshot",
             "daily",
             "primary",

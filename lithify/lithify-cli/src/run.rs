@@ -1,12 +1,10 @@
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
-
 use lithify_config::Pipeline;
 use lithify_config::infra::{Sink, Source};
 use lithify_config::table;
 use lithify_core::sink::OpenWarehouse;
-use lithify_core::ts::Ts;
+use lithify_core::ts::{Replay, Ts};
 use lithify_protocol::sink::bigquery::client::BigQueryClient;
 use lithify_protocol::sink::duckdb::client::DuckDbClient;
 use lithify_protocol::sink::duckdb::config::Config;
@@ -27,7 +25,7 @@ pub struct Run {
     directory: PathBuf,
     credentials: Credentials,
     sink: Option<String>,
-    now: DateTime<Utc>,
+    now: Ts<Replay>,
 }
 
 impl Run {
@@ -35,7 +33,7 @@ impl Run {
         directory: PathBuf,
         credentials: Credentials,
         sink: Option<String>,
-        now: DateTime<Utc>,
+        now: Ts<Replay>,
     ) -> Self {
         Self {
             directory,
@@ -93,7 +91,7 @@ impl Run {
             snapshot.schedule(),
             source.since(),
             &source.capture().to_json()?,
-            Ts::from(self.now),
+            self.now,
         );
         let (namespace, series) = (snapshot.namespace(), snapshot.series());
 

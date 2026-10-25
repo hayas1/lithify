@@ -371,7 +371,7 @@ mod tests {
         BuildLog::new(
             &Run::new(
                 Ulid::from_parts(finished_at, 0),
-                DateTime::UNIX_EPOCH,
+                Ts::from(DateTime::UNIX_EPOCH),
                 "snapshot",
                 "daily",
                 "primary",
@@ -385,7 +385,7 @@ mod tests {
             window(from, to),
             Outcome::new(
                 status,
-                DateTime::from_timestamp_millis(finished_at as i64).unwrap(),
+                Ts::from(DateTime::from_timestamp_millis(finished_at as i64).unwrap()),
             ),
         )
     }

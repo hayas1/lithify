@@ -5,7 +5,7 @@ use crate::build_log::{BuildLog, Latest, Series, UnreadableBuildLog};
 use crate::model::TableId;
 use crate::schedule::Schedule;
 use crate::sink::{Namespace, TablePath, WarehouseClient};
-use crate::ts::{Event, Ts};
+use crate::ts::{Event, Replay, Ts};
 use crate::window::Window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,11 +92,11 @@ pub struct Expectation {
     schedule: Schedule,
     since: Ts<Event>,
     capture: String,
-    now: Ts<Event>,
+    now: Ts<Replay>,
 }
 
 impl Expectation {
-    pub fn new(schedule: Schedule, since: Ts<Event>, capture: &str, now: Ts<Event>) -> Self {
+    pub fn new(schedule: Schedule, since: Ts<Event>, capture: &str, now: Ts<Replay>) -> Self {
         Self {
             schedule,
             since,
@@ -176,7 +176,7 @@ impl Expectation {
 
     fn due_until(&self, built_until: Ts<Event>) -> Option<Ts<Event>> {
         self.schedule
-            .windows(built_until, self.now)
+            .windows(built_until, self.now.as_event())
             .last()
             .map(|window| *window.to())
     }
@@ -246,7 +246,7 @@ mod tests {
     use crate::build_log::{Outcome, Run, Status};
     use crate::testing::{Engine, Recorder};
 
-    fn at(rfc3339: &str) -> Ts<Event> {
+    fn at<A>(rfc3339: &str) -> Ts<A> {
         Ts::from(rfc3339.parse::<DateTime<Utc>>().unwrap())
     }
 
@@ -267,7 +267,7 @@ mod tests {
         BuildLog::new(
             &Run::new(
                 Ulid::from_parts(run, 0),
-                DateTime::UNIX_EPOCH,
+                Ts::from(DateTime::UNIX_EPOCH),
                 "snapshot",
                 "daily",
                 "primary",
@@ -282,7 +282,10 @@ mod tests {
                 &format!("{table}_{}", window.from().milliseconds_since_epoch()),
             )),
             window,
-            Outcome::new(status, DateTime::from_timestamp_millis(0).unwrap()),
+            Outcome::new(
+                status,
+                Ts::from(DateTime::from_timestamp_millis(0).unwrap()),
+            ),
         )
     }
 

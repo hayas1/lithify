@@ -2,13 +2,11 @@ use std::fmt::{self, Display, Formatter};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use chrono::Utc;
-
 use lithify_cli::artifacts::ArtifactConfig;
 use lithify_cli::pipeline::{CaptureConfig, WarehouseConfig};
 use lithify_cli::unrunnable::Unrunnable;
 use lithify_config::Pipeline;
-use lithify_core::ts::Ts;
+use lithify_core::ts::{Replay, Ts};
 
 use crate::pipeline::{ConnectedPipeline, Watch};
 use crate::runnable::Report;
@@ -44,7 +42,7 @@ impl Run {
     pub fn report(&self) -> Result<Report, Unverifiable> {
         let config: Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig> =
             Pipeline::open(self.directory.join(self.scenario.pipeline()))?;
-        let watch = Watch::new(Ts::from(Utc::now()), self.patience);
+        let watch = Watch::new(Ts::<Replay>::now().as_event(), self.patience);
         let mut pipeline =
             ConnectedPipeline::connect(&self.scenario, &config, watch, &self.key_id, &self.secret)?;
 

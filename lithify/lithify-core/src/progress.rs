@@ -137,7 +137,7 @@ mod tests {
         BuildLog::new(
             &Run::new(
                 Ulid::from_parts(run, 0),
-                DateTime::UNIX_EPOCH,
+                Ts::from(DateTime::UNIX_EPOCH),
                 series.artifact(),
                 series.schedule(),
                 "primary",
@@ -149,7 +149,7 @@ mod tests {
             None,
             Some(TablePath::new("mysql_shop", "people")),
             window,
-            Outcome::new(status, DateTime::UNIX_EPOCH),
+            Outcome::new(status, Ts::from(DateTime::UNIX_EPOCH)),
         )
     }
 

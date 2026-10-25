@@ -1,10 +1,10 @@
-use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
+use chrono::{NaiveDate, NaiveTime};
 
 use lithify_config::infra::{Sink, Source};
 use lithify_core::runner::StepTaker;
 use lithify_core::schedule::Timeline;
 use lithify_core::stepping::Stepping;
-use lithify_core::ts::Ts;
+use lithify_core::ts::{Replay, Ts};
 
 use crate::artifacts::{ArtifactConfig, Declared, DeclaredSnapshot, Lineup};
 use crate::journal::Journal;
@@ -25,7 +25,7 @@ impl RunCommand {
         &self,
         sink: &Sink<WarehouseConfig, ArtifactConfig>,
         source: &Source<CaptureConfig>,
-        now: DateTime<Utc>,
+        now: Ts<Replay>,
         taker: &P,
         writer: &B,
         journal: &mut Journal,
@@ -39,7 +39,7 @@ impl RunCommand {
             taker,
             Timeline::new(
                 DeclaredSnapshot::of(sink)?.schedule(),
-                source.since()..Ts::from(now),
+                source.since()..now.as_event(),
             ),
             source.capture().to_json()?,
         );
@@ -329,14 +329,14 @@ pub(crate) mod tests {
             .unwrap();
         let writer = DeclaredSnapshot::of(sink)
             .unwrap()
-            .build(source, at(now))
+            .build(source, Ts::from(at(now)))
             .unwrap();
         let mut journal = Journal::default();
 
         command.settle(
             sink,
             source,
-            at(now),
+            Ts::from(at(now)),
             &Taking::new(
                 client,
                 source.capture(),

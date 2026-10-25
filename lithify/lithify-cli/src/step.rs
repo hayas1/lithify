@@ -281,14 +281,13 @@ place.snapshot = [{ prefix = "mysql_shop" }]
             Namespace::from("mysql_shop"),
             Run::new(
                 Ulid::nil(),
-                DateTime::UNIX_EPOCH,
+                Ts::from(DateTime::UNIX_EPOCH),
                 "snapshot",
                 "daily",
                 "primary",
                 CAPTURE,
                 "0.1.0",
             ),
-            || DateTime::UNIX_EPOCH,
         )
     }
 
@@ -471,7 +470,7 @@ place.snapshot = [{ prefix = "mysql_shop" }]
         BuildLog::new(
             &Run::new(
                 Ulid::from_parts(1, 0),
-                DateTime::UNIX_EPOCH,
+                Ts::from(DateTime::UNIX_EPOCH),
                 "snapshot",
                 "daily",
                 "primary",
@@ -486,7 +485,7 @@ place.snapshot = [{ prefix = "mysql_shop" }]
                 Ts::from(at("2026-09-19T00:00:00Z")),
                 Ts::from(at("2026-09-20T00:00:00Z")),
             ),
-            Outcome::new(Status::Succeeded, at("2026-09-20T00:10:00Z")),
+            Outcome::new(Status::Succeeded, Ts::from(at("2026-09-20T00:10:00Z"))),
         )
     }
 
@@ -608,7 +607,7 @@ place.snapshot = [{ prefix = "mysql_shop" }]
                     pipeline.tables(),
                     &DeclaredSnapshot::of(sink)
                         .unwrap()
-                        .build(source, at("2026-09-22T05:00:00Z"))
+                        .build(source, Ts::from(at("2026-09-22T05:00:00Z")))
                         .unwrap(),
                 ),
             )

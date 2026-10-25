@@ -149,7 +149,7 @@ mod tests {
     fn run() -> Run {
         Run::new(
             Ulid::nil(),
-            DateTime::UNIX_EPOCH,
+            Ts::from(DateTime::UNIX_EPOCH),
             "snapshot",
             "daily",
             "primary",
@@ -173,7 +173,10 @@ mod tests {
             None,
             Some(TablePath::new("mysql_shop", "people_20260920")),
             window(),
-            Outcome::new(Status::Failed("no era".to_owned()), DateTime::UNIX_EPOCH),
+            Outcome::new(
+                Status::Failed("no era".to_owned()),
+                Ts::from(DateTime::UNIX_EPOCH),
+            ),
         )
     }
 
@@ -181,9 +184,7 @@ mod tests {
     fn a_dry_run_writes_what_its_step_recorded_and_reports_a_table_that_failed_as_a_build_does() {
         let into = std::env::temp_dir().join(format!("lithify-dry-run-{}", Ulid::generate()));
         let dry_run = DryRunBuildLogWrite::new(
-            BuildLogWrite::new(Namespace::from("mysql_shop"), run(), || {
-                DateTime::UNIX_EPOCH
-            }),
+            BuildLogWrite::new(Namespace::from("mysql_shop"), run()),
             &into,
             "rustfs",
         );

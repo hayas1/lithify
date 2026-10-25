@@ -198,7 +198,7 @@ mod tests {
         let log = BuildLog::new(
             &Run::new(
                 Ulid::nil(),
-                DateTime::UNIX_EPOCH,
+                Ts::from(DateTime::UNIX_EPOCH),
                 "snapshot",
                 "daily",
                 "primary",
@@ -215,7 +215,7 @@ mod tests {
             ),
             Outcome::new(
                 Status::Succeeded,
-                chrono::DateTime::from_timestamp_millis(1789949000000).unwrap(),
+                Ts::from(chrono::DateTime::from_timestamp_millis(1789949000000).unwrap()),
             ),
         );
 

@@ -10,7 +10,7 @@ use lithify_artifact::scd2::Scd2;
 use lithify_artifact::shard::Shard;
 use lithify_artifact::snapshot::Snapshot;
 use lithify_core::artifact::Artifact;
-use lithify_core::build_log::{BuildLog, Run, Status};
+use lithify_core::build_log::{BuildLog, Outcome, Run, Status};
 use lithify_core::listener::{Finish, ReplayEnd};
 use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
 use lithify_core::schedule::{Schedule, Timeline};
@@ -124,18 +124,20 @@ impl Shards {
             self.client.execute(statement).unwrap();
         }
 
-        build.built(Status::Succeeded).logged(
-            &Run::new(
+        build
+            .built(Outcome::new(
+                Status::Succeeded,
+                Ts::from(DateTime::UNIX_EPOCH),
+            ))
+            .logged(&Run::new(
                 Ulid::nil(),
-                DateTime::UNIX_EPOCH,
+                Ts::from(DateTime::UNIX_EPOCH),
                 artifact.series().artifact(),
                 artifact.series().schedule(),
                 "primary",
                 "{}",
                 "0.1.0",
-            ),
-            DateTime::UNIX_EPOCH,
-        )
+            ))
     }
 
     fn rows(&self, built: &BuildLog) -> Vec<Row> {

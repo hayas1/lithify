@@ -86,7 +86,7 @@ impl Kept {
             BuildLog::new(
                 &Run::new(
                     Ulid::from_parts(1, 0),
-                    DateTime::UNIX_EPOCH,
+                    Ts::from(DateTime::UNIX_EPOCH),
                     "snapshot",
                     "daily",
                     "primary",
@@ -101,7 +101,7 @@ impl Kept {
                     &format!("{table}_{}", at(opened).format("%Y%m%d")),
                 )),
                 Window::new(Ts::from(at(opened)), Ts::from(at(closed))),
-                Outcome::new(status, at(closed)),
+                Outcome::new(status, Ts::from(at(closed))),
             )
         };
 

@@ -36,7 +36,7 @@ fn previous(window: &Window, shard: &str) -> BuildLog {
     BuildLog::new(
         &Run::new(
             Ulid::nil(),
-            DateTime::UNIX_EPOCH,
+            Ts::from(DateTime::UNIX_EPOCH),
             "snapshot",
             "daily",
             "primary",
@@ -48,7 +48,7 @@ fn previous(window: &Window, shard: &str) -> BuildLog {
         None,
         Some(TablePath::new("mysql_shop", shard)),
         Window::new(Ts::try_from(0).unwrap(), *window.from()),
-        Outcome::new(Status::Succeeded, DateTime::UNIX_EPOCH),
+        Outcome::new(Status::Succeeded, Ts::from(DateTime::UNIX_EPOCH)),
     )
 }
 

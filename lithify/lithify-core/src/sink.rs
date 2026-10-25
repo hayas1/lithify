@@ -2,12 +2,13 @@ use std::fmt;
 
 use crate::artifact::UnbuildableArtifact;
 use crate::build_log::{
-    BuildLog, BuildLogQuery, BuildLogRow, Series, Status, TableBuild, TableBuilt,
+    BuildLog, BuildLogQuery, BuildLogRow, Outcome, Series, Status, TableBuild, TableBuilt,
     UnreadableBuildLog,
 };
 use crate::model::{ColumnModel, ColumnType};
 use crate::source::{ColumnPath, SchemaChangeLog};
 use crate::sql::SqlString;
+use crate::ts::Ts;
 use crate::window::Window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -348,7 +349,7 @@ pub trait WarehouseClient {
             },
         };
 
-        build.built(status)
+        build.built(Outcome::new(status, Ts::now()))
     }
 }
 

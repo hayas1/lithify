@@ -19,6 +19,7 @@ use lithify_core::runner::{BuildLogWrite, StepTaker, Tables};
 use lithify_core::schedule::Schedule;
 use lithify_core::sink::Namespace;
 use lithify_core::stepping::{SeriesLog, Stepping};
+use lithify_core::ts::{Replay, Ts};
 use lithify_core::window::Window;
 
 use crate::journal::Journal;
@@ -189,14 +190,14 @@ impl<'a> DeclaredSnapshot<'a> {
     pub fn build(
         &self,
         source: &Source<CaptureConfig>,
-        now: DateTime<Utc>,
+        now: Ts<Replay>,
     ) -> Result<BuildLogWrite, Unrunnable> {
         let series = self.series();
 
         Ok(BuildLogWrite::new(
             self.namespace().clone(),
             Run::new(
-                Ulid::from_datetime(now.into()),
+                Ulid::from_datetime(DateTime::<Utc>::from(now).into()),
                 now,
                 series.artifact(),
                 series.schedule(),
@@ -204,7 +205,6 @@ impl<'a> DeclaredSnapshot<'a> {
                 &source.capture().to_json()?,
                 env!("CARGO_PKG_VERSION"),
             ),
-            Utc::now,
         ))
     }
 }
@@ -508,7 +508,6 @@ mod tests {
     use lithify_core::artifact::Artifact;
     use lithify_core::model::TableId;
     use lithify_core::sink::TablePath;
-    use lithify_core::ts::Ts;
     use lithify_core::window::Window;
 
     use super::*;

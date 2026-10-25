@@ -100,7 +100,7 @@ mod tests {
         BuildLog::new(
             &Run::new(
                 ulid::Ulid::nil(),
-                DateTime::UNIX_EPOCH,
+                Ts::from(DateTime::UNIX_EPOCH),
                 "snapshot",
                 "daily",
                 "primary",
@@ -117,7 +117,7 @@ mod tests {
             ),
             Outcome::new(
                 status,
-                DateTime::from_timestamp_millis(1789949000000).unwrap(),
+                Ts::from(DateTime::from_timestamp_millis(1789949000000).unwrap()),
             ),
         )
     }

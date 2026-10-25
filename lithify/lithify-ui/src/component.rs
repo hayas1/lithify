@@ -656,7 +656,7 @@ mod tests {
         let renamed = BuildLog::new(
             &Run::new(
                 Ulid::from_parts(1, 0),
-                DateTime::UNIX_EPOCH,
+                Ts::from(DateTime::UNIX_EPOCH),
                 "snapshot",
                 "daily",
                 "primary",
@@ -671,7 +671,7 @@ mod tests {
                 Ts::from(at("2026-09-20T00:00:00Z")),
                 Ts::from(at("2026-09-21T00:00:00Z")),
             ),
-            Outcome::new(Status::Succeeded, at("2026-09-21T00:10:00Z")),
+            Outcome::new(Status::Succeeded, Ts::from(at("2026-09-21T00:10:00Z"))),
         );
         let rows = listed(vec![renamed]);
 

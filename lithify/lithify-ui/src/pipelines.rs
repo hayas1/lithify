@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -10,7 +9,7 @@ use lithify_core::build_log::{BuildLog, BuildLogQuery, Latest, Series};
 use lithify_core::check::{Expectation, Inspection};
 use lithify_core::schedule::Schedule;
 use lithify_core::sink::{Namespace, SinkWarehouse, WarehouseClient, WarehouseFn};
-use lithify_core::ts::{Event, Ts};
+use lithify_core::ts::{Replay, Ts};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PipelineLocation {
@@ -269,7 +268,7 @@ where
     ) -> Result<SourceOverview, String> {
         let capture =
             serde_json::to_string(source.capture()).map_err(|unwritten| unwritten.to_string())?;
-        let now = Ts::from(Utc::now());
+        let now = Ts::now();
 
         Ok(SourceOverview::new(
             source.name(),
@@ -290,7 +289,7 @@ where
         sink: &Sink<W, A>,
         source: &Source<C>,
         capture: &str,
-        now: Ts<Event>,
+        now: Ts<Replay>,
         view: BuildLogView,
     ) -> Result<SinkInspection, String> {
         let undeclared = || format!("{} places no snapshot", sink.name());

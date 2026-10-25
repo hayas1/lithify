@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::convert::Infallible;
 use std::fmt::{self, Display, Formatter};
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::NaiveDate;
 
 use crate::artifact::{Artifact, UnbuildableArtifact};
 use crate::build_log::{BuildLog, Run, Series, TableBuilt, UnreadableBuildLog};
@@ -81,16 +81,11 @@ pub trait BuildLogWriter {
 pub struct BuildLogWrite {
     namespace: Namespace,
     run: Run,
-    clock: fn() -> DateTime<Utc>,
 }
 
 impl BuildLogWrite {
-    pub fn new(namespace: Namespace, run: Run, clock: fn() -> DateTime<Utc>) -> Self {
-        Self {
-            namespace,
-            run,
-            clock,
-        }
+    pub fn new(namespace: Namespace, run: Run) -> Self {
+        Self { namespace, run }
     }
 }
 
@@ -101,7 +96,6 @@ impl BuildLogWriter for BuildLogWrite {
         Self {
             namespace: namespace.clone(),
             run: self.run.advancing(series),
-            clock: self.clock,
         }
     }
 
@@ -110,10 +104,9 @@ impl BuildLogWriter for BuildLogWrite {
         K: WarehouseClient,
         E: From<K::Error> + From<UnbuildableArtifact>,
     {
-        let finished_at = (self.clock)();
         let logs: Vec<_> = built
             .into_iter()
-            .map(|built| built.logged(&self.run, finished_at))
+            .map(|built| built.logged(&self.run))
             .collect();
         client.create_build_log::<E>(&self.namespace)?;
         client.append_build_logs(&self.namespace, &logs)?;

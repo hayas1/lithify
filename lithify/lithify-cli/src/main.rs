@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use chrono::{NaiveDate, NaiveTime, Utc};
+use chrono::{NaiveDate, NaiveTime};
 use clap::{Parser, Subcommand};
 
 #[cfg(feature = "serve")]
@@ -16,6 +16,7 @@ use lithify_cli::journal::Journal;
 use lithify_cli::pipeline::{CaptureConfig, WarehouseConfig};
 use lithify_cli::run::Run;
 use lithify_cli::unrunnable::Unrunnable;
+use lithify_core::ts::Ts;
 use lithify_protocol::sink::duckdb::store::{S3Credential, Secret};
 #[cfg(feature = "serve")]
 use lithify_ui::pipelines::Pipelines;
@@ -139,7 +140,7 @@ impl PipelineArguments {
             self.directory.clone(),
             self.credential.credentials(),
             self.sink.clone(),
-            Utc::now(),
+            Ts::now(),
         )
     }
 }
