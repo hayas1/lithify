@@ -7,6 +7,7 @@ use chrono::NaiveTime;
 use lithify_artifact::instant::Instant;
 use lithify_artifact::scd1::Scd1;
 use lithify_artifact::scd2::Scd2;
+use lithify_artifact::shard::Shard;
 use lithify_artifact::snapshot::Snapshot;
 use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
 use lithify_core::build_log::{BuildLog, Outcome, Run, Status};
@@ -116,7 +117,7 @@ impl Shards {
 
         Self {
             client,
-            artifact: Snapshot::new("shop_snapshot", "%Y%m%d"),
+            artifact: Snapshot::new("shop_snapshot", Shard::new("%Y%m%d", chrono_tz::Tz::UTC)),
         }
     }
 
@@ -132,22 +133,12 @@ impl Shards {
     ) -> BuildLog {
         let log = Debezium::under("value", "mysql", MySql);
         let mut snapshot = artifact
-            .builder::<_, DuckDbWarehouse>(
-                &log,
-                people().id().clone(),
-                window,
-                artifact.open(window),
-                previous,
-            )
+            .builder::<_, DuckDbWarehouse>(&log, people().id().clone(), window, previous)
             .unwrap();
         snapshot
-            .era_boundary(
+            .finish(
                 self.client.warehouse(),
-                &Era::new(
-                    people(),
-                    Bound::EventTime(*window.from()),
-                    Bound::EventTime(*window.to()),
-                ),
+                &Era::new(people(), Bound::EventTime(*window.from()), Bound::Open),
             )
             .unwrap();
         self.client.build::<Unbuilt>(&snapshot).unwrap();
@@ -233,8 +224,9 @@ fn an_instant_holds_what_the_source_held_as_it_was_cut() {
     let shards = Shards::over(&replica);
     let six = Instant::new(
         NaiveTime::from_hms_opt(6, 0, 0).unwrap(),
-        chrono_tz::Tz::UTC,
-        Snapshot::cut("shop_instant", "%Y%m%d%H", chrono_tz::Tz::UTC),
+        Schedule::default(),
+        "shop_instant",
+        Shard::new("%Y%m%d%H", chrono_tz::Tz::UTC),
     );
     let first = shards.build(&day(0), None);
     let timeline = Timeline::new(Schedule::default(), *day(0).from()..*day(2).to());
@@ -253,7 +245,7 @@ fn an_instant_holds_what_the_source_held_as_it_was_cut() {
 fn an_scd1_holds_what_the_source_holds_now_onto_the_last_daily_snapshot() {
     let replica = replica();
     let shards = Shards::over(&replica);
-    let scd1 = Scd1::new(Snapshot::current("shop_scd1"));
+    let scd1 = Scd1::new("shop_scd1");
     let first = shards.build(&day(0), None);
     let built = Ts::try_from(DAY + 1_500).unwrap();
     let now = Ts::try_from(i64::from(i32::MAX)).unwrap();
@@ -302,7 +294,7 @@ impl Shards {
 }
 
 fn scd2() -> Scd2 {
-    Scd2::new(Namespace::from("shop_scd2"), "%Y%m%d", Schedule::default())
+    Scd2::new(Namespace::from("shop_scd2"), "%Y%m%d", chrono_tz::Tz::UTC)
 }
 
 #[test]
@@ -317,8 +309,8 @@ fn an_scd2_holds_at_every_instant_the_version_the_source_held_then() {
         scd2.base(std::slice::from_ref(&first), people().id(), &day(1)),
     );
     let versions = [
-        scd2.closed(people().id(), &day(0)).unwrap(),
-        scd2.closed(people().id(), &day(1)).unwrap(),
+        scd2.closed(people().id(), &day(0)),
+        scd2.closed(people().id(), &day(1)),
         second.target().unwrap().clone(),
     ];
 
@@ -350,7 +342,7 @@ fn an_scd2_built_again_for_a_window_holds_the_same_versions() {
     let base = scd2.base(std::slice::from_ref(&first), people().id(), &day(1));
     let second = shards.build_into(&scd2, &day(1), base);
     let versions = [
-        scd2.closed(people().id(), &day(1)).unwrap(),
+        scd2.closed(people().id(), &day(1)),
         second.target().unwrap().clone(),
     ];
     let built = shards.as_of(&versions, DAY + 2_500);
@@ -368,7 +360,7 @@ fn an_scd2_whose_table_changed_its_schema_within_the_window_is_refused() {
     let log = Debezium::under("value", "mysql", MySql);
     let window = day(0);
     let mut versions = scd2
-        .builder::<_, DuckDbWarehouse>(&log, people().id().clone(), &window, (), None)
+        .builder::<_, DuckDbWarehouse>(&log, people().id().clone(), &window, None)
         .unwrap();
     let era = Era::new(
         people(),

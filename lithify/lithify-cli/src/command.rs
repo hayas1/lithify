@@ -819,7 +819,7 @@ mod catch_up {
 
         assert!(matches!(
             unsharded,
-            Err(Unrunnable::Unsteppable(Unsteppable::Unsharded(_)))
+            Err(Unrunnable::Unsteppable(Unsteppable::Unopened(_)))
         ));
     }
 
@@ -1052,14 +1052,14 @@ mod derived {
                 "SELECT target, base FROM mysql_shop_scd1._lithify_log WHERE status = 'succeeded' ORDER BY id"
             ),
             [(
-                "mysql_shop_scd1.people".to_owned(),
+                "mysql_shop_scd1.people_scd_type_1".to_owned(),
                 "mysql_shop.people_20260920".to_owned()
             )]
         );
         assert_eq!(
             rows(
                 &client,
-                "SELECT id::VARCHAR, 'people' FROM mysql_shop_scd1.people ORDER BY id"
+                "SELECT id::VARCHAR, 'people' FROM mysql_shop_scd1.people_scd_type_1 ORDER BY id"
             ),
             [
                 ("7".to_owned(), "people".to_owned()),

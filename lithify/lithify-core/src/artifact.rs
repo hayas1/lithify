@@ -63,8 +63,6 @@ pub trait Artifact {
 
     type From: Artifact;
 
-    type Open;
-
     type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>: ArtifactBuilder
         + SchemaChangeListener<L::Position, Context = W, Error = UnbuildableArtifact>
     where
@@ -73,8 +71,6 @@ pub trait Artifact {
     fn series(&self) -> Series;
 
     fn window(&self, day: &Window, timeline: &Timeline) -> Option<Window>;
-
-    fn open(&self, window: &Window) -> Self::Open;
 
     fn base<'b>(
         &self,
@@ -90,7 +86,6 @@ pub trait Artifact {
         log: &'a L,
         table: TableId,
         window: &'a Window,
-        open: Self::Open,
         previous: Option<&BuildLog>,
     ) -> Result<Self::Builder<'a, L, W>, UnbuildableArtifact>;
 }

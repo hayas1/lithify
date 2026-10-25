@@ -8,6 +8,7 @@ use ulid::Ulid;
 use lithify_artifact::instant::{self, Instant};
 use lithify_artifact::scd1::{self, Scd1};
 use lithify_artifact::scd2::{self, Scd2};
+use lithify_artifact::shard::Shard;
 use lithify_artifact::snapshot::{self, Snapshot};
 use lithify_config::infra::{Sink, Source};
 use lithify_config::{Declaration, Place};
@@ -129,26 +130,16 @@ impl<'a> Placement<'a> {
         &self.namespace
     }
 
-    fn dated(&self, shard: &str, schedule: Schedule) -> Snapshot {
-        self.placed(Snapshot::dated(self.namespace.clone(), shard, schedule))
+    fn shard(&self, format: &str) -> Shard {
+        Shard::new(format, self.time_zone)
     }
 
-    fn cut(&self, shard: &str) -> Snapshot {
-        self.placed(Snapshot::cut(self.namespace.clone(), shard, self.time_zone))
-    }
-
-    fn current(&self) -> Snapshot {
-        self.placed(Snapshot::current(self.namespace.clone()))
-    }
-
-    fn placed(&self, snapshot: Snapshot) -> Snapshot {
-        snapshot.copied_into(
-            self.places
-                .iter()
-                .skip(1)
-                .map(|place| place.clone().into())
-                .collect(),
-        )
+    fn copies(&self) -> Vec<Namespace> {
+        self.places
+            .iter()
+            .skip(1)
+            .map(|place| place.clone().into())
+            .collect()
     }
 }
 
@@ -188,7 +179,11 @@ impl<'a> DeclaredSnapshot<'a> {
     }
 
     pub fn artifact(&self) -> Snapshot {
-        self.placement.dated(self.config.shard(), self.schedule())
+        Snapshot::new(
+            self.placement.namespace.clone(),
+            self.placement.shard(self.config.shard()),
+        )
+        .copied_into(self.placement.copies())
     }
 
     pub fn build(
@@ -217,24 +212,34 @@ impl<'a> DeclaredSnapshot<'a> {
 pub struct DeclaredInstant<'a> {
     config: &'a snapshot::Config,
     placement: Placement<'a>,
+    schedule: Schedule,
 }
 
 impl<'a> DeclaredInstant<'a> {
     pub const ARTIFACT: &'static str = Instant::KIND;
 
     pub fn of(sink: &'a Sink<WarehouseConfig, ArtifactConfig>) -> Result<Vec<Self>, Unrunnable> {
-        sink.artifact(Self::ARTIFACT)
+        let Some(configs) = sink
+            .artifact(Self::ARTIFACT)
             .and_then(ArtifactConfig::as_instant)
-            .into_iter()
-            .flatten()
+        else {
+            return Ok(Vec::new());
+        };
+        let schedule = DeclaredSnapshot::of(sink)?.schedule();
+
+        configs
+            .iter()
             .filter_map(|config| {
                 let places = sink
                     .place(Self::ARTIFACT)?
                     .cut(&Instant::cut(config.at()))?;
 
                 Some(
-                    Placement::of(sink, Self::ARTIFACT, places)
-                        .map(|placement| Self { config, placement }),
+                    Placement::of(sink, Self::ARTIFACT, places).map(|placement| Self {
+                        config,
+                        placement,
+                        schedule,
+                    }),
                 )
             })
             .collect()
@@ -251,9 +256,11 @@ impl<'a> DeclaredInstant<'a> {
     pub fn artifact(&self) -> Instant {
         Instant::new(
             self.config.at(),
-            self.placement.time_zone,
-            self.placement.cut(self.config.shard()),
+            self.schedule,
+            self.placement.namespace.clone(),
+            self.placement.shard(self.config.shard()),
         )
+        .copied_into(self.placement.copies())
     }
 }
 
@@ -284,14 +291,13 @@ impl<'a> DeclaredScd1<'a> {
     }
 
     pub fn artifact(&self) -> Scd1 {
-        Scd1::new(self.placement.current())
+        Scd1::new(self.placement.namespace.clone()).copied_into(self.placement.copies())
     }
 }
 
 pub struct DeclaredScd2<'a> {
     config: &'a scd2::Config,
     placement: Placement<'a>,
-    schedule: Schedule,
 }
 
 impl<'a> DeclaredScd2<'a> {
@@ -304,7 +310,6 @@ impl<'a> DeclaredScd2<'a> {
                 Ok(Self {
                     config,
                     placement: Placement::whole(sink, Self::ARTIFACT)?,
-                    schedule: DeclaredSnapshot::of(sink)?.schedule(),
                 })
             })
             .transpose()
@@ -322,7 +327,7 @@ impl<'a> DeclaredScd2<'a> {
         Scd2::new(
             self.placement.namespace.clone(),
             self.config.shard(),
-            self.schedule,
+            self.placement.time_zone,
         )
     }
 }
@@ -609,7 +614,7 @@ mod tests {
             DeclaredSnapshot::of(pipeline.sinks().next().unwrap())
                 .unwrap()
                 .artifact(),
-            Snapshot::new("mysql_shop", "%Y%m%d")
+            Snapshot::new("mysql_shop", Shard::new("%Y%m%d", Tz::UTC))
                 .copied_into(vec![Namespace::from("analytics.shop")])
         );
     }

@@ -45,14 +45,13 @@ impl<'a, P: Planner> Stepping<'a, P> {
     }
 
     pub fn up_to(self, date: NaiveDate, snapshot: &SeriesLog) -> Result<Self, P::Error> {
-        let shard = self
+        let until = self
             .timeline
-            .shard(date)
-            .ok_or(Unsteppable::Unsharded(date))?;
-        if !self.timeline.reached(&shard) {
-            return Err(Unsteppable::Unclosed(shard).into());
+            .through(date)
+            .ok_or(Unsteppable::Unopened(date))?;
+        if until > self.timeline.range().end {
+            return Err(Unsteppable::Unclosed(date).into());
         }
-        let until = *shard.to();
         let standing = self.progress(snapshot)?.standing();
 
         match standing.filter(|standing| *standing > until) {

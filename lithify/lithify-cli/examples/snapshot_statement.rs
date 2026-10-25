@@ -1,6 +1,7 @@
 use chrono::DateTime;
 use ulid::Ulid;
 
+use lithify_artifact::shard::Shard;
 use lithify_artifact::snapshot::Snapshot;
 use lithify_core::artifact::{Artifact, ArtifactBuilder};
 use lithify_core::build_log::{BuildLog, Outcome, Run, Status};
@@ -58,18 +59,12 @@ fn statements<W: Warehouse>(warehouse: &W) -> String {
         Ts::try_from(1789862400000).unwrap(),
         Ts::try_from(1789948800000).unwrap(),
     );
-    let artifact = Snapshot::new("mysql_shop", "%Y%m%d");
+    let artifact = Snapshot::new("mysql_shop", Shard::new("%Y%m%d", chrono_tz::Tz::UTC));
     let previous = std::env::args()
         .nth(2)
         .map(|shard| previous(&window, &shard));
     let mut snapshot = artifact
-        .builder::<_, W>(
-            &log,
-            customers().id().clone(),
-            &window,
-            (),
-            previous.as_ref(),
-        )
+        .builder::<_, W>(&log, customers().id().clone(), &window, previous.as_ref())
         .unwrap();
 
     SchemaChangeListener::<MySqlPosition>::era_boundary(

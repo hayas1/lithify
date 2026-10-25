@@ -1,33 +1,48 @@
-use chrono::NaiveTime;
-use chrono_tz::Tz;
+use chrono::{DateTime, NaiveTime, TimeDelta, Utc};
 
 use lithify_core::artifact::{Artifact, UnbuildableArtifact};
 use lithify_core::build_log::{BuildLog, Series};
 use lithify_core::model::TableId;
-use lithify_core::schedule::Schedule;
-use lithify_core::schedule::Timeline;
-use lithify_core::sink::{TablePath, Warehouse};
+use lithify_core::schedule::{Schedule, Timeline};
+use lithify_core::sink::{Namespace, TablePath, Warehouse};
 use lithify_core::source::RowChangeLog;
+use lithify_core::sql::SqlString;
+use lithify_core::ts::{Event, Ts};
 use lithify_core::window::Window;
 
-use crate::snapshot::{Snapshot, SnapshotBuilder};
+use crate::scd1::{Overwrite, Scd1Builder};
+use crate::shard::Shard;
+use crate::snapshot::Snapshot;
 
 pub type Config = Vec<crate::snapshot::Config>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Instant {
     at: NaiveTime,
-    cut: Schedule,
-    snapshot: Snapshot,
+    delay: TimeDelta,
+    namespace: Namespace,
+    copies: Vec<Namespace>,
+    shard: Shard,
 }
 
 impl Instant {
-    pub fn new(at: NaiveTime, zone: Tz, snapshot: Snapshot) -> Self {
+    pub fn new(
+        at: NaiveTime,
+        days: Schedule,
+        namespace: impl Into<Namespace>,
+        shard: Shard,
+    ) -> Self {
         Self {
             at,
-            cut: Schedule::daily(at, zone),
-            snapshot,
+            delay: days.delay(at),
+            namespace: namespace.into(),
+            copies: Vec::new(),
+            shard,
         }
+    }
+
+    pub fn copied_into(self, copies: Vec<Namespace>) -> Self {
+        Self { copies, ..self }
     }
 
     pub fn cut(at: NaiveTime) -> String {
@@ -40,19 +55,20 @@ impl Artifact for Instant {
 
     type From = Snapshot;
 
-    type Open = ();
-
-    type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = SnapshotBuilder<'a, L, W>;
+    type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = Scd1Builder<'a, Self, L, W>;
 
     fn series(&self) -> Series {
         Series::new(Self::KIND, &Self::cut(self.at))
     }
 
+    // TODO: a day that daylight saving time shortens or lengthens moves the cut off the time of
+    // day it is declared at, since the delay is counted in elapsed time.
     fn window(&self, day: &Window, _: &Timeline) -> Option<Window> {
-        self.cut.window(*day.from())
-    }
+        let cut = DateTime::<Utc>::from(*day.from()).checked_add_signed(self.delay)?;
+        let window = Window::new(*day.from(), Ts::from(cut));
 
-    fn open(&self, _: &Window) -> Self::Open {}
+        (window.to() <= day.to()).then_some(window)
+    }
 
     fn base<'b>(
         &self,
@@ -63,8 +79,13 @@ impl Artifact for Instant {
         Snapshot::shard_closing(built, table, *window.from())
     }
 
+    // An instant is read as the data at the instant it is cut, unlike a snapshot read as a day, so
+    // it is named after the instant its window closes.
     fn target(&self, table: &TableId, window: &Window) -> Result<TablePath, UnbuildableArtifact> {
-        Ok(self.snapshot.placed(table, window))
+        Ok(TablePath::new(
+            self.namespace.clone(),
+            &self.shard.name(table, *window.to()),
+        ))
     }
 
     fn builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>(
@@ -72,11 +93,10 @@ impl Artifact for Instant {
         log: &'a L,
         table: TableId,
         window: &'a Window,
-        _: Self::Open,
         previous: Option<&BuildLog>,
     ) -> Result<Self::Builder<'a, L, W>, UnbuildableArtifact> {
-        Ok(SnapshotBuilder::new(
-            &self.snapshot,
+        Ok(Scd1Builder::new(
+            self,
             log,
             table,
             window.clone(),
@@ -85,14 +105,31 @@ impl Artifact for Instant {
     }
 }
 
+impl Overwrite for Instant {
+    fn until(&self, window: &Window) -> Option<Ts<Event>> {
+        Some(*window.to())
+    }
+
+    fn copies(&self) -> &[Namespace] {
+        &self.copies
+    }
+
+    fn materialize<W: Warehouse>(
+        &self,
+        warehouse: &W,
+        target: &TablePath,
+        select: &SqlString,
+    ) -> SqlString {
+        warehouse.create_table_as(target, select)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use chrono::{DateTime, Utc};
     use ulid::Ulid;
 
     use lithify_core::build_log::{Outcome, Run, Status};
     use lithify_core::schedule::Timeline;
-    use lithify_core::ts::{Event, Ts};
 
     use super::*;
 
@@ -103,8 +140,9 @@ mod tests {
     fn nine_in_tokyo() -> Instant {
         Instant::new(
             NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
-            chrono_tz::Asia::Tokyo,
-            Snapshot::cut("mysql_shop_0900", "%Y%m%d%H", chrono_tz::Asia::Tokyo),
+            Schedule::daily(NaiveTime::MIN, chrono_tz::Asia::Tokyo),
+            "mysql_shop_0900",
+            Shard::new("%Y%m%d%H", chrono_tz::Asia::Tokyo),
         )
     }
 
@@ -149,6 +187,26 @@ mod tests {
         let day = Window::new(at("2026-09-20T15:00:00Z"), at("2026-09-21T15:00:00Z"));
 
         assert_eq!(nine_in_tokyo().window(&day, &days_in_tokyo()), Some(cut()));
+    }
+
+    #[test]
+    fn an_instant_cut_as_its_day_closes_holds_the_whole_day() {
+        let midnight = Instant::new(
+            NaiveTime::MIN,
+            Schedule::daily(NaiveTime::MIN, chrono_tz::Asia::Tokyo),
+            "mysql_shop_0000",
+            Shard::new("%Y%m%d%H", chrono_tz::Asia::Tokyo),
+        );
+        let day = Window::new(at("2026-09-20T15:00:00Z"), at("2026-09-21T15:00:00Z"));
+
+        assert_eq!(midnight.window(&day, &days_in_tokyo()), Some(day));
+    }
+
+    #[test]
+    fn an_instant_cuts_no_day_that_closes_before_it_is_reached() {
+        let day = Window::new(at("2026-09-20T15:00:00Z"), at("2026-09-20T20:00:00Z"));
+
+        assert_eq!(nine_in_tokyo().window(&day, &days_in_tokyo()), None);
     }
 
     #[test]

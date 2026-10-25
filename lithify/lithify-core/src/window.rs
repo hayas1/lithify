@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use chrono::DateTime;
+use chrono::{DateTime, TimeDelta, Utc};
 
 use crate::ts::{Event, Ts};
 
@@ -28,5 +28,21 @@ impl Window {
 
     pub fn to(&self) -> &Ts<Event> {
         &self.range.end
+    }
+
+    pub fn last(&self) -> Ts<Event> {
+        Ts::from(DateTime::<Utc>::from(self.range.end) - TimeDelta::milliseconds(1))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_window_holds_last_the_millisecond_before_it_closes() {
+        let window = Window::new(Ts::try_from(100).unwrap(), Ts::try_from(200).unwrap());
+
+        assert_eq!(window.last(), Ts::try_from(199).unwrap());
     }
 }

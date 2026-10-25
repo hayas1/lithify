@@ -177,7 +177,7 @@ struct CatchUpArguments {
     #[arg(
         long,
         value_name = "DATE",
-        help = "The date of the last shard to build, rather than the latest one that has closed"
+        help = "The last day to build through, rather than the latest window that has closed"
     )]
     to: Option<NaiveDate>,
 }

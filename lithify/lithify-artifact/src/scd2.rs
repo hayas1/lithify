@@ -1,13 +1,13 @@
 use std::marker::PhantomData;
 
+use chrono_tz::Tz;
 use serde::Deserialize;
 
 use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
 use lithify_core::build_log::{BuildLog, Outcome, Run, Series};
-use lithify_core::era::Era;
+use lithify_core::era::{Bound, Era};
 use lithify_core::listener::{
-    Alteration, Appearance, SchemaChangeListener, TableAltered, TableCreated, TableDropped,
-    TableRenamed,
+    Alteration, SchemaChangeListener, TableAltered, TableCreated, TableDropped, TableRenamed,
 };
 use lithify_core::model::TableId;
 use lithify_core::schedule::{Schedule, Timeline};
@@ -16,8 +16,9 @@ use lithify_core::source::RowChangeLog;
 use lithify_core::sql::SqlString;
 use lithify_core::window::Window;
 
-use crate::snapshot::Snapshot;
-use crate::snapshot::query::ChangeLogQuery;
+use crate::scd1::Base;
+use crate::scd1::query::ChangeLogQuery;
+use crate::shard::Shard;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -33,27 +34,30 @@ impl Config {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scd2 {
-    open: Snapshot,
-    closed: Snapshot,
+    namespace: Namespace,
+    open: Shard,
+    closed: Shard,
 }
 
 impl Scd2 {
     pub const VALID_FROM: &'static str = "_valid_from";
     pub const VALID_TO: &'static str = "_valid_to";
 
-    pub fn new(namespace: Namespace, shard: &str, schedule: Schedule) -> Self {
+    pub fn new(namespace: Namespace, shard: &str, zone: Tz) -> Self {
         Self {
-            open: Snapshot::dated(namespace.clone(), &format!("open_{shard}"), schedule),
-            closed: Snapshot::dated(namespace, &format!("closed_{shard}"), schedule),
+            namespace,
+            open: Shard::new(&format!("open_{shard}"), zone),
+            closed: Shard::new(&format!("closed_{shard}"), zone),
         }
     }
 
-    pub fn closed(
-        &self,
-        table: &TableId,
-        window: &Window,
-    ) -> Result<TablePath, UnbuildableArtifact> {
-        Ok(self.closed.placed(table, window))
+    // The versions of a day are those it closed and those it left open as it ended, so both are
+    // named after the last instant the window holds, as a snapshot of that day is.
+    pub fn closed(&self, table: &TableId, window: &Window) -> TablePath {
+        TablePath::new(
+            self.namespace.clone(),
+            &self.closed.name(table, window.last()),
+        )
     }
 }
 
@@ -61,8 +65,6 @@ impl Artifact for Scd2 {
     const KIND: &'static str = "scd2";
 
     type From = Self;
-
-    type Open = ();
 
     type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = Scd2Builder<'a, L, W>;
 
@@ -73,8 +75,6 @@ impl Artifact for Scd2 {
     fn window(&self, day: &Window, _: &Timeline) -> Option<Window> {
         Some(day.clone())
     }
-
-    fn open(&self, _: &Window) -> Self::Open {}
 
     fn base<'b>(
         &self,
@@ -90,7 +90,10 @@ impl Artifact for Scd2 {
     }
 
     fn target(&self, table: &TableId, window: &Window) -> Result<TablePath, UnbuildableArtifact> {
-        Ok(self.open.placed(table, window))
+        Ok(TablePath::new(
+            self.namespace.clone(),
+            &self.open.name(table, window.last()),
+        ))
     }
 
     fn builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>(
@@ -98,33 +101,33 @@ impl Artifact for Scd2 {
         log: &'a L,
         table: TableId,
         window: &'a Window,
-        _: Self::Open,
         previous: Option<&BuildLog>,
     ) -> Result<Self::Builder<'a, L, W>, UnbuildableArtifact> {
         Ok(Scd2Builder {
             scd2: self,
             query: ChangeLogQuery::new(log),
-            target: Some(self.open.placed(&table, window)),
-            table_from: Some(table.clone()),
-            table,
-            appearance: None,
             window: window.clone(),
-            base: previous.and_then(BuildLog::target).cloned(),
+            base: Base::from(previous.and_then(BuildLog::target).cloned()),
+            opened_as: Some(table.clone()),
+            table,
+            dropped: false,
             versions: None,
             warehouse: PhantomData,
         })
     }
 }
 
+// Holds what the listener tells it in the versions it folds, as Scd1Builder holds its fold.
 pub struct Scd2Builder<'a, L, W> {
     scd2: &'a Scd2,
     query: ChangeLogQuery<'a, L>,
-    table_from: Option<TableId>,
-    table: TableId,
-    appearance: Option<Appearance>,
     window: Window,
-    base: Option<TablePath>,
-    target: Option<TablePath>,
+    base: Base,
+    // The table as the window opened, which the build log records; None for one created within it.
+    opened_as: Option<TableId>,
+    // The table as the listener named it last, which the runner asks for after the replay.
+    table: TableId,
+    dropped: bool,
     versions: Option<Versions>,
     warehouse: PhantomData<fn(&W)>,
 }
@@ -135,6 +138,13 @@ struct Versions {
 }
 
 impl<L: RowChangeLog, W: Warehouse> Scd2Builder<'_, L, W> {
+    fn target(&self) -> Option<TablePath> {
+        match self.dropped {
+            true => None,
+            false => self.scd2.target(&self.table, &self.window).ok(),
+        }
+    }
+
     fn across_eras(&self) -> UnbuildableArtifact {
         UnbuildableArtifact::AcrossEras(self.table.clone())
     }
@@ -185,7 +195,7 @@ impl<L: RowChangeLog, W: Warehouse> Scd2Builder<'_, L, W> {
             &self.query.change_log(warehouse, table.id()),
             era,
         )?;
-        let opened = match &self.base {
+        let opened = match self.base.as_built() {
             Some(base) => format!(
                 "  SELECT {columns}, {valid_from}, {valid_to}\n  FROM {}",
                 warehouse.table_ref(base)
@@ -274,19 +284,17 @@ impl<L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Position> for Scd2Bu
     type Error = UnbuildableArtifact;
 
     fn table_created(&mut self, _: &W, event: &TableCreated<'_>) -> Result<(), Self::Error> {
-        self.appearance = Some(event.appearance());
+        self.base.appeared(event.appearance());
         if event.appearance().is_creation() {
-            self.table_from = None;
-        }
-        if event.appearance().is_logged_from_start() {
-            self.base = None;
+            self.opened_as = None;
         }
 
         Ok(())
     }
 
-    fn table_dropped(&mut self, _: &W, _: &TableDropped<'_>) -> Result<(), Self::Error> {
-        self.target = None;
+    fn table_dropped(&mut self, _: &W, event: &TableDropped<'_>) -> Result<(), Self::Error> {
+        self.table = event.table().id().clone();
+        self.dropped = true;
 
         Ok(())
     }
@@ -307,6 +315,19 @@ impl<L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Position> for Scd2Bu
         Ok(())
     }
 
+    fn finish(&mut self, warehouse: &W, last_era: &Era<L::Position>) -> Result<(), Self::Error> {
+        self.table = last_era.table().id().clone();
+
+        self.era_boundary(
+            warehouse,
+            &Era::new(
+                last_era.table().clone(),
+                last_era.from().clone(),
+                Bound::EventTime(*self.window.to()),
+            ),
+        )
+    }
+
     fn table_renamed(&mut self, _: &W, _: &TableRenamed<'_>) -> Result<(), Self::Error> {
         Err(self.across_eras())
     }
@@ -325,13 +346,9 @@ impl<L: RowChangeLog, W: Warehouse> ArtifactBuilder for Scd2Builder<'_, L, W> {
     }
 
     fn missing_base(&self) -> Option<&TableId> {
-        let logged_from_start = self
-            .appearance
-            .is_some_and(|appearance| appearance.is_logged_from_start());
-
-        match logged_from_start || self.base.is_some() {
-            true => None,
-            false => self.table_from.as_ref(),
+        match self.base.is_missing() {
+            true => self.opened_as.as_ref(),
+            false => None,
         }
     }
 
@@ -343,29 +360,31 @@ impl<L: RowChangeLog, W: Warehouse> ArtifactBuilder for Scd2Builder<'_, L, W> {
     }
 
     fn create<V: Warehouse>(&self, warehouse: &V) -> Result<Vec<SqlString>, UnbuildableArtifact> {
-        let Some(target) = &self.target else {
+        let Some(target) = self.target() else {
             return Ok(Vec::new());
         };
         let versions = self
             .versions
             .as_ref()
             .ok_or_else(|| UnbuildableArtifact::WithoutEra(self.table.clone()))?;
-        let closed = self.scd2.closed(&self.table, &self.window)?;
+        let closed = self.scd2.closed(&self.table, &self.window);
 
         Ok(vec![
             warehouse.create_namespace(target.namespace()),
             warehouse.create_table_as(&closed, &versions.closed),
-            warehouse.create_table_as(target, &versions.open),
+            warehouse.create_table_as(&target, &versions.open),
         ])
     }
 
     fn build_log(&self, run: &Run, outcome: Outcome) -> BuildLog {
+        let target = self.target();
+
         BuildLog::new(
             run,
-            self.table_from.clone(),
-            self.target.as_ref().map(|_| self.table.clone()),
-            self.base.clone(),
-            self.target.clone(),
+            self.opened_as.clone(),
+            target.as_ref().map(|_| self.table.clone()),
+            self.base.as_built().cloned(),
+            target,
             self.window.clone(),
             outcome,
         )
@@ -383,11 +402,7 @@ mod tests {
 
     #[test]
     fn an_scd2_appends_the_day_it_is_built_for() {
-        let scd2 = Scd2::new(
-            Namespace::from("mysql_shop_scd2"),
-            "%Y%m%d",
-            Schedule::default(),
-        );
+        let scd2 = Scd2::new(Namespace::from("mysql_shop_scd2"), "%Y%m%d", Tz::UTC);
         let timeline = Timeline::new(
             Schedule::default(),
             Ts::try_from(0).unwrap()..Ts::try_from(DAY * 3 + 5).unwrap(),

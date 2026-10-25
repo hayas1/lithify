@@ -1,4 +1,5 @@
-use chrono::NaiveDate;
+use chrono::DateTime;
+use chrono_tz::Tz;
 use leptos::prelude::*;
 
 use lithify_core::build_log::{BuildLog, Status};
@@ -165,7 +166,7 @@ pub struct TableRow {
     pub table: TableId,
     pub status: Status,
     pub values: [Option<String>; BuildLog::COLUMNS.len()],
-    pub shard: Option<NaiveDate>,
+    pub closed: DateTime<Tz>,
 }
 
 impl TableRow {
@@ -182,7 +183,7 @@ impl TableRow {
             table: log.table()?.clone(),
             status: log.status().clone(),
             values: log.values(),
-            shard: schedule.date(*log.window().to()),
+            closed: schedule.local(*log.window().to()),
         })
     }
 
@@ -587,8 +588,8 @@ fn RowPane(id: String, number: usize, row: TableRow) -> impl IntoView {
             <dl class="fields">{fields}</dl>
             <h3>"Derived"</h3>
             <dl class="fields">
-                <dt>"shard"</dt>
-                <dd class="mono">{row.shard.map(|shard| shard.to_string()).unwrap_or_default()}</dd>
+                <dt>"closed"</dt>
+                <dd class="mono">{row.closed.to_rfc3339()}</dd>
             </dl>
         </aside>
         <a class="backdrop" href="#closed" title="Close"></a>
@@ -630,7 +631,7 @@ mod tests {
             ]
         );
         assert_eq!(rows[2].status, Status::Failed("no such column".to_owned()));
-        assert_eq!(rows[1].shard, Some("2026-09-20".parse().unwrap()));
+        assert_eq!(rows[1].closed.to_rfc3339(), "2026-09-21T00:00:00+00:00");
     }
 
     #[test]

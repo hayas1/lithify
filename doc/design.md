@@ -19,7 +19,7 @@ A pipeline moves to another warehouse by rewriting `infra.toml` alone, and a tab
 An artifact is one of the kinds of table lithify builds: `snapshot`, `instant`, `scd1` and `scd2`, and is named by its kind alone.
 `infra.toml` declares under `artifact` what each kind is, once for the whole pipeline, and each sink places in its warehouse the artifacts it builds.
 A series is what the build log records under one `artifact` and `schedule`: a `snapshot` has one, cut at `at`, an `instant` has one for each instant of the day it is cut at, and an `scd1` and an `scd2` have one each.
-How a kind writes its series down and names its tables is its own: an `instant` lists its series as an array of tables, each with its instant, a `snapshot` and an `instant` name a table for each shard by `shard`, an `scd2` names by `shard` the versions each window closed and those it left open, and an `scd1` names one table after the table it is built from.
+How a kind writes its series down and names its tables is its own: an `instant` lists its series as an array of tables, each with its instant, a `snapshot` and an `instant` name a table for each shard by formatting with `shard` an instant read in the time zone, a `snapshot` the last instant its window holds, as the data of a day is the day as it ended, and an `instant` the instant it is cut at, an `scd2` names by `shard`, as a `snapshot` is named, the versions each window closed and those it left open, and an `scd1` names one view after the table it is built from, as `<table>_scd_type_1`.
 
 ```toml
 time_zone = "Asia/Tokyo"

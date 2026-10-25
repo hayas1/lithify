@@ -11,7 +11,6 @@ use crate::model::{TableId, TableModel};
 use crate::position::{Coordinate, Position};
 use crate::source::{ChangeLog, ColumnPath};
 use crate::ts::{Event, Processing, Ts};
-use crate::window::Window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Bound<P> {
@@ -61,7 +60,6 @@ impl<P> Era<P> {
 
 pub struct EraTracker<F, L, E, P> {
     from: Ts<Event>,
-    end: Bound<P>,
     at: Bound<P>,
     open: F,
     tables: BTreeMap<TableId, Track<L, P>>,
@@ -113,27 +111,22 @@ impl<L, P: Position> Track<L, P> {
         Ok(())
     }
 
-    fn finish(
-        mut self,
-        context: &L::Context,
-        table: &TableModel,
-        to: &Bound<P>,
-    ) -> Result<L, L::Error>
+    fn finish(mut self, context: &L::Context, table: &TableModel) -> Result<L, L::Error>
     where
         L: SchemaChangeListener<P>,
     {
-        self.advance(context, to, table)?;
+        let last_era = Era::new(table.clone(), self.since, Bound::Open);
+        self.listener.finish(context, &last_era)?;
 
         Ok(self.listener)
     }
 }
 
 impl<F, L, E, P: Position> EraTracker<F, L, E, P> {
-    pub fn new(window: &Window, open: F) -> Self {
+    pub fn new(from: Ts<Event>, open: F) -> Self {
         Self {
-            at: Bound::EventTime(*window.from()),
-            end: Bound::EventTime(*window.to()),
-            from: *window.from(),
+            at: Bound::EventTime(from),
+            from,
             open,
             tables: BTreeMap::new(),
             dropped: Vec::new(),
@@ -155,7 +148,7 @@ impl<F, L, E, P: Position> EraTracker<F, L, E, P> {
                     None => self.open(table.id(), Bound::EventTime(self.from), None)?,
                 };
 
-                Ok(track.finish(context, table, &self.end)?)
+                Ok(track.finish(context, table)?)
             })
             .collect::<Result<Vec<_>, E>>()?;
 
@@ -312,6 +305,7 @@ mod tests {
     };
     use crate::model::{ColumnModel, ColumnType, TableModel};
     use crate::position::Position;
+    use crate::window::Window;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     struct Offset(u64);
@@ -347,21 +341,32 @@ mod tests {
         told: Vec<String>,
     }
 
+    impl Story {
+        fn tell(&mut self, era: &Era<Offset>) {
+            self.told.push(format!(
+                "era {:?} {}..{}",
+                era.table()
+                    .columns()
+                    .map(|column| column.name())
+                    .collect::<Vec<_>>(),
+                bound(era.from()),
+                bound(era.to())
+            ));
+        }
+    }
+
     impl SchemaChangeListener<Offset> for Story {
         type Context = ();
         type Error = Untold;
 
         fn era_boundary(&mut self, _: &(), closed_era: &Era<Offset>) -> Result<(), Untold> {
-            self.told.push(format!(
-                "era {:?} {}..{}",
-                closed_era
-                    .table()
-                    .columns()
-                    .map(|column| column.name())
-                    .collect::<Vec<_>>(),
-                bound(closed_era.from()),
-                bound(closed_era.to())
-            ));
+            self.tell(closed_era);
+
+            Ok(())
+        }
+
+        fn finish(&mut self, _: &(), last_era: &Era<Offset>) -> Result<(), Untold> {
+            self.tell(last_era);
 
             Ok(())
         }
@@ -448,7 +453,7 @@ mod tests {
                 .accept::<OutOfOrder, _>(&(), change, &mut ())
                 .unwrap();
         }
-        let mut tracker = EraTracker::new(&ten_to_twenty(), |table: &TableId| {
+        let mut tracker = EraTracker::new(*ten_to_twenty().from(), |table: &TableId| {
             Ok::<_, Untold>(Story {
                 table: table.clone(),
                 told: Vec::new(),
@@ -478,7 +483,7 @@ mod tests {
                 )],
                 vec![]
             ),
-            [(people(), vec!["era [\"id\"] 10..20".to_owned()])]
+            [(people(), vec!["era [\"id\"] 10..open".to_owned()])]
         );
     }
 
@@ -500,7 +505,7 @@ mod tests {
                 vec![
                     "era [\"id\"] 10..15@15".to_owned(),
                     "altered: added name".to_owned(),
-                    "era [\"id\", \"name\"] 15@15..20".to_owned()
+                    "era [\"id\", \"name\"] 15@15..open".to_owned()
                 ]
             )]
         );
@@ -527,7 +532,7 @@ mod tests {
                 vec![
                     "era [\"id\"] 10..15@99".to_owned(),
                     "altered: added name".to_owned(),
-                    "era [\"id\", \"name\"] 15@99..20".to_owned()
+                    "era [\"id\", \"name\"] 15@99..open".to_owned()
                 ]
             )]
         );
@@ -554,7 +559,7 @@ mod tests {
                 vec![
                     "era [\"id\"] 10..15@15".to_owned(),
                     "altered: added name, added born".to_owned(),
-                    "era [\"id\", \"name\", \"born\"] 15@15..20".to_owned()
+                    "era [\"id\", \"name\", \"born\"] 15@15..open".to_owned()
                 ]
             )]
         );
@@ -578,7 +583,7 @@ mod tests {
                 vec![
                     "era [\"id\", \"name\"] 10..15@15".to_owned(),
                     "altered: dropped name, added born".to_owned(),
-                    "era [\"id\", \"born\"] 15@15..20".to_owned()
+                    "era [\"id\", \"born\"] 15@15..open".to_owned()
                 ]
             )]
         );
@@ -607,7 +612,7 @@ mod tests {
                 people(),
                 vec![
                     "altered: described id".to_owned(),
-                    "era [\"id\"] 10..20".to_owned()
+                    "era [\"id\"] 10..open".to_owned()
                 ]
             )]
         );
@@ -640,7 +645,7 @@ mod tests {
                 vec![
                     "era [\"id\", \"name\"] 10..15@15".to_owned(),
                     "altered: renamed name to full_name".to_owned(),
-                    "era [\"id\", \"full_name\"] 15@15..20".to_owned()
+                    "era [\"id\", \"full_name\"] 15@15..open".to_owned()
                 ]
             )]
         );
@@ -668,7 +673,7 @@ mod tests {
                 vec![
                     "era [\"id\"] 10..15@15".to_owned(),
                     "renamed shop.people to shop.persons".to_owned(),
-                    "era [\"id\"] 15@15..20".to_owned()
+                    "era [\"id\"] 15@15..open".to_owned()
                 ]
             )]
         );
@@ -708,7 +713,7 @@ mod tests {
                     "renamed shop.people to shop.persons".to_owned(),
                     "era [\"id\"] 12@12..15@15".to_owned(),
                     "renamed shop.persons to shop.pets".to_owned(),
-                    "era [\"id\"] 15@15..20".to_owned()
+                    "era [\"id\"] 15@15..open".to_owned()
                 ]
             )]
         );
@@ -728,7 +733,7 @@ mod tests {
                 pets(),
                 vec![
                     "created shop.pets".to_owned(),
-                    "era [\"id\"] 12@12..20".to_owned()
+                    "era [\"id\"] 12@12..open".to_owned()
                 ]
             )]
         );
@@ -770,7 +775,7 @@ mod tests {
                     people(),
                     vec![
                         "created shop.people".to_owned(),
-                        "era [\"id\", \"name\"] 16@16..20".to_owned()
+                        "era [\"id\", \"name\"] 16@16..open".to_owned()
                     ]
                 )
             ]
@@ -801,7 +806,7 @@ mod tests {
                 &mut (),
             )
             .unwrap();
-        let tracker = EraTracker::new(&ten_to_twenty(), |table: &TableId| {
+        let tracker = EraTracker::new(*ten_to_twenty().from(), |table: &TableId| {
             Err::<Story, _>(Untold::Unopened(table.clone()))
         });
 
@@ -829,7 +834,7 @@ mod tests {
                 vec![
                     "era [\"id\"] 10..10@10".to_owned(),
                     "altered: added name".to_owned(),
-                    "era [\"id\", \"name\"] 10@10..20".to_owned()
+                    "era [\"id\", \"name\"] 10@10..open".to_owned()
                 ]
             )]
         );

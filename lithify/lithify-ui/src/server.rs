@@ -256,7 +256,7 @@ mod tests {
         assert!(page.contains("class=\"backdrop\""));
         assert!(page.contains("href=\"#closed\""));
         assert!(!page.contains("href=\"#\""));
-        assert!(page.contains("<dt>shard</dt><dd class=\"mono\">2026-09-20</dd>"));
+        assert!(page.contains("<dt>closed</dt><dd class=\"mono\">2026-09-21T00:00:00+00:00</dd>"));
     }
 
     #[tokio::test]

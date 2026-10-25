@@ -41,6 +41,12 @@ pub trait SchemaChangeListener<P> {
         Ok(())
     }
 
+    fn finish(&mut self, context: &Self::Context, last_era: &Era<P>) -> Result<(), Self::Error> {
+        let _ = (context, last_era);
+
+        Ok(())
+    }
+
     fn table_created(
         &mut self,
         context: &Self::Context,

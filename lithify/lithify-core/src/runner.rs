@@ -23,8 +23,8 @@ pub enum Unsteppable {
         logged: String,
         configured: String,
     },
-    Unsharded(NaiveDate),
-    Unclosed(Window),
+    Unopened(NaiveDate),
+    Unclosed(NaiveDate),
     Overtaken {
         date: NaiveDate,
         built_until: Ts<Event>,
@@ -52,16 +52,14 @@ impl Display for Unsteppable {
                 formatter,
                 "the build log was captured as {logged} but the pipeline is captured as {configured} now"
             ),
-            Self::Unsharded(date) => write!(formatter, "the schedule dates no shard {date}"),
-            Self::Unclosed(window) => write!(
+            Self::Unopened(date) => write!(
                 formatter,
-                "the window {} .. {} has not closed yet",
-                window.from(),
-                window.to()
+                "no window closes by the end of {date} since the change log opened"
             ),
+            Self::Unclosed(date) => write!(formatter, "{date} has not closed yet"),
             Self::Overtaken { date, built_until } => write!(
                 formatter,
-                "the build log has built past the shard dated {date}, up to {built_until}; rebuild that shard with `lithify build --date {date}` instead"
+                "the build log has built past {date}, up to {built_until}"
             ),
             Self::Baseless { window, tables } => write!(
                 formatter,
@@ -238,12 +236,11 @@ where
         E: From<OutOfOrder> + From<UnbuildableArtifact>,
         <K as SchemaChangeStream<C::Schema>>::Error: Into<E>,
     {
-        let mut tracker = EraTracker::new(window, |table: &TableId| {
+        let mut tracker = EraTracker::new(*window.from(), |table: &TableId| {
             artifact.builder::<_, K::Warehouse>(
                 self.logs.row_changes(),
                 table.clone(),
                 window,
-                artifact.open(window),
                 artifact.base(previous, table, window),
             )
         });
