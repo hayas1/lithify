@@ -125,14 +125,14 @@ impl Artifact for Snapshot {
         table: TableId,
         window: &'a Window,
         previous: Option<&BuildLog>,
-    ) -> Result<Self::Builder<'a, L, W>, UnbuildableArtifact> {
-        Ok(Scd1Builder::new(
+    ) -> Self::Builder<'a, L, W> {
+        Scd1Builder::new(
             self,
             log,
             table,
             window.clone(),
             previous.and_then(BuildLog::target).cloned(),
-        ))
+        )
     }
 }
 

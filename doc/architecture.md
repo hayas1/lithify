@@ -17,16 +17,19 @@ How the code is laid out and the rules it keeps, as opposed to the [design](desi
 
 ### The replay tells a builder everything it needs
 
-A schema change reaches a builder through `SchemaChangeListener`: each era a schema change closes through `era_boundary`, the table as it is created, dropped, renamed or altered, and, once the replay is over, the last era through `finish`.
+A schema change reaches a builder through `SchemaChangeListener`: the table as it is created, dropped, renamed or altered, each with the schema change that did it and so where it falls in the change log, and, once the replay is over, the table as it stands through `finish`.
+`TableListeners` hands each table its own builder, following it through a rename and setting aside the one of a table dropped, and keeps each on a `Track` with what it refused, so a table whose builder refuses a schema change stops alone and is logged as failed while the replay goes on for the others.
 
-A builder folds what it is told into the SQL it builds as it is told it, and keeps nothing else: no copy of a table model, of where an era began or of a name it can be told again.
-What it holds besides the SQL is what it was handed when it was made, such as the artifact, the window and the base, and the few things the build log or the runner ask for after the replay is over, such as the table as the window opened, each named for when it was learned.
+A builder folds what it is told into the SQL it builds as it is told it, and keeps nothing else: no copy of a table model or of a name it can be told again.
+What it holds besides the SQL is what it was handed when it was made, such as the artifact, the window and the base, an `EraTracker` for where the era running now began, which no schema change tells it again, and the few things the build log or the runner ask for after the replay is over, such as the table as the window opened, each named for when it was learned.
+
+Eras are the builder's own to cut: `EraTracker` closes one at each schema change that changes what a row holds, skips one that would hold nothing, and leaves a builder that needs no eras, as one that refuses a schema change, free not to cut any.
 
 When a builder seems to need something more, look first for the listener call that already tells it.
 
 ### The last era ends where the artifact says
 
-The replay knows where each era begins, but not where the last one ends: it hands that era to `finish` open, and the artifact closes it, a `snapshot` or an `instant` where its window closes, an `scd1` nowhere so as to read the change log up to now.
+No schema change ends the last era, so the builder closes it at `finish` where the artifact says, a `snapshot` or an `instant` where its window closes, an `scd1` nowhere so as to read the change log up to now.
 
 ### An artifact names its tables and says how they are created
 

@@ -5,11 +5,11 @@ use serde::Deserialize;
 
 use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
 use lithify_core::build_log::{BuildLog, Outcome, Run, Series};
-use lithify_core::era::{Bound, Era};
+use lithify_core::era::{Bound, Era, EraTracker};
 use lithify_core::listener::{
     Alteration, SchemaChangeListener, TableAltered, TableCreated, TableDropped, TableRenamed,
 };
-use lithify_core::model::TableId;
+use lithify_core::model::{TableId, TableModel};
 use lithify_core::schedule::{Schedule, Timeline};
 use lithify_core::sink::{Namespace, TablePath, Warehouse};
 use lithify_core::source::RowChangeLog;
@@ -102,27 +102,29 @@ impl Artifact for Scd2 {
         table: TableId,
         window: &'a Window,
         previous: Option<&BuildLog>,
-    ) -> Result<Self::Builder<'a, L, W>, UnbuildableArtifact> {
-        Ok(Scd2Builder {
+    ) -> Self::Builder<'a, L, W> {
+        Scd2Builder {
             scd2: self,
             query: ChangeLogQuery::new(log),
             window: window.clone(),
             base: Base::from(previous.and_then(BuildLog::target).cloned()),
+            eras: EraTracker::since(Bound::EventTime(*window.from())),
             opened_as: Some(table.clone()),
             table,
             dropped: false,
             versions: None,
             warehouse: PhantomData,
-        })
+        }
     }
 }
 
 // Holds what the listener tells it in the versions it folds, as Scd1Builder holds its fold.
-pub struct Scd2Builder<'a, L, W> {
+pub struct Scd2Builder<'a, L: RowChangeLog, W> {
     scd2: &'a Scd2,
     query: ChangeLogQuery<'a, L>,
     window: Window,
     base: Base,
+    eras: EraTracker<L::Position>,
     // The table as the window opened, which the build log records; None for one created within it.
     opened_as: Option<TableId>,
     // The table as the listener named it last, which the runner asks for after the replay.
@@ -283,7 +285,12 @@ impl<L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Position> for Scd2Bu
     type Context = W;
     type Error = UnbuildableArtifact;
 
-    fn table_created(&mut self, _: &W, event: &TableCreated<'_>) -> Result<(), Self::Error> {
+    fn table_created(
+        &mut self,
+        _: &W,
+        event: &TableCreated<'_, L::Position>,
+    ) -> Result<(), Self::Error> {
+        self.eras = EraTracker::since(Bound::from(event.change()));
         self.base.appeared(event.appearance());
         if event.appearance().is_creation() {
             self.opened_as = None;
@@ -292,47 +299,43 @@ impl<L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Position> for Scd2Bu
         Ok(())
     }
 
-    fn table_dropped(&mut self, _: &W, event: &TableDropped<'_>) -> Result<(), Self::Error> {
+    fn table_dropped(
+        &mut self,
+        _: &W,
+        event: &TableDropped<'_, L::Position>,
+    ) -> Result<(), Self::Error> {
         self.table = event.table().id().clone();
         self.dropped = true;
 
         Ok(())
     }
 
-    fn era_boundary(
-        &mut self,
-        warehouse: &W,
-        closed_era: &Era<L::Position>,
-    ) -> Result<(), Self::Error> {
-        if self.versions.is_some() {
-            return Err(self.across_eras());
-        }
-        if closed_era.table().primary_key().next().is_none() {
+    fn finish(&mut self, warehouse: &W, table: &TableModel) -> Result<(), Self::Error> {
+        self.table = table.id().clone();
+        if table.primary_key().next().is_none() {
             return Err(UnbuildableArtifact::WithoutPrimaryKey(self.table.clone()));
         }
-        self.versions = Some(self.versions(warehouse, closed_era)?);
+        let era = self.eras.finish(table, Bound::EventTime(*self.window.to()));
+        self.versions = Some(self.versions(warehouse, &era)?);
 
         Ok(())
     }
 
-    fn finish(&mut self, warehouse: &W, last_era: &Era<L::Position>) -> Result<(), Self::Error> {
-        self.table = last_era.table().id().clone();
-
-        self.era_boundary(
-            warehouse,
-            &Era::new(
-                last_era.table().clone(),
-                last_era.from().clone(),
-                Bound::EventTime(*self.window.to()),
-            ),
-        )
-    }
-
-    fn table_renamed(&mut self, _: &W, _: &TableRenamed<'_>) -> Result<(), Self::Error> {
+    // TODO: carry the versions across a schema change, closing the era before it as the builder of
+    // an scd1 does, rather than refusing the window.
+    fn table_renamed(
+        &mut self,
+        _: &W,
+        _: &TableRenamed<'_, L::Position>,
+    ) -> Result<(), Self::Error> {
         Err(self.across_eras())
     }
 
-    fn table_altered(&mut self, _: &W, event: &TableAltered<'_>) -> Result<(), Self::Error> {
+    fn table_altered(
+        &mut self,
+        _: &W,
+        event: &TableAltered<'_, L::Position>,
+    ) -> Result<(), Self::Error> {
         match event.alterations().iter().all(Alteration::is_metadata_only) {
             true => Ok(()),
             false => Err(self.across_eras()),
@@ -393,10 +396,15 @@ impl<L: RowChangeLog, W: Warehouse> ArtifactBuilder for Scd2Builder<'_, L, W> {
 
 #[cfg(test)]
 mod tests {
+    use lithify_core::event::{SchemaChange, TableChange};
+    use lithify_core::listener::{CatalogModel, OutOfOrder};
+    use lithify_core::model::{ColumnModel, ColumnType};
     use lithify_core::schedule::Timeline;
+    use lithify_core::testing::Engine;
     use lithify_core::ts::Ts;
 
     use super::*;
+    use lithify_core::testing::{Log, Offset, Untold};
 
     const DAY: i64 = 86_400_000;
 
@@ -410,5 +418,53 @@ mod tests {
         let day = Window::new(Ts::try_from(DAY).unwrap(), Ts::try_from(DAY * 2).unwrap());
 
         assert_eq!(scd2.window(&day, &timeline), Some(day));
+    }
+
+    fn people(columns: &[&str]) -> TableModel {
+        TableModel::new(
+            TableId::new("shop", "people"),
+            columns
+                .iter()
+                .map(|name| ColumnModel::new(name, "BIGINT", ColumnType::Int64, false, None))
+                .collect(),
+            vec!["id".to_owned()],
+        )
+    }
+
+    fn change(at: i64, table: TableChange) -> SchemaChange<Offset> {
+        SchemaChange::new(
+            Offset(at as u64),
+            Ts::try_from(at).unwrap(),
+            "",
+            vec![table],
+            vec![],
+        )
+    }
+
+    #[test]
+    fn an_scd2_whose_table_changed_its_schema_within_the_window_is_refused() {
+        let scd2 = Scd2::new(Namespace::from("mysql_shop_scd2"), "%Y%m%d", Tz::UTC);
+        let window = Window::new(Ts::try_from(10).unwrap(), Ts::try_from(20).unwrap());
+        let mut versions =
+            scd2.builder::<Log, Engine>(&Log, TableId::new("shop", "people"), &window, None);
+        let mut catalog = CatalogModel::default();
+        catalog
+            .accept::<OutOfOrder, _>(
+                &(),
+                &change(1, TableChange::Created(people(&["id"]))),
+                &mut (),
+            )
+            .unwrap();
+
+        assert_eq!(
+            catalog.accept::<Untold, _>(
+                &Engine::default(),
+                &change(15, TableChange::Altered(people(&["id", "name"]))),
+                &mut versions,
+            ),
+            Err(Untold::Unbuildable(UnbuildableArtifact::AcrossEras(
+                TableId::new("shop", "people")
+            )))
+        );
     }
 }

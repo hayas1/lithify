@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
 use lithify_core::build_log::{BuildLog, Outcome, Run, Series};
-use lithify_core::era::{Bound, Era};
+use lithify_core::era::{Bound, Era, EraTracker};
 use lithify_core::listener::{
     Alteration, Appearance, SchemaChangeListener, TableAltered, TableCreated, TableDropped,
     TableRenamed,
@@ -87,14 +87,14 @@ impl Artifact for Scd1 {
         table: TableId,
         window: &'a Window,
         previous: Option<&BuildLog>,
-    ) -> Result<Self::Builder<'a, L, W>, UnbuildableArtifact> {
-        Ok(Scd1Builder::new(
+    ) -> Self::Builder<'a, L, W> {
+        Scd1Builder::new(
             self,
             log,
             table,
             window.clone(),
             previous.and_then(BuildLog::target).cloned(),
-        ))
+        )
     }
 }
 
@@ -166,13 +166,14 @@ impl From<Option<TablePath>> for Base {
 }
 
 // A builder keeps what the listener tells it in the fold as it is told, and nothing else, so what
-// it holds besides the fold is what it was handed when made and the little the listener cannot
-// tell it again once the replay is over.
-pub struct Scd1Builder<'a, A, L, W> {
+// it holds besides the fold is what it was handed when made, where the era running now began, and
+// the little the listener cannot tell it again once the replay is over.
+pub struct Scd1Builder<'a, A, L: RowChangeLog, W> {
     artifact: &'a A,
     query: ChangeLogQuery<'a, L>,
     window: Window,
     base: Base,
+    eras: EraTracker<L::Position>,
     // The table as the window opened, which the build log records; None for one created within it.
     opened_as: Option<TableId>,
     // The table as the listener named it last, which the runner asks for after the replay.
@@ -193,6 +194,7 @@ impl<'a, A: Overwrite, L: RowChangeLog, W: Warehouse> Scd1Builder<'a, A, L, W> {
         Self {
             artifact,
             query: ChangeLogQuery::new(log),
+            eras: EraTracker::since(Bound::EventTime(*window.from())),
             window,
             base: Base::from(base),
             opened_as: Some(table.clone()),
@@ -346,8 +348,9 @@ impl<A: Overwrite, L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Positi
     fn table_created(
         &mut self,
         _: &W,
-        event: &TableCreated<'_>,
+        event: &TableCreated<'_, L::Position>,
     ) -> Result<(), UnbuildableArtifact> {
+        self.eras = EraTracker::since(Bound::from(event.change()));
         self.base.appeared(event.appearance());
         if event.appearance().is_creation() {
             self.opened_as = None;
@@ -359,7 +362,7 @@ impl<A: Overwrite, L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Positi
     fn table_dropped(
         &mut self,
         _: &W,
-        event: &TableDropped<'_>,
+        event: &TableDropped<'_, L::Position>,
     ) -> Result<(), UnbuildableArtifact> {
         self.table = event.table().id().clone();
         self.dropped = true;
@@ -367,43 +370,32 @@ impl<A: Overwrite, L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Positi
         Ok(())
     }
 
-    fn era_boundary(
-        &mut self,
-        warehouse: &W,
-        closed_era: &Era<L::Position>,
-    ) -> Result<(), UnbuildableArtifact> {
-        self.fold_era(warehouse, closed_era)
-    }
-
-    fn finish(
-        &mut self,
-        warehouse: &W,
-        last_era: &Era<L::Position>,
-    ) -> Result<(), UnbuildableArtifact> {
+    fn finish(&mut self, warehouse: &W, table: &TableModel) -> Result<(), UnbuildableArtifact> {
         let until = self
             .artifact
             .until(&self.window)
             .map_or(Bound::Open, Bound::EventTime);
-        self.table = last_era.table().id().clone();
+        self.table = table.id().clone();
 
-        self.fold_era(
-            warehouse,
-            &Era::new(last_era.table().clone(), last_era.from().clone(), until),
-        )
+        self.fold_era(warehouse, &self.eras.finish(table, until))
     }
 
     fn table_renamed(
         &mut self,
         warehouse: &W,
-        event: &TableRenamed<'_>,
+        event: &TableRenamed<'_, L::Position>,
     ) -> Result<(), UnbuildableArtifact> {
+        if let Some(era) = self.eras.renamed(event) {
+            self.fold_era(warehouse, &era)?;
+        }
+
         self.begin(warehouse, event.before())
     }
 
     fn table_altered(
         &mut self,
         warehouse: &W,
-        event: &TableAltered<'_>,
+        event: &TableAltered<'_, L::Position>,
     ) -> Result<(), UnbuildableArtifact> {
         let rekeyed = event
             .alterations()
@@ -416,6 +408,9 @@ impl<A: Overwrite, L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Positi
         }
         if event.alterations().iter().all(Alteration::is_metadata_only) {
             return Ok(());
+        }
+        if let Some(era) = self.eras.altered(event) {
+            self.fold_era(warehouse, &era)?;
         }
         self.begin(warehouse, event.before())?;
 
@@ -543,65 +538,19 @@ mod tests {
 
     use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
     use lithify_core::build_log::{Lifecycle, Status};
-    use lithify_core::era::{Bound, EraTracker};
+    use lithify_core::era::Bound;
     use lithify_core::event::{Hint, SchemaChange, TableChange};
     use lithify_core::listener::{CatalogModel, OutOfOrder};
     use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
-    use lithify_core::position::{Coordinate, Position};
+    use lithify_core::position::Coordinate;
     use lithify_core::sink::{TablePath, UnsupportedColumn};
-    use lithify_core::source::{ChangeLog, ColumnPath, RowChangeLog};
+    use lithify_core::source::ColumnPath;
+    use lithify_core::table_listeners::TableListeners;
     use lithify_core::testing::Engine;
     use lithify_core::ts::Ts;
     use lithify_core::window::Window;
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-    struct Offset(u64);
-
-    impl Position for Offset {}
-
-    struct Log;
-
-    impl ChangeLog for Log {
-        type Position = Offset;
-
-        fn envelope(&self) -> Option<ColumnPath> {
-            None
-        }
-
-        fn event_time(&self) -> ColumnPath {
-            ColumnPath::from("source.ts_ms")
-        }
-
-        fn processing_time(&self) -> ColumnPath {
-            ColumnPath::from("ts_ms")
-        }
-
-        fn ordering(&self) -> Vec<ColumnPath> {
-            vec![ColumnPath::from("source.offset")]
-        }
-
-        fn coordinates(&self, position: &Offset) -> Vec<Coordinate> {
-            vec![Coordinate::Number(position.0 as i64)]
-        }
-    }
-
-    impl RowChangeLog for Log {
-        fn dml_topic(&self, table: &TableId) -> String {
-            format!("mysql_{}_{}", table.schema(), table.table())
-        }
-
-        fn operation(&self) -> ColumnPath {
-            ColumnPath::from("op")
-        }
-
-        fn before(&self) -> ColumnPath {
-            ColumnPath::from("before")
-        }
-
-        fn after(&self) -> ColumnPath {
-            ColumnPath::from("after")
-        }
-    }
+    use lithify_core::testing::{Log, Offset, Untold};
 
     fn column(name: &str, column_type: ColumnType) -> ColumnModel {
         let type_name = format!("{column_type:?}");
@@ -660,24 +609,6 @@ mod tests {
         }
     }
 
-    #[derive(Debug, PartialEq, Eq)]
-    enum Untold {
-        OutOfOrder,
-        Unbuildable(UnbuildableArtifact),
-    }
-
-    impl From<OutOfOrder> for Untold {
-        fn from(_: OutOfOrder) -> Self {
-            Self::OutOfOrder
-        }
-    }
-
-    impl From<UnbuildableArtifact> for Untold {
-        fn from(unbuildable: UnbuildableArtifact) -> Self {
-            Self::Unbuildable(unbuildable)
-        }
-    }
-
     fn shop() -> &'static Snapshot {
         Box::leak(Box::new(Snapshot::new(
             "mysql_shop",
@@ -697,20 +628,18 @@ mod tests {
     ) -> Result<Vec<Scd1Builder<'static, Snapshot, Log, W>>, Untold> {
         let mut catalog = CatalogModel::default();
         catalog.accept::<OutOfOrder, _>(&(), &change(1, TableChange::Created(created)), &mut ())?;
-        let mut tracker = EraTracker::new(*window().from(), |table: &TableId| {
-            Ok::<_, Untold>(Scd1Builder::new(
-                shop(),
-                &Log,
-                table.clone(),
-                window(),
-                base(),
-            ))
+        let mut tracker = TableListeners::new(|table: &TableId| {
+            Scd1Builder::new(shop(), &Log, table.clone(), window(), base())
         });
         for change in &within {
             catalog.accept::<Untold, _>(warehouse, change, &mut tracker)?;
         }
 
-        tracker.finish(warehouse, &catalog)
+        Ok(tracker
+            .finish(warehouse, &catalog)
+            .into_iter()
+            .map(Result::from)
+            .collect::<Result<_, _>>()?)
     }
 
     fn snapshots(
@@ -1558,21 +1487,12 @@ mod tests {
     }
 
     #[test]
-    fn a_snapshot_hands_a_builder_that_builds_it_from_the_eras_it_is_told_of() {
+    fn a_snapshot_hands_a_builder_that_builds_it_from_the_table_it_is_told_of() {
         let window = window();
-        let mut fold = shop()
-            .builder::<Log, Engine>(&Log, TableId::new("shop", "customers"), &window, None)
-            .unwrap();
+        let mut fold =
+            shop().builder::<Log, Engine>(&Log, TableId::new("shop", "customers"), &window, None);
 
-        fold.era_boundary(
-            &Engine::default(),
-            &Era::new(
-                customers(),
-                Bound::EventTime(Ts::try_from(100).unwrap()),
-                Bound::EventTime(Ts::try_from(200).unwrap()),
-            ),
-        )
-        .unwrap();
+        fold.finish(&Engine::default(), &customers()).unwrap();
 
         assert!(
             fold.create(&Engine::default()).unwrap()[1]
@@ -1604,14 +1524,12 @@ mod tests {
             Window::new(Ts::try_from(0).unwrap(), Ts::try_from(100).unwrap()),
             Outcome::new(Status::Succeeded, finished_at),
         );
-        let builder = shop()
-            .builder::<Log, Engine>(
-                &Log,
-                TableId::new("shop", "customers"),
-                &window,
-                Some(&previous),
-            )
-            .unwrap();
+        let builder = shop().builder::<Log, Engine>(
+            &Log,
+            TableId::new("shop", "customers"),
+            &window,
+            Some(&previous),
+        );
 
         assert_eq!(
             builder.build_log(&run, Outcome::new(Status::Succeeded, finished_at)),
@@ -1866,19 +1784,10 @@ mod tests {
         let artifact = Snapshot::new("mysql_shop", Shard::new("20260920", Tz::UTC))
             .copied_into(vec![lithify_core::sink::Namespace::from("analytics.shop")]);
         let window = window();
-        let mut snapshot = artifact
-            .builder::<Log, Engine>(&Log, customers().id().clone(), &window, None)
+        let mut snapshot =
+            artifact.builder::<Log, Engine>(&Log, customers().id().clone(), &window, None);
+        SchemaChangeListener::<Offset>::finish(&mut snapshot, &Engine::default(), &customers())
             .unwrap();
-        SchemaChangeListener::<Offset>::era_boundary(
-            &mut snapshot,
-            &Engine::default(),
-            &Era::new(
-                customers(),
-                Bound::EventTime(*window.from()),
-                Bound::EventTime(*window.to()),
-            ),
-        )
-        .unwrap();
 
         let statements = snapshot.create(&Engine::default()).unwrap();
 

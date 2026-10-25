@@ -1,21 +1,22 @@
 use std::collections::BTreeSet;
+use std::convert::Infallible;
 use std::fmt::{self, Display, Formatter};
 
 use chrono::{DateTime, NaiveDate, Utc};
 
 use crate::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
 use crate::build_log::{BuildLog, Outcome, Run, Series, Status, UnreadableBuildLog};
-use crate::era::EraTracker;
 use crate::listener::OutOfOrder;
 use crate::model::TableId;
 use crate::sink::{Namespace, WarehouseClient};
 use crate::source::{ChangeLogs, SchemaChangeStream};
 use crate::sql::SqlString;
+use crate::table_listeners::{TableListeners, Track};
 use crate::ts::{Event, Ts};
 use crate::window::Window;
 
-type BuilderOf<'b, A, C, K> =
-    <A as Artifact>::Builder<'b, <C as ChangeLogs>::Row, <K as WarehouseClient>::Warehouse>;
+type BuiltOf<'b, A, C, K> =
+    Built<<A as Artifact>::Builder<'b, <C as ChangeLogs>::Row, <K as WarehouseClient>::Warehouse>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Unsteppable {
@@ -82,11 +83,11 @@ pub enum Tables {
 }
 
 impl Tables {
-    pub fn narrow<B: ArtifactBuilder>(&self, mut builders: Vec<B>) -> Vec<B> {
+    pub fn narrow<B: ArtifactBuilder>(&self, mut builders: Vec<Built<B>>) -> Vec<Built<B>> {
         match self {
             Self::Every => builders,
             Self::Except(tables) => {
-                builders.retain(|builder| !tables.contains(builder.table()));
+                builders.retain(|built| !tables.contains(built.listener().table()));
 
                 builders
             }
@@ -94,12 +95,19 @@ impl Tables {
     }
 }
 
+pub type Built<B> = Track<B, UnbuildableArtifact>;
+
 pub trait Runner {
     type Output;
 
     fn advancing(&self, namespace: &Namespace, series: &Series) -> Self;
 
-    fn run<K, B, E>(&self, client: &K, window: &Window, builders: &[B]) -> Result<Self::Output, E>
+    fn run<K, B, E>(
+        &self,
+        client: &K,
+        window: &Window,
+        builders: &[Built<B>],
+    ) -> Result<Self::Output, E>
     where
         K: WarehouseClient,
         B: ArtifactBuilder,
@@ -115,15 +123,23 @@ impl Runner for Rehearsal {
         Self
     }
 
-    fn run<K, B, E>(&self, client: &K, window: &Window, builders: &[B]) -> Result<Self::Output, E>
+    fn run<K, B, E>(
+        &self,
+        client: &K,
+        window: &Window,
+        builders: &[Built<B>],
+    ) -> Result<Self::Output, E>
     where
         K: WarehouseClient,
         B: ArtifactBuilder,
         E: From<K::Error> + From<UnbuildableArtifact> + From<Unsteppable>,
     {
+        if let Some(failure) = builders.iter().find_map(Built::failure) {
+            return Err(failure.clone().into());
+        }
         let baseless: Vec<_> = builders
             .iter()
-            .filter_map(ArtifactBuilder::missing_base)
+            .filter_map(|built| built.listener().missing_base())
             .cloned()
             .collect();
         if !baseless.is_empty() {
@@ -136,7 +152,7 @@ impl Runner for Rehearsal {
 
         Ok(builders
             .iter()
-            .map(|builder| builder.create(client.warehouse()))
+            .map(|built| built.listener().create(client.warehouse()))
             .collect::<Result<Vec<_>, _>>()?
             .concat())
     }
@@ -157,12 +173,18 @@ impl Build {
         }
     }
 
-    fn outcome<K: WarehouseClient>(&self, client: &K, builder: &impl ArtifactBuilder) -> Outcome {
-        let built = match builder.missing_base() {
-            Some(table) => Err(Unbuilt::from(UnbuildableArtifact::WithoutBase(
+    fn outcome<K: WarehouseClient, B: ArtifactBuilder>(
+        &self,
+        client: &K,
+        built: &Built<B>,
+    ) -> Outcome {
+        let builder = built.listener();
+        let built = match (built.failure(), builder.missing_base()) {
+            (Some(failure), _) => Err(Unbuilt::from(failure.clone())),
+            (None, Some(table)) => Err(Unbuilt::from(UnbuildableArtifact::WithoutBase(
                 table.clone(),
             ))),
-            None => client.build::<Unbuilt>(builder),
+            (None, None) => client.build::<Unbuilt>(builder),
         };
         let status = match built {
             Ok(()) => Status::Succeeded,
@@ -184,7 +206,7 @@ impl Runner for Build {
         }
     }
 
-    fn run<K, B, E>(&self, client: &K, _: &Window, builders: &[B]) -> Result<Self::Output, E>
+    fn run<K, B, E>(&self, client: &K, _: &Window, builders: &[Built<B>]) -> Result<Self::Output, E>
     where
         K: WarehouseClient,
         B: ArtifactBuilder,
@@ -194,8 +216,10 @@ impl Runner for Build {
 
         builders
             .iter()
-            .map(|builder| {
-                let log = builder.build_log(&self.run, self.outcome(client, builder));
+            .map(|built| {
+                let log = built
+                    .listener()
+                    .build_log(&self.run, self.outcome(client, built));
                 client.append_build_log(&self.namespace, &log)?;
 
                 Ok(log)
@@ -231,12 +255,12 @@ where
         artifact: &'a A,
         window: &'a Window,
         previous: &[BuildLog],
-    ) -> Result<Vec<BuilderOf<'a, A, C, K>>, E>
+    ) -> Result<Vec<BuiltOf<'a, A, C, K>>, E>
     where
-        E: From<OutOfOrder> + From<UnbuildableArtifact>,
+        E: From<OutOfOrder> + From<Infallible>,
         <K as SchemaChangeStream<C::Schema>>::Error: Into<E>,
     {
-        let mut tracker = EraTracker::new(*window.from(), |table: &TableId| {
+        let mut tracker = TableListeners::new(|table: &TableId| {
             artifact.builder::<_, K::Warehouse>(
                 self.logs.row_changes(),
                 table.clone(),
@@ -251,7 +275,7 @@ where
             &mut tracker,
         )?;
 
-        Ok(tracker.finish(self.client.warehouse(), &catalog)?)
+        Ok(tracker.finish(self.client.warehouse(), &catalog))
     }
 
     pub fn run<A: Artifact, R: Runner, E>(
@@ -265,13 +289,14 @@ where
     ) -> Result<R::Output, E>
     where
         E: From<OutOfOrder>
+            + From<Infallible>
             + From<UnbuildableArtifact>
             + From<Unsteppable>
             + From<<K as WarehouseClient>::Error>,
         <K as SchemaChangeStream<C::Schema>>::Error: Into<E>,
     {
         let mut builders = tables.narrow(self.builders::<A, E>(artifact, window, previous)?);
-        builders.retain(|builder| builds(builder.table()));
+        builders.retain(|built| builds(built.listener().table()));
 
         runner.run(self.client, window, &builders)
     }

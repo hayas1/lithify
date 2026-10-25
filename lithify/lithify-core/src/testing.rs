@@ -10,8 +10,10 @@ use crate::sink::{
 };
 use crate::sql::SqlString;
 
+pub use change_log::{Log, Offset, Untold};
 pub use replica::{Mutation, Replica, Row};
 
+mod change_log;
 mod replica;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

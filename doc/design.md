@@ -158,3 +158,5 @@ A table that fails is logged as failed and stays where it was, while the other t
 A catch-up takes no window twice: a step whose window it has already taken leaves out the tables it was taken for, so a table that failed is tried again by the next catch-up rather than within the same one.
 A step that cannot run at all, such as one whose warehouse is out of reach or whose capture changed since the build log was written, stops the catch-up of the sink.
 A table with nothing to fold onto is logged as failed rather than refusing the step, and so starts again from `since` at the next step it is taken into.
+A table whose builder refuses a schema change the replay tells it of, such as one changing its primary key, is told nothing more of the window and is logged as failed with why, while the replay goes on for the other tables.
+A table dropped and created again, as a table refilled from scratch is, is logged as dropped and then as created, and is built anew from the change log of the table created rather than onto what was built of the one dropped.

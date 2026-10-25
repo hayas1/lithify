@@ -5,7 +5,6 @@ use lithify_artifact::shard::Shard;
 use lithify_artifact::snapshot::Snapshot;
 use lithify_core::artifact::{Artifact, ArtifactBuilder};
 use lithify_core::build_log::{BuildLog, Outcome, Run, Status};
-use lithify_core::era::{Bound, Era};
 use lithify_core::listener::SchemaChangeListener;
 use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
 use lithify_core::sink::{TablePath, Warehouse};
@@ -63,20 +62,10 @@ fn statements<W: Warehouse>(warehouse: &W) -> String {
     let previous = std::env::args()
         .nth(2)
         .map(|shard| previous(&window, &shard));
-    let mut snapshot = artifact
-        .builder::<_, W>(&log, customers().id().clone(), &window, previous.as_ref())
-        .unwrap();
+    let mut snapshot =
+        artifact.builder::<_, W>(&log, customers().id().clone(), &window, previous.as_ref());
 
-    SchemaChangeListener::<MySqlPosition>::era_boundary(
-        &mut snapshot,
-        warehouse,
-        &Era::new(
-            customers(),
-            Bound::EventTime(*window.from()),
-            Bound::EventTime(*window.to()),
-        ),
-    )
-    .unwrap();
+    SchemaChangeListener::<MySqlPosition>::finish(&mut snapshot, warehouse, &customers()).unwrap();
 
     snapshot.create(warehouse).unwrap().join(";\n")
 }

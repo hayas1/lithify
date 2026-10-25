@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use lithify_core::artifact::{ArtifactBuilder, UnbuildableArtifact};
 use lithify_core::build_log::Series;
-use lithify_core::runner::{Build, Rehearsal, Runner, Unsteppable};
+use lithify_core::runner::{Build, Built, Rehearsal, Runner, Unsteppable};
 use lithify_core::sink::{Namespace, WarehouseClient};
 use lithify_core::sql::SqlString;
 use lithify_core::window::Window;
@@ -68,7 +68,12 @@ impl Runner for DryRun {
         self.clone()
     }
 
-    fn run<K, B, E>(&self, client: &K, window: &Window, builders: &[B]) -> Result<Self::Output, E>
+    fn run<K, B, E>(
+        &self,
+        client: &K,
+        window: &Window,
+        builders: &[Built<B>],
+    ) -> Result<Self::Output, E>
     where
         K: WarehouseClient,
         B: ArtifactBuilder,

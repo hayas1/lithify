@@ -171,6 +171,118 @@ pub(crate) mod tests {
             'before': NULL::STRUCT(id BIGINT), 'after': {'id': 8::BIGINT}})
         ) AS t(value)";
 
+    const PETS_REPLACED_ON_20260920: &str = "CREATE SCHEMA mysql_shop_cdc;
+        CREATE TABLE mysql_shop_cdc.mysql AS SELECT * FROM (VALUES
+          ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
+            'ddl': 'CREATE TABLE people (id BIGINT)',
+            'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
+              'table': {'primaryKeyColumnNames': ['id'], 'columns': [
+                {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
+                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]}),
+          ({'source': {'file': 'binlog.000001', 'pos': 2::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
+            'ddl': 'CREATE TABLE pets (id BIGINT)',
+            'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"pets\"',
+              'table': {'primaryKeyColumnNames': ['id'], 'columns': [
+                {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
+                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]}),
+          ({'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL, 'ts_ms': 1789862400005::BIGINT}, 'ts_ms': 1789862400005::BIGINT,
+            'ddl': 'DROP TABLE pets',
+            'tableChanges': [{'type': 'DROP', 'id': '\"shop\".\"pets\"', 'table': NULL}]}),
+          ({'source': {'file': 'binlog.000001', 'pos': 5::BIGINT, 'gtid': NULL, 'ts_ms': 1789862400006::BIGINT}, 'ts_ms': 1789862400006::BIGINT,
+            'ddl': 'CREATE TABLE pets (id BIGINT)',
+            'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"pets\"',
+              'table': {'primaryKeyColumnNames': ['id'], 'columns': [
+                {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
+                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]})
+        ) AS t(value);
+        CREATE TABLE mysql_shop_cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
+          ({'op': 'c', 'ts_ms': 1789862400001::BIGINT,
+            'source': {'file': 'binlog.000001', 'pos': 3::BIGINT, 'gtid': NULL, 'ts_ms': 1789862400001::BIGINT},
+            'before': NULL::STRUCT(id BIGINT), 'after': {'id': 8::BIGINT}})
+        ) AS t(value);
+        CREATE TABLE mysql_shop_cdc.\"mysql.shop.pets\" AS SELECT * FROM (VALUES
+          ({'op': 'c', 'ts_ms': 1789862400002::BIGINT,
+            'source': {'file': 'binlog.000001', 'pos': 3::BIGINT, 'gtid': NULL, 'ts_ms': 1789862400002::BIGINT},
+            'before': NULL::STRUCT(id BIGINT), 'after': {'id': 6::BIGINT}}),
+          ({'op': 'c', 'ts_ms': 1789862400009::BIGINT,
+            'source': {'file': 'binlog.000001', 'pos': 6::BIGINT, 'gtid': NULL, 'ts_ms': 1789862400009::BIGINT},
+            'before': NULL::STRUCT(id BIGINT), 'after': {'id': 9::BIGINT}})
+        ) AS t(value)";
+
+    const PETS_DROPPED_ON_20260920_AND_CREATED_AGAIN_ON_20260921: &str = "CREATE SCHEMA mysql_shop_cdc;
+        CREATE TABLE mysql_shop_cdc.mysql AS SELECT * FROM (VALUES
+          ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
+            'ddl': 'CREATE TABLE people (id BIGINT)',
+            'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
+              'table': {'primaryKeyColumnNames': ['id'], 'columns': [
+                {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
+                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]}),
+          ({'source': {'file': 'binlog.000001', 'pos': 2::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
+            'ddl': 'CREATE TABLE pets (id BIGINT)',
+            'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"pets\"',
+              'table': {'primaryKeyColumnNames': ['id'], 'columns': [
+                {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
+                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]}),
+          ({'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL, 'ts_ms': 1789862400005::BIGINT}, 'ts_ms': 1789862400005::BIGINT,
+            'ddl': 'DROP TABLE pets',
+            'tableChanges': [{'type': 'DROP', 'id': '\"shop\".\"pets\"', 'table': NULL}]}),
+          ({'source': {'file': 'binlog.000001', 'pos': 5::BIGINT, 'gtid': NULL, 'ts_ms': 1789948800006::BIGINT}, 'ts_ms': 1789948800006::BIGINT,
+            'ddl': 'CREATE TABLE pets (id BIGINT)',
+            'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"pets\"',
+              'table': {'primaryKeyColumnNames': ['id'], 'columns': [
+                {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
+                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]})
+        ) AS t(value);
+        CREATE TABLE mysql_shop_cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
+          ({'op': 'c', 'ts_ms': 1789862400001::BIGINT,
+            'source': {'file': 'binlog.000001', 'pos': 3::BIGINT, 'gtid': NULL, 'ts_ms': 1789862400001::BIGINT},
+            'before': NULL::STRUCT(id BIGINT), 'after': {'id': 8::BIGINT}})
+        ) AS t(value);
+        CREATE TABLE mysql_shop_cdc.\"mysql.shop.pets\" AS SELECT * FROM (VALUES
+          ({'op': 'c', 'ts_ms': 1789862400002::BIGINT,
+            'source': {'file': 'binlog.000001', 'pos': 3::BIGINT, 'gtid': NULL, 'ts_ms': 1789862400002::BIGINT},
+            'before': NULL::STRUCT(id BIGINT), 'after': {'id': 6::BIGINT}}),
+          ({'op': 'c', 'ts_ms': 1789948800009::BIGINT,
+            'source': {'file': 'binlog.000001', 'pos': 6::BIGINT, 'gtid': NULL, 'ts_ms': 1789948800009::BIGINT},
+            'before': NULL::STRUCT(id BIGINT), 'after': {'id': 9::BIGINT}})
+        ) AS t(value)";
+
+    const PETS_REKEYED_ON_20260920: &str = "CREATE SCHEMA mysql_shop_cdc;
+        CREATE TABLE mysql_shop_cdc.mysql AS SELECT * FROM (VALUES
+          ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
+            'ddl': 'CREATE TABLE people (id BIGINT)',
+            'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
+              'table': {'primaryKeyColumnNames': ['id'], 'columns': [
+                {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
+                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]}),
+          ({'source': {'file': 'binlog.000001', 'pos': 2::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
+            'ddl': 'CREATE TABLE pets (id BIGINT, tag BIGINT)',
+            'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"pets\"',
+              'table': {'primaryKeyColumnNames': ['id'], 'columns': [
+                {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
+                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL},
+                {'name': 'tag', 'typeName': 'BIGINT', 'position': 2, 'optional': false,
+                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]}),
+          ({'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL, 'ts_ms': 1789862400005::BIGINT}, 'ts_ms': 1789862400005::BIGINT,
+            'ddl': 'ALTER TABLE pets DROP PRIMARY KEY, ADD PRIMARY KEY (tag)',
+            'tableChanges': [{'type': 'ALTER', 'id': '\"shop\".\"pets\"',
+              'table': {'primaryKeyColumnNames': ['tag'], 'columns': [
+                {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
+                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL},
+                {'name': 'tag', 'typeName': 'BIGINT', 'position': 2, 'optional': false,
+                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]})
+        ) AS t(value);
+        CREATE TABLE mysql_shop_cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
+          ({'op': 'c', 'ts_ms': 1789862400001::BIGINT,
+            'source': {'file': 'binlog.000001', 'pos': 3::BIGINT, 'gtid': NULL, 'ts_ms': 1789862400001::BIGINT},
+            'before': NULL::STRUCT(id BIGINT), 'after': {'id': 8::BIGINT}})
+        ) AS t(value);
+        CREATE TABLE mysql_shop_cdc.\"mysql.shop.pets\" AS SELECT * FROM (VALUES
+          ({'op': 'c', 'ts_ms': 1789862400009::BIGINT,
+            'source': {'file': 'binlog.000001', 'pos': 5::BIGINT, 'gtid': NULL, 'ts_ms': 1789862400009::BIGINT},
+            'before': NULL::STRUCT(id BIGINT, tag BIGINT), 'after': {'id': 9::BIGINT, 'tag': 1::BIGINT}})
+        ) AS t(value)";
+
     const PEOPLE_RENAMED_ON_20260920: &str = "CREATE SCHEMA mysql_shop_cdc;
         CREATE TABLE mysql_shop_cdc.mysql AS SELECT * FROM (VALUES
           ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
@@ -574,6 +686,117 @@ pub(crate) mod tests {
                 ("7".to_owned(), "kept".to_owned()),
                 ("8".to_owned(), "kept".to_owned()),
                 ("9".to_owned(), "kept".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    fn a_table_dropped_and_created_again_within_a_window_is_built_anew_and_folded_onto_after() {
+        let client = logged(
+            PETS_REPLACED_ON_20260920,
+            &[
+                built_before("people", CAPTURE),
+                built_before("pets", CAPTURE),
+            ],
+        );
+
+        settle(
+            &pipeline(),
+            &client,
+            &RunCommand::CatchUp {
+                target: Target::default(),
+                to: None,
+            },
+            NOW,
+        )
+        .unwrap();
+
+        assert_eq!(
+            rows(
+                &client,
+                "SELECT concat_ws(' ', COALESCE(table_from, '-'), COALESCE(table_to, '-'), COALESCE(lifecycle, '-')), concat_ws(' <- ', COALESCE(target, '-'), COALESCE(base, '-')) FROM mysql_shop._lithify_log WHERE window_from >= '2026-09-20' AND table_from IS DISTINCT FROM 'shop.people' ORDER BY id"
+            ),
+            [
+                folded("shop.pets - dropped", "- <- mysql_shop.pets_20260919"),
+                folded("- shop.pets created", "mysql_shop.pets_20260920 <- -"),
+                folded(
+                    "shop.pets shop.pets -",
+                    "mysql_shop.pets_20260921 <- mysql_shop.pets_20260920"
+                ),
+            ]
+        );
+        assert_eq!(ids(&client, "pets_20260920"), ["9"]);
+        assert_eq!(ids(&client, "pets_20260921"), ["9"]);
+    }
+
+    #[test]
+    fn a_table_created_again_in_a_later_window_is_built_anew_rather_than_onto_what_was_dropped() {
+        let client = logged(
+            PETS_DROPPED_ON_20260920_AND_CREATED_AGAIN_ON_20260921,
+            &[
+                built_before("people", CAPTURE),
+                built_before("pets", CAPTURE),
+            ],
+        );
+
+        settle(
+            &pipeline(),
+            &client,
+            &RunCommand::CatchUp {
+                target: Target::default(),
+                to: None,
+            },
+            NOW,
+        )
+        .unwrap();
+
+        assert_eq!(
+            rows(
+                &client,
+                "SELECT concat_ws(' ', COALESCE(table_from, '-'), COALESCE(table_to, '-'), COALESCE(lifecycle, '-')), concat_ws(' <- ', COALESCE(target, '-'), COALESCE(base, '-')) FROM mysql_shop._lithify_log WHERE window_from >= '2026-09-20' AND table_from IS DISTINCT FROM 'shop.people' ORDER BY id"
+            ),
+            [
+                folded("shop.pets - dropped", "- <- mysql_shop.pets_20260919"),
+                folded("- shop.pets created", "mysql_shop.pets_20260921 <- -"),
+            ]
+        );
+        assert_eq!(ids(&client, "pets_20260921"), ["9"]);
+    }
+
+    #[test]
+    fn a_table_refusing_a_schema_change_within_a_window_is_logged_as_failed_while_the_others_advance()
+     {
+        let client = logged(
+            PETS_REKEYED_ON_20260920,
+            &[
+                built_before("people", CAPTURE),
+                built_before("pets", CAPTURE),
+            ],
+        );
+
+        settle(
+            &pipeline(),
+            &client,
+            &RunCommand::CatchUp {
+                target: Target::default(),
+                to: None,
+            },
+            NOW,
+        )
+        .unwrap();
+
+        assert_eq!(
+            rows(
+                &client,
+                "SELECT target, concat_ws(': ', status, error) FROM mysql_shop._lithify_log WHERE window_from >= '2026-09-20' ORDER BY id"
+            ),
+            [
+                folded("mysql_shop.people_20260920", "succeeded"),
+                folded(
+                    "mysql_shop.pets_20260920",
+                    "failed: shop.pets changed its primary key within the window"
+                ),
+                folded("mysql_shop.people_20260921", "succeeded"),
             ]
         );
     }

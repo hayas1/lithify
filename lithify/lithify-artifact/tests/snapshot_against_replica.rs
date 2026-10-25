@@ -11,7 +11,6 @@ use lithify_artifact::shard::Shard;
 use lithify_artifact::snapshot::Snapshot;
 use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
 use lithify_core::build_log::{BuildLog, Outcome, Run, Status};
-use lithify_core::era::{Bound, Era};
 use lithify_core::listener::SchemaChangeListener;
 use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
 use lithify_core::schedule::{Schedule, Timeline};
@@ -132,15 +131,9 @@ impl Shards {
         previous: Option<&BuildLog>,
     ) -> BuildLog {
         let log = Debezium::under("value", "mysql", MySql);
-        let mut snapshot = artifact
-            .builder::<_, DuckDbWarehouse>(&log, people().id().clone(), window, previous)
-            .unwrap();
-        snapshot
-            .finish(
-                self.client.warehouse(),
-                &Era::new(people(), Bound::EventTime(*window.from()), Bound::Open),
-            )
-            .unwrap();
+        let mut snapshot =
+            artifact.builder::<_, DuckDbWarehouse>(&log, people().id().clone(), window, previous);
+        snapshot.finish(self.client.warehouse(), &people()).unwrap();
         self.client.build::<Unbuilt>(&snapshot).unwrap();
 
         snapshot.build_log(
@@ -350,29 +343,4 @@ fn an_scd2_built_again_for_a_window_holds_the_same_versions() {
     shards.build_into(&scd2, &day(1), base);
 
     assert_eq!(shards.as_of(&versions, DAY + 2_500), built);
-}
-
-#[test]
-fn an_scd2_whose_table_changed_its_schema_within_the_window_is_refused() {
-    let replica = replica();
-    let shards = Shards::over(&replica);
-    let scd2 = scd2();
-    let log = Debezium::under("value", "mysql", MySql);
-    let window = day(0);
-    let mut versions = scd2
-        .builder::<_, DuckDbWarehouse>(&log, people().id().clone(), &window, None)
-        .unwrap();
-    let era = Era::new(
-        people(),
-        Bound::EventTime(*window.from()),
-        Bound::EventTime(*window.to()),
-    );
-    versions
-        .era_boundary(shards.client.warehouse(), &era)
-        .unwrap();
-
-    assert_eq!(
-        versions.era_boundary(shards.client.warehouse(), &era),
-        Err(UnbuildableArtifact::AcrossEras(people().id().clone()))
-    );
 }

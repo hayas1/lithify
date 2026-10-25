@@ -87,7 +87,7 @@ pub trait Artifact {
         table: TableId,
         window: &'a Window,
         previous: Option<&BuildLog>,
-    ) -> Result<Self::Builder<'a, L, W>, UnbuildableArtifact>;
+    ) -> Self::Builder<'a, L, W>;
 }
 
 pub trait ArtifactBuilder {

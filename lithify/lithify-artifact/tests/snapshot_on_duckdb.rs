@@ -1,15 +1,17 @@
+use std::convert::Infallible;
+
 use duckdb::Connection;
 
 use lithify_artifact::shard::Shard;
 use lithify_artifact::snapshot::Snapshot;
 use lithify_core::artifact::{Artifact, UnbuildableArtifact};
-use lithify_core::era::{Bound, Era, EraTracker};
 use lithify_core::listener::OutOfOrder;
 use lithify_core::listener::SchemaChangeListener;
 use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
 use lithify_core::sink::WarehouseClient;
 use lithify_core::source::SchemaChangeStream;
 use lithify_core::sql::SqlString;
+use lithify_core::table_listeners::TableListeners;
 use lithify_core::ts::Ts;
 use lithify_core::window::Window;
 use lithify_protocol::sink::duckdb::client::DuckDbClient;
@@ -48,19 +50,10 @@ fn a_snapshot_holds_each_key_as_the_change_log_last_left_it() {
     let log = Debezium::under("value", "mysql", MySql);
     let window = Window::new(Ts::try_from(0).unwrap(), Ts::try_from(10).unwrap());
     let artifact = Snapshot::new("shop_snapshot", Shard::new("%Y%m%d", chrono_tz::Tz::UTC));
-    let mut snapshot = artifact
-        .builder::<_, DuckDbWarehouse>(&log, people().id().clone(), &window, None)
+    let mut snapshot =
+        artifact.builder::<_, DuckDbWarehouse>(&log, people().id().clone(), &window, None);
+    SchemaChangeListener::<MySqlPosition>::finish(&mut snapshot, client.warehouse(), &people())
         .unwrap();
-    SchemaChangeListener::<MySqlPosition>::era_boundary(
-        &mut snapshot,
-        client.warehouse(),
-        &Era::new(
-            people(),
-            Bound::EventTime(*window.from()),
-            Bound::EventTime(*window.to()),
-        ),
-    )
-    .unwrap();
 
     client.build::<Unbuilt>(&snapshot).unwrap();
 
@@ -121,19 +114,16 @@ fn rows(client: &DuckDbClient, query: &str) -> Vec<String> {
 fn build_snapshots(client: &DuckDbClient, window: &Window) {
     let log = Debezium::under("value", "mysql", MySql);
     let artifact = Snapshot::new("shop_snapshot", Shard::new("%Y%m%d", chrono_tz::Tz::UTC));
-    let mut tracker = EraTracker::new(*window.from(), |table: &TableId| {
-        Ok::<_, Unbuilt>(artifact.builder::<_, DuckDbWarehouse>(
-            &log,
-            table.clone(),
-            window,
-            None,
-        )?)
+    let mut tracker = TableListeners::new(|table: &TableId| {
+        artifact.builder::<_, DuckDbWarehouse>(&log, table.clone(), window, None)
     });
     let catalog = client
         .replay::<Unbuilt, _>(client.warehouse(), &log, window, &mut tracker)
         .unwrap();
-    for snapshot in tracker.finish(client.warehouse(), &catalog).unwrap() {
-        client.build::<Unbuilt>(&snapshot).unwrap();
+    for snapshot in tracker.finish(client.warehouse(), &catalog) {
+        client
+            .build::<Unbuilt>(&Result::from(snapshot).unwrap())
+            .unwrap();
     }
 }
 
@@ -555,6 +545,12 @@ impl From<duckdb::Error> for Unbuilt {
 impl From<UnbuildableArtifact> for Unbuilt {
     fn from(_: UnbuildableArtifact) -> Self {
         Self
+    }
+}
+
+impl From<Infallible> for Unbuilt {
+    fn from(never: Infallible) -> Self {
+        match never {}
     }
 }
 

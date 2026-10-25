@@ -1,3 +1,4 @@
+use std::convert::Infallible;
 use std::fmt::{self, Display, Formatter};
 
 use chrono::DateTime;
@@ -290,10 +291,10 @@ impl DuckDbChangeLogsFn for SnapshotBuild<'_> {
         let snapshot = Replay::new(self.client, &logs)
             .builders::<_, Unbuildable>(self.artifact, self.window, &[])?
             .into_iter()
-            .find(|snapshot| snapshot.table() == self.table)
+            .find(|snapshot| snapshot.listener().table() == self.table)
             .ok_or_else(|| Unbuildable::UnknownTable(self.table.clone()))?;
 
-        self.client.build(&snapshot)
+        self.client.build(&Result::from(snapshot)?)
     }
 }
 
@@ -334,6 +335,12 @@ impl From<duckdb::Error> for Unbuildable {
 impl From<UnbuildableArtifact> for Unbuildable {
     fn from(cause: UnbuildableArtifact) -> Self {
         Self::Unwritable(cause)
+    }
+}
+
+impl From<Infallible> for Unbuildable {
+    fn from(never: Infallible) -> Self {
+        match never {}
     }
 }
 

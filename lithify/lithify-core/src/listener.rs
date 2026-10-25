@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::fmt;
 
-use crate::era::Era;
 use crate::event::{Hint, SchemaChange, TableChange};
 use crate::model::{ColumnModel, TableId, TableModel};
 use crate::position::Position;
@@ -31,18 +30,8 @@ pub trait SchemaChangeListener<P> {
         Ok(())
     }
 
-    fn era_boundary(
-        &mut self,
-        context: &Self::Context,
-        closed_era: &Era<P>,
-    ) -> Result<(), Self::Error> {
-        let _ = (context, closed_era);
-
-        Ok(())
-    }
-
-    fn finish(&mut self, context: &Self::Context, last_era: &Era<P>) -> Result<(), Self::Error> {
-        let _ = (context, last_era);
+    fn finish(&mut self, context: &Self::Context, table: &TableModel) -> Result<(), Self::Error> {
+        let _ = (context, table);
 
         Ok(())
     }
@@ -50,7 +39,7 @@ pub trait SchemaChangeListener<P> {
     fn table_created(
         &mut self,
         context: &Self::Context,
-        event: &TableCreated<'_>,
+        event: &TableCreated<'_, P>,
     ) -> Result<(), Self::Error> {
         let _ = (context, event);
 
@@ -60,7 +49,7 @@ pub trait SchemaChangeListener<P> {
     fn table_dropped(
         &mut self,
         context: &Self::Context,
-        event: &TableDropped<'_>,
+        event: &TableDropped<'_, P>,
     ) -> Result<(), Self::Error> {
         let _ = (context, event);
 
@@ -70,7 +59,7 @@ pub trait SchemaChangeListener<P> {
     fn table_renamed(
         &mut self,
         context: &Self::Context,
-        event: &TableRenamed<'_>,
+        event: &TableRenamed<'_, P>,
     ) -> Result<(), Self::Error> {
         let _ = (context, event);
 
@@ -80,7 +69,7 @@ pub trait SchemaChangeListener<P> {
     fn table_altered(
         &mut self,
         context: &Self::Context,
-        event: &TableAltered<'_>,
+        event: &TableAltered<'_, P>,
     ) -> Result<(), Self::Error> {
         let _ = (context, event);
 
@@ -133,12 +122,17 @@ impl Appearance {
     }
 }
 
-pub struct TableCreated<'a> {
+pub struct TableCreated<'a, P> {
+    change: &'a SchemaChange<P>,
     table: &'a TableModel,
     appearance: Appearance,
 }
 
-impl<'a> TableCreated<'a> {
+impl<'a, P> TableCreated<'a, P> {
+    pub fn change(&self) -> &'a SchemaChange<P> {
+        self.change
+    }
+
     pub fn table(&self) -> &'a TableModel {
         self.table
     }
@@ -148,22 +142,32 @@ impl<'a> TableCreated<'a> {
     }
 }
 
-pub struct TableDropped<'a> {
+pub struct TableDropped<'a, P> {
+    change: &'a SchemaChange<P>,
     table: &'a TableModel,
 }
 
-impl<'a> TableDropped<'a> {
+impl<'a, P> TableDropped<'a, P> {
+    pub fn change(&self) -> &'a SchemaChange<P> {
+        self.change
+    }
+
     pub fn table(&self) -> &'a TableModel {
         self.table
     }
 }
 
-pub struct TableRenamed<'a> {
+pub struct TableRenamed<'a, P> {
+    change: &'a SchemaChange<P>,
     before: &'a TableModel,
     after: &'a TableModel,
 }
 
-impl<'a> TableRenamed<'a> {
+impl<'a, P> TableRenamed<'a, P> {
+    pub fn change(&self) -> &'a SchemaChange<P> {
+        self.change
+    }
+
     pub fn before(&self) -> &'a TableModel {
         self.before
     }
@@ -365,13 +369,18 @@ impl<'a> ColumnLineage<'a> {
     }
 }
 
-pub struct TableAltered<'a> {
+pub struct TableAltered<'a, P> {
+    change: &'a SchemaChange<P>,
     before: &'a TableModel,
     after: &'a TableModel,
     alterations: Vec<Alteration<'a>>,
 }
 
-impl<'a> TableAltered<'a> {
+impl<'a, P> TableAltered<'a, P> {
+    pub fn change(&self) -> &'a SchemaChange<P> {
+        self.change
+    }
+
     pub fn before(&self) -> &'a TableModel {
         self.before
     }
@@ -488,7 +497,14 @@ impl<P: Position> CatalogModel<P> {
         appearance: Appearance,
         listener: &mut L,
     ) -> Result<(), L::Error> {
-        listener.table_created(context, &TableCreated { table, appearance })?;
+        listener.table_created(
+            context,
+            &TableCreated {
+                change,
+                table,
+                appearance,
+            },
+        )?;
         self.remember(change, table);
 
         Ok(())
@@ -502,7 +518,7 @@ impl<P: Position> CatalogModel<P> {
         listener: &mut L,
     ) -> Result<(), L::Error> {
         match self.tables.get(id) {
-            Some(table) => listener.table_dropped(context, &TableDropped { table })?,
+            Some(table) => listener.table_dropped(context, &TableDropped { change, table })?,
             None => tracing::warn!(
                 table = %id,
                 statement = change.statement(),
@@ -539,6 +555,7 @@ impl<P: Position> CatalogModel<P> {
         listener.table_renamed(
             context,
             &TableRenamed {
+                change,
                 before: &before,
                 after: &after,
             },
@@ -583,6 +600,7 @@ impl<P: Position> CatalogModel<P> {
             listener.table_altered(
                 context,
                 &TableAltered {
+                    change,
                     before: &before,
                     after,
                     alterations,
@@ -616,10 +634,7 @@ mod tests {
     use crate::model::{ColumnType, TableId};
     use crate::ts::Ts;
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-    struct Offset(u64);
-
-    impl Position for Offset {}
+    use crate::testing::Offset;
 
     impl Alteration<'_> {
         pub(crate) fn announcement(&self) -> String {
@@ -672,7 +687,11 @@ mod tests {
             Ok(())
         }
 
-        fn table_created(&mut self, _: &(), event: &TableCreated<'_>) -> Result<(), Infallible> {
+        fn table_created(
+            &mut self,
+            _: &(),
+            event: &TableCreated<'_, Offset>,
+        ) -> Result<(), Infallible> {
             self.entries.push(format!("table {}", event.table().id()));
 
             Ok(())
@@ -683,19 +702,31 @@ mod tests {
         type Context = ();
         type Error = Infallible;
 
-        fn table_created(&mut self, _: &(), event: &TableCreated<'_>) -> Result<(), Infallible> {
+        fn table_created(
+            &mut self,
+            _: &(),
+            event: &TableCreated<'_, Offset>,
+        ) -> Result<(), Infallible> {
             self.entries.push(format!("created {}", event.table().id()));
 
             Ok(())
         }
 
-        fn table_dropped(&mut self, _: &(), event: &TableDropped<'_>) -> Result<(), Infallible> {
+        fn table_dropped(
+            &mut self,
+            _: &(),
+            event: &TableDropped<'_, Offset>,
+        ) -> Result<(), Infallible> {
             self.entries.push(format!("dropped {}", event.table().id()));
 
             Ok(())
         }
 
-        fn table_altered(&mut self, _: &(), event: &TableAltered<'_>) -> Result<(), Infallible> {
+        fn table_altered(
+            &mut self,
+            _: &(),
+            event: &TableAltered<'_, Offset>,
+        ) -> Result<(), Infallible> {
             let id = event.after().id();
             let entries = event
                 .alterations()
@@ -1058,7 +1089,11 @@ mod tests {
         type Context = ();
         type Error = Infallible;
 
-        fn table_renamed(&mut self, _: &(), event: &TableRenamed<'_>) -> Result<(), Infallible> {
+        fn table_renamed(
+            &mut self,
+            _: &(),
+            event: &TableRenamed<'_, Offset>,
+        ) -> Result<(), Infallible> {
             self.take(
                 format!("renamed {} to {}", event.before().id(), event.after().id()),
                 event.before(),
@@ -1068,7 +1103,11 @@ mod tests {
             Ok(())
         }
 
-        fn table_altered(&mut self, _: &(), event: &TableAltered<'_>) -> Result<(), Infallible> {
+        fn table_altered(
+            &mut self,
+            _: &(),
+            event: &TableAltered<'_, Offset>,
+        ) -> Result<(), Infallible> {
             let announced: Vec<String> = event
                 .alterations()
                 .iter()
@@ -1232,7 +1271,11 @@ mod tests {
         type Context = ();
         type Error = Halted;
 
-        fn table_altered(&mut self, _: &(), event: &TableAltered<'_>) -> Result<(), Halted> {
+        fn table_altered(
+            &mut self,
+            _: &(),
+            event: &TableAltered<'_, Offset>,
+        ) -> Result<(), Halted> {
             Err(Halted::Refused(event.after().id().to_string()))
         }
     }
@@ -1702,7 +1745,11 @@ mod tests {
         type Context = ();
         type Error = Infallible;
 
-        fn table_created(&mut self, _: &(), event: &TableCreated<'_>) -> Result<(), Infallible> {
+        fn table_created(
+            &mut self,
+            _: &(),
+            event: &TableCreated<'_, Offset>,
+        ) -> Result<(), Infallible> {
             self.told
                 .push((event.table().id().clone(), event.appearance()));
 
