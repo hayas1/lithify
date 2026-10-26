@@ -5,7 +5,7 @@ pub mod place;
 pub mod table;
 pub mod unreadable;
 
-pub use artifact::{Declaration, Declarations};
+pub use artifact::{Declaration, Declarations, Misdeclaring};
 pub use pipeline::Pipeline;
-pub use place::{Place, Placed, Places, Placing};
+pub use place::{Placed, Places, Placing};
 pub use unreadable::{Cause, Unreadable};

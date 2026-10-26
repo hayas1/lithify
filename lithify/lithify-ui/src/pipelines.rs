@@ -4,7 +4,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use lithify_config::infra::{Sink, Source};
-use lithify_config::{Declaration, Pipeline, Place, Placing};
+use lithify_config::{Declaration, Pipeline, Placing};
 use lithify_core::build_log::{BuildLog, BuildLogQuery, Latest, Series};
 use lithify_core::check::{Expectation, Inspection};
 use lithify_core::schedule::Schedule;
@@ -198,8 +198,6 @@ where
     W: Clone + DeserializeOwned + Placing,
     A: Clone + DeserializeOwned + Declaration,
 {
-    const SNAPSHOT: &str = "snapshot";
-
     pub fn new(root: PathBuf, credential: W::Credential) -> Self {
         Self {
             root,
@@ -304,15 +302,16 @@ where
         view: BuildLogView,
     ) -> Result<SinkInspection, String> {
         let undeclared = || format!("{} places no snapshot", sink.name());
-        let snapshot = sink.artifact(Self::SNAPSHOT).ok_or_else(undeclared)?;
-        let schedule = snapshot.schedule(sink.time_zone()).ok_or_else(undeclared)?;
+        let (snapshot, schedule) = sink
+            .artifacts()
+            .find_map(|(name, declared)| Some((name, declared.schedule(sink.time_zone())?)))
+            .ok_or_else(undeclared)?;
         let expectation = Expectation::new(schedule, source.since(), capture, now);
         let reading = Reading {
             expectation: &expectation,
-            series: Series::new(Self::SNAPSHOT, &schedule.to_string()),
+            series: Series::new(snapshot.clone(), &schedule.to_string()),
             namespace: sink
-                .place(Self::SNAPSHOT)
-                .and_then(Place::as_whole)
+                .place(snapshot)
                 .and_then(<[_]>::first)
                 .map(|place| place.clone().into())
                 .ok_or_else(undeclared)?,

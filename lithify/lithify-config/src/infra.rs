@@ -6,22 +6,20 @@ use semigroup::Semigroup;
 use serde::{Deserialize, Serialize};
 
 use chrono_tz::Tz;
-use serde::de::DeserializeOwned;
 
+use lithify_core::artifact::ArtifactName;
 use lithify_core::sink::SinkWarehouse;
 use lithify_core::ts::{Event, Ts};
 
 use crate::artifact::{Declaration, Declarations};
-use crate::place::{Place, Places, Placing};
+use crate::place::{Places, Placing};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[serde(bound(deserialize = "C: Deserialize<'de>, W: Deserialize<'de>, A: DeserializeOwned"))]
-pub(crate) struct Wiring<C, W, A> {
+#[serde(bound(deserialize = "C: Deserialize<'de>, W: Deserialize<'de>"))]
+pub(crate) struct Wiring<C, W> {
     #[serde(default)]
     time_zone: Option<Tz>,
-    #[serde(default)]
-    artifact: Declarations<A>,
     #[serde(default)]
     default: Defaults<C, W>,
     #[serde(default, rename = "source")]
@@ -30,11 +28,10 @@ pub(crate) struct Wiring<C, W, A> {
     sinks: Vec<WiredSink<W>>,
 }
 
-impl<C, W, A> Wiring<C, W, A>
+impl<C, W> Wiring<C, W>
 where
     C: Clone,
     W: Clone + Placing,
-    A: Clone + Declaration,
 {
     pub(crate) fn sources(&self) -> Result<Vec<Source<C>>, Miswiring> {
         if self.sources.is_empty() {
@@ -67,7 +64,10 @@ where
         }
     }
 
-    pub(crate) fn sinks(&self) -> Result<Vec<Sink<W, A>>, Miswiring> {
+    pub(crate) fn sinks<A: Clone + Declaration>(
+        &self,
+        declarations: &Declarations<A>,
+    ) -> Result<Vec<Sink<W, A>>, Miswiring> {
         if self.sinks.is_empty() {
             return Err(Miswiring::WithoutSinks);
         }
@@ -80,7 +80,7 @@ where
                 wired.clone().sink(
                     at,
                     &self.default.sink,
-                    &self.artifact,
+                    declarations,
                     self.time_zone.unwrap_or(Tz::UTC),
                 )
             })
@@ -197,8 +197,8 @@ impl<W: Clone + Placing> WiredSink<W> {
         if places.is_empty() {
             return Err(Miswiring::SinkWithoutArtifacts(name));
         }
-        for (artifact, place) in places.iter() {
-            Self::placed(&name, artifact, place, declarations, &places)?;
+        for (artifact, placed) in places.iter() {
+            Self::placed(&name, artifact, placed, declarations, &places)?;
         }
 
         Ok(Sink {
@@ -213,40 +213,22 @@ impl<W: Clone + Placing> WiredSink<W> {
 
     fn placed<A: Declaration>(
         sink: &str,
-        artifact: &str,
-        place: &Place<W::Location>,
+        artifact: &ArtifactName,
+        placed: &[W::Location],
         declarations: &Declarations<A>,
         places: &Places<W::Location>,
     ) -> Result<(), Miswiring> {
-        let misplaced = |misplacing: fn(String, String) -> Miswiring| {
-            misplacing(sink.to_owned(), artifact.to_owned())
-        };
         let declared = declarations
             .get(artifact)
-            .ok_or_else(|| misplaced(Miswiring::Undeclared))?;
-        match (declared.cuts(), place) {
-            (None, Place::Whole(_)) => {}
-            (Some(cuts), Place::Cuts(placed)) => {
-                if let Some(uncut) = placed.keys().find(|cut| !cuts.contains(cut)) {
-                    return Err(Miswiring::Uncut {
-                        sink: sink.to_owned(),
-                        artifact: artifact.to_owned(),
-                        cut: uncut.to_owned(),
-                    });
-                }
-            }
-            (None, Place::Cuts(_)) | (Some(_), Place::Whole(_)) => {
-                return Err(misplaced(Miswiring::Misplaced));
-            }
+            .ok_or_else(|| Miswiring::Undeclared(sink.to_owned(), artifact.clone()))?;
+        if placed.is_empty() {
+            return Err(Miswiring::Unplaced(sink.to_owned(), artifact.clone()));
         }
-        if place.lists().iter().any(|listed| listed.is_empty()) {
-            return Err(misplaced(Miswiring::Unplaced));
-        }
-        match declared.source() {
-            Some(source) if places.get(source).is_none() => Err(Miswiring::SourceUnplaced {
+        match declared.base() {
+            Some(base) if places.get(base).is_none() => Err(Miswiring::BaseUnplaced {
                 sink: sink.to_owned(),
-                artifact: artifact.to_owned(),
-                source: source.to_owned(),
+                artifact: artifact.clone(),
+                base: base.clone(),
             }),
             _ => Ok(()),
         }
@@ -264,18 +246,12 @@ pub enum Miswiring {
     SinkWithoutName(usize),
     SinkWithoutWarehouse(String),
     SinkWithoutArtifacts(String),
-    Undeclared(String, String),
-    Misplaced(String, String),
-    Uncut {
+    Undeclared(String, ArtifactName),
+    Unplaced(String, ArtifactName),
+    BaseUnplaced {
         sink: String,
-        artifact: String,
-        cut: String,
-    },
-    Unplaced(String, String),
-    SourceUnplaced {
-        sink: String,
-        artifact: String,
-        source: String,
+        artifact: ArtifactName,
+        base: ArtifactName,
     },
     SinkNamedTwice(String),
 }
@@ -301,30 +277,18 @@ impl Display for Miswiring {
             Self::SinkWithoutArtifacts(name) => write!(formatter, "{name} places nothing"),
             Self::Undeclared(sink, artifact) => write!(
                 formatter,
-                "{sink} places {artifact}, which is declared nowhere under [artifact]"
-            ),
-            Self::Misplaced(sink, artifact) => write!(
-                formatter,
-                "{sink} places {artifact} as a list where it is placed by each instant it is cut at, or the other way round"
-            ),
-            Self::Uncut {
-                sink,
-                artifact,
-                cut,
-            } => write!(
-                formatter,
-                "{sink} places {artifact} cut at {cut}, which is declared nowhere under [artifact]"
+                "{sink} places {artifact}, which artifact.toml declares nowhere"
             ),
             Self::Unplaced(sink, artifact) => {
                 write!(formatter, "{sink} places {artifact} nowhere")
             }
-            Self::SourceUnplaced {
+            Self::BaseUnplaced {
                 sink,
                 artifact,
-                source,
+                base,
             } => write!(
                 formatter,
-                "{sink} places {artifact} without {source} it is built from"
+                "{sink} places {artifact} without {base} it is built from"
             ),
             Self::SinkNamedTwice(name) => write!(formatter, "{name} is sunk into twice"),
         }
@@ -380,11 +344,15 @@ impl<W: SinkWarehouse, A> Sink<W, A> {
         &self.warehouse
     }
 
-    pub fn artifact(&self, artifact: &str) -> Option<&A> {
+    pub fn artifact(&self, artifact: &ArtifactName) -> Option<&A> {
         self.artifacts.get(artifact)
     }
 
-    pub fn place(&self, artifact: &str) -> Option<&Place<W::Location>> {
+    pub fn artifacts(&self) -> impl Iterator<Item = (&ArtifactName, &A)> {
+        self.artifacts.iter()
+    }
+
+    pub fn place(&self, artifact: &ArtifactName) -> Option<&[W::Location]> {
         self.places.get(artifact)
     }
 
@@ -490,33 +458,55 @@ mod tests {
     }
 
     #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Cut {
-        at: String,
-    }
-
-    #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-    #[serde(deny_unknown_fields, rename_all = "lowercase")]
+    #[serde(deny_unknown_fields, tag = "kind", rename_all = "lowercase")]
     enum Made {
         Snapshot { shard: String },
-        Copy {},
-        Instant(Vec<Cut>),
+        Copy { base: ArtifactName },
     }
 
     impl Declaration for Made {
-        fn source(&self) -> Option<&'static str> {
+        fn kind(&self) -> &'static str {
             match self {
-                Self::Snapshot { .. } => None,
-                Self::Copy {} | Self::Instant(_) => Some("snapshot"),
+                Self::Snapshot { .. } => "snapshot",
+                Self::Copy { .. } => "copy",
             }
         }
 
-        fn cuts(&self) -> Option<Vec<String>> {
+        fn built_from(&self) -> &'static str {
+            "snapshot"
+        }
+
+        fn base(&self) -> Option<&ArtifactName> {
             match self {
-                Self::Snapshot { .. } | Self::Copy {} => None,
-                Self::Instant(cuts) => Some(cuts.iter().map(|cut| cut.at.clone()).collect()),
+                Self::Snapshot { .. } => None,
+                Self::Copy { base } => Some(base),
             }
         }
+    }
+
+    fn declarations() -> Declarations<Made> {
+        Declarations::try_from(
+            toml::from_str::<crate::artifact::Declaring>(
+                r#"
+                [[artifact]]
+                name = "snapshot"
+                kind = "snapshot"
+                shard = "%Y%m%d"
+
+                [[artifact]]
+                name = "copy"
+                kind = "copy"
+                base = "snapshot"
+
+                [[artifact]]
+                name = "nine"
+                kind = "copy"
+                base = "snapshot"
+                "#,
+            )
+            .unwrap(),
+        )
+        .unwrap()
     }
 
     fn prefix(prefix: &str) -> Lying {
@@ -532,17 +522,6 @@ mod tests {
     }
 
     const INFRA: &str = r#"
-        [artifact.snapshot]
-        shard = "%Y%m%d"
-
-        [artifact.copy]
-
-        [[artifact.instant]]
-        at = "09:00"
-
-        [[artifact.instant]]
-        at = "18:00"
-
         [default]
         source.capture.debezium.dialect = "mysql"
 
@@ -564,7 +543,7 @@ mod tests {
         bucket = "lithify"
         change_log = { prefix = "mysql_shop_cdc" }
         place.snapshot = [{ prefix = "mysql_shop" }]
-        place.instant."09:00" = [{ prefix = "mysql_shop_0900" }]
+        place.nine = [{ prefix = "mysql_shop_0900" }]
 
         [[sink]]
         name = "warehouse"
@@ -577,11 +556,6 @@ mod tests {
     "#;
 
     const SERVER: &str = r#"
-        [artifact.snapshot]
-        shard = "%Y%m%d"
-
-        [artifact.copy]
-
         [[source]]
         name = "primary"
         since = "1970-01-01T00:00:00Z"
@@ -603,11 +577,11 @@ mod tests {
         place.snapshot = [{ prefix = "mysql_shop" }]
     "#;
 
-    fn wiring(written: &str) -> Wiring<Captured, Sunk, Made> {
+    fn wiring(written: &str) -> Wiring<Captured, Sunk> {
         toml::from_str(written).unwrap()
     }
 
-    fn wired(server: &str, sink: &str) -> Wiring<Captured, Sunk, Made> {
+    fn wired(server: &str, sink: &str) -> Wiring<Captured, Sunk> {
         wiring(&format!("{server}\n[[sink]]\n{NAMED}{sink}"))
     }
 
@@ -615,8 +589,12 @@ mod tests {
         wiring(INFRA).sources().unwrap()
     }
 
+    fn sinks_of(wiring: &Wiring<Captured, Sunk>) -> Result<Vec<Sink<Sunk, Made>>, Miswiring> {
+        wiring.sinks(&declarations())
+    }
+
     fn sinks() -> Vec<Sink<Sunk, Made>> {
-        wiring(INFRA).sinks().unwrap()
+        sinks_of(&wiring(INFRA)).unwrap()
     }
 
     #[test]
@@ -624,7 +602,7 @@ mod tests {
         assert_eq!(
             sources()[1].capture(),
             &Captured::Debezium {
-                dialect: "postgres".to_owned()
+                dialect: "postgres".into()
             }
         );
     }
@@ -634,7 +612,7 @@ mod tests {
         assert_eq!(
             sources()[0].capture(),
             &Captured::Debezium {
-                dialect: "mysql".to_owned()
+                dialect: "mysql".into()
             }
         );
     }
@@ -656,7 +634,7 @@ mod tests {
     fn a_server_that_took_over_at_an_unreadable_time_is_rejected() {
         let unknown = INFRA.replace("\"2026-09-21T00:00:00Z\"", "\"yesterday afternoon\"");
 
-        assert!(toml::from_str::<Wiring<Captured, Sunk, Made>>(&unknown).is_err());
+        assert!(toml::from_str::<Wiring<Captured, Sunk>>(&unknown).is_err());
     }
 
     #[test]
@@ -675,7 +653,7 @@ mod tests {
 
         assert_eq!(
             wiring(&twice).sources().unwrap_err(),
-            Miswiring::SourceNamedTwice("primary".to_owned())
+            Miswiring::SourceNamedTwice("primary".into())
         );
     }
 
@@ -690,7 +668,10 @@ mod tests {
     fn a_pipeline_sunk_nowhere_is_rejected() {
         let wiring = wiring(SERVER);
 
-        assert_eq!(wiring.sinks().unwrap_err(), Miswiring::WithoutSinks);
+        assert_eq!(
+            wiring.sinks(&declarations()).unwrap_err(),
+            Miswiring::WithoutSinks
+        );
     }
 
     #[test]
@@ -711,7 +692,7 @@ mod tests {
         let zoned = format!("time_zone = \"Asia/Tokyo\"\n{INFRA}");
 
         assert_eq!(
-            wiring(&zoned).sinks().unwrap()[0].time_zone(),
+            wiring(&zoned).sinks(&declarations()).unwrap()[0].time_zone(),
             chrono_tz::Asia::Tokyo
         );
     }
@@ -725,7 +706,7 @@ mod tests {
     fn a_time_zone_nobody_keeps_is_rejected() {
         let unknown = format!("time_zone = \"Mars/Olympus\"\n{INFRA}");
 
-        assert!(toml::from_str::<Wiring<Captured, Sunk, Made>>(&unknown).is_err());
+        assert!(toml::from_str::<Wiring<Captured, Sunk>>(&unknown).is_err());
     }
 
     #[test]
@@ -733,18 +714,37 @@ mod tests {
         let sinks = sinks();
 
         assert_eq!(
-            sinks[0].artifact("snapshot"),
+            sinks[0].artifact(&"snapshot".into()),
             Some(&Made::Snapshot {
                 shard: "%Y%m%d".to_owned()
             })
         );
         assert_eq!(
-            sinks[0].place("snapshot").and_then(Place::as_whole),
+            sinks[0].place(&"snapshot".into()),
             Some([prefix("mysql_shop")].as_slice())
         );
         assert_eq!(
-            sinks[1].place("snapshot").and_then(Place::as_whole),
+            sinks[1].place(&"snapshot".into()),
             Some([dataset("mysql_shop")].as_slice())
+        );
+    }
+
+    #[test]
+    fn a_sink_places_each_artifact_by_its_name() {
+        assert_eq!(
+            sinks()[0].place(&"nine".into()),
+            Some([prefix("mysql_shop_0900")].as_slice())
+        );
+    }
+
+    #[test]
+    fn a_sink_builds_the_artifacts_it_places_in_the_order_they_are_declared() {
+        assert_eq!(
+            sinks()[1]
+                .artifacts()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["snapshot", "copy"]
         );
     }
 
@@ -752,66 +752,17 @@ mod tests {
     fn a_sink_builds_no_artifact_its_warehouse_places_nowhere() {
         let sinks = sinks();
 
-        assert_eq!(sinks[0].artifact("copy"), None);
-        assert_eq!(sinks[1].artifact("instant"), None);
-    }
-
-    #[test]
-    fn a_sink_places_each_instant_an_artifact_is_cut_at_on_its_own() {
-        let sinks = sinks();
-        let instant = sinks[0].place("instant").unwrap();
-
-        assert_eq!(
-            instant.cut("09:00"),
-            Some([prefix("mysql_shop_0900")].as_slice())
-        );
-        assert_eq!(instant.cut("18:00"), None);
+        assert_eq!(sinks[0].artifact(&"copy".into()), None);
+        assert_eq!(sinks[1].artifact(&"nine".into()), None);
     }
 
     #[test]
     fn an_artifact_placed_but_declared_nowhere_is_rejected() {
-        let undeclared = INFRA.replace("[artifact.copy]\n", "");
+        let undeclared = INFRA.replace("place.copy", "place.history");
 
         assert_eq!(
-            wiring(&undeclared).sinks().unwrap_err(),
-            Miswiring::Undeclared("warehouse".to_owned(), "copy".to_owned())
-        );
-    }
-
-    #[test]
-    fn an_instant_placed_but_declared_nowhere_is_rejected() {
-        let uncut = INFRA.replace("place.instant.\"09:00\"", "place.instant.\"12:00\"");
-
-        assert_eq!(
-            wiring(&uncut).sinks().unwrap_err(),
-            Miswiring::Uncut {
-                sink: "rustfs".to_owned(),
-                artifact: "instant".to_owned(),
-                cut: "12:00".to_owned(),
-            }
-        );
-    }
-
-    #[test]
-    fn an_artifact_cut_at_several_instants_placed_as_one_list_is_rejected() {
-        let listed = INFRA.replace("place.instant.\"09:00\"", "place.instant");
-
-        assert_eq!(
-            wiring(&listed).sinks().unwrap_err(),
-            Miswiring::Misplaced("rustfs".to_owned(), "instant".to_owned())
-        );
-    }
-
-    #[test]
-    fn an_artifact_placed_by_instants_it_is_not_cut_at_is_rejected() {
-        let by_instant = INFRA.replace(
-            "place.copy = [{ dataset = \"mysql_shop_copy\" }]",
-            "place.copy.\"09:00\" = [{ dataset = \"mysql_shop_copy\" }]",
-        );
-
-        assert_eq!(
-            wiring(&by_instant).sinks().unwrap_err(),
-            Miswiring::Misplaced("warehouse".to_owned(), "copy".to_owned())
+            wiring(&undeclared).sinks(&declarations()).unwrap_err(),
+            Miswiring::Undeclared("warehouse".into(), "history".into())
         );
     }
 
@@ -820,8 +771,8 @@ mod tests {
         let wiring = wired(SERVER, &format!("{WAREHOUSE}place.snapshot = []\n"));
 
         assert_eq!(
-            wiring.sinks().unwrap_err(),
-            Miswiring::Unplaced("rustfs".to_owned(), "snapshot".to_owned())
+            wiring.sinks(&declarations()).unwrap_err(),
+            Miswiring::Unplaced("rustfs".into(), "snapshot".into())
         );
     }
 
@@ -833,11 +784,11 @@ mod tests {
         );
 
         assert_eq!(
-            wiring.sinks().unwrap_err(),
-            Miswiring::SourceUnplaced {
-                sink: "rustfs".to_owned(),
-                artifact: "copy".to_owned(),
-                source: "snapshot".to_owned(),
+            wiring.sinks(&declarations()).unwrap_err(),
+            Miswiring::BaseUnplaced {
+                sink: "rustfs".into(),
+                artifact: "copy".into(),
+                base: "snapshot".into(),
             }
         );
     }
@@ -849,13 +800,13 @@ mod tests {
             "place.copy = [{ prefix = \"mysql_shop_copy\" }]",
         );
 
-        assert!(toml::from_str::<Wiring<Captured, Sunk, Made>>(&elsewhere).is_err());
+        assert!(toml::from_str::<Wiring<Captured, Sunk>>(&elsewhere).is_err());
     }
 
     #[test]
     fn a_source_that_says_since_when_nowhere_is_captured_since_the_epoch() {
         let wiring = wired(
-            "[artifact.snapshot]\nshard = \"%Y%m%d\"\n[[source]]\nname = \"primary\"\ncapture.debezium.dialect = \"mysql\"",
+            "[[source]]\nname = \"primary\"\ncapture.debezium.dialect = \"mysql\"",
             &format!("{WAREHOUSE}{ARTIFACTS}"),
         );
 
@@ -868,13 +819,13 @@ mod tests {
     #[test]
     fn a_source_captured_in_no_named_way_is_rejected() {
         let wiring = wired(
-            "[artifact.snapshot]\nshard = \"%Y%m%d\"\n[[source]]\nname = \"primary\"\nsince = \"1970-01-01T00:00:00Z\"",
+            "[[source]]\nname = \"primary\"\nsince = \"1970-01-01T00:00:00Z\"",
             &format!("{WAREHOUSE}{ARTIFACTS}"),
         );
 
         assert_eq!(
             wiring.sources().unwrap_err(),
-            Miswiring::SourceWithoutCapture("primary".to_owned())
+            Miswiring::SourceWithoutCapture("primary".into())
         );
     }
 
@@ -886,14 +837,14 @@ mod tests {
 
         assert_eq!(
             wiring(&sinceless).sources().unwrap_err(),
-            Miswiring::SourcesTakingOverTogether("primary".to_owned(), "replica".to_owned())
+            Miswiring::SourcesTakingOverTogether("primary".into(), "replica".into())
         );
     }
 
     #[test]
     fn two_servers_taking_over_together_are_asked_whether_one_forgot_since_when() {
         assert!(
-            Miswiring::SourcesTakingOverTogether("primary".to_owned(), "replica".to_owned())
+            Miswiring::SourcesTakingOverTogether("primary".into(), "replica".into())
                 .to_string()
                 .contains("since")
         );
@@ -905,7 +856,7 @@ mod tests {
 
         assert_eq!(
             wiring(&together).sources().unwrap_err(),
-            Miswiring::SourcesTakingOverTogether("primary".to_owned(), "replica".to_owned())
+            Miswiring::SourcesTakingOverTogether("primary".into(), "replica".into())
         );
     }
 
@@ -913,7 +864,7 @@ mod tests {
     fn a_sink_holding_no_change_log_is_rejected() {
         let unlogged = INFRA.replace("change_log = { prefix = \"mysql_shop_cdc\" }\n", "");
 
-        assert!(toml::from_str::<Wiring<Captured, Sunk, Made>>(&unlogged).is_err());
+        assert!(toml::from_str::<Wiring<Captured, Sunk>>(&unlogged).is_err());
     }
 
     #[test]
@@ -921,8 +872,8 @@ mod tests {
         let wiring = wiring(&format!("{SERVER}\n[[sink]]\n{NAMED}"));
 
         assert_eq!(
-            wiring.sinks().unwrap_err(),
-            Miswiring::SinkWithoutWarehouse("rustfs".to_owned())
+            wiring.sinks(&declarations()).unwrap_err(),
+            Miswiring::SinkWithoutWarehouse("rustfs".into())
         );
     }
 
@@ -933,9 +884,7 @@ mod tests {
         ));
 
         assert_eq!(
-            wiring.sinks().unwrap()[0]
-                .place("snapshot")
-                .and_then(Place::as_whole),
+            wiring.sinks(&declarations()).unwrap()[0].place(&"snapshot".into()),
             Some([prefix("mysql_shop")].as_slice())
         );
     }
@@ -945,8 +894,8 @@ mod tests {
         let wiring = wired(SERVER, WAREHOUSE);
 
         assert_eq!(
-            wiring.sinks().unwrap_err(),
-            Miswiring::SinkWithoutArtifacts("rustfs".to_owned())
+            wiring.sinks(&declarations()).unwrap_err(),
+            Miswiring::SinkWithoutArtifacts("rustfs".into())
         );
     }
 
@@ -956,8 +905,8 @@ mod tests {
         let wiring = wiring(&format!("{SERVER}\n[[sink]]\n{sink}\n[[sink]]\n{sink}"));
 
         assert_eq!(
-            wiring.sinks().unwrap_err(),
-            Miswiring::SinkNamedTwice("rustfs".to_owned())
+            wiring.sinks(&declarations()).unwrap_err(),
+            Miswiring::SinkNamedTwice("rustfs".into())
         );
     }
 
@@ -965,7 +914,10 @@ mod tests {
     fn a_sink_without_a_name_is_rejected() {
         let wiring = wiring(&format!("{SERVER}\n[[sink]]\n{WAREHOUSE}{ARTIFACTS}"));
 
-        assert_eq!(wiring.sinks().unwrap_err(), Miswiring::SinkWithoutName(0));
+        assert_eq!(
+            wiring.sinks(&declarations()).unwrap_err(),
+            Miswiring::SinkWithoutName(0)
+        );
     }
 
     #[test]
@@ -984,6 +936,6 @@ mod tests {
     fn a_sink_into_a_warehouse_the_application_does_not_know_is_rejected() {
         let unknown = INFRA.replace("sink.warehouse.files", "sink.warehouse.redshift");
 
-        assert!(toml::from_str::<Wiring<Captured, Sunk, Made>>(&unknown).is_err());
+        assert!(toml::from_str::<Wiring<Captured, Sunk>>(&unknown).is_err());
     }
 }

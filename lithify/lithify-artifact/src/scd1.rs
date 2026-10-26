@@ -3,7 +3,9 @@ use std::marker::PhantomData;
 
 use serde::Deserialize;
 
-use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
+use lithify_core::artifact::{
+    Artifact, ArtifactBuilder, ArtifactName, Placement, UnbuildableArtifact,
+};
 use lithify_core::build_log::{Base, BuildLog, Series, TableBuild};
 use lithify_core::era::{Bound, Era, EraTracker};
 use lithify_core::listener::{
@@ -26,10 +28,20 @@ pub(crate) mod query;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Config {}
+pub struct Scd1Config {
+    base: ArtifactName,
+}
+
+impl Scd1Config {
+    pub fn base(&self) -> &ArtifactName {
+        &self.base
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scd1 {
+    name: ArtifactName,
+    base: Series,
     namespace: Namespace,
     copies: Vec<Namespace>,
 }
@@ -37,8 +49,21 @@ pub struct Scd1 {
 impl Scd1 {
     pub fn new(namespace: impl Into<Namespace>) -> Self {
         Self {
+            name: ArtifactName::from(Self::KIND),
+            base: Snapshot::days(&ArtifactName::from(Snapshot::KIND)),
             namespace: namespace.into(),
             copies: Vec::new(),
+        }
+    }
+
+    pub fn named(self, name: ArtifactName) -> Self {
+        Self { name, ..self }
+    }
+
+    pub fn based_on(self, base: &Snapshot) -> Self {
+        Self {
+            base: base.series(),
+            ..self
         }
     }
 
@@ -52,10 +77,27 @@ impl Artifact for Scd1 {
 
     type From = Snapshot;
 
+    type Config = Scd1Config;
+
     type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = Scd1Builder<'a, Self, L, W>;
 
+    fn declared(
+        name: &ArtifactName,
+        _: &Scd1Config,
+        placement: &Placement,
+        _: chrono_tz::Tz,
+    ) -> Self {
+        Self::new(placement.namespace().clone())
+            .named(name.clone())
+            .copied_into(placement.copies().to_vec())
+    }
+
+    fn namespace(&self) -> &Namespace {
+        &self.namespace
+    }
+
     fn series(&self) -> Series {
-        Series::new(Self::KIND, "current")
+        Series::new(self.name.clone(), "current")
     }
 
     fn window(&self, day: &Window, timeline: &Timeline) -> Option<Window> {
@@ -71,7 +113,7 @@ impl Artifact for Scd1 {
         table: &TableId,
         window: &Window,
     ) -> Option<&'b BuildLog> {
-        Snapshot::shard_closing(built, table, *window.from())
+        Snapshot::shard_closing(&self.base, built, table, *window.from())
     }
 
     fn target(&self, table: &TableId, _: &Window) -> Result<TablePath, UnbuildableArtifact> {
@@ -1590,7 +1632,7 @@ mod tests {
         let run = Run::new(
             ulid::Ulid::nil(),
             Ts::from(DateTime::UNIX_EPOCH),
-            "snapshot",
+            &"snapshot".into(),
             "daily",
             "primary",
             "{}",
@@ -1642,7 +1684,7 @@ mod tests {
         let run = Run::new(
             ulid::Ulid::nil(),
             Ts::from(DateTime::UNIX_EPOCH),
-            "snapshot",
+            &"snapshot".into(),
             "daily",
             "primary",
             "{}",
@@ -1672,7 +1714,7 @@ mod tests {
         let run = Run::new(
             ulid::Ulid::nil(),
             Ts::from(DateTime::UNIX_EPOCH),
-            "snapshot",
+            &"snapshot".into(),
             "daily",
             "primary",
             "{}",
@@ -1714,7 +1756,7 @@ mod tests {
         let run = Run::new(
             ulid::Ulid::nil(),
             Ts::from(DateTime::UNIX_EPOCH),
-            "snapshot",
+            &"snapshot".into(),
             "daily",
             "primary",
             "{}",
@@ -1747,7 +1789,7 @@ mod tests {
         let run = Run::new(
             ulid::Ulid::nil(),
             Ts::from(DateTime::UNIX_EPOCH),
-            "snapshot",
+            &"snapshot".into(),
             "daily",
             "primary",
             "{}",
@@ -1787,7 +1829,7 @@ mod tests {
         let run = Run::new(
             ulid::Ulid::nil(),
             Ts::from(DateTime::UNIX_EPOCH),
-            "snapshot",
+            &"snapshot".into(),
             "daily",
             "primary",
             "{}",

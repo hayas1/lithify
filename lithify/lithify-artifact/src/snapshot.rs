@@ -3,7 +3,7 @@ use chrono_tz::Tz;
 use serde::Deserialize;
 use serde::de::{self, Deserializer};
 
-use lithify_core::artifact::{Artifact, UnbuildableArtifact};
+use lithify_core::artifact::{Artifact, ArtifactName, Placement, UnbuildableArtifact};
 use lithify_core::build_log::{BuildLog, Series};
 use lithify_core::model::TableId;
 use lithify_core::schedule::{Schedule, Timeline};
@@ -18,18 +18,21 @@ use crate::shard::Shard;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Config {
-    #[serde(default = "Config::midnight", deserialize_with = "Config::time")]
+pub struct SnapshotConfig {
+    #[serde(
+        default = "SnapshotConfig::midnight",
+        deserialize_with = "SnapshotConfig::time"
+    )]
     at: NaiveTime,
     shard: String,
 }
 
-impl Config {
+impl SnapshotConfig {
     fn midnight() -> NaiveTime {
         NaiveTime::MIN
     }
 
-    fn time<'de, D: Deserializer<'de>>(deserializer: D) -> Result<NaiveTime, D::Error> {
+    pub(crate) fn time<'de, D: Deserializer<'de>>(deserializer: D) -> Result<NaiveTime, D::Error> {
         let written = String::deserialize(deserializer)?;
 
         NaiveTime::parse_from_str(&written, "%H:%M")
@@ -52,35 +55,52 @@ impl Config {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
+    name: ArtifactName,
     namespace: Namespace,
     copies: Vec<Namespace>,
     shard: Shard,
+    schedule: Schedule,
 }
 
 impl Snapshot {
     pub fn new(namespace: impl Into<Namespace>, shard: Shard) -> Self {
         Self {
+            name: ArtifactName::from(Self::KIND),
             namespace: namespace.into(),
             copies: Vec::new(),
             shard,
+            schedule: Schedule::default(),
         }
+    }
+
+    pub fn scheduled(self, schedule: Schedule) -> Self {
+        Self { schedule, ..self }
+    }
+
+    pub fn schedule(&self) -> Schedule {
+        self.schedule
+    }
+
+    pub fn named(self, name: ArtifactName) -> Self {
+        Self { name, ..self }
     }
 
     pub fn copied_into(self, copies: Vec<Namespace>) -> Self {
         Self { copies, ..self }
     }
 
-    pub fn days() -> Series {
-        Series::new(Self::KIND, &Schedule::default().to_string())
+    pub fn days(name: &ArtifactName) -> Series {
+        Series::new(name.clone(), &Schedule::default().to_string())
     }
 
     pub fn shard_closing<'b>(
+        series: &Series,
         built: &'b [BuildLog],
         table: &TableId,
         at: Ts<Event>,
     ) -> Option<&'b BuildLog> {
         built.iter().find(|log| {
-            log.advances(&Self::days()) && log.table_to() == Some(table) && *log.window().to() == at
+            log.advances(series) && log.table_to() == Some(table) && *log.window().to() == at
         })
     }
 }
@@ -90,10 +110,31 @@ impl Artifact for Snapshot {
 
     type From = Self;
 
+    type Config = SnapshotConfig;
+
     type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = Scd1Builder<'a, Self, L, W>;
 
+    fn declared(
+        name: &ArtifactName,
+        config: &SnapshotConfig,
+        placement: &Placement,
+        zone: Tz,
+    ) -> Self {
+        Self::new(
+            placement.namespace().clone(),
+            Shard::new(config.shard(), zone),
+        )
+        .named(name.clone())
+        .scheduled(config.schedule(zone))
+        .copied_into(placement.copies().to_vec())
+    }
+
+    fn namespace(&self) -> &Namespace {
+        &self.namespace
+    }
+
     fn series(&self) -> Series {
-        Self::days()
+        Self::days(&self.name)
     }
 
     fn window(&self, day: &Window, _: &Timeline) -> Option<Window> {
@@ -106,7 +147,7 @@ impl Artifact for Snapshot {
         table: &TableId,
         window: &Window,
     ) -> Option<&'b BuildLog> {
-        Self::shard_closing(built, table, *window.from())
+        Self::shard_closing(&self.series(), built, table, *window.from())
     }
 
     // A snapshot is read as the data of a day, which means the day as it ended, so its shard is
@@ -178,7 +219,7 @@ mod tests {
         .logged(&Run::new(
             ulid::Ulid::nil(),
             Ts::from(DateTime::UNIX_EPOCH),
-            artifact,
+            &artifact.into(),
             schedule,
             "primary",
             "{}",
@@ -220,7 +261,7 @@ mod tests {
 
     #[test]
     fn a_snapshot_is_declared_with_how_its_shards_are_named() {
-        let config: Config = serde_json::from_value(serde_json::json!({
+        let config: SnapshotConfig = serde_json::from_value(serde_json::json!({
             "shard": "%Y%m%d"
         }))
         .unwrap();
@@ -231,7 +272,7 @@ mod tests {
 
     #[test]
     fn a_snapshot_is_cut_at_the_instant_of_the_day_it_is_declared_with() {
-        let config: Config = serde_json::from_value(serde_json::json!({
+        let config: SnapshotConfig = serde_json::from_value(serde_json::json!({
             "at": "09:00",
             "shard": "%Y%m%d"
         }))
@@ -249,7 +290,7 @@ mod tests {
     #[test]
     fn a_snapshot_declared_with_where_it_is_placed_is_rejected_as_the_warehouse_places_it() {
         assert!(
-            serde_json::from_value::<Config>(serde_json::json!({
+            serde_json::from_value::<SnapshotConfig>(serde_json::json!({
                 "shard": "%Y%m%d",
                 "place": ["mysql_shop"]
             }))

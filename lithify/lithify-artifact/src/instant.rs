@@ -1,6 +1,8 @@
 use chrono::{DateTime, NaiveTime, TimeDelta, Utc};
+use chrono_tz::Tz;
+use serde::Deserialize;
 
-use lithify_core::artifact::{Artifact, UnbuildableArtifact};
+use lithify_core::artifact::{Artifact, ArtifactName, Placement, UnbuildableArtifact};
 use lithify_core::build_log::{BuildLog, Series};
 use lithify_core::model::TableId;
 use lithify_core::schedule::{Schedule, Timeline};
@@ -14,10 +16,33 @@ use crate::scd1::{Overwrite, Scd1Builder};
 use crate::shard::Shard;
 use crate::snapshot::Snapshot;
 
-pub type Config = Vec<crate::snapshot::Config>;
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstantConfig {
+    base: ArtifactName,
+    #[serde(deserialize_with = "crate::snapshot::SnapshotConfig::time")]
+    at: NaiveTime,
+    shard: String,
+}
+
+impl InstantConfig {
+    pub fn base(&self) -> &ArtifactName {
+        &self.base
+    }
+
+    pub fn at(&self) -> NaiveTime {
+        self.at
+    }
+
+    pub fn shard(&self) -> &str {
+        &self.shard
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Instant {
+    name: ArtifactName,
+    base: Series,
     at: NaiveTime,
     delay: TimeDelta,
     namespace: Namespace,
@@ -33,11 +58,25 @@ impl Instant {
         shard: Shard,
     ) -> Self {
         Self {
+            name: ArtifactName::from(Self::KIND),
+            base: Snapshot::days(&ArtifactName::from(Snapshot::KIND)),
             at,
             delay: days.delay(at),
             namespace: namespace.into(),
             copies: Vec::new(),
             shard,
+        }
+    }
+
+    pub fn named(self, name: ArtifactName) -> Self {
+        Self { name, ..self }
+    }
+
+    pub fn based_on(self, base: &Snapshot) -> Self {
+        Self {
+            base: base.series(),
+            delay: base.schedule().delay(self.at),
+            ..self
         }
     }
 
@@ -55,10 +94,32 @@ impl Artifact for Instant {
 
     type From = Snapshot;
 
+    type Config = InstantConfig;
+
     type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = Scd1Builder<'a, Self, L, W>;
 
+    fn declared(
+        name: &ArtifactName,
+        config: &InstantConfig,
+        placement: &Placement,
+        zone: Tz,
+    ) -> Self {
+        Self::new(
+            config.at(),
+            Schedule::default(),
+            placement.namespace().clone(),
+            Shard::new(config.shard(), zone),
+        )
+        .named(name.clone())
+        .copied_into(placement.copies().to_vec())
+    }
+
+    fn namespace(&self) -> &Namespace {
+        &self.namespace
+    }
+
     fn series(&self) -> Series {
-        Series::new(Self::KIND, &Self::cut(self.at))
+        Series::new(self.name.clone(), &Self::cut(self.at))
     }
 
     // TODO: a day that daylight saving time shortens or lengthens moves the cut off the time of
@@ -76,7 +137,7 @@ impl Artifact for Instant {
         table: &TableId,
         window: &Window,
     ) -> Option<&'b BuildLog> {
-        Snapshot::shard_closing(built, table, *window.from())
+        Snapshot::shard_closing(&self.base, built, table, *window.from())
     }
 
     // An instant is read as the data at the instant it is cut, unlike a snapshot read as a day, so
@@ -159,7 +220,7 @@ mod tests {
         .logged(&Run::new(
             Ulid::nil(),
             Ts::from(DateTime::UNIX_EPOCH),
-            artifact,
+            &artifact.into(),
             schedule,
             "primary",
             "{}",
@@ -169,7 +230,10 @@ mod tests {
 
     #[test]
     fn an_instant_advances_a_series_of_its_own_for_the_instant_of_the_day_it_is_cut_at() {
-        assert_eq!(nine_in_tokyo().series(), Series::new("instant", "09:00"));
+        assert_eq!(
+            nine_in_tokyo().series(),
+            Series::new("instant".into(), "09:00")
+        );
     }
 
     fn cut() -> Window {
@@ -227,6 +291,40 @@ mod tests {
 
         assert_eq!(
             nine_in_tokyo().base(&built, &TableId::new("shop", "people"), &cut()),
+            Some(&built[1])
+        );
+    }
+
+    #[test]
+    fn a_named_instant_advances_its_series_under_its_name() {
+        assert_eq!(
+            nine_in_tokyo().named("morning".into()).series(),
+            Series::new("morning".into(), "09:00")
+        );
+    }
+
+    #[test]
+    fn an_instant_folds_onto_the_daily_snapshot_it_is_based_on_alone() {
+        let built = [
+            built(
+                "snapshot",
+                "daily",
+                ("2026-09-19T15:00:00Z", "2026-09-20T15:00:00Z"),
+            ),
+            built(
+                "daily",
+                "daily",
+                ("2026-09-19T15:00:00Z", "2026-09-20T15:00:00Z"),
+            ),
+        ];
+
+        assert_eq!(
+            nine_in_tokyo()
+                .based_on(
+                    &Snapshot::new("mysql_shop", Shard::new("%Y%m%d", chrono_tz::Asia::Tokyo))
+                        .named("daily".into())
+                )
+                .base(&built, &TableId::new("shop", "people"), &cut()),
             Some(&built[1])
         );
     }

@@ -112,7 +112,7 @@ mod tests {
         .logged(&Run::new(
             ulid::Ulid::nil(),
             Ts::from(DateTime::UNIX_EPOCH),
-            "snapshot",
+            &"snapshot".into(),
             "daily",
             "primary",
             "{}",

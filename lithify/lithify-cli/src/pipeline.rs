@@ -208,10 +208,7 @@ mod tests {
     fn a_warehouse_reaches_the_change_log_and_the_places_written_in_it() {
         let bigquery: WarehouseConfig = toml::from_str(BIGQUERY).unwrap();
         let places = bigquery.places();
-        let snapshot = places
-            .get("snapshot")
-            .and_then(lithify_config::Place::as_whole)
-            .unwrap();
+        let snapshot = places.get(&"snapshot".into()).unwrap();
 
         assert!(bigquery.reaches(&bigquery.change_log()));
         assert!(snapshot.iter().all(|place| bigquery.reaches(place)));

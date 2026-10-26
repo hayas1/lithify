@@ -4,7 +4,7 @@ use serde::de::DeserializeOwned;
 
 use lithify_core::sink::SinkWarehouse;
 
-use crate::artifact::Declaration;
+use crate::artifact::{Declaration, Declarations, Declaring};
 use crate::infra::{self, Sink, Source};
 use crate::place::Placing;
 use crate::table::{self, Mislisting, Tables};
@@ -25,17 +25,21 @@ where
     A: Clone + DeserializeOwned + Declaration,
 {
     const WIRING: &str = "infra.toml";
+    const DECLARING: &str = "artifact.toml";
     const LISTING: &str = "table.toml";
 
     pub fn open(directory: impl AsRef<Path>) -> Result<Self, Unreadable> {
         let directory = directory.as_ref();
         let wiring = directory.join(Self::WIRING);
+        let declaring = directory.join(Self::DECLARING);
         let listing = directory.join(Self::LISTING);
-        let written: infra::Wiring<C, W, A> = Self::read(&wiring)?;
+        let written: infra::Wiring<C, W> = Self::read(&wiring)?;
         let miswired = |miswiring| Unreadable::at(&wiring, miswiring);
         let mislisted = |mislisting| Unreadable::at(&listing, mislisting);
+        let declarations = Declarations::try_from(Self::read::<Declaring>(&declaring)?)
+            .map_err(|misdeclaring| Unreadable::at(&declaring, misdeclaring))?;
         let sources = written.sources().map_err(miswired)?;
-        let sinks = written.sinks().map_err(miswired)?;
+        let sinks = written.sinks(&declarations).map_err(miswired)?;
         let tables =
             Tables::try_from(Self::read::<table::Listing>(&listing)?).map_err(mislisted)?;
         Self::declared(&sinks, &tables).map_err(mislisted)?;
@@ -58,13 +62,13 @@ where
                         table: table.cloned(),
                         artifact: artifact.to_owned(),
                     })?;
-                if let Some(source) = declared.source()
-                    && !listed.builds(source)
+                if let Some(base) = declared.base()
+                    && !listed.builds(base)
                 {
-                    return Err(Mislisting::WithoutSource {
+                    return Err(Mislisting::WithoutBase {
                         table: table.cloned(),
                         artifact: artifact.to_owned(),
-                        source: source.to_owned(),
+                        base: base.to_owned(),
                     });
                 }
             }
@@ -134,6 +138,7 @@ mod tests {
     use crate::place::{Placed, Places};
     use crate::table::Mask;
     use crate::unreadable::Cause;
+    use lithify_core::artifact::ArtifactName;
     use lithify_core::model::TableId;
     use lithify_protocol::sink::bigquery::config as bigquery;
     use lithify_protocol::sink::duckdb::config as duckdb;
@@ -153,34 +158,55 @@ mod tests {
     }
 
     #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Cut {
-        at: String,
-        shard: String,
-    }
-
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
-    #[serde(deny_unknown_fields, rename_all = "lowercase")]
+    #[serde(deny_unknown_fields, tag = "kind", rename_all = "lowercase")]
     enum Made {
-        Snapshot { at: String, shard: String },
-        Instant(Vec<Cut>),
-        Scd1 {},
-        Scd2 { shard: String },
-        Copy {},
+        Snapshot {
+            at: String,
+            shard: String,
+        },
+        Instant {
+            base: ArtifactName,
+            at: String,
+            shard: String,
+        },
+        Scd1 {
+            base: ArtifactName,
+        },
+        Scd2 {
+            shard: String,
+        },
+        Copy {
+            base: ArtifactName,
+        },
     }
 
     impl Declaration for Made {
-        fn source(&self) -> Option<&'static str> {
+        fn kind(&self) -> &'static str {
             match self {
-                Self::Snapshot { .. } | Self::Scd2 { .. } => None,
-                Self::Instant(_) | Self::Scd1 {} | Self::Copy {} => Some("snapshot"),
+                Self::Snapshot { .. } => "snapshot",
+                Self::Instant { .. } => "instant",
+                Self::Scd1 { .. } => "scd1",
+                Self::Scd2 { .. } => "scd2",
+                Self::Copy { .. } => "copy",
             }
         }
 
-        fn cuts(&self) -> Option<Vec<String>> {
+        fn built_from(&self) -> &'static str {
             match self {
-                Self::Instant(cuts) => Some(cuts.iter().map(|cut| cut.at.clone()).collect()),
-                Self::Snapshot { .. } | Self::Scd1 {} | Self::Scd2 { .. } | Self::Copy {} => None,
+                Self::Scd2 { .. } => "scd2",
+                Self::Snapshot { .. }
+                | Self::Instant { .. }
+                | Self::Scd1 { .. }
+                | Self::Copy { .. } => "snapshot",
+            }
+        }
+
+        fn base(&self) -> Option<&ArtifactName> {
+            match self {
+                Self::Snapshot { .. } | Self::Scd2 { .. } => None,
+                Self::Instant { base, .. } | Self::Scd1 { base } | Self::Copy { base } => {
+                    Some(base)
+                }
             }
         }
     }
@@ -238,9 +264,27 @@ mod tests {
         Debezium(debezium::Config),
     }
 
-    const ARTIFACTS: &str = "[artifact.snapshot]\nat = \"00:00\"\nshard = \"%Y%m%d\"\n";
+    const ARTIFACTS: &str = "[[artifact]]\nname = \"snapshot\"\nkind = \"snapshot\"\nat = \"00:00\"\nshard = \"%Y%m%d\"\n\n[[artifact]]\nname = \"copy\"\nkind = \"copy\"\nbase = \"snapshot\"\n";
+
+    const SOURCE: &str = "[[source]]\nname = \"primary\"\ncapture.debezium.dialect = \"mysql\"\n";
 
     const SINK: &str = "[[sink]]\nname = \"rustfs\"\n[sink.warehouse.duckdb]\ns3 = { endpoint = \"http://rustfs:9000\", region = \"us-east-1\", bucket = \"lithify\", format = \"parquet\" }\nchange_log = { prefix = \"mysql_shop_cdc\" }\nplace.snapshot = [{ prefix = \"mysql_shop\" }]\n";
+
+    fn configure(directory: &Path, infra: &str, listed: &str) {
+        std::fs::write(directory.join("infra.toml"), infra).unwrap();
+        std::fs::write(directory.join("artifact.toml"), ARTIFACTS).unwrap();
+        std::fs::write(directory.join("table.toml"), listed).unwrap();
+    }
+
+    fn compose(directory: &Path, file: &str) {
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../compose/lithify/mysql")
+                .join(file),
+            directory.join(file),
+        )
+        .unwrap();
+    }
 
     fn pipeline(name: &str) -> Pipeline<Capture, Sunk, Made> {
         Pipeline::open(
@@ -322,12 +366,11 @@ mod tests {
     #[test]
     fn a_table_the_pipeline_does_not_configure_takes_the_defaults() {
         let pipeline = pipeline("mysql");
-        let table = pipeline
-            .tables()
-            .table(&TableId::new("shop", "order_items"));
+        let table = pipeline.tables().table(&TableId::new("shop", "heartbeat"));
 
-        assert!(table.builds("snapshot"));
-        assert_eq!(table.mask("sku"), Mask::Identity);
+        assert!(table.builds(&"snapshot".into()));
+        assert!(!table.builds(&"scd2".into()));
+        assert_eq!(table.mask("beat_at"), Mask::Identity);
     }
 
     #[test]
@@ -335,7 +378,7 @@ mod tests {
         let pipeline = pipeline("mysql");
         let table = pipeline.tables().table(&TableId::new("shop", "orders"));
 
-        assert!(table.builds("snapshot"));
+        assert!(table.builds(&"snapshot".into()));
         assert_eq!(table.mask("attributes"), Mask::Null);
         assert_eq!(table.mask("amount"), Mask::Identity);
     }
@@ -352,11 +395,8 @@ mod tests {
     #[test]
     fn a_pipeline_that_configures_no_table_is_reported_with_the_file_it_misses() {
         let directory = scratch("pipeline-without-tables");
-        std::fs::copy(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compose/lithify/mysql/infra.toml"),
-            directory.join("infra.toml"),
-        )
-        .unwrap();
+        compose(&directory, "infra.toml");
+        compose(&directory, "artifact.toml");
 
         let unreadable = Pipeline::<Capture, Sunk, Made>::open(&directory).unwrap_err();
 
@@ -368,8 +408,7 @@ mod tests {
     #[test]
     fn a_pipeline_captured_from_no_server_is_reported_with_the_file_that_wires_it() {
         let directory = scratch("pipeline-without-servers");
-        std::fs::write(directory.join("infra.toml"), format!("{ARTIFACTS}{SINK}")).unwrap();
-        std::fs::write(directory.join("table.toml"), "").unwrap();
+        configure(&directory, SINK, "");
 
         let unreadable = Pipeline::<Capture, Sunk, Made>::open(&directory).unwrap_err();
 
@@ -391,11 +430,8 @@ mod tests {
     #[test]
     fn a_table_listed_twice_is_reported_with_the_file_that_lists_it() {
         let directory = scratch("pipeline-with-a-table-twice");
-        std::fs::copy(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compose/lithify/mysql/infra.toml"),
-            directory.join("infra.toml"),
-        )
-        .unwrap();
+        compose(&directory, "infra.toml");
+        compose(&directory, "artifact.toml");
         std::fs::write(
             directory.join("table.toml"),
             "[[table]]\nschema = \"shop\"\nname = \"orders\"\n\n[[table]]\nschema = \"shop\"\nname = \"orders\"\n",
@@ -411,14 +447,11 @@ mod tests {
 
     fn listing(name: &str, listed: &str) -> Result<Pipeline<Capture, Sunk, Made>, Unreadable> {
         let directory = scratch(name);
-        std::fs::write(
-            directory.join("infra.toml"),
-            format!(
-                "{ARTIFACTS}[artifact.copy]\n[[source]]\nname = \"primary\"\ncapture.debezium.dialect = \"mysql\"\n{SINK}place.copy = [{{ prefix = \"mysql_shop_copy\" }}]\n"
-            ),
-        )
-        .unwrap();
-        std::fs::write(directory.join("table.toml"), listed).unwrap();
+        configure(
+            &directory,
+            &format!("{SOURCE}{SINK}place.copy = [{{ prefix = \"mysql_shop_copy\" }}]\n"),
+            listed,
+        );
         let opened = Pipeline::<Capture, Sunk, Made>::open(&directory);
         std::fs::remove_dir_all(&directory).unwrap();
 
@@ -435,31 +468,24 @@ mod tests {
 
         assert!(matches!(
             unreadable.cause(),
-            Cause::Mislisting(Mislisting::Undeclared { table: Some(_), artifact }) if artifact == "scd2"
+            Cause::Mislisting(Mislisting::Undeclared { table: Some(_), artifact }) if artifact.as_str() == "scd2"
         ));
     }
 
     #[test]
     fn a_table_built_into_an_artifact_declared_but_placed_by_no_sink_is_rejected() {
         let directory = scratch("pipeline-with-an-unplaced-artifact");
-        std::fs::write(
-            directory.join("infra.toml"),
-            format!(
-                "{ARTIFACTS}[artifact.copy]\n[[source]]\nname = \"primary\"\ncapture.debezium.dialect = \"mysql\"\n{SINK}"
-            ),
-        )
-        .unwrap();
-        std::fs::write(
-            directory.join("table.toml"),
+        configure(
+            &directory,
+            &format!("{SOURCE}{SINK}"),
             "[default]\nartifacts = [\"snapshot\", \"copy\"]\n",
-        )
-        .unwrap();
+        );
         let unreadable = Pipeline::<Capture, Sunk, Made>::open(&directory).unwrap_err();
         std::fs::remove_dir_all(&directory).unwrap();
 
         assert!(matches!(
             unreadable.cause(),
-            Cause::Mislisting(Mislisting::Undeclared { table: None, artifact }) if artifact == "copy"
+            Cause::Mislisting(Mislisting::Undeclared { table: None, artifact }) if artifact.as_str() == "copy"
         ));
     }
 
@@ -473,8 +499,8 @@ mod tests {
 
         assert!(matches!(
             unreadable.cause(),
-            Cause::Mislisting(Mislisting::WithoutSource { table: None, artifact, source })
-                if artifact == "copy" && source == "snapshot"
+            Cause::Mislisting(Mislisting::WithoutBase { table: None, artifact, base })
+                if artifact.as_str() == "copy" && base.as_str() == "snapshot"
         ));
     }
 
@@ -499,5 +525,59 @@ mod tests {
         assert!(matches!(unreadable.cause(), Cause::Malformed(_)));
         assert_eq!(unreadable.path(), directory.join("infra.toml"));
         std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn a_pipeline_that_declares_no_artifact_is_reported_with_the_file_it_misses() {
+        let directory = scratch("pipeline-without-artifacts");
+        compose(&directory, "infra.toml");
+        compose(&directory, "table.toml");
+
+        let unreadable = Pipeline::<Capture, Sunk, Made>::open(&directory).unwrap_err();
+        std::fs::remove_dir_all(&directory).unwrap();
+
+        assert!(matches!(unreadable.cause(), Cause::Missing(_)));
+        assert_eq!(unreadable.path(), directory.join("artifact.toml"));
+    }
+
+    #[test]
+    fn an_artifact_declared_twice_is_reported_with_the_file_that_declares_it() {
+        let directory = scratch("pipeline-with-an-artifact-twice");
+        configure(&directory, &format!("{SOURCE}{SINK}"), "");
+        std::fs::write(
+            directory.join("artifact.toml"),
+            format!(
+                "{ARTIFACTS}\n[[artifact]]\nname = \"copy\"\nkind = \"scd1\"\nbase = \"snapshot\"\n"
+            ),
+        )
+        .unwrap();
+
+        let unreadable = Pipeline::<Capture, Sunk, Made>::open(&directory).unwrap_err();
+        std::fs::remove_dir_all(&directory).unwrap();
+
+        assert!(matches!(
+            unreadable.cause(),
+            Cause::Misdeclaring(crate::artifact::Misdeclaring::NamedTwice(artifact)) if artifact.as_str() == "copy"
+        ));
+        assert_eq!(unreadable.path(), directory.join("artifact.toml"));
+    }
+
+    #[test]
+    fn a_place_naming_an_artifact_declared_nowhere_is_reported_with_the_file_that_wires_it() {
+        let directory = scratch("pipeline-placing-an-undeclared-artifact");
+        configure(
+            &directory,
+            &format!("{SOURCE}{SINK}place.history = [{{ prefix = \"mysql_shop_scd2\" }}]\n"),
+            "",
+        );
+
+        let unreadable = Pipeline::<Capture, Sunk, Made>::open(&directory).unwrap_err();
+        std::fs::remove_dir_all(&directory).unwrap();
+
+        assert!(matches!(
+            unreadable.cause(),
+            Cause::Miswiring(Miswiring::Undeclared(sink, artifact)) if sink == "rustfs" && artifact.as_str() == "history"
+        ));
+        assert_eq!(unreadable.path(), directory.join("infra.toml"));
     }
 }

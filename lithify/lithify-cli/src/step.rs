@@ -155,7 +155,11 @@ impl<X: DuckDbExecution, B: BuildLogWriter, A: Artifact> DuckDbChangeLogsFn
                 self.window,
                 self.previous,
                 self.tables,
-                |table| self.listing.table(table).builds(A::KIND),
+                |table| {
+                    self.listing
+                        .table(table)
+                        .builds(self.artifact.series().artifact())
+                },
                 self.writer,
             )
             .await
@@ -178,7 +182,11 @@ impl<X: BigQueryExecution, B: BuildLogWriter, A: Artifact> BigQueryChangeLogsFn
                 self.window,
                 self.previous,
                 self.tables,
-                |table| self.listing.table(table).builds(A::KIND),
+                |table| {
+                    self.listing
+                        .table(table)
+                        .builds(self.artifact.series().artifact())
+                },
                 self.writer,
             )
             .await
@@ -225,10 +233,14 @@ pub(crate) mod tests {
         DeclaredSnapshot::of(sink).unwrap().artifact()
     }
 
-    pub(crate) const INFRA: &str = r#"
-[artifact.snapshot]
+    pub(crate) const ARTIFACTS: &str = r#"
+[[artifact]]
+name = "snapshot"
+kind = "snapshot"
 shard = "%Y%m%d"
+"#;
 
+    pub(crate) const INFRA: &str = r#"
 [default]
 source.capture.debezium.dialect = "mysql"
 
@@ -254,24 +266,41 @@ change_log = { prefix = "mysql_shop_cdc" }
 place.snapshot = [{ prefix = "mysql_shop" }]
 "#;
 
-    pub(crate) fn opened(
+    pub(crate) fn opening(
         name: &str,
+        artifacts: &str,
         infra: &str,
         listed: &str,
-    ) -> Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig> {
+    ) -> Result<Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig>, lithify_config::Unreadable>
+    {
         let directory =
             std::env::temp_dir().join(format!("lithify-cli-{name}-{}", Ulid::generate()));
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(directory.join("infra.toml"), infra).unwrap();
+        std::fs::write(directory.join("artifact.toml"), artifacts).unwrap();
         std::fs::write(directory.join("table.toml"), listed).unwrap();
-        let pipeline = Pipeline::open(&directory).unwrap();
+        let pipeline = Pipeline::open(&directory);
         std::fs::remove_dir_all(&directory).unwrap();
 
         pipeline
     }
 
+    pub(crate) fn opened(
+        name: &str,
+        artifacts: &str,
+        infra: &str,
+        listed: &str,
+    ) -> Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig> {
+        opening(name, artifacts, infra, listed).unwrap()
+    }
+
     pub(crate) fn pipeline() -> Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig> {
-        opened("pipeline", INFRA, "")
+        opened(
+            "pipeline",
+            ARTIFACTS,
+            INFRA,
+            "[default]\nartifacts = [\"snapshot\"]\n",
+        )
     }
 
     async fn dry_run(sink: &Sink<WarehouseConfig, ArtifactConfig>) -> DuckDbClient<DryRun> {
@@ -290,7 +319,7 @@ place.snapshot = [{ prefix = "mysql_shop" }]
             Run::new(
                 Ulid::nil(),
                 Ts::from(DateTime::UNIX_EPOCH),
-                "snapshot",
+                &"snapshot".into(),
                 "daily",
                 "primary",
                 CAPTURE,
@@ -496,7 +525,7 @@ place.snapshot = [{ prefix = "mysql_shop" }]
         .logged(&Run::new(
             Ulid::from_parts(1, 0),
             Ts::from(DateTime::UNIX_EPOCH),
-            "snapshot",
+            &"snapshot".into(),
             "daily",
             "primary",
             capture,
@@ -698,7 +727,7 @@ place.snapshot = [{ prefix = "mysql_shop" }]
         let latest = client
             .build_logs::<Unrunnable>(
                 &Namespace::from("mysql_shop"),
-                &Snapshot::days(),
+                &Snapshot::days(&"snapshot".into()),
                 &Latest::Attempted.into(),
             )
             .await

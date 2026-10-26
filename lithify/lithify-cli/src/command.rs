@@ -1,6 +1,7 @@
-use chrono::{NaiveDate, NaiveTime};
+use chrono::NaiveDate;
 
 use lithify_config::infra::{Sink, Source};
+use lithify_core::artifact::ArtifactName;
 use lithify_core::runner::StepTaker;
 use lithify_core::schedule::Timeline;
 use lithify_core::stepping::Stepping;
@@ -70,25 +71,24 @@ impl RunCommand {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Target {
-    artifact: Option<&'static str>,
-    at: Option<NaiveTime>,
+    artifact: Option<ArtifactName>,
 }
 
 impl Target {
-    pub fn new(artifact: Option<&'static str>, at: Option<NaiveTime>) -> Self {
-        Self { artifact, at }
+    pub fn new(artifact: Option<ArtifactName>) -> Self {
+        Self { artifact }
     }
 
     fn named(&self) -> impl Fn(&Declared) -> bool {
-        move |declared| match self.artifact {
-            Some(artifact) => declared.is(artifact, self.at),
+        move |declared| match &self.artifact {
+            Some(artifact) => declared.is(artifact),
             None => true,
         }
     }
 
     async fn build<P, B>(
         &self,
-        lineup: &Lineup<'_>,
+        lineup: &Lineup,
         stepping: &Stepping<'_, P>,
         writer: &B,
         journal: &mut Journal,
@@ -525,8 +525,8 @@ pub(crate) mod tests {
         assert_eq!(built(&client), [folded("mysql_shop.people_19700101", "")]);
     }
 
-    fn next(artifact: Option<&'static str>) -> RunCommand {
-        RunCommand::Build(Target::new(artifact, None))
+    fn next(artifact: Option<&str>) -> RunCommand {
+        RunCommand::Build(Target::new(artifact.map(ArtifactName::from)))
     }
 
     #[tokio::test]
@@ -551,7 +551,11 @@ pub(crate) mod tests {
         let pipeline = crate::step::tests::opened(
             "next-scd2",
             &format!(
-                "[artifact.scd2]\nshard = \"%Y%m%d\"\n{}place.scd2 = [{{ prefix = \"mysql_shop_scd2\" }}]\n",
+                "{}[[artifact]]\nname = \"scd2\"\nkind = \"scd2\"\nshard = \"%Y%m%d\"\n",
+                crate::step::tests::ARTIFACTS
+            ),
+            &format!(
+                "{}place.scd2 = [{{ prefix = \"mysql_shop_scd2\" }}]\n",
                 crate::step::tests::INFRA
             ),
             "[default]\nartifacts = [\"snapshot\", \"scd2\"]\n",
@@ -878,7 +882,11 @@ pub(crate) mod tests {
                 CAPTURE,
                 Ts::from(at(NOW)),
             )
-            .read::<_, Unrunnable>(&client, &Namespace::from("mysql_shop"), &Snapshot::days())
+            .read::<_, Unrunnable>(
+                &client,
+                &Namespace::from("mysql_shop"),
+                &Snapshot::days(&"snapshot".into())
+            )
             .await
             .unwrap()
             .discrepancies(),
@@ -1284,7 +1292,9 @@ mod derived {
     use crate::command::tests::settle;
     use crate::command::{RunCommand, Target};
     use crate::pipeline::CaptureConfig;
-    use crate::step::tests::{CAPTURE, INFRA, PEOPLE, built_before, logged, opened, rows};
+    use crate::step::tests::{
+        ARTIFACTS, CAPTURE, INFRA, PEOPLE, built_before, logged, opened, rows,
+    };
 
     use super::*;
 
@@ -1294,15 +1304,20 @@ mod derived {
         placed: &str,
         listed: &str,
     ) -> Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig> {
-        opened(name, &format!("{declared}{INFRA}{placed}"), listed)
+        opened(
+            name,
+            &format!("{ARTIFACTS}{declared}"),
+            &format!("{INFRA}{placed}"),
+            listed,
+        )
     }
 
     fn cut_at_six(name: &str) -> Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig> {
         derived(
             name,
-            "[[artifact.instant]]\nat = \"06:00\"\nshard = \"%Y%m%d%H\"\n",
-            "place.instant.\"06:00\" = [{ prefix = \"mysql_shop_instant\" }]\n",
-            "[default]\nartifacts = [\"snapshot\", \"instant\"]\n",
+            "[[artifact]]\nname = \"instant_0600\"\nkind = \"instant\"\nbase = \"snapshot\"\nat = \"06:00\"\nshard = \"%Y%m%d%H\"\n",
+            "place.instant_0600 = [{ prefix = \"mysql_shop_instant\" }]\n",
+            "[default]\nartifacts = [\"snapshot\", \"instant_0600\"]\n",
         )
     }
 
@@ -1312,7 +1327,7 @@ mod derived {
         let client = logged(PEOPLE, &[built_before("people", CAPTURE)]).await;
         let pipeline = derived(
             "scd1",
-            "[artifact.scd1]\n",
+            "[[artifact]]\nname = \"scd1\"\nkind = \"scd1\"\nbase = \"snapshot\"\n",
             "place.scd1 = [{ prefix = \"mysql_shop_scd1\" }]\n",
             "[default]\nartifacts = [\"snapshot\", \"scd1\"]\n",
         );
@@ -1356,7 +1371,7 @@ mod derived {
         let client = logged(PEOPLE, &[built_before("people", CAPTURE)]).await;
         let pipeline = derived(
             "scd1-once",
-            "[artifact.scd1]\n",
+            "[[artifact]]\nname = \"scd1\"\nkind = \"scd1\"\nbase = \"snapshot\"\n",
             "place.scd1 = [{ prefix = \"mysql_shop_scd1\" }]\n",
             "[default]\nartifacts = [\"snapshot\", \"scd1\"]\n",
         );
@@ -1396,7 +1411,7 @@ mod derived {
         let client = logged(PEOPLE, &[]).await;
         let pipeline = derived(
             "scd2",
-            "[artifact.scd2]\nshard = \"%Y%m%d\"\n",
+            "[[artifact]]\nname = \"scd2\"\nkind = \"scd2\"\nshard = \"%Y%m%d\"\n",
             "place.scd2 = [{ prefix = \"mysql_shop_scd2\" }]\n",
             "[default]\nartifacts = [\"snapshot\", \"scd2\"]\n",
         );
@@ -1437,7 +1452,7 @@ mod derived {
         let client = logged(PEOPLE, &[]).await;
         let pipeline = derived(
             "scd2-unnamed",
-            "[artifact.scd2]\nshard = \"%Y%m%d\"\n",
+            "[[artifact]]\nname = \"scd2\"\nkind = \"scd2\"\nshard = \"%Y%m%d\"\n",
             "place.scd2 = [{ prefix = \"mysql_shop_scd2\" }]\n",
             "[default]\nartifacts = [\"snapshot\"]\n",
         );
@@ -1529,8 +1544,8 @@ mod derived {
     async fn a_catch_up_named_an_artifact_advances_that_one_alone() {
         let client = logged(PEOPLE, &[built_before("people", CAPTURE)]).await;
         let pipeline = cut_at_six("one-at-a-time");
-        let caught_up = |artifact, at: Option<&str>| RunCommand::CatchUp {
-            target: Target::new(Some(artifact), at.map(|at| at.parse().unwrap())),
+        let caught_up = |artifact: &str| RunCommand::CatchUp {
+            target: Target::new(Some(artifact.into())),
             to: None,
         };
         let instants = |client: &lithify_protocol::sink::duckdb::client::DuckDbClient| {
@@ -1543,7 +1558,7 @@ mod derived {
         settle(
             &pipeline,
             &client,
-            &caught_up("snapshot", None),
+            &caught_up("snapshot"),
             "2026-09-21T07:00:00Z",
         )
         .await
@@ -1557,7 +1572,7 @@ mod derived {
         settle(
             &pipeline,
             &client,
-            &caught_up("instant", Some("06:00")),
+            &caught_up("instant_0600"),
             "2026-09-21T07:00:00Z",
         )
         .await

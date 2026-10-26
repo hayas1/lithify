@@ -1,11 +1,14 @@
 use std::convert::Infallible;
 use std::fmt;
 
+use chrono_tz::Tz;
+use serde::{Deserialize, Serialize};
+
 use crate::build_log::{BuildLog, Series, TableBuild};
 use crate::listener::{Finish, ReplayEnd, SchemaChangeListener};
 use crate::model::TableId;
 use crate::schedule::Timeline;
-use crate::sink::{TablePath, UnsupportedColumn, Warehouse};
+use crate::sink::{Namespace, TablePath, UnsupportedColumn, Warehouse};
 use crate::source::RowChangeLog;
 use crate::sql::SqlString;
 use crate::window::Window;
@@ -59,14 +62,89 @@ impl From<UnsupportedColumn> for UnbuildableArtifact {
     }
 }
 
+// TODO: restrict a name to the characters every place it reaches takes, such as `[a-z0-9_]`, as
+// it names a build log column, a configuration key and a dry run file alike.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
+#[serde(transparent)]
+pub struct ArtifactName(String);
+
+impl ArtifactName {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for ArtifactName {
+    fn from(name: &str) -> Self {
+        Self(name.to_owned())
+    }
+}
+
+impl From<String> for ArtifactName {
+    fn from(name: String) -> Self {
+        Self(name)
+    }
+}
+
+impl std::str::FromStr for ArtifactName {
+    type Err = Infallible;
+
+    fn from_str(name: &str) -> Result<Self, Infallible> {
+        Ok(Self::from(name))
+    }
+}
+
+impl fmt::Display for ArtifactName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Placement {
+    namespace: Namespace,
+    copies: Vec<Namespace>,
+}
+
+impl Placement {
+    pub fn new(namespace: Namespace, copies: Vec<Namespace>) -> Self {
+        Self { namespace, copies }
+    }
+
+    pub fn namespace(&self) -> &Namespace {
+        &self.namespace
+    }
+
+    pub fn copies(&self) -> &[Namespace] {
+        &self.copies
+    }
+}
+
+impl From<Namespace> for Placement {
+    fn from(namespace: Namespace) -> Self {
+        Self::new(namespace, Vec::new())
+    }
+}
+
 pub trait Artifact {
     const KIND: &'static str;
 
     type From: Artifact;
 
+    type Config;
+
     type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>: ArtifactBuilder<L::Position, W>
     where
         Self: 'a;
+
+    fn declared(
+        name: &ArtifactName,
+        config: &Self::Config,
+        placement: &Placement,
+        zone: Tz,
+    ) -> Self;
+
+    fn namespace(&self) -> &Namespace;
 
     fn series(&self) -> Series;
 

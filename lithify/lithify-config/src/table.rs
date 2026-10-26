@@ -3,6 +3,7 @@ use std::fmt::{self, Display, Formatter};
 
 use serde::{Deserialize, Serialize};
 
+use lithify_core::artifact::ArtifactName;
 use lithify_core::model::TableId;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -14,25 +15,11 @@ pub(crate) struct Listing {
     tables: Vec<ListedTable>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Defaults {
-    #[serde(default = "Defaults::snapshot")]
-    artifacts: BTreeSet<String>,
-}
-
-impl Defaults {
-    fn snapshot() -> BTreeSet<String> {
-        BTreeSet::from(["snapshot".to_owned()])
-    }
-}
-
-impl Default for Defaults {
-    fn default() -> Self {
-        Self {
-            artifacts: Self::snapshot(),
-        }
-    }
+    #[serde(default)]
+    artifacts: BTreeSet<ArtifactName>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -40,7 +27,7 @@ impl Default for Defaults {
 struct ListedTable {
     schema: String,
     name: String,
-    artifacts: Option<BTreeSet<String>>,
+    artifacts: Option<BTreeSet<ArtifactName>>,
     #[serde(default, rename = "column")]
     columns: BTreeMap<String, ListedColumn>,
 }
@@ -107,12 +94,12 @@ pub enum Mislisting {
     TableListedTwice(TableId),
     Undeclared {
         table: Option<TableId>,
-        artifact: String,
+        artifact: ArtifactName,
     },
-    WithoutSource {
+    WithoutBase {
         table: Option<TableId>,
-        artifact: String,
-        source: String,
+        artifact: ArtifactName,
+        base: ArtifactName,
     },
 }
 
@@ -134,13 +121,13 @@ impl Display for Mislisting {
                 "{} is built into {artifact}, which no sink places",
                 Self::named(table)
             ),
-            Self::WithoutSource {
+            Self::WithoutBase {
                 table,
                 artifact,
-                source,
+                base,
             } => write!(
                 formatter,
-                "{} is built into {artifact} but not into {source} it is built from",
+                "{} is built into {artifact} but not into {base} it is built from",
                 Self::named(table)
             ),
         }
@@ -149,17 +136,17 @@ impl Display for Mislisting {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Table {
-    artifacts: BTreeSet<String>,
+    artifacts: BTreeSet<ArtifactName>,
     masks: BTreeMap<String, Mask>,
 }
 
 impl Table {
-    pub fn builds(&self, artifact: &str) -> bool {
+    pub fn builds(&self, artifact: &ArtifactName) -> bool {
         self.artifacts.contains(artifact)
     }
 
-    pub fn artifacts(&self) -> impl Iterator<Item = &str> {
-        self.artifacts.iter().map(String::as_str)
+    pub fn artifacts(&self) -> impl Iterator<Item = &ArtifactName> {
+        self.artifacts.iter()
     }
 
     pub fn mask(&self, column: &str) -> Mask {
@@ -225,24 +212,24 @@ mod tests {
     fn a_table_that_is_not_configured_takes_the_defaults() {
         let table = table("shop", "customers");
 
-        assert!(table.builds("snapshot"));
-        assert!(!table.builds("scd2"));
+        assert!(table.builds(&"snapshot".into()));
+        assert!(!table.builds(&"scd2".into()));
     }
 
     #[test]
     fn a_configured_table_builds_the_artifacts_it_names() {
         let table = table("shop", "orders");
 
-        assert!(table.builds("snapshot"));
-        assert!(table.builds("scd2"));
+        assert!(table.builds(&"snapshot".into()));
+        assert!(table.builds(&"scd2".into()));
     }
 
     #[test]
     fn a_table_can_be_left_out_of_every_artifact() {
         let table = table("shop", "audit_log");
 
-        assert!(!table.builds("snapshot"));
-        assert!(!table.builds("scd2"));
+        assert!(!table.builds(&"snapshot".into()));
+        assert!(!table.builds(&"scd2".into()));
     }
 
     #[test]
@@ -272,21 +259,20 @@ mod tests {
     }
 
     #[test]
-    fn a_configuration_that_defaults_to_nothing_in_particular_snapshots_every_table() {
+    fn a_configuration_that_defaults_to_nothing_in_particular_builds_nothing_of_a_table_it_does_not_list()
+     {
         let table = tables("[default]")
             .table(&TableId::new("shop", "customers"))
             .clone();
 
-        assert!(table.builds("snapshot"));
-        assert!(!table.builds("scd2"));
+        assert_eq!(table.artifacts().count(), 0);
     }
 
     #[test]
-    fn a_configuration_without_defaults_snapshots_every_table() {
+    fn a_configuration_without_defaults_builds_nothing_of_a_table_it_does_not_list() {
         let table = tables("").table(&TableId::new("shop", "customers")).clone();
 
-        assert!(table.builds("snapshot"));
-        assert!(!table.builds("scd2"));
+        assert_eq!(table.artifacts().count(), 0);
     }
 
     #[test]

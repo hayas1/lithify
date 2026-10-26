@@ -3,12 +3,11 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use chrono::{NaiveDate, NaiveTime};
+use chrono::NaiveDate;
 use clap::{Parser, Subcommand};
 
 #[cfg(feature = "serve")]
 use lithify_cli::artifacts::ArtifactConfig;
-use lithify_cli::artifacts::Declared;
 use lithify_cli::command::{RunCommand, Target};
 use lithify_cli::credential::Credentials;
 use lithify_cli::journal::Journal;
@@ -16,6 +15,7 @@ use lithify_cli::journal::Journal;
 use lithify_cli::pipeline::{CaptureConfig, WarehouseConfig};
 use lithify_cli::run::Run;
 use lithify_cli::unrunnable::Unrunnable;
+use lithify_core::artifact::ArtifactName;
 use lithify_core::ts::Ts;
 use lithify_protocol::sink::duckdb::store::{S3Credential, Secret};
 #[cfg(feature = "serve")]
@@ -150,22 +150,14 @@ struct TargetArguments {
     #[arg(
         long,
         value_name = "ARTIFACT",
-        value_parser = |artifact: &str| Declared::KINDS.into_iter().find(|kind| *kind == artifact).ok_or("snapshot, instant, scd1 or scd2"),
-        help = "The artifact to build, out of every one the sink places when none is named"
+        help = "The name of the artifact to build, out of every one the sink places when none is named"
     )]
-    artifact: Option<&'static str>,
-    #[arg(
-        long,
-        value_name = "HH:MM",
-        requires = "artifact",
-        help = "The instant of the day the instant to build is cut at, out of every one the sink places when none is named"
-    )]
-    at: Option<NaiveTime>,
+    artifact: Option<ArtifactName>,
 }
 
 impl TargetArguments {
     fn target(&self) -> Target {
-        Target::new(self.artifact, self.at)
+        Target::new(self.artifact.clone())
     }
 }
 
@@ -331,13 +323,10 @@ mod tests {
         assert!(parsed("catch-up", &["--from", "2026-09-20T00:00:00Z"]).is_err());
         assert!(parsed("catch-up", &["--onto", "2026-09-19T00:00:00Z"]).is_err());
         assert!(parsed("catch-up", &["--dry-run", "dry-run"]).is_err());
-        let Ok(Command::CatchUp(cut)) =
-            parsed("catch-up", &["--artifact", "instant", "--at", "06:00"])
-        else {
+        let Ok(Command::CatchUp(cut)) = parsed("catch-up", &["--artifact", "instant_0600"]) else {
             panic!("catch-up was named");
         };
-        assert_eq!(cut.target.artifact, Some("instant"));
-        assert_eq!(cut.target.at, NaiveTime::from_hms_opt(6, 0, 0));
+        assert_eq!(cut.target.artifact, Some("instant_0600".into()));
     }
 
     #[test]
@@ -352,12 +341,10 @@ mod tests {
     }
 
     #[test]
-    fn a_build_is_named_the_artifact_and_the_instant_it_is_cut_at() {
-        let cut = build_arguments(&["--artifact", "instant", "--at", "12:00"]);
+    fn a_build_is_named_the_artifact_it_builds() {
+        let cut = build_arguments(&["--artifact", "instant_1200"]);
 
-        assert_eq!(cut.target.artifact, Some("instant"));
-        assert_eq!(cut.target.at, NaiveTime::from_hms_opt(12, 0, 0));
-        assert!(parsed("build", &["--artifact", "masked"]).is_err());
+        assert_eq!(cut.target.artifact, Some("instant_1200".into()));
         assert!(parsed("build", &["--at", "12:00"]).is_err());
     }
 

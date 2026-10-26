@@ -8,20 +8,47 @@ A pipeline is a directory of files, each answering one question about it.
 
 | File | Answers | Holds |
 | --- | --- | --- |
-| `infra.toml` | What can be built and where it lies | The sources a change log is captured from, the artifacts the pipeline builds, each with what it needs to know, and the warehouses the change log is sunk into, each with where in it the change log is read from and each artifact is written to, such as the project and dataset in BigQuery or the prefix in the bucket of a store |
-| `table.toml` | What is to be made of each table | The artifacts each table is built into, named as `infra.toml` names them, and how its columns are treated in them, such as a mask |
+| `artifact.toml` | What can be built | The artifacts the pipeline builds, each under a name with its kind and what that kind needs to know, such as the instant it is cut at |
+| `infra.toml` | Where it is captured from and where it lies | The sources a change log is captured from, and the warehouses the change log is sunk into, each with where in it the change log is read from and where each artifact is written to, such as a dataset in BigQuery or a prefix in the bucket of a store |
+| `table.toml` | What is to be made of each table | The artifacts each table is built into, by the names `artifact.toml` gives them, and how its columns are treated in them, such as a mask |
 | `owner.toml` | Who answers for the data | The team that owns each table and the people allowed to read each artifact |
 
-A pipeline moves to another warehouse by rewriting `infra.toml` alone, and a table changes what is built of it by rewriting `table.toml` alone.
+A pipeline moves to another warehouse by rewriting `infra.toml` alone, and a table changes what is built of it by rewriting `table.toml` alone; the artifacts and the places they lie in are set up once and seldom change.
 
-### Artifacts are declared by pipeline, placed by sink and chosen by table
+### Artifacts are declared by name, placed by sink and chosen by table
 
-An artifact is one of the kinds of table lithify builds: `snapshot`, `instant`, `scd1` and `scd2`, and is named by its kind alone.
-`infra.toml` declares under `artifact` what each kind is, once for the whole pipeline, and each sink places in its warehouse the artifacts it builds.
-A series is what the build log records under one `artifact` and `schedule`: a `snapshot` has one, cut at `at`, an `instant` has one for each instant of the day it is cut at, and an `scd1` and an `scd2` have one each.
-How a kind writes its series down and names its tables is its own: an `instant` lists its series as an array of tables, each with its instant, a `snapshot` and an `instant` name a table for each shard by formatting with `shard` an instant read in the time zone, a `snapshot` the last instant its window holds, as the data of a day is the day as it ended, and an `instant` the instant it is cut at, an `scd2` names by `shard`, as a `snapshot` is named, the versions each window closed and those it left open, and an `scd1` names one view after the table it is built from, as `<table>_scd_type_1`.
+An artifact is declared in `artifact.toml` under a `name`, with its `kind`, one of `snapshot`, `instant`, `scd1` and `scd2`, and what that kind needs to know; the name may be the kind itself as long as no other artifact takes it.
+The name is what the rest of the configuration and the build log know the artifact by: each sink places it by its name, each table chooses it by its name, and the build log records its series under it, so renaming an artifact starts its series afresh.
+Each kind names its tables its own way: a `snapshot` and an `instant` name a table for each shard by formatting with `shard` an instant read in the time zone, a `snapshot` the last instant its window holds, as the data of a day is the day as it ended, and an `instant` the instant it is cut at, an `scd2` names by `shard`, as a `snapshot` is named, the versions each window closed and those it left open, and an `scd1` names one view after the table it is built from, as `<table>_scd_type_1`.
 
 ```toml
+# artifact.toml
+[[artifact]]
+name = "snapshot"
+kind = "snapshot"
+at = "00:00"
+shard = "%Y%m%d"
+
+[[artifact]]
+name = "instant_0900"
+kind = "instant"
+base = "snapshot"
+at = "09:00"
+shard = "%Y%m%d"
+
+[[artifact]]
+name = "scd1"
+kind = "scd1"
+base = "snapshot"
+
+[[artifact]]
+name = "scd2"
+kind = "scd2"
+shard = "%Y%m%d"
+```
+
+```toml
+# infra.toml
 time_zone = "Asia/Tokyo"
 
 [[sink]]
@@ -32,11 +59,10 @@ project = "local-project"
 endpoint = "http://bigquery-emulator:9050"
 change_log = { project = "raw-project", dataset = "mysql_shop_cdc" }
 place.snapshot = [{ dataset = "mysql_shop" }]
-place.instant."09:00" = [
+place.instant_0900 = [
   { dataset = "mysql_shop_instant_0900" },
   { project = "analytics-project", dataset = "shop_instant_0900" },
 ]
-place.instant."18:00" = [{ dataset = "mysql_shop_instant_1800" }]
 place.scd1 = [{ dataset = "mysql_shop_scd1" }]
 
 [[sink]]
@@ -47,26 +73,10 @@ s3 = { endpoint = "http://rustfs:9000", region = "us-east-1", bucket = "lithify"
 change_log = { prefix = "mysql_shop_cdc" }
 place.snapshot = [{ prefix = "mysql_shop" }]
 place.scd2 = [{ prefix = "mysql_shop_scd2" }]
-
-[artifact.snapshot]
-at = "00:00"
-shard = "%Y%m%d"
-
-[[artifact.instant]]
-at = "09:00"
-shard = "%Y%m%d"
-
-[[artifact.instant]]
-at = "18:00"
-shard = "%Y%m%d"
-
-[artifact.scd1]
-
-[artifact.scd2]
-shard = "%Y%m%d"
 ```
 
 ```toml
+# table.toml
 [default]
 artifacts = ["snapshot"]
 
@@ -78,23 +88,21 @@ artifacts = ["snapshot", "scd1"]
 [[table]]
 schema = "shop"
 name = "orders"
-artifacts = ["snapshot", "instant", "scd2"]
+artifacts = ["snapshot", "instant_0900", "scd2"]
 ```
 
-A sink builds the artifacts its warehouse places, and an `instant` only at the instants it places, so sinks may build different artifacts of the same table.
-Each artifact is built only of the tables naming it, and a table that names none takes `[default]`, which is a `snapshot` alone unless it is written, so what costs more than a snapshot is paid only for the tables that need it.
+A sink builds the artifacts it places, so sinks may build different artifacts of the same table.
+Each artifact is built only of the tables naming it, and a table that names none takes `[default]`, which builds nothing unless it is written, so nothing is built of a table no one asked for, and what costs more than a snapshot is paid only for the tables that name it.
 A table naming an artifact no sink places is refused.
 
 ### Placement
 
 The change log and each placement are written inside the warehouse of the sink, the way that warehouse is: a project and a dataset in BigQuery, the project defaulting to the one the warehouse names, and a prefix in the bucket of a store.
 A placement cannot be written for a warehouse other than the one of its sink, since it is read as that warehouse reads where a table lies.
-An artifact is placed by the name of its kind, and an `instant` by the instant it is cut at as well; a placement of an artifact, or of an instant, that `artifact` does not declare is refused.
-The change log and each series are placed on their own, so the series of one sink may lie in projects or datasets apart from the change log and from one another.
+An artifact is placed by its name; a placement of an artifact `artifact.toml` does not declare is refused.
+The change log and each artifact are placed on their own, so the artifacts of one sink may lie in projects or datasets apart from the change log and from one another.
 
-A series may be placed more than once, each placement holding the whole of it: it is built into the first placement and copied into the others, so every placement holds the same rows.
-
-## Artifacts
+An artifact may be placed more than once, each placement holding the whole of it: it is built into the first placement and copied into the others, so every placement holds the same rows.
 
 ### The build log advances daily
 
@@ -105,34 +113,34 @@ The instant a `snapshot` is cut at and the time zone it is read in are fixed onc
 
 An artifact that holds the state at another instant of the day is an `instant`, which cuts within a daily window rather than closing one, and leaves what the build log folds onto untouched.
 
-### An artifact knows what it is built from
+### An artifact names what it is built from
 
-Which artifact another is built from is the artifact's to know, not the configuration's:
+What kind of artifact another is built from is the artifact's to know, as `Artifact::From`, and which one of that kind is the configuration's to say, as its `base`:
 
 - an `instant` folds the change log up to the instant it is cut at onto the `snapshot` before it;
 - an `scd1` folds the change log after the latest `snapshot` onto it;
-- an `scd2` appends each window onto what the window before it left.
+- an `scd2` appends each window onto what the window before it left, and names no base.
 
-A sink placing an artifact without the one it is built from is refused, and so is a table naming an artifact without the one it is built from.
-A pipeline declares each kind at most once, so what an artifact is built from is never in doubt.
+A base declared nowhere, or one of another kind than the artifact is built from, is refused as `artifact.toml` is read, and so are a sink placing an artifact without its base and a table naming an artifact without its base.
+A sink places one `snapshot`, which the build log of the sink advances by, so what an artifact is built from is never in doubt.
 
 ### The set of artifacts is open
 
 No crate but the command line enumerates the kinds of artifact there are.
-As a capture is configured by `CdcFormat::Config` and a warehouse by `OpenWarehouse::Config`, each kind of artifact defines its own configuration in the crate that implements it, and the command line gathers them into one enum the way it gathers `CaptureConfig` and `WarehouseConfig`, so another kind is added without touching the configuration crate.
-The build log records each series by the kind of its artifact and by what makes it advance, such as the instant of the day it is cut at, so the `artifact` and `schedule` columns read whatever the artifact writes into them.
+As a capture is configured by `CdcFormat::Config` and a warehouse by `OpenWarehouse::Config`, each kind of artifact is configured by `Artifact::Config`, and is made by `Artifact::declared` from its name, its configuration, the `Placement` it is written into and the time zone; the command line gathers the configurations into one enum tagged by `kind`, the way it gathers `CaptureConfig` and `WarehouseConfig`, so another kind is added without touching the configuration crate.
+The build log records each series under the name of its artifact and by what makes it advance, such as the instant of the day it is cut at, so the `artifact` and `schedule` columns read whatever the artifact writes into them.
 
 ## Running
 
 ### A build takes one step, and a catch-up repeats it
 
 `lithify build` takes one step: it builds one window of one series for the tables that window is next for, onto what the build log records them built from, and logs each table.
-Named nothing, it takes the step the build log says is next; `--artifact` and `--at` name the series.
+Named nothing, it takes the step the build log says is next; `--artifact` names the series by the name of its artifact.
 `--dry-run` takes the step as a build does, but on a client that records the statements it would run, the build log it would write among them, rather than running them, and writes them into one file for the step; a table that fails fails the dry run as it would the build, while the statements of the other tables are still written.
 
 `lithify catch-up` repeats `lithify build`, reading the build log afresh before each step, until no step is left.
-Named an artifact with `--artifact` and `--at`, it advances that series alone, so each artifact may be run by a process of its own at the times that suit it, such as an `instant` after the instant it is cut at.
-Named nothing, it advances the series of a sink in the order they are built from one another: the `snapshot`, each `instant`, the `scd2`, then the `scd1`, each as far as it can.
+Named an artifact with `--artifact`, it advances that series alone, so each artifact may be run by a process of its own at the times that suit it, such as an `instant` after the instant it is cut at.
+Named nothing, it advances the series of a sink in the order `artifact.toml` declares them, each as far as it can; a series waiting on its base takes its step once the base has stepped.
 
 ### Each table advances on its own
 

@@ -155,7 +155,7 @@ mod tests {
     }
 
     fn daily() -> Series {
-        Series::new("snapshot", "daily")
+        Series::new("snapshot".into(), "daily")
     }
 
     fn people() -> TableId {

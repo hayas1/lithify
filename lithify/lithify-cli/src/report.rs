@@ -150,7 +150,7 @@ mod tests {
         Run::new(
             Ulid::nil(),
             Ts::from(DateTime::UNIX_EPOCH),
-            "snapshot",
+            &"snapshot".into(),
             "daily",
             "primary",
             "{}",
@@ -191,7 +191,7 @@ mod tests {
 
         dry_run
             .report(
-                &Series::new("snapshot", "daily"),
+                &Series::new("snapshot".into(), "daily"),
                 &window(),
                 vec![failed()],
                 &mut journal,

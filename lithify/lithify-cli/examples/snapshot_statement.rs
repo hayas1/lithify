@@ -45,7 +45,7 @@ fn previous(window: &Window, shard: &str) -> BuildLog {
     .logged(&Run::new(
         Ulid::nil(),
         Ts::from(DateTime::UNIX_EPOCH),
-        "snapshot",
+        &"snapshot".into(),
         "daily",
         "primary",
         "{}",

@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 use serde::de::{self, DeserializeOwned, Deserializer};
 
+use lithify_core::artifact::ArtifactName;
 use lithify_core::sink::SinkWarehouse;
 
 pub trait Placing: SinkWarehouse {
@@ -58,7 +59,7 @@ impl<'de, W: DeserializeOwned, L: DeserializeOwned> Deserialize<'de> for Placed<
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(bound(deserialize = "L: DeserializeOwned"))]
-pub struct Places<L>(BTreeMap<String, Place<L>>);
+pub struct Places<L>(BTreeMap<ArtifactName, Vec<L>>);
 
 impl<L> Default for Places<L> {
     fn default() -> Self {
@@ -67,14 +68,14 @@ impl<L> Default for Places<L> {
 }
 
 impl<L> Places<L> {
-    pub fn get(&self, artifact: &str) -> Option<&Place<L>> {
-        self.0.get(artifact)
+    pub fn get(&self, artifact: &ArtifactName) -> Option<&[L]> {
+        self.0.get(artifact).map(Vec::as_slice)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&str, &Place<L>)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&ArtifactName, &[L])> {
         self.0
             .iter()
-            .map(|(artifact, place)| (artifact.as_str(), place))
+            .map(|(artifact, places)| (artifact, places.as_slice()))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -85,68 +86,9 @@ impl<L> Places<L> {
         Places(
             self.0
                 .into_iter()
-                .map(|(artifact, place)| (artifact, place.map(&located)))
+                .map(|(artifact, places)| (artifact, places.into_iter().map(&located).collect()))
                 .collect(),
         )
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Place<L> {
-    Whole(Vec<L>),
-    Cuts(BTreeMap<String, Vec<L>>),
-}
-
-impl<L> Place<L> {
-    pub fn as_whole(&self) -> Option<&[L]> {
-        match self {
-            Self::Whole(places) => Some(places),
-            Self::Cuts(_) => None,
-        }
-    }
-
-    pub fn cut(&self, cut: &str) -> Option<&[L]> {
-        match self {
-            Self::Whole(_) => None,
-            Self::Cuts(cuts) => cuts.get(cut).map(Vec::as_slice),
-        }
-    }
-
-    pub(crate) fn lists(&self) -> Vec<&[L]> {
-        match self {
-            Self::Whole(places) => vec![places],
-            Self::Cuts(cuts) => cuts.values().map(Vec::as_slice).collect(),
-        }
-    }
-
-    fn map<M>(self, located: impl Fn(L) -> M) -> Place<M> {
-        let all = |places: Vec<L>| places.into_iter().map(&located).collect();
-
-        match self {
-            Self::Whole(places) => Place::Whole(all(places)),
-            Self::Cuts(cuts) => Place::Cuts(
-                cuts.into_iter()
-                    .map(|(cut, places)| (cut, all(places)))
-                    .collect(),
-            ),
-        }
-    }
-}
-
-impl<'de, L: DeserializeOwned> Deserialize<'de> for Place<L> {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        match toml::Value::deserialize(deserializer)? {
-            toml::Value::Array(places) => Vec::deserialize(toml::Value::Array(places))
-                .map(Self::Whole)
-                .map_err(de::Error::custom),
-            toml::Value::Table(cuts) => BTreeMap::deserialize(toml::Value::Table(cuts))
-                .map(Self::Cuts)
-                .map_err(de::Error::custom),
-            written => Err(de::Error::custom(format!(
-                "expected a list of places, or one by each instant an artifact is cut at, found {}",
-                written.type_str()
-            ))),
-        }
     }
 }
 
@@ -176,7 +118,7 @@ mod tests {
         bucket = "lithify"
         change_log = { prefix = "mysql_shop_cdc" }
         place.snapshot = [{ prefix = "mysql_shop" }, { prefix = "shop" }]
-        place.instant."09:00" = [{ prefix = "mysql_shop_0900" }]
+        place.instant_0900 = [{ prefix = "mysql_shop_0900" }]
     "#;
 
     fn placed(written: &str) -> Placed<Bucket, Prefix> {
@@ -190,7 +132,7 @@ mod tests {
         assert_eq!(
             placed.warehouse(),
             &Bucket {
-                bucket: "lithify".to_owned()
+                bucket: "lithify".into()
             }
         );
         assert_eq!(placed.change_log(), &prefix("mysql_shop_cdc"));
@@ -199,25 +141,9 @@ mod tests {
     #[test]
     fn an_artifact_is_placed_whole_in_each_place_it_lists() {
         assert_eq!(
-            placed(PLACED)
-                .places()
-                .get("snapshot")
-                .and_then(Place::as_whole),
+            placed(PLACED).places().get(&"snapshot".into()),
             Some([prefix("mysql_shop"), prefix("shop")].as_slice())
         );
-    }
-
-    #[test]
-    fn an_artifact_cut_at_several_instants_is_placed_by_each_instant() {
-        let placed = placed(PLACED);
-        let instant = placed.places().get("instant").unwrap();
-
-        assert_eq!(
-            instant.cut("09:00"),
-            Some([prefix("mysql_shop_0900")].as_slice())
-        );
-        assert_eq!(instant.cut("18:00"), None);
-        assert_eq!(instant.as_whole(), None);
     }
 
     #[test]
@@ -247,7 +173,7 @@ mod tests {
     }
 
     #[test]
-    fn a_place_neither_listed_nor_by_instant_is_rejected() {
+    fn a_place_not_listed_is_rejected() {
         let unlisted = PLACED.replace(
             "place.snapshot = [{ prefix = \"mysql_shop\" }, { prefix = \"shop\" }]",
             "place.snapshot = \"mysql_shop\"",
@@ -261,10 +187,8 @@ mod tests {
         let places = placed(PLACED).places().clone().map(|place| place.prefix);
 
         assert_eq!(
-            places
-                .get("instant")
-                .and_then(|instant| instant.cut("09:00")),
-            Some(["mysql_shop_0900".to_owned()].as_slice())
+            places.get(&"instant_0900".into()),
+            Some(["mysql_shop_0900".into()].as_slice())
         );
     }
 }

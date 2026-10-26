@@ -1,18 +1,17 @@
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, NaiveTime, Utc};
+use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use serde::Deserialize;
 use ulid::Ulid;
 
-use lithify_artifact::instant::{self, Instant};
-use lithify_artifact::scd1::{self, Scd1};
-use lithify_artifact::scd2::{self, Scd2};
-use lithify_artifact::shard::Shard;
-use lithify_artifact::snapshot::{self, Snapshot};
+use lithify_artifact::instant::Instant;
+use lithify_artifact::scd1::Scd1;
+use lithify_artifact::scd2::Scd2;
+use lithify_artifact::snapshot::Snapshot;
+use lithify_config::Declaration;
 use lithify_config::infra::{Sink, Source};
-use lithify_config::{Declaration, Place};
-use lithify_core::artifact::Artifact;
+use lithify_core::artifact::{Artifact, ArtifactName, Placement};
 use lithify_core::build_log::{Run, Series};
 use lithify_core::progress::Step;
 use lithify_core::runner::{BuildLogWrite, StepTaker, Tables};
@@ -23,62 +22,71 @@ use lithify_core::ts::{Replay, Ts};
 use lithify_core::window::Window;
 
 use crate::journal::Journal;
-use crate::pipeline::{CaptureConfig, LocationConfig, WarehouseConfig};
+use crate::pipeline::{CaptureConfig, WarehouseConfig};
 use crate::report::Report;
 use crate::unrunnable::Unrunnable;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "lowercase")]
+#[serde(tag = "kind", rename_all = "lowercase")]
 pub enum ArtifactConfig {
-    Snapshot(snapshot::Config),
-    Instant(instant::Config),
-    Scd1(scd1::Config),
-    Scd2(scd2::Config),
+    Snapshot(<Snapshot as Artifact>::Config),
+    Instant(<Instant as Artifact>::Config),
+    Scd1(<Scd1 as Artifact>::Config),
+    Scd2(<Scd2 as Artifact>::Config),
 }
 
 impl ArtifactConfig {
-    pub fn as_snapshot(&self) -> Option<&snapshot::Config> {
+    pub fn as_snapshot(&self) -> Option<&<Snapshot as Artifact>::Config> {
         match self {
             Self::Snapshot(config) => Some(config),
             Self::Instant(_) | Self::Scd1(_) | Self::Scd2(_) => None,
         }
     }
 
-    pub fn as_instant(&self) -> Option<&instant::Config> {
-        match self {
-            Self::Instant(config) => Some(config),
-            Self::Snapshot(_) | Self::Scd1(_) | Self::Scd2(_) => None,
-        }
-    }
-
-    pub fn as_scd1(&self) -> Option<&scd1::Config> {
-        match self {
-            Self::Scd1(config) => Some(config),
-            Self::Snapshot(_) | Self::Instant(_) | Self::Scd2(_) => None,
-        }
-    }
-
-    pub fn as_scd2(&self) -> Option<&scd2::Config> {
-        match self {
-            Self::Scd2(config) => Some(config),
-            Self::Snapshot(_) | Self::Instant(_) | Self::Scd1(_) => None,
-        }
+    fn declared(
+        &self,
+        sink: &Sink<WarehouseConfig, ArtifactConfig>,
+        name: &ArtifactName,
+    ) -> Result<Declared, Unrunnable> {
+        Ok(match self {
+            Self::Snapshot(config) => Declared::Snapshot(Declared::artifact(sink, name, config)?),
+            Self::Instant(config) => Declared::Instant(
+                Declared::artifact::<Instant>(sink, name, config)?
+                    .based_on(&DeclaredSnapshot::named(sink, name, config.base())?.snapshot),
+            ),
+            Self::Scd1(config) => Declared::Scd1(
+                Declared::artifact::<Scd1>(sink, name, config)?
+                    .based_on(&DeclaredSnapshot::named(sink, name, config.base())?.snapshot),
+            ),
+            Self::Scd2(config) => Declared::Scd2(Declared::artifact(sink, name, config)?),
+        })
     }
 }
 
 impl Declaration for ArtifactConfig {
-    fn source(&self) -> Option<&'static str> {
+    fn kind(&self) -> &'static str {
         match self {
-            Self::Snapshot(_) | Self::Scd2(_) => None,
-            Self::Instant(_) => Some(<Instant as Artifact>::From::KIND),
-            Self::Scd1(_) => Some(<Scd1 as Artifact>::From::KIND),
+            Self::Snapshot(_) => Snapshot::KIND,
+            Self::Instant(_) => Instant::KIND,
+            Self::Scd1(_) => Scd1::KIND,
+            Self::Scd2(_) => Scd2::KIND,
         }
     }
 
-    fn cuts(&self) -> Option<Vec<String>> {
+    fn built_from(&self) -> &'static str {
         match self {
-            Self::Instant(cuts) => Some(cuts.iter().map(|cut| Instant::cut(cut.at())).collect()),
-            Self::Snapshot(_) | Self::Scd1(_) | Self::Scd2(_) => None,
+            Self::Snapshot(_) => <Snapshot as Artifact>::From::KIND,
+            Self::Instant(_) => <Instant as Artifact>::From::KIND,
+            Self::Scd1(_) => <Scd1 as Artifact>::From::KIND,
+            Self::Scd2(_) => <Scd2 as Artifact>::From::KIND,
+        }
+    }
+
+    fn base(&self) -> Option<&ArtifactName> {
+        match self {
+            Self::Snapshot(_) | Self::Scd2(_) => None,
+            Self::Instant(config) => Some(config.base()),
+            Self::Scd1(config) => Some(config.base()),
         }
     }
 
@@ -90,101 +98,60 @@ impl Declaration for ArtifactConfig {
     }
 }
 
-pub struct Placement<'a> {
-    places: &'a [LocationConfig],
-    namespace: Namespace,
-    time_zone: Tz,
+pub struct DeclaredSnapshot {
+    snapshot: Snapshot,
 }
 
-impl<'a> Placement<'a> {
-    fn of(
-        sink: &'a Sink<WarehouseConfig, ArtifactConfig>,
-        artifact: &'static str,
-        places: &'a [LocationConfig],
-    ) -> Result<Self, Unrunnable> {
-        let place = places.first().ok_or_else(|| Unrunnable::Undeclared {
+impl DeclaredSnapshot {
+    pub fn of(sink: &Sink<WarehouseConfig, ArtifactConfig>) -> Result<Self, Unrunnable> {
+        let mut snapshots = sink
+            .artifacts()
+            .filter_map(|(name, declared)| Some((name, declared.as_snapshot()?)));
+        let (name, config) = snapshots.next().ok_or_else(|| Unrunnable::Undeclared {
             sink: sink.name().to_owned(),
-            artifact,
+            artifact: ArtifactName::from(Snapshot::KIND),
         })?;
 
-        Ok(Self {
-            places,
-            namespace: place.clone().into(),
-            time_zone: sink.time_zone(),
-        })
+        match snapshots.next() {
+            Some(_) => Err(Unrunnable::SnapshotPlacedTwice(sink.name().to_owned())),
+            None => Ok(Self {
+                snapshot: Declared::artifact(sink, name, config)?,
+            }),
+        }
     }
 
-    fn whole(
-        sink: &'a Sink<WarehouseConfig, ArtifactConfig>,
-        artifact: &'static str,
+    fn named(
+        sink: &Sink<WarehouseConfig, ArtifactConfig>,
+        artifact: &ArtifactName,
+        base: &ArtifactName,
     ) -> Result<Self, Unrunnable> {
-        Self::of(
-            sink,
-            artifact,
-            sink.place(artifact)
-                .and_then(Place::as_whole)
-                .unwrap_or_default(),
-        )
-    }
-
-    pub fn namespace(&self) -> &Namespace {
-        &self.namespace
-    }
-
-    fn shard(&self, format: &str) -> Shard {
-        Shard::new(format, self.time_zone)
-    }
-
-    fn copies(&self) -> Vec<Namespace> {
-        self.places
-            .iter()
-            .skip(1)
-            .map(|place| place.clone().into())
-            .collect()
-    }
-}
-
-pub struct DeclaredSnapshot<'a> {
-    config: &'a snapshot::Config,
-    placement: Placement<'a>,
-}
-
-impl<'a> DeclaredSnapshot<'a> {
-    pub const ARTIFACT: &'static str = Snapshot::KIND;
-
-    pub fn of(sink: &'a Sink<WarehouseConfig, ArtifactConfig>) -> Result<Self, Unrunnable> {
         let config = sink
-            .artifact(Self::ARTIFACT)
+            .artifact(base)
             .and_then(ArtifactConfig::as_snapshot)
-            .ok_or_else(|| Unrunnable::Undeclared {
-                sink: sink.name().to_owned(),
-                artifact: Self::ARTIFACT,
+            .ok_or_else(|| Unrunnable::Unbased {
+                artifact: artifact.clone(),
+                base: base.clone(),
             })?;
 
         Ok(Self {
-            config,
-            placement: Placement::whole(sink, Self::ARTIFACT)?,
+            snapshot: Declared::artifact(sink, base, config)?,
         })
     }
 
     pub fn namespace(&self) -> &Namespace {
-        self.placement.namespace()
+        self.snapshot.namespace()
     }
 
     pub fn schedule(&self) -> Schedule {
-        self.config.schedule(self.placement.time_zone)
+        self.snapshot.schedule()
     }
 
     pub fn series(&self) -> Series {
-        self.artifact().series()
+        self.snapshot.series()
     }
 
     pub fn artifact(&self) -> Snapshot {
-        Snapshot::new(
-            self.placement.namespace.clone(),
-            self.placement.shard(self.config.shard()),
-        )
-        .copied_into(self.placement.copies())
+        self.snapshot.clone()
     }
 
     pub fn build(
@@ -209,165 +176,63 @@ impl<'a> DeclaredSnapshot<'a> {
     }
 }
 
-pub struct DeclaredInstant<'a> {
-    config: &'a snapshot::Config,
-    placement: Placement<'a>,
-    schedule: Schedule,
+pub enum Declared {
+    Snapshot(Snapshot),
+    Instant(Instant),
+    Scd2(Scd2),
+    Scd1(Scd1),
 }
 
-impl<'a> DeclaredInstant<'a> {
-    pub const ARTIFACT: &'static str = Instant::KIND;
+impl Declared {
+    fn artifact<A: Artifact>(
+        sink: &Sink<WarehouseConfig, ArtifactConfig>,
+        name: &ArtifactName,
+        config: &A::Config,
+    ) -> Result<A, Unrunnable> {
+        Ok(A::declared(
+            name,
+            config,
+            &Self::placement(sink, name)?,
+            sink.time_zone(),
+        ))
+    }
 
-    pub fn of(sink: &'a Sink<WarehouseConfig, ArtifactConfig>) -> Result<Vec<Self>, Unrunnable> {
-        let Some(configs) = sink
-            .artifact(Self::ARTIFACT)
-            .and_then(ArtifactConfig::as_instant)
-        else {
-            return Ok(Vec::new());
-        };
-        let schedule = DeclaredSnapshot::of(sink)?.schedule();
-
-        configs
+    fn placement(
+        sink: &Sink<WarehouseConfig, ArtifactConfig>,
+        artifact: &ArtifactName,
+    ) -> Result<Placement, Unrunnable> {
+        let mut places = sink
+            .place(artifact)
+            .unwrap_or_default()
             .iter()
-            .filter_map(|config| {
-                let places = sink
-                    .place(Self::ARTIFACT)?
-                    .cut(&Instant::cut(config.at()))?;
+            .map(|place| Namespace::from(place.clone()));
+        let namespace = places.next().ok_or_else(|| Unrunnable::Undeclared {
+            sink: sink.name().to_owned(),
+            artifact: artifact.clone(),
+        })?;
 
-                Some(
-                    Placement::of(sink, Self::ARTIFACT, places).map(|placement| Self {
-                        config,
-                        placement,
-                        schedule,
-                    }),
-                )
-            })
-            .collect()
+        Ok(Placement::new(namespace, places.collect()))
     }
-
-    pub fn namespace(&self) -> &Namespace {
-        self.placement.namespace()
-    }
-
-    pub fn series(&self) -> Series {
-        self.artifact().series()
-    }
-
-    pub fn artifact(&self) -> Instant {
-        Instant::new(
-            self.config.at(),
-            self.schedule,
-            self.placement.namespace.clone(),
-            self.placement.shard(self.config.shard()),
-        )
-        .copied_into(self.placement.copies())
-    }
-}
-
-pub struct DeclaredScd1<'a> {
-    placement: Placement<'a>,
-}
-
-impl<'a> DeclaredScd1<'a> {
-    pub const ARTIFACT: &'static str = Scd1::KIND;
-
-    pub fn of(sink: &'a Sink<WarehouseConfig, ArtifactConfig>) -> Result<Option<Self>, Unrunnable> {
-        sink.artifact(Self::ARTIFACT)
-            .and_then(ArtifactConfig::as_scd1)
-            .map(|_| {
-                Ok(Self {
-                    placement: Placement::whole(sink, Self::ARTIFACT)?,
-                })
-            })
-            .transpose()
-    }
-
-    pub fn namespace(&self) -> &Namespace {
-        self.placement.namespace()
-    }
-
-    pub fn series(&self) -> Series {
-        self.artifact().series()
-    }
-
-    pub fn artifact(&self) -> Scd1 {
-        Scd1::new(self.placement.namespace.clone()).copied_into(self.placement.copies())
-    }
-}
-
-pub struct DeclaredScd2<'a> {
-    config: &'a scd2::Config,
-    placement: Placement<'a>,
-}
-
-impl<'a> DeclaredScd2<'a> {
-    pub const ARTIFACT: &'static str = Scd2::KIND;
-
-    pub fn of(sink: &'a Sink<WarehouseConfig, ArtifactConfig>) -> Result<Option<Self>, Unrunnable> {
-        sink.artifact(Self::ARTIFACT)
-            .and_then(ArtifactConfig::as_scd2)
-            .map(|config| {
-                Ok(Self {
-                    config,
-                    placement: Placement::whole(sink, Self::ARTIFACT)?,
-                })
-            })
-            .transpose()
-    }
-
-    pub fn namespace(&self) -> &Namespace {
-        self.placement.namespace()
-    }
-
-    pub fn series(&self) -> Series {
-        self.artifact().series()
-    }
-
-    pub fn artifact(&self) -> Scd2 {
-        Scd2::new(
-            self.placement.namespace.clone(),
-            self.config.shard(),
-            self.placement.time_zone,
-        )
-    }
-}
-
-pub enum Declared<'a> {
-    Snapshot(DeclaredSnapshot<'a>),
-    Instant(DeclaredInstant<'a>),
-    Scd2(DeclaredScd2<'a>),
-    Scd1(DeclaredScd1<'a>),
-}
-
-impl<'a> Declared<'a> {
-    pub const KINDS: [&'static str; 4] = [
-        DeclaredSnapshot::ARTIFACT,
-        DeclaredInstant::ARTIFACT,
-        DeclaredScd1::ARTIFACT,
-        DeclaredScd2::ARTIFACT,
-    ];
 
     pub fn series(&self) -> Series {
         match self {
-            Self::Snapshot(declared) => declared.series(),
-            Self::Instant(declared) => declared.series(),
-            Self::Scd2(declared) => declared.series(),
-            Self::Scd1(declared) => declared.series(),
+            Self::Snapshot(artifact) => artifact.series(),
+            Self::Instant(artifact) => artifact.series(),
+            Self::Scd2(artifact) => artifact.series(),
+            Self::Scd1(artifact) => artifact.series(),
         }
     }
 
-    pub fn is(&self, artifact: &str, at: Option<NaiveTime>) -> bool {
-        let series = self.series();
-
-        series.artifact() == artifact && at.is_none_or(|at| series.schedule() == Instant::cut(at))
+    pub fn is(&self, artifact: &ArtifactName) -> bool {
+        self.series().artifact() == artifact
     }
 
     fn log(&self) -> SeriesLog {
         let namespace = match self {
-            Self::Snapshot(declared) => declared.namespace(),
-            Self::Instant(declared) => declared.namespace(),
-            Self::Scd2(declared) => declared.namespace(),
-            Self::Scd1(declared) => declared.namespace(),
+            Self::Snapshot(artifact) => artifact.namespace(),
+            Self::Instant(artifact) => artifact.namespace(),
+            Self::Scd2(artifact) => artifact.namespace(),
+            Self::Scd1(artifact) => artifact.namespace(),
         };
 
         SeriesLog::new(namespace.clone(), self.series())
@@ -389,12 +254,10 @@ impl<'a> Declared<'a> {
         let (log, base) = (self.log(), self.base(snapshot));
 
         match self {
-            Self::Snapshot(declared) => {
-                stepping.next(&declared.artifact(), &log, base, taken).await
-            }
-            Self::Instant(declared) => stepping.next(&declared.artifact(), &log, base, taken).await,
-            Self::Scd2(declared) => stepping.next(&declared.artifact(), &log, base, taken).await,
-            Self::Scd1(declared) => stepping.next(&declared.artifact(), &log, base, taken).await,
+            Self::Snapshot(artifact) => stepping.next(artifact, &log, base, taken).await,
+            Self::Instant(artifact) => stepping.next(artifact, &log, base, taken).await,
+            Self::Scd2(artifact) => stepping.next(artifact, &log, base, taken).await,
+            Self::Scd1(artifact) => stepping.next(artifact, &log, base, taken).await,
         }
     }
 
@@ -410,24 +273,24 @@ impl<'a> Declared<'a> {
         let (log, base) = (self.log(), self.base(snapshot));
         journal.window(window);
         let output = match self {
-            Self::Snapshot(declared) => {
+            Self::Snapshot(artifact) => {
                 stepping
-                    .take(&declared.artifact(), &log, base, window, tables, writer)
+                    .take(artifact, &log, base, window, tables, writer)
                     .await
             }
-            Self::Instant(declared) => {
+            Self::Instant(artifact) => {
                 stepping
-                    .take(&declared.artifact(), &log, base, window, tables, writer)
+                    .take(artifact, &log, base, window, tables, writer)
                     .await
             }
-            Self::Scd2(declared) => {
+            Self::Scd2(artifact) => {
                 stepping
-                    .take(&declared.artifact(), &log, base, window, tables, writer)
+                    .take(artifact, &log, base, window, tables, writer)
                     .await
             }
-            Self::Scd1(declared) => {
+            Self::Scd1(artifact) => {
                 stepping
-                    .take(&declared.artifact(), &log, base, window, tables, writer)
+                    .take(artifact, &log, base, window, tables, writer)
                     .await
             }
         }?;
@@ -436,26 +299,21 @@ impl<'a> Declared<'a> {
     }
 }
 
-pub struct Lineup<'a> {
+pub struct Lineup {
     snapshot: SeriesLog,
-    declared: Vec<Declared<'a>>,
+    declared: Vec<Declared>,
 }
 
-impl<'a> Lineup<'a> {
-    pub fn of(sink: &'a Sink<WarehouseConfig, ArtifactConfig>) -> Result<Self, Unrunnable> {
-        let snapshot = Declared::Snapshot(DeclaredSnapshot::of(sink)?);
+impl Lineup {
+    pub fn of(sink: &Sink<WarehouseConfig, ArtifactConfig>) -> Result<Self, Unrunnable> {
+        let snapshot = DeclaredSnapshot::of(sink)?;
 
         Ok(Self {
-            snapshot: snapshot.log(),
-            declared: std::iter::once(snapshot)
-                .chain(
-                    DeclaredInstant::of(sink)?
-                        .into_iter()
-                        .map(Declared::Instant),
-                )
-                .chain(DeclaredScd2::of(sink)?.map(Declared::Scd2))
-                .chain(DeclaredScd1::of(sink)?.map(Declared::Scd1))
-                .collect(),
+            snapshot: SeriesLog::new(snapshot.namespace().clone(), snapshot.series()),
+            declared: sink
+                .artifacts()
+                .map(|(name, declared)| declared.declared(sink, name))
+                .collect::<Result<_, _>>()?,
         })
     }
 
@@ -518,6 +376,7 @@ impl<'a> Lineup<'a> {
 mod tests {
     use std::path::Path;
 
+    use lithify_artifact::shard::Shard;
     use lithify_config::Pipeline;
     use lithify_core::artifact::Artifact;
     use lithify_core::model::TableId;
@@ -526,7 +385,11 @@ mod tests {
 
     use super::*;
     use crate::pipeline::CaptureConfig;
-    use crate::step::tests::{INFRA, opened};
+    use lithify_core::build_log::{Status, TableBuilt};
+
+    use lithify_config::{Cause, Misdeclaring};
+
+    use crate::step::tests::{ARTIFACTS, INFRA, opened, opening};
 
     #[test]
     fn a_sink_builds_its_snapshots_in_the_namespace_and_shards_the_pipeline_names() {
@@ -550,6 +413,12 @@ mod tests {
         );
     }
 
+    fn declared(sink: &Sink<WarehouseConfig, ArtifactConfig>) -> Vec<Series> {
+        sink.artifacts()
+            .map(|(name, declared)| declared.declared(sink, name).unwrap().series())
+            .collect()
+    }
+
     #[test]
     fn the_example_pipeline_builds_every_artifact_into_each_sink() {
         let pipeline: Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig> = Pipeline::open(
@@ -559,43 +428,144 @@ mod tests {
 
         for sink in pipeline.sinks() {
             assert_eq!(
-                DeclaredInstant::of(sink)
-                    .unwrap()
-                    .iter()
-                    .map(DeclaredInstant::series)
-                    .collect::<Vec<_>>(),
-                [Series::new("instant", "12:00")]
+                declared(sink),
+                [
+                    Series::new("snapshot".into(), "daily"),
+                    Series::new("instant_0900".into(), "09:00"),
+                    Series::new("instant_1200".into(), "12:00"),
+                    Series::new("instant_1800".into(), "18:00"),
+                    Series::new("scd1".into(), "current"),
+                    Series::new("scd2".into(), "daily"),
+                ]
             );
-            assert!(DeclaredScd1::of(sink).unwrap().is_some());
-            assert!(DeclaredScd2::of(sink).unwrap().is_some());
         }
     }
 
+    const INSTANTS: &str = "[[artifact]]\nname = \"six\"\nkind = \"instant\"\nbase = \"snapshot\"\nat = \"06:00\"\nshard = \"%Y%m%d%H\"\n\n[[artifact]]\nname = \"eighteen\"\nkind = \"instant\"\nbase = \"snapshot\"\nat = \"18:00\"\nshard = \"%Y%m%d%H\"\n";
+
     #[test]
-    fn a_sink_cuts_only_the_instants_its_warehouse_places() {
+    fn a_sink_cuts_only_the_instants_it_places() {
         let pipeline = opened(
             "partly-placed-instants",
-            &format!(
-                "[[artifact.instant]]\nat = \"06:00\"\nshard = \"%Y%m%d%H\"\n[[artifact.instant]]\nat = \"18:00\"\nshard = \"%Y%m%d%H\"\n{INFRA}place.instant.\"06:00\" = [{{ prefix = \"mysql_shop_0600\" }}]\n"
-            ),
+            &format!("{ARTIFACTS}{INSTANTS}"),
+            &format!("{INFRA}place.six = [{{ prefix = \"mysql_shop_0600\" }}]\n"),
             "",
         );
-        let instants = pipeline
-            .sinks()
-            .map(|sink| DeclaredInstant::of(sink).unwrap().len())
-            .collect::<Vec<_>>();
 
-        assert_eq!(instants, [0, 1]);
+        assert_eq!(
+            pipeline.sinks().map(declared).collect::<Vec<_>>(),
+            [
+                vec![Series::new("snapshot".into(), "daily")],
+                vec![
+                    Series::new("snapshot".into(), "daily"),
+                    Series::new("six".into(), "06:00")
+                ]
+            ]
+        );
+    }
+
+    #[test]
+    fn an_instant_cut_off_a_snapshot_is_built_onto_that_snapshot() {
+        let pipeline = opened(
+            "based-instant",
+            &format!("{ARTIFACTS}{INSTANTS}"),
+            &format!("{INFRA}place.six = [{{ prefix = \"mysql_shop_0600\" }}]\n"),
+            "",
+        );
+        let sink = pipeline.sinks().nth(1).unwrap();
+        let built = |series: Series| {
+            TableBuilt::new(
+                Some(TableId::new("shop", "people")),
+                Some(TableId::new("shop", "people")),
+                None,
+                Some(TablePath::new("mysql_shop", "people_20260919")),
+                Window::new(
+                    Ts::try_from(1789776000000).unwrap(),
+                    Ts::try_from(1789862400000).unwrap(),
+                ),
+                Status::Succeeded,
+                Ts::try_from(1789862400000).unwrap(),
+            )
+            .logged(&Run::new(
+                Ulid::nil(),
+                Ts::try_from(0).unwrap(),
+                series.artifact(),
+                series.schedule(),
+                "primary",
+                "{}",
+                "0.1.0",
+            ))
+        };
+        let Ok(Declared::Instant(six)) = sink
+            .artifact(&"six".into())
+            .unwrap()
+            .declared(sink, &"six".into())
+        else {
+            panic!("six is an instant");
+        };
+        let window = Window::new(
+            Ts::try_from(1789862400000).unwrap(),
+            Ts::try_from(1789884000000).unwrap(),
+        );
+        let onto = built(Series::new("snapshot".into(), "daily"));
+        let elsewhere = built(Series::new("weekly".into(), "daily"));
+
+        assert_eq!(
+            six.base(
+                &[elsewhere.clone(), onto.clone()],
+                &TableId::new("shop", "people"),
+                &window
+            ),
+            Some(&onto)
+        );
+        assert_eq!(
+            six.base(&[elsewhere], &TableId::new("shop", "people"), &window),
+            None
+        );
+    }
+
+    #[test]
+    fn a_sink_placing_two_snapshots_is_refused() {
+        let pipeline = opened(
+            "two-snapshots",
+            &format!(
+                "{ARTIFACTS}[[artifact]]\nname = \"weekly\"\nkind = \"snapshot\"\nshard = \"%Y%m%d\"\n"
+            ),
+            &format!("{INFRA}place.weekly = [{{ prefix = \"mysql_shop_weekly\" }}]\n"),
+            "",
+        );
+
+        assert!(matches!(
+            DeclaredSnapshot::of(pipeline.sinks().nth(1).unwrap()),
+            Err(Unrunnable::SnapshotPlacedTwice(sink)) if sink == "duckdb_s3"
+        ));
+    }
+
+    #[test]
+    fn an_instant_built_from_what_is_no_snapshot_is_refused_as_it_is_declared() {
+        let unreadable = opening(
+            "instant-off-scd2",
+            &format!(
+                "{ARTIFACTS}[[artifact]]\nname = \"scd2\"\nkind = \"scd2\"\nshard = \"%Y%m%d\"\n\n[[artifact]]\nname = \"six\"\nkind = \"instant\"\nbase = \"scd2\"\nat = \"06:00\"\nshard = \"%Y%m%d%H\"\n"
+            ),
+            INFRA,
+            "",
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            unreadable.cause(),
+            Cause::Misdeclaring(Misdeclaring::Misbased { artifact, base, kind })
+                if artifact.as_str() == "six" && base.as_str() == "scd2" && *kind == "snapshot"
+        ));
     }
 
     #[test]
     fn a_sink_cuts_its_snapshot_at_the_instant_it_declares_in_the_time_zone_of_the_pipeline() {
         let pipeline = opened(
             "zoned-snapshot",
-            &format!(
-                "time_zone = \"Asia/Tokyo\"\n{}",
-                INFRA.replacen("shard = ", "at = \"09:00\"\nshard = ", 1)
-            ),
+            &ARTIFACTS.replacen("shard = ", "at = \"09:00\"\nshard = ", 1),
+            &format!("time_zone = \"Asia/Tokyo\"\n{INFRA}"),
             "",
         );
 
@@ -615,6 +585,7 @@ mod tests {
      {
         let pipeline = opened(
             "copied-snapshot",
+            ARTIFACTS,
             &INFRA.replacen(
                 "place.snapshot = [{ dataset = \"mysql_shop\" }]",
                 "place.snapshot = [{ dataset = \"mysql_shop\" }, { project = \"analytics\", dataset = \"shop\" }]",

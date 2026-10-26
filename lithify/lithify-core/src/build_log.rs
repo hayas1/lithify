@@ -2,7 +2,7 @@ use std::fmt::{self, Display, Formatter};
 
 use ulid::Ulid;
 
-use crate::artifact::UnbuildableArtifact;
+use crate::artifact::{ArtifactName, UnbuildableArtifact};
 use crate::listener::Appearance;
 use crate::model::{ColumnType, TableId};
 use crate::sink::{Namespace, TablePath, UnsupportedColumn, WarehouseSql};
@@ -14,7 +14,7 @@ use crate::window::Window;
 pub struct Run {
     run_id: Ulid,
     started_at: Ts<Replay>,
-    artifact: String,
+    artifact: ArtifactName,
     schedule: String,
     source: String,
     capture: String,
@@ -25,7 +25,7 @@ impl Run {
     pub fn new(
         run_id: Ulid,
         started_at: Ts<Replay>,
-        artifact: &str,
+        artifact: &ArtifactName,
         schedule: &str,
         source: &str,
         capture: &str,
@@ -34,7 +34,7 @@ impl Run {
         Self {
             run_id,
             started_at,
-            artifact: artifact.to_owned(),
+            artifact: artifact.clone(),
             schedule: schedule.to_owned(),
             source: source.to_owned(),
             capture: capture.to_owned(),
@@ -53,19 +53,19 @@ impl Run {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Series {
-    artifact: String,
+    artifact: ArtifactName,
     schedule: String,
 }
 
 impl Series {
-    pub fn new(artifact: &str, schedule: &str) -> Self {
+    pub fn new(artifact: ArtifactName, schedule: &str) -> Self {
         Self {
-            artifact: artifact.to_owned(),
+            artifact,
             schedule: schedule.to_owned(),
         }
     }
 
-    pub fn artifact(&self) -> &str {
+    pub fn artifact(&self) -> &ArtifactName {
         &self.artifact
     }
 
@@ -405,7 +405,7 @@ impl BuildLog {
         [
             warehouse.literal(&self.run.run_id.to_string()),
             warehouse.timestamp_millis(self.run.started_at.milliseconds_since_epoch()),
-            warehouse.literal(&self.run.artifact),
+            warehouse.literal(self.run.artifact.as_str()),
             warehouse.literal(&self.run.schedule),
             warehouse.literal(&self.run.source),
             warehouse.literal(&self.run.capture),
@@ -430,7 +430,7 @@ impl BuildLog {
         [
             Some(self.run.run_id.to_string()),
             Some(self.run.started_at.to_string()),
-            Some(self.run.artifact.clone()),
+            Some(self.run.artifact.to_string()),
             Some(self.run.schedule.clone()),
             Some(self.run.source.clone()),
             Some(self.run.capture.clone()),
@@ -692,7 +692,7 @@ pub struct BuildLogRow {
 
 impl BuildLogRow {
     pub fn advances(&self, series: &Series) -> bool {
-        self.artifact == series.artifact && self.schedule == series.schedule
+        self.artifact == series.artifact.as_str() && self.schedule == series.schedule
     }
 
     fn path(written: &str) -> Result<TablePath, UnreadableBuildLog> {
@@ -729,7 +729,7 @@ impl From<&BuildLog> for BuildLogRow {
         Self {
             run_id: log.run.run_id.to_string(),
             started_at: log.run.started_at.milliseconds_since_epoch(),
-            artifact: log.run.artifact.clone(),
+            artifact: log.run.artifact.to_string(),
             schedule: log.run.schedule.clone(),
             source: log.run.source.clone(),
             capture: log.run.capture.clone(),
@@ -770,7 +770,7 @@ impl TryFrom<BuildLogRow> for BuildLog {
         .logged(&Run::new(
             run_id,
             BuildLogRow::ts(row.started_at)?,
-            &row.artifact,
+            &ArtifactName::from(row.artifact.as_str()),
             &row.schedule,
             &row.source,
             &row.capture,
@@ -827,7 +827,7 @@ mod tests {
         .logged(&Run::new(
             Ulid::nil(),
             Ts::from(DateTime::UNIX_EPOCH),
-            "snapshot",
+            &"snapshot".into(),
             "daily",
             "primary",
             "{}",
@@ -840,7 +840,7 @@ mod tests {
         let run = Run::new(
             Ulid::nil(),
             Ts::from(DateTime::UNIX_EPOCH),
-            "snapshot",
+            &"snapshot".into(),
             "daily",
             "primary",
             "{}",
@@ -928,20 +928,20 @@ mod tests {
         let run = Run::new(
             Ulid::nil(),
             Ts::from(DateTime::UNIX_EPOCH),
-            "snapshot",
+            &"snapshot".into(),
             "daily",
             "primary",
             "{}",
             "0.1.0",
         );
-        let cut = run.advancing(&Series::new("instant", "09:00"));
+        let cut = run.advancing(&Series::new("instant".into(), "09:00"));
 
         assert_eq!(
             cut,
             Run::new(
                 Ulid::nil(),
                 Ts::from(DateTime::UNIX_EPOCH),
-                "instant",
+                &"instant".into(),
                 "09:00",
                 "primary",
                 "{}",
@@ -954,9 +954,9 @@ mod tests {
     fn a_build_log_advances_the_series_of_the_artifact_and_schedule_it_was_run_for() {
         let logged = logged(Some("people"), Some("people"));
 
-        assert!(logged.advances(&Series::new("snapshot", "daily")));
-        assert!(!logged.advances(&Series::new("instant", "daily")));
-        assert!(!logged.advances(&Series::new("snapshot", "09:00")));
+        assert!(logged.advances(&Series::new("snapshot".into(), "daily")));
+        assert!(!logged.advances(&Series::new("instant".into(), "daily")));
+        assert!(!logged.advances(&Series::new("snapshot".into(), "09:00")));
     }
 
     #[test]

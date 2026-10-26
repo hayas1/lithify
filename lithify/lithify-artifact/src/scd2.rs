@@ -4,7 +4,9 @@ use std::marker::PhantomData;
 use chrono_tz::Tz;
 use serde::Deserialize;
 
-use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
+use lithify_core::artifact::{
+    Artifact, ArtifactBuilder, ArtifactName, Placement, UnbuildableArtifact,
+};
 use lithify_core::build_log::{Base, BuildLog, Series, TableBuild};
 use lithify_core::era::{Bound, Era, EraTracker};
 use lithify_core::listener::{
@@ -22,11 +24,11 @@ use crate::shard::Shard;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Config {
+pub struct Scd2Config {
     shard: String,
 }
 
-impl Config {
+impl Scd2Config {
     pub fn shard(&self) -> &str {
         &self.shard
     }
@@ -34,6 +36,7 @@ impl Config {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scd2 {
+    name: ArtifactName,
     namespace: Namespace,
     open: Shard,
     closed: Shard,
@@ -45,10 +48,15 @@ impl Scd2 {
 
     pub fn new(namespace: Namespace, shard: &str, zone: Tz) -> Self {
         Self {
+            name: ArtifactName::from(Self::KIND),
             namespace,
             open: Shard::new(&format!("open_{shard}"), zone),
             closed: Shard::new(&format!("closed_{shard}"), zone),
         }
+    }
+
+    pub fn named(self, name: ArtifactName) -> Self {
+        Self { name, ..self }
     }
 
     // The versions of a day are those it closed and those it left open as it ended, so both are
@@ -66,10 +74,22 @@ impl Artifact for Scd2 {
 
     type From = Self;
 
+    type Config = Scd2Config;
+
     type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = Scd2Builder<'a, L, W>;
 
+    // An scd2 is built into its first placement alone, as its versions are appended rather than
+    // created whole and so cannot be copied as they are built.
+    fn declared(name: &ArtifactName, config: &Scd2Config, placement: &Placement, zone: Tz) -> Self {
+        Self::new(placement.namespace().clone(), config.shard(), zone).named(name.clone())
+    }
+
+    fn namespace(&self) -> &Namespace {
+        &self.namespace
+    }
+
     fn series(&self) -> Series {
-        Series::new(Self::KIND, &Schedule::default().to_string())
+        Series::new(self.name.clone(), &Schedule::default().to_string())
     }
 
     fn window(&self, day: &Window, _: &Timeline) -> Option<Window> {

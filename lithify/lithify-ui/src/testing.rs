@@ -53,14 +53,18 @@ impl From<Shelf> for Namespace {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "lowercase")]
+#[serde(deny_unknown_fields, tag = "kind", rename_all = "lowercase")]
 pub enum Made {
     Snapshot {},
 }
 
 impl Declaration for Made {
-    fn source(&self) -> Option<&'static str> {
-        None
+    fn kind(&self) -> &'static str {
+        "snapshot"
+    }
+
+    fn built_from(&self) -> &'static str {
+        "snapshot"
     }
 
     fn schedule(&self, time_zone: chrono_tz::Tz) -> Option<Schedule> {
@@ -98,7 +102,7 @@ impl Kept {
             .logged(&Run::new(
                 Ulid::from_parts(1, 0),
                 Ts::from(DateTime::UNIX_EPOCH),
-                "snapshot",
+                &"snapshot".into(),
                 "daily",
                 "primary",
                 "{}",
@@ -177,8 +181,6 @@ impl Placing for Kept {
 }
 
 pub const INFRA: &str = r#"
-    [artifact.snapshot]
-
     [default]
     source.capture.debezium.dialect = "mysql"
 
@@ -216,6 +218,11 @@ pub fn scratch(name: &str) -> PathBuf {
 pub fn configure(directory: &Path, infra: &str) {
     std::fs::create_dir_all(directory).unwrap();
     std::fs::write(directory.join("infra.toml"), infra).unwrap();
+    std::fs::write(
+        directory.join("artifact.toml"),
+        "[[artifact]]\nname = \"snapshot\"\nkind = \"snapshot\"\n",
+    )
+    .unwrap();
     std::fs::write(
         directory.join("table.toml"),
         "[default]\nartifacts = [\"snapshot\"]\n",

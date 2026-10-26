@@ -2,7 +2,7 @@ use std::convert::Infallible;
 use std::fmt::{self, Display, Formatter};
 
 use lithify_config::Unreadable;
-use lithify_core::artifact::UnbuildableArtifact;
+use lithify_core::artifact::{ArtifactName, UnbuildableArtifact};
 use lithify_core::build_log::UnreadableBuildLog;
 use lithify_core::listener::OutOfOrder;
 use lithify_core::runner::Unsteppable;
@@ -21,12 +21,16 @@ pub enum Unrunnable {
     Unreached,
     Undeclared {
         sink: String,
-        artifact: &'static str,
+        artifact: ArtifactName,
+    },
+    SnapshotPlacedTwice(String),
+    Unbased {
+        artifact: ArtifactName,
+        base: ArtifactName,
     },
     WithoutSource,
     Unsteppable(Unsteppable),
     Unlogged(UnreadableBuildLog),
-    Unnamed(&'static str),
     Uncredentialed(&'static str),
 }
 
@@ -47,16 +51,21 @@ impl Display for Unrunnable {
             Self::Undeclared { sink, artifact } => {
                 write!(formatter, "{sink} places no {artifact}")
             }
+            Self::SnapshotPlacedTwice(sink) => {
+                write!(formatter, "{sink} places more than one snapshot")
+            }
+            Self::Unbased { artifact, base } => {
+                write!(
+                    formatter,
+                    "{artifact} is built from {base}, which is no snapshot"
+                )
+            }
             Self::Unreached => write!(
                 formatter,
                 "the change log lies in a warehouse other than the one it is sunk into"
             ),
             Self::Unsteppable(cause) => write!(formatter, "{cause}"),
             Self::Unlogged(cause) => write!(formatter, "{cause}"),
-            Self::Unnamed(artifact) => write!(
-                formatter,
-                "the sink builds no {artifact} at the instant named"
-            ),
             Self::Uncredentialed(warehouse) => write!(
                 formatter,
                 "a {warehouse} sink is read with a credential, but none was given"
@@ -80,8 +89,9 @@ impl std::error::Error for Unrunnable {
             Self::UnknownSink(_)
             | Self::Unreached
             | Self::Undeclared { .. }
+            | Self::SnapshotPlacedTwice(_)
+            | Self::Unbased { .. }
             | Self::WithoutSource
-            | Self::Unnamed(_)
             | Self::Uncredentialed(_) => None,
         }
     }

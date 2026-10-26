@@ -387,7 +387,7 @@ mod tests {
         .logged(&Run::new(
             Ulid::from_parts(finished_at, 0),
             Ts::from(DateTime::UNIX_EPOCH),
-            "snapshot",
+            &"snapshot".into(),
             "daily",
             "primary",
             r#"{"debezium":{"dialect":"mysql"}}"#,
@@ -441,7 +441,7 @@ mod tests {
     }
 
     fn daily() -> Series {
-        Series::new("snapshot", "daily")
+        Series::new("snapshot".into(), "daily")
     }
 
     fn history() -> Vec<BuildLog> {
