@@ -1,4 +1,5 @@
-use chrono::NaiveDate;
+use chrono::DateTime;
+use chrono_tz::Tz;
 use leptos::prelude::*;
 
 use lithify_core::build_log::{BuildLog, Status};
@@ -165,7 +166,7 @@ pub struct TableRow {
     pub table: TableId,
     pub status: Status,
     pub values: [Option<String>; BuildLog::COLUMNS.len()],
-    pub shard: Option<NaiveDate>,
+    pub closed: DateTime<Tz>,
 }
 
 impl TableRow {
@@ -182,7 +183,7 @@ impl TableRow {
             table: log.table()?.clone(),
             status: log.status().clone(),
             values: log.values(),
-            shard: schedule.date(log.window()),
+            closed: schedule.local(*log.window().to()),
         })
     }
 
@@ -587,8 +588,8 @@ fn RowPane(id: String, number: usize, row: TableRow) -> impl IntoView {
             <dl class="fields">{fields}</dl>
             <h3>"Derived"</h3>
             <dl class="fields">
-                <dt>"shard"</dt>
-                <dd class="mono">{row.shard.map(|shard| shard.to_string()).unwrap_or_default()}</dd>
+                <dt>"closed"</dt>
+                <dd class="mono">{row.closed.to_rfc3339()}</dd>
             </dl>
         </aside>
         <a class="backdrop" href="#closed" title="Close"></a>
@@ -605,7 +606,7 @@ mod tests {
     use chrono::DateTime;
     use ulid::Ulid;
 
-    use lithify_core::build_log::{Outcome, Run};
+    use lithify_core::build_log::{Run, TableBuilt};
     use lithify_core::sink::TablePath;
     use lithify_core::ts::Ts;
     use lithify_core::window::Window;
@@ -614,7 +615,7 @@ mod tests {
     use crate::testing::Kept;
 
     fn listed(logs: Vec<BuildLog>) -> Vec<TableRow> {
-        TableRow::listed(&SinkInspection::new(Schedule::Daily, logs, vec![]))
+        TableRow::listed(&SinkInspection::new(Schedule::default(), logs, vec![]))
     }
 
     #[test]
@@ -630,7 +631,7 @@ mod tests {
             ]
         );
         assert_eq!(rows[2].status, Status::Failed("no such column".to_owned()));
-        assert_eq!(rows[1].shard, Some("2026-09-20".parse().unwrap()));
+        assert_eq!(rows[1].closed.to_rfc3339(), "2026-09-21T00:00:00+00:00");
     }
 
     #[test]
@@ -652,16 +653,7 @@ mod tests {
     #[test]
     fn a_table_renamed_within_its_window_is_listed_under_its_new_name_as_renamed() {
         let at = |rfc3339: &str| rfc3339.parse::<DateTime<chrono::Utc>>().unwrap();
-        let renamed = BuildLog::new(
-            &Run::new(
-                Ulid::from_parts(1, 0),
-                DateTime::UNIX_EPOCH,
-                "snapshot",
-                "daily",
-                "primary",
-                "{}",
-                "0.1.0",
-            ),
+        let renamed = TableBuilt::new(
             Some(TableId::new("shop", "people")),
             Some(TableId::new("shop", "persons")),
             None,
@@ -670,8 +662,18 @@ mod tests {
                 Ts::from(at("2026-09-20T00:00:00Z")),
                 Ts::from(at("2026-09-21T00:00:00Z")),
             ),
-            Outcome::new(Status::Succeeded, at("2026-09-21T00:10:00Z")),
-        );
+            Status::Succeeded,
+            Ts::from(at("2026-09-21T00:10:00Z")),
+        )
+        .logged(&Run::new(
+            Ulid::from_parts(1, 0),
+            Ts::from(DateTime::UNIX_EPOCH),
+            &"snapshot".into(),
+            "daily",
+            "primary",
+            "{}",
+            "0.1.0",
+        ));
         let rows = listed(vec![renamed]);
 
         assert_eq!(rows[0].table, TableId::new("shop", "persons"));

@@ -2,11 +2,11 @@ use std::fmt::{self, Display, Formatter};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use chrono::Utc;
-
+use lithify_cli::artifacts::ArtifactConfig;
 use lithify_cli::pipeline::{CaptureConfig, WarehouseConfig};
+use lithify_cli::unrunnable::Unrunnable;
 use lithify_config::Pipeline;
-use lithify_core::ts::Ts;
+use lithify_core::ts::{Replay, Ts};
 
 use crate::pipeline::{ConnectedPipeline, Watch};
 use crate::runnable::Report;
@@ -40,9 +40,9 @@ impl Run {
     }
 
     pub fn report(&self) -> Result<Report, Unverifiable> {
-        let config: Pipeline<CaptureConfig, WarehouseConfig> =
+        let config: Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig> =
             Pipeline::open(self.directory.join(self.scenario.pipeline()))?;
-        let watch = Watch::new(Ts::from(Utc::now()), self.patience);
+        let watch = Watch::new(Ts::<Replay>::now().as_event(), self.patience);
         let mut pipeline =
             ConnectedPipeline::connect(&self.scenario, &config, watch, &self.key_id, &self.secret)?;
 
@@ -82,6 +82,7 @@ pub enum Unverifiable {
     Unreadable(lithify_config::Unreadable),
     Unreachable(Unreachable),
     Unbuildable(Unbuildable),
+    Unrunnable(Unrunnable),
     Unwritable(Unwritable),
     UnknownSource(String),
     UnknownSink(String),
@@ -96,6 +97,7 @@ impl Display for Unverifiable {
             Self::Unreadable(cause) => write!(formatter, "{cause}"),
             Self::Unreachable(cause) => write!(formatter, "{cause}"),
             Self::Unbuildable(cause) => write!(formatter, "{cause}"),
+            Self::Unrunnable(cause) => write!(formatter, "{cause}"),
             Self::Unwritable(cause) => write!(formatter, "{cause}"),
             Self::UnknownSource(name) => write!(formatter, "the pipeline captures no {name}"),
             Self::UnknownSink(name) => write!(formatter, "the pipeline is not sunk into {name}"),
@@ -127,6 +129,12 @@ impl From<Unreachable> for Unverifiable {
 impl From<Unbuildable> for Unverifiable {
     fn from(cause: Unbuildable) -> Self {
         Self::Unbuildable(cause)
+    }
+}
+
+impl From<Unrunnable> for Unverifiable {
+    fn from(cause: Unrunnable) -> Self {
+        Self::Unrunnable(cause)
     }
 }
 

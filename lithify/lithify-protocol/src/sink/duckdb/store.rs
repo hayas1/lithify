@@ -4,12 +4,12 @@ use std::str::FromStr;
 
 use duckdb::Connection;
 
-use lithify_core::sink::OpenWarehouse;
+use lithify_core::sink::{Namespace, OpenWarehouse};
 use lithify_core::sql::SqlString;
 
 use crate::sink::duckdb::DuckDbWarehouse;
 use crate::sink::duckdb::client::DuckDbClient;
-use crate::sink::duckdb::config::Config;
+use crate::sink::duckdb::config::{Config, Location};
 
 pub struct S3Credential {
     key_id: String,
@@ -55,14 +55,15 @@ impl FromStr for Secret {
 
 impl OpenWarehouse for DuckDbWarehouse {
     type Config = Config;
+    type Location = Location;
     type Client = DuckDbClient;
     type Credential = S3Credential;
     type Error = duckdb::Error;
 
-    fn open(
+    async fn open(
         config: &Config,
         credential: &S3Credential,
-        change_log: &str,
+        change_log: &Location,
     ) -> Result<DuckDbClient, duckdb::Error> {
         ObjectStore::open(config, credential.key_id(), credential.secret()).client(change_log)
     }
@@ -83,13 +84,16 @@ impl ObjectStore {
         }
     }
 
-    pub fn client(&self, change_log: &str) -> Result<DuckDbClient, duckdb::Error> {
+    pub fn client(&self, change_log: &Location) -> Result<DuckDbClient, duckdb::Error> {
         let connection = self.connect()?;
         connection.execute_batch(self.secret().as_str())?;
 
         Ok(DuckDbClient::new(
             connection,
-            DuckDbWarehouse::over(change_log, self.config.store().clone()),
+            DuckDbWarehouse::over(
+                Namespace::from(change_log.clone()),
+                self.config.store().clone(),
+            ),
         ))
     }
 

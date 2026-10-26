@@ -1,3 +1,6 @@
+// No future here is asked to be Send: a DuckDB connection cannot be shared across threads.
+#![allow(async_fn_in_trait)]
+
 pub mod sink;
 pub mod source;
 

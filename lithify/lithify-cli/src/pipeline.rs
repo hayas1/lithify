@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use lithify_core::sink::{OpenWarehouse, SinkWarehouse, WarehouseFn};
+use lithify_config::{Placed, Places, Placing};
+use lithify_core::sink::{Namespace, OpenWarehouse, SinkWarehouse, WarehouseFn};
 use lithify_core::source::CdcFormat;
 use lithify_protocol::sink::bigquery::client::{BigQueryCapture, BigQueryChangeLogsFn};
 use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbChangeLogsFn};
@@ -22,25 +23,25 @@ impl CaptureConfig {
 }
 
 impl DuckDbCapture for CaptureConfig {
-    fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(
+    async fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(
         &self,
         topic_prefix: &str,
         f: F,
     ) -> F::Output {
         match self {
-            Self::Debezium(debezium) => debezium.with_duckdb_change_logs(topic_prefix, f),
+            Self::Debezium(debezium) => debezium.with_duckdb_change_logs(topic_prefix, f).await,
         }
     }
 }
 
 impl BigQueryCapture for CaptureConfig {
-    fn with_bigquery_change_logs<F: BigQueryChangeLogsFn>(
+    async fn with_bigquery_change_logs<F: BigQueryChangeLogsFn>(
         &self,
         topic_prefix: &str,
         f: F,
     ) -> F::Output {
         match self {
-            Self::Debezium(debezium) => debezium.with_bigquery_change_logs(topic_prefix, f),
+            Self::Debezium(debezium) => debezium.with_bigquery_change_logs(topic_prefix, f).await,
         }
     }
 }
@@ -48,31 +49,100 @@ impl BigQueryCapture for CaptureConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "lowercase")]
 pub enum WarehouseConfig {
-    DuckDb(<DuckDbWarehouse as OpenWarehouse>::Config),
-    BigQuery(<BigQueryWarehouse as OpenWarehouse>::Config),
+    DuckDb(
+        Placed<
+            <DuckDbWarehouse as OpenWarehouse>::Config,
+            <DuckDbWarehouse as OpenWarehouse>::Location,
+        >,
+    ),
+    BigQuery(
+        Placed<
+            <BigQueryWarehouse as OpenWarehouse>::Config,
+            <BigQueryWarehouse as OpenWarehouse>::Location,
+        >,
+    ),
+}
+
+impl WarehouseConfig {
+    pub fn reach<'a>(&'a self, location: &'a LocationConfig) -> Option<Reached<'a>> {
+        match (self, location) {
+            (Self::DuckDb(placed), LocationConfig::DuckDb(location)) => {
+                Some(Reached::DuckDb(placed.warehouse(), location))
+            }
+            (Self::BigQuery(placed), LocationConfig::BigQuery(location)) => {
+                Some(Reached::BigQuery(placed.warehouse(), location))
+            }
+            _ => None,
+        }
+    }
+}
+
+impl Placing for WarehouseConfig {
+    fn change_log(&self) -> LocationConfig {
+        match self {
+            Self::DuckDb(placed) => LocationConfig::DuckDb(placed.change_log().clone()),
+            Self::BigQuery(placed) => LocationConfig::BigQuery(placed.change_log().clone()),
+        }
+    }
+
+    fn places(&self) -> Places<LocationConfig> {
+        match self {
+            Self::DuckDb(placed) => placed.places().clone().map(LocationConfig::DuckDb),
+            Self::BigQuery(placed) => placed.places().clone().map(LocationConfig::BigQuery),
+        }
+    }
 }
 
 impl SinkWarehouse for WarehouseConfig {
+    type Location = LocationConfig;
     type Credential = Credentials;
     type Error = Unrunnable;
 
-    fn with_client<F: WarehouseFn>(
+    fn reaches(&self, location: &LocationConfig) -> bool {
+        self.reach(location).is_some()
+    }
+
+    async fn with_client<F: WarehouseFn>(
         &self,
-        change_log: &str,
+        change_log: &LocationConfig,
         credentials: &Credentials,
         f: F,
     ) -> Result<F::Output, Unrunnable> {
-        match self {
-            Self::DuckDb(config) => Ok(f.call(&DuckDbWarehouse::open(
-                config,
-                credentials.duckdb()?,
-                change_log,
-            )?)),
-            Self::BigQuery(config) => {
-                Ok(f.call(&BigQueryWarehouse::open(config, &(), change_log)?))
-            }
+        match self.reach(change_log).ok_or(Unrunnable::Unreached)? {
+            Reached::DuckDb(config, change_log) => Ok(f
+                .call(&DuckDbWarehouse::open(config, credentials.duckdb()?, change_log).await?)
+                .await),
+            Reached::BigQuery(config, change_log) => Ok(f
+                .call(&BigQueryWarehouse::open(config, &(), change_log).await?)
+                .await),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LocationConfig {
+    DuckDb(<DuckDbWarehouse as OpenWarehouse>::Location),
+    BigQuery(<BigQueryWarehouse as OpenWarehouse>::Location),
+}
+
+impl From<LocationConfig> for Namespace {
+    fn from(location: LocationConfig) -> Self {
+        match location {
+            LocationConfig::DuckDb(location) => Namespace::from(location),
+            LocationConfig::BigQuery(location) => Namespace::from(location),
+        }
+    }
+}
+
+pub enum Reached<'a> {
+    DuckDb(
+        &'a <DuckDbWarehouse as OpenWarehouse>::Config,
+        &'a <DuckDbWarehouse as OpenWarehouse>::Location,
+    ),
+    BigQuery(
+        &'a <BigQueryWarehouse as OpenWarehouse>::Config,
+        &'a <BigQueryWarehouse as OpenWarehouse>::Location,
+    ),
 }
 
 #[cfg(test)]
@@ -91,14 +161,14 @@ mod tests {
         assert_eq!(debezium.dialect(), config::Dialect::MySql);
     }
 
-    #[test]
-    fn a_capture_calls_a_fn_with_the_logs_of_the_dialect_it_captures_in() {
+    #[tokio::test]
+    async fn a_capture_calls_a_fn_with_the_logs_of_the_dialect_it_captures_in() {
         struct Probe;
 
         impl DuckDbChangeLogsFn for Probe {
             type Output = &'static str;
 
-            fn call_duckdb<C>(self, _: C) -> Self::Output
+            async fn call_duckdb<C>(self, _: C) -> Self::Output
             where
                 C: ChangeLogs,
                 <C::Schema as SchemaChangeLog>::Record: duckdb::types::FromSql,
@@ -110,7 +180,7 @@ mod tests {
         let capture: CaptureConfig = toml::from_str("[debezium]\ndialect = \"postgres\"").unwrap();
 
         assert_eq!(
-            capture.with_duckdb_change_logs("postgres", Probe),
+            capture.with_duckdb_change_logs("postgres", Probe).await,
             std::any::type_name::<Debezium<Postgres>>()
         );
     }
@@ -122,20 +192,37 @@ mod tests {
         assert!(unknown.is_err());
     }
 
+    const BIGQUERY: &str = "[bigquery]\nproject = \"local-project\"\nchange_log = { dataset = \"mysql_shop_cdc\" }\nplace.snapshot = [{ dataset = \"mysql_shop\" }]";
+
     #[test]
     fn a_pipeline_is_sunk_into_a_warehouse_this_program_reads() {
-        let warehouse: WarehouseConfig =
-            toml::from_str("[bigquery]\nproject = \"local-project\"").unwrap();
+        let warehouse: WarehouseConfig = toml::from_str(BIGQUERY).unwrap();
 
         let WarehouseConfig::BigQuery(bigquery) = warehouse else {
             panic!("expected a bigquery warehouse");
         };
-        assert_eq!(bigquery.project(), "local-project");
+        assert_eq!(bigquery.warehouse().project(), "local-project");
+    }
+
+    #[test]
+    fn a_warehouse_reaches_the_change_log_and_the_places_written_in_it() {
+        let bigquery: WarehouseConfig = toml::from_str(BIGQUERY).unwrap();
+        let places = bigquery.places();
+        let snapshot = places.get(&"snapshot".into()).unwrap();
+
+        assert!(bigquery.reaches(&bigquery.change_log()));
+        assert!(snapshot.iter().all(|place| bigquery.reaches(place)));
+        assert_eq!(
+            Namespace::from(snapshot[0].clone()),
+            Namespace::from("mysql_shop")
+        );
     }
 
     #[test]
     fn a_warehouse_this_program_does_not_read_is_rejected() {
-        let unknown = toml::from_str::<WarehouseConfig>("[redshift]\ncluster = \"shop\"");
+        let unknown = toml::from_str::<WarehouseConfig>(
+            "[redshift]\ncluster = \"shop\"\nchange_log = { schema = \"mysql_shop_cdc\" }",
+        );
 
         assert!(unknown.is_err());
     }

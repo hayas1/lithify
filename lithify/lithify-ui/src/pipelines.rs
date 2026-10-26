@@ -1,16 +1,15 @@
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use lithify_config::infra::{Sink, Source};
-use lithify_config::{ArtifactKind, Pipeline};
-use lithify_core::build_log::{BuildLog, BuildLogQuery, Latest};
+use lithify_config::{Declaration, Pipeline, Placing};
+use lithify_core::build_log::{BuildLog, BuildLogQuery, Latest, Series};
 use lithify_core::check::{Expectation, Inspection};
 use lithify_core::schedule::Schedule;
-use lithify_core::sink::{SinkWarehouse, WarehouseClient, WarehouseFn};
-use lithify_core::ts::Ts;
+use lithify_core::sink::{Namespace, SinkWarehouse, WarehouseClient, WarehouseFn};
+use lithify_core::ts::{Replay, Ts};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PipelineLocation {
@@ -187,22 +186,23 @@ impl From<Inspection> for SinkInspection {
     }
 }
 
-pub struct Pipelines<C, W: SinkWarehouse> {
+pub struct Pipelines<C, W: SinkWarehouse, A> {
     root: PathBuf,
     credential: W::Credential,
-    capture: std::marker::PhantomData<fn() -> C>,
+    configured: std::marker::PhantomData<fn() -> (C, A)>,
 }
 
-impl<C, W> Pipelines<C, W>
+impl<C, W, A> Pipelines<C, W, A>
 where
     C: Clone + DeserializeOwned + Serialize,
-    W: Clone + DeserializeOwned + SinkWarehouse,
+    W: Clone + DeserializeOwned + Placing,
+    A: Clone + DeserializeOwned + Declaration,
 {
     pub fn new(root: PathBuf, credential: W::Credential) -> Self {
         Self {
             root,
             credential,
-            capture: std::marker::PhantomData,
+            configured: std::marker::PhantomData,
         }
     }
 
@@ -214,20 +214,24 @@ where
             .collect())
     }
 
-    pub fn inspect(
+    pub async fn inspect(
         &self,
         name: &str,
         view: BuildLogView,
     ) -> Result<Option<PipelineOverview>, String> {
-        Ok(self
-            .directories()?
+        let directories = self.directories()?;
+        let found = directories
             .iter()
-            .find(|directory| Self::location(directory).name() == name)
-            .map(|directory| self.overview(directory, view)))
+            .find(|directory| Self::location(directory).name() == name);
+
+        Ok(match found {
+            Some(directory) => Some(self.overview(directory, view).await),
+            None => None,
+        })
     }
 
     fn directories(&self) -> Result<Vec<PathBuf>, String> {
-        let directories = Pipeline::<C, W>::directories(&self.root)
+        let directories = Pipeline::<C, W, A>::directories(&self.root)
             .map_err(|unreadable| unreadable.to_string())?;
 
         match directories.is_empty() {
@@ -245,81 +249,109 @@ where
         PipelineLocation::new(&name, &directory.display().to_string())
     }
 
-    fn overview(&self, directory: &Path, view: BuildLogView) -> PipelineOverview {
-        let sources = Pipeline::<C, W>::open(directory)
-            .map_err(|unreadable| unreadable.to_string())
-            .and_then(|pipeline| {
-                pipeline
-                    .sources()
-                    .map(|source| self.source(&pipeline, source, view))
-                    .collect()
-            });
+    async fn overview(&self, directory: &Path, view: BuildLogView) -> PipelineOverview {
+        let sources = match Pipeline::<C, W, A>::open(directory) {
+            Ok(pipeline) => self.sources(&pipeline, view).await,
+            Err(unreadable) => Err(unreadable.to_string()),
+        };
 
         PipelineOverview::new(Self::location(directory), sources)
     }
 
-    fn source(
+    async fn sources(
         &self,
-        pipeline: &Pipeline<C, W>,
+        pipeline: &Pipeline<C, W, A>,
+        view: BuildLogView,
+    ) -> Result<Vec<SourceOverview>, String> {
+        let mut sources = Vec::new();
+
+        for source in pipeline.sources() {
+            sources.push(self.source(pipeline, source, view).await?);
+        }
+
+        Ok(sources)
+    }
+
+    async fn source(
+        &self,
+        pipeline: &Pipeline<C, W, A>,
         source: &Source<C>,
         view: BuildLogView,
     ) -> Result<SourceOverview, String> {
         let capture =
             serde_json::to_string(source.capture()).map_err(|unwritten| unwritten.to_string())?;
-        let now = Ts::from(Utc::now());
+        let now = Ts::now();
+        let mut sinks = Vec::new();
 
-        Ok(SourceOverview::new(
-            source.name(),
-            pipeline
-                .sinks()
-                .map(|sink| {
-                    let expectation = Expectation::new(
-                        sink.artifacts().schedule(),
-                        source.since(),
-                        &capture,
-                        now,
-                    );
+        for sink in pipeline.sinks() {
+            sinks.push(SinkOverview::new(
+                sink.name(),
+                self.inspection(sink, source, &capture, now, view).await,
+            ));
+        }
 
-                    SinkOverview::new(sink.name(), self.inspection(sink, &expectation, view))
-                })
-                .collect(),
-        ))
+        Ok(SourceOverview::new(source.name(), sinks))
     }
 
-    fn inspection(
+    async fn inspection(
         &self,
-        sink: &Sink<W>,
-        expectation: &Expectation,
+        sink: &Sink<W, A>,
+        source: &Source<C>,
+        capture: &str,
+        now: Ts<Replay>,
         view: BuildLogView,
     ) -> Result<SinkInspection, String> {
+        let undeclared = || format!("{} places no snapshot", sink.name());
+        let (snapshot, schedule) = sink
+            .artifacts()
+            .find_map(|(name, declared)| Some((name, declared.schedule(sink.time_zone())?)))
+            .ok_or_else(undeclared)?;
+        let expectation = Expectation::new(schedule, source.since(), capture, now);
         let reading = Reading {
-            expectation,
-            namespace: sink.artifacts().namespace(ArtifactKind::Snapshot),
+            expectation: &expectation,
+            series: Series::new(snapshot.clone(), &schedule.to_string()),
+            namespace: sink
+                .place(snapshot)
+                .and_then(<[_]>::first)
+                .map(|place| place.clone().into())
+                .ok_or_else(undeclared)?,
             view,
         };
 
         sink.warehouse()
             .with_client(sink.change_log(), &self.credential, reading)
+            .await
             .map_err(|unopened| unopened.to_string())?
     }
 }
 
 struct Reading<'a> {
     expectation: &'a Expectation,
-    namespace: &'a str,
+    series: Series,
+    namespace: Namespace,
     view: BuildLogView,
 }
 
 impl Reading<'_> {
-    fn read<K: WarehouseClient>(&self, client: &K) -> Result<SinkInspection, K::Error> {
-        let inspection = self.expectation.read(client, self.namespace)?;
+    async fn read<K: WarehouseClient>(&self, client: &K) -> Result<SinkInspection, Misread> {
+        let inspection = self
+            .expectation
+            .read::<K, Misread>(client, &self.namespace, &self.series)
+            .await?;
         let unbuilt = inspection.latest().is_empty();
         let inspection = SinkInspection::from(inspection);
 
         match (self.view, unbuilt) {
             (BuildLogView::Latest, _) | (BuildLogView::All, true) => Ok(inspection),
-            (BuildLogView::All, false) => Ok(inspection
-                .showing(client.build_logs(self.namespace, &BuildLogQuery::from(self.view))?)),
+            (BuildLogView::All, false) => Ok(inspection.showing(
+                client
+                    .build_logs::<Misread>(
+                        &self.namespace,
+                        &self.series,
+                        &BuildLogQuery::from(self.view),
+                    )
+                    .await?,
+            )),
         }
     }
 }
@@ -327,8 +359,16 @@ impl Reading<'_> {
 impl WarehouseFn for Reading<'_> {
     type Output = Result<SinkInspection, String>;
 
-    fn call<K: WarehouseClient>(self, client: &K) -> Self::Output {
-        self.read(client).map_err(|unread| unread.to_string())
+    async fn call<K: WarehouseClient>(self, client: &K) -> Self::Output {
+        self.read(client).await.map_err(|Misread(unread)| unread)
+    }
+}
+
+struct Misread(String);
+
+impl<E: std::error::Error> From<E> for Misread {
+    fn from(cause: E) -> Self {
+        Self(cause.to_string())
     }
 }
 
@@ -337,9 +377,10 @@ mod tests {
     use super::*;
     use crate::testing::{INFRA, configure, logged, scratch, under};
 
-    fn tables(root: &Path, view: BuildLogView) -> Vec<String> {
+    async fn tables(root: &Path, view: BuildLogView) -> Vec<String> {
         under(root)
             .inspect("mysql", view)
+            .await
             .unwrap()
             .unwrap()
             .sources()
@@ -369,13 +410,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn each_sink_is_inspected_on_its_own_so_one_unreached_leaves_the_others_read() {
+    #[tokio::test]
+    async fn each_sink_is_inspected_on_its_own_so_one_unreached_leaves_the_others_read() {
         let root = scratch("inspected");
         configure(&root.join("mysql"), INFRA);
 
         let pipeline = under(&root)
             .inspect("mysql", BuildLogView::Latest)
+            .await
             .unwrap()
             .unwrap();
         let sources = pipeline.sources().unwrap();
@@ -390,23 +432,23 @@ mod tests {
         assert_eq!(sinks[1].found(), Err("JobCreationMode"));
     }
 
-    #[test]
-    fn a_sink_shows_its_latest_build_of_each_table_or_every_build_newest_first() {
+    #[tokio::test]
+    async fn a_sink_shows_its_latest_build_of_each_table_or_every_build_newest_first() {
         let root = scratch("viewed");
         configure(&root.join("mysql"), &logged());
 
         assert_eq!(
-            tables(&root, BuildLogView::Latest),
+            tables(&root, BuildLogView::Latest).await,
             ["people", "people", "pets"]
         );
         assert_eq!(
-            tables(&root, BuildLogView::All),
+            tables(&root, BuildLogView::All).await,
             ["pets", "people", "people"]
         );
     }
 
-    #[test]
-    fn a_pipeline_that_could_not_be_opened_is_inspected_beside_the_ones_that_were() {
+    #[tokio::test]
+    async fn a_pipeline_that_could_not_be_opened_is_inspected_beside_the_ones_that_were() {
         let root = scratch("unopened");
         configure(&root.join("mysql"), INFRA);
         configure(&root.join("postgres"), "[[source]]\nname = \"primary\"");
@@ -416,6 +458,7 @@ mod tests {
         assert!(
             pipelines
                 .inspect("mysql", BuildLogView::Latest)
+                .await
                 .unwrap()
                 .unwrap()
                 .sources()
@@ -424,13 +467,17 @@ mod tests {
         assert!(
             pipelines
                 .inspect("postgres", BuildLogView::Latest)
+                .await
                 .unwrap()
                 .unwrap()
                 .sources()
                 .is_err()
         );
         assert_eq!(
-            pipelines.inspect("oracle", BuildLogView::Latest).unwrap(),
+            pipelines
+                .inspect("oracle", BuildLogView::Latest)
+                .await
+                .unwrap(),
             None
         );
     }

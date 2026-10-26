@@ -1,6 +1,7 @@
 use std::fmt::{self, Display, Formatter};
 use std::path::{Path, PathBuf};
 
+use crate::artifact::Misdeclaring;
 use crate::infra::Miswiring;
 use crate::table::Mislisting;
 
@@ -39,6 +40,7 @@ impl std::error::Error for Unreadable {}
 pub enum Cause {
     Missing(std::io::Error),
     Malformed(toml::de::Error),
+    Misdeclaring(Misdeclaring),
     Mislisting(Mislisting),
     Miswiring(Miswiring),
 }
@@ -48,6 +50,7 @@ impl Display for Cause {
         match self {
             Self::Missing(cause) => write!(formatter, "{cause}"),
             Self::Malformed(cause) => write!(formatter, "{cause}"),
+            Self::Misdeclaring(cause) => write!(formatter, "{cause}"),
             Self::Mislisting(cause) => write!(formatter, "{cause}"),
             Self::Miswiring(cause) => write!(formatter, "{cause}"),
         }
@@ -63,6 +66,12 @@ impl From<std::io::Error> for Cause {
 impl From<toml::de::Error> for Cause {
     fn from(cause: toml::de::Error) -> Self {
         Self::Malformed(cause)
+    }
+}
+
+impl From<Misdeclaring> for Cause {
+    fn from(cause: Misdeclaring) -> Self {
+        Self::Misdeclaring(cause)
     }
 }
 

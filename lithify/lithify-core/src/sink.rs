@@ -1,10 +1,14 @@
 use std::fmt;
 
-use crate::artifact::{ArtifactBuilder, UnbuildableArtifact};
-use crate::build_log::{BuildLog, BuildLogQuery};
+use crate::artifact::UnbuildableArtifact;
+use crate::build_log::{
+    BuildLog, BuildLogQuery, BuildLogRow, Series, Status, TableBuild, TableBuilt,
+    UnreadableBuildLog,
+};
 use crate::model::{ColumnModel, ColumnType};
 use crate::source::{ColumnPath, SchemaChangeLog};
 use crate::sql::SqlString;
+use crate::ts::Ts;
 use crate::window::Window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,20 +41,47 @@ impl fmt::Display for UnsupportedColumn {
 impl std::error::Error for UnsupportedColumn {}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Namespace(Vec<String>);
+
+impl Namespace {
+    pub fn parts(&self) -> impl DoubleEndedIterator<Item = &str> {
+        self.0.iter().map(String::as_str)
+    }
+}
+
+impl From<&str> for Namespace {
+    fn from(path: &str) -> Self {
+        Self(path.split('.').map(str::to_owned).collect())
+    }
+}
+
+impl From<Vec<String>> for Namespace {
+    fn from(parts: Vec<String>) -> Self {
+        Self(parts)
+    }
+}
+
+impl fmt::Display for Namespace {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0.join("."))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TablePath {
-    namespace: String,
+    namespace: Namespace,
     name: String,
 }
 
 impl TablePath {
-    pub fn new(namespace: &str, name: &str) -> Self {
+    pub fn new(namespace: impl Into<Namespace>, name: &str) -> Self {
         Self {
-            namespace: namespace.to_owned(),
+            namespace: namespace.into(),
             name: name.to_owned(),
         }
     }
 
-    pub fn namespace(&self) -> &str {
+    pub fn namespace(&self) -> &Namespace {
         &self.namespace
     }
 
@@ -68,8 +99,14 @@ impl fmt::Display for TablePath {
 pub trait WarehouseSql {
     fn identifier(&self, name: &str) -> SqlString;
 
-    fn namespace_ref(&self, namespace: &str) -> SqlString {
-        self.identifier(namespace)
+    fn namespace_ref(&self, namespace: &Namespace) -> SqlString {
+        SqlString::from(
+            namespace
+                .parts()
+                .map(|part| self.identifier(part).to_string())
+                .collect::<Vec<_>>()
+                .join("."),
+        )
     }
 
     fn table_ref(&self, table: &TablePath) -> SqlString;
@@ -104,7 +141,7 @@ pub trait WarehouseSql {
 
     fn timestamp_millis(&self, milliseconds: i64) -> SqlString;
 
-    fn create_namespace(&self, namespace: &str) -> SqlString {
+    fn create_namespace(&self, namespace: &Namespace) -> SqlString {
         SqlString::from(format!(
             "CREATE SCHEMA IF NOT EXISTS {}",
             self.namespace_ref(namespace)
@@ -153,13 +190,20 @@ pub trait WarehouseSql {
             columns.join(", ")
         ))
     }
+
+    fn create_view(&self, view: &TablePath, select: &SqlString) -> SqlString {
+        SqlString::from(format!(
+            "CREATE OR REPLACE VIEW {} AS\n{select}",
+            self.table_ref(view)
+        ))
+    }
 }
 
 pub trait ChangeLogSql: WarehouseSql {
-    fn change_log_namespace(&self) -> &str;
+    fn change_log_namespace(&self) -> &Namespace;
 
     fn change_log(&self, topic: &str) -> TablePath {
-        TablePath::new(self.change_log_namespace(), topic)
+        TablePath::new(self.change_log_namespace().clone(), topic)
     }
 
     fn change_log_ref(&self, topic: &str) -> SqlString {
@@ -195,29 +239,33 @@ impl<W: ChangeLogSql + OpenWarehouse> Warehouse for W {}
 pub trait WarehouseFn {
     type Output;
 
-    fn call<K: WarehouseClient>(self, client: &K) -> Self::Output;
+    async fn call<K: WarehouseClient>(self, client: &K) -> Self::Output;
 }
 
 pub trait OpenWarehouse {
     type Config;
+    type Location;
     type Client: WarehouseClient;
     type Credential;
     type Error: std::error::Error;
 
-    fn open(
+    async fn open(
         config: &Self::Config,
         credential: &Self::Credential,
-        change_log: &str,
+        change_log: &Self::Location,
     ) -> Result<Self::Client, Self::Error>;
 }
 
 pub trait SinkWarehouse {
+    type Location: Clone + fmt::Debug + PartialEq + Eq + Into<Namespace>;
     type Credential;
     type Error: std::error::Error;
 
-    fn with_client<F: WarehouseFn>(
+    fn reaches(&self, location: &Self::Location) -> bool;
+
+    async fn with_client<F: WarehouseFn>(
         &self,
-        change_log: &str,
+        change_log: &Self::Location,
         credential: &Self::Credential,
         f: F,
     ) -> Result<F::Output, Self::Error>;
@@ -232,40 +280,81 @@ pub trait WarehouseClient {
     // TODO: a client may come to be asked to create_table and the like rather than to
     // execute any statement, so that what a warehouse builds is named in this trait
     // instead of being spelled out as SQL by every artifact.
-    fn execute(&self, statement: &SqlString) -> Result<(), Self::Error>;
+    async fn execute(&self, statement: &SqlString) -> Result<(), Self::Error>;
 
-    fn build_logs(
+    async fn build_log_rows(
         &self,
-        namespace: &str,
+        namespace: &Namespace,
         query: &BuildLogQuery,
-    ) -> Result<Vec<BuildLog>, Self::Error>;
+    ) -> Result<Vec<BuildLogRow>, Self::Error>;
 
-    fn create_build_log<E>(&self, namespace: &str) -> Result<(), E>
+    async fn build_logs<E>(
+        &self,
+        namespace: &Namespace,
+        series: &Series,
+        query: &BuildLogQuery,
+    ) -> Result<Vec<BuildLog>, E>
+    where
+        E: From<Self::Error> + From<UnreadableBuildLog>,
+    {
+        if !self.exists(&BuildLog::path(namespace)).await? {
+            return Ok(Vec::new());
+        }
+
+        self.build_log_rows(namespace, query)
+            .await?
+            .into_iter()
+            .filter(|row| row.advances(series))
+            .map(|row| Ok(BuildLog::try_from(row)?))
+            .collect()
+    }
+
+    async fn create_build_log<E>(&self, namespace: &Namespace) -> Result<(), E>
     where
         E: From<Self::Error> + From<UnbuildableArtifact>,
     {
         let warehouse = self.warehouse();
 
-        self.execute(&warehouse.create_namespace(namespace))?;
+        self.execute(&warehouse.create_namespace(namespace)).await?;
         self.execute(
             &BuildLog::create_table(warehouse, namespace).map_err(UnbuildableArtifact::from)?,
-        )?;
+        )
+        .await?;
 
         Ok(())
     }
 
-    fn exists(&self, table: &TablePath) -> Result<bool, Self::Error>;
+    async fn exists(&self, table: &TablePath) -> Result<bool, Self::Error>;
 
-    fn append_build_log(&self, namespace: &str, log: &BuildLog) -> Result<(), Self::Error> {
-        self.execute(&log.insert(self.warehouse(), namespace))
+    async fn append_build_logs(
+        &self,
+        namespace: &Namespace,
+        logs: &[BuildLog],
+    ) -> Result<(), Self::Error> {
+        match BuildLog::insert(logs, self.warehouse(), namespace) {
+            Some(insert) => self.execute(&insert).await,
+            None => Ok(()),
+        }
     }
 
-    fn build<E>(&self, builder: &impl ArtifactBuilder) -> Result<(), E>
-    where
-        E: From<Self::Error> + From<UnbuildableArtifact>,
-    {
-        for statement in builder.create(self.warehouse())? {
-            self.execute(&statement)?;
+    async fn build(&self, build: TableBuild) -> TableBuilt {
+        let status = match build.refusal() {
+            Some(refused) => Status::Failed(refused.to_string()),
+            None => match self
+                .execute_all(build.statements().unwrap_or_default())
+                .await
+            {
+                Ok(()) => Status::Succeeded,
+                Err(failed) => Status::Failed(failed.to_string()),
+            },
+        };
+
+        build.built(status, Ts::now())
+    }
+
+    async fn execute_all(&self, statements: &[SqlString]) -> Result<(), Self::Error> {
+        for statement in statements {
+            self.execute(statement).await?;
         }
 
         Ok(())
@@ -275,71 +364,36 @@ pub trait WarehouseClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::build_log::{Outcome, Run};
+    use crate::build_log::Base;
     use crate::model::TableId;
     use crate::testing::{Engine, Recorder};
     use crate::ts::Ts;
 
-    struct Namespaced(TableId);
-
-    impl ArtifactBuilder for Namespaced {
-        fn table(&self) -> &TableId {
-            &self.0
-        }
-
-        fn select(&self) -> Result<SqlString, UnbuildableArtifact> {
-            Ok(SqlString::from("SELECT 1 AS id"))
-        }
-
-        fn create<W: Warehouse>(
-            &self,
-            warehouse: &W,
-        ) -> Result<Vec<SqlString>, UnbuildableArtifact> {
-            Ok(vec![
-                warehouse.create_namespace("shop"),
-                SqlString::from("CREATE TABLE shop.people (id BIGINT)"),
-            ])
-        }
-
-        fn build_log(&self, run: &Run, outcome: Outcome) -> BuildLog {
-            BuildLog::new(
-                run,
-                Some(self.0.clone()),
-                Some(self.0.clone()),
-                None,
-                Some(TablePath::new("shop", "people")),
-                Window::until(Ts::try_from(1).unwrap()),
-                outcome,
-            )
-        }
+    fn people(base: Base, making: Result<Vec<SqlString>, UnbuildableArtifact>) -> TableBuild {
+        TableBuild::new(
+            Some(TableId::new("shop", "people")),
+            Some(TableId::new("shop", "people")),
+            base,
+            Some(TablePath::new("shop", "people")),
+            Window::until(Ts::try_from(1).unwrap()),
+            making,
+        )
     }
 
-    #[derive(Debug)]
-    enum Unbuilt {
-        Unexecuted,
-        Unbuildable,
+    fn statements() -> Vec<SqlString> {
+        vec![
+            SqlString::from("CREATE SCHEMA IF NOT EXISTS \"shop\""),
+            SqlString::from("CREATE TABLE shop.people (id BIGINT)"),
+        ]
     }
 
-    impl From<std::fmt::Error> for Unbuilt {
-        fn from(_: std::fmt::Error) -> Self {
-            Self::Unexecuted
-        }
-    }
-
-    impl From<UnbuildableArtifact> for Unbuilt {
-        fn from(_: UnbuildableArtifact) -> Self {
-            Self::Unbuildable
-        }
-    }
-
-    #[test]
-    fn a_client_builds_an_artifact_by_running_its_statements_in_order() {
+    #[tokio::test]
+    async fn a_client_builds_a_table_by_running_its_statements_in_order() {
         let client = Recorder::new(Engine::default());
 
-        client
-            .build::<Unbuilt>(&Namespaced(TableId::new("shop", "people")))
-            .unwrap();
+        let built = client.build(people(Base::ChangeLog, Ok(statements())));
 
+        assert_eq!(built.await.status(), &Status::Succeeded);
         assert_eq!(
             client.executed(),
             [
@@ -347,6 +401,32 @@ mod tests {
                 "CREATE TABLE shop.people (id BIGINT)"
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn a_client_builds_nothing_of_a_table_with_nothing_to_fold_onto() {
+        let client = Recorder::new(Engine::default());
+
+        let built = client.build(people(Base::Missing, Ok(statements())));
+
+        assert_eq!(
+            built.await.status(),
+            &Status::Failed(
+                UnbuildableArtifact::WithoutBase(TableId::new("shop", "people")).to_string()
+            )
+        );
+        assert_eq!(client.executed(), Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn a_client_builds_nothing_of_a_table_its_builder_refused() {
+        let client = Recorder::new(Engine::default());
+        let refused = UnbuildableArtifact::PrimaryKeyChanged(TableId::new("shop", "people"));
+
+        let built = client.build(people(Base::ChangeLog, Err(refused.clone())));
+
+        assert_eq!(built.await.status(), &Status::Failed(refused.to_string()));
+        assert_eq!(client.executed(), Vec::<String>::new());
     }
 
     #[test]
@@ -371,6 +451,22 @@ mod tests {
                 &SqlString::from("SELECT 1")
             ),
             "INSERT INTO \"shop\".\"people\" (\"id\")\nSELECT 1"
+        );
+    }
+
+    #[test]
+    fn a_namespace_is_a_path_of_names_joined_by_dots() {
+        let namespace = Namespace::from("analytics.shop");
+
+        assert_eq!(namespace.parts().collect::<Vec<_>>(), ["analytics", "shop"]);
+        assert_eq!(namespace.to_string(), "analytics.shop");
+    }
+
+    #[test]
+    fn a_table_is_written_after_the_namespace_it_lies_in() {
+        assert_eq!(
+            TablePath::new("analytics.shop", "people").to_string(),
+            "analytics.shop.people"
         );
     }
 

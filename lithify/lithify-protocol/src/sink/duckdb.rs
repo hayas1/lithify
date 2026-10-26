@@ -7,26 +7,26 @@ pub mod from_sql;
 pub mod store;
 
 use lithify_core::model::ColumnType;
-use lithify_core::sink::{ChangeLogSql, TablePath, UnsupportedColumn, WarehouseSql};
+use lithify_core::sink::{ChangeLogSql, Namespace, TablePath, UnsupportedColumn, WarehouseSql};
 use lithify_core::sql::SqlString;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DuckDbWarehouse {
-    change_log: String,
+    change_log: Namespace,
     store: Option<config::Store>,
 }
 
 impl DuckDbWarehouse {
-    pub fn new(change_log: &str) -> Self {
+    pub fn new(change_log: impl Into<Namespace>) -> Self {
         Self {
-            change_log: change_log.to_owned(),
+            change_log: change_log.into(),
             store: None,
         }
     }
 
-    pub fn over(change_log: &str, store: config::Store) -> Self {
+    pub fn over(change_log: impl Into<Namespace>, store: config::Store) -> Self {
         Self {
-            change_log: change_log.to_owned(),
+            change_log: change_log.into(),
             store: Some(store),
         }
     }
@@ -77,6 +77,16 @@ impl WarehouseSql for DuckDbWarehouse {
             None => SqlString::from(format!(
                 "CREATE OR REPLACE TABLE {} AS\n{select}",
                 self.table_ref(table)
+            )),
+        }
+    }
+
+    fn create_view(&self, view: &TablePath, select: &SqlString) -> SqlString {
+        match &self.store {
+            Some(store) => store.replace(view, select),
+            None => SqlString::from(format!(
+                "CREATE OR REPLACE VIEW {} AS\n{select}",
+                self.table_ref(view)
             )),
         }
     }
@@ -138,7 +148,7 @@ impl WarehouseSql for DuckDbWarehouse {
         SqlString::from(format!(
             "SELECT COUNT(*) AS {} FROM information_schema.tables WHERE table_schema = {} AND table_name = {}",
             self.identifier("count"),
-            self.literal(table.namespace()),
+            self.literal(&table.namespace().to_string()),
             self.literal(table.name())
         ))
     }
@@ -184,7 +194,7 @@ impl WarehouseSql for DuckDbWarehouse {
 }
 
 impl ChangeLogSql for DuckDbWarehouse {
-    fn change_log_namespace(&self) -> &str {
+    fn change_log_namespace(&self) -> &Namespace {
         &self.change_log
     }
 }
@@ -192,6 +202,24 @@ impl ChangeLogSql for DuckDbWarehouse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_view_over_a_store_is_written_as_a_table_since_a_store_keeps_no_view() {
+        let warehouse = DuckDbWarehouse::over("cdc", s3("http://rustfs:9000"));
+        let view = TablePath::new("mysql_shop_scd1", "people");
+        let select = SqlString::from("SELECT 1");
+
+        assert_eq!(
+            warehouse.create_view(&view, &select),
+            warehouse.create_table_as(&view, &select)
+        );
+        assert!(
+            DuckDbWarehouse::new("cdc")
+                .create_view(&view, &select)
+                .as_str()
+                .starts_with("CREATE OR REPLACE VIEW")
+        );
+    }
     use crate::sink::duckdb::config::tests::s3;
     use crate::source::debezium::Debezium;
     use crate::source::debezium::mysql::MySql;

@@ -1,0 +1,36 @@
+[[artifact]]
+name = "snapshot"
+kind = "snapshot"
+at = "00:00"
+shard = "%Y%m%d"
+
+[[artifact]]
+name = "instant_0900"
+kind = "instant"
+base = "snapshot"
+at = "09:00"
+shard = "%Y%m%d"
+
+[[artifact]]
+name = "instant_1200"
+kind = "instant"
+base = "snapshot"
+at = "12:00"
+shard = "%Y%m%d"
+
+[[artifact]]
+name = "instant_1800"
+kind = "instant"
+base = "snapshot"
+at = "18:00"
+shard = "%Y%m%d"
+
+[[artifact]]
+name = "scd1"
+kind = "scd1"
+base = "snapshot"
+
+[[artifact]]
+name = "scd2"
+kind = "scd2"
+shard = "%Y%m%d"

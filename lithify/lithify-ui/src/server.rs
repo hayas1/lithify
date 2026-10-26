@@ -11,23 +11,25 @@ use leptos::prelude::*;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use lithify_config::{Declaration, Placing};
 use lithify_core::sink::SinkWarehouse;
 
 use crate::pipelines::{PipelineLocation, PipelineOverview, Pipelines};
 use crate::route::{AppRoute, BuildLogQueryParam, CheckQueryParam, QueryState};
 use crate::screen::{BuildLogScreen, CheckScreen, PipelinesScreen, UnreadScreen};
 
-pub struct Board<C, W: SinkWarehouse> {
-    pipelines: Arc<Pipelines<C, W>>,
+pub struct Board<C, W: SinkWarehouse, A> {
+    pipelines: Arc<Pipelines<C, W, A>>,
 }
 
-impl<C, W> Board<C, W>
+impl<C, W, A> Board<C, W, A>
 where
     C: Clone + DeserializeOwned + Serialize + 'static,
-    W: Clone + DeserializeOwned + SinkWarehouse + Send + Sync + 'static,
+    W: Clone + DeserializeOwned + Placing + Send + Sync + 'static,
     W::Credential: Send + Sync,
+    A: Clone + DeserializeOwned + Declaration + 'static,
 {
-    pub fn new(pipelines: Pipelines<C, W>) -> Self {
+    pub fn new(pipelines: Pipelines<C, W, A>) -> Self {
         Self {
             pipelines: Arc::new(pipelines),
         }
@@ -42,37 +44,52 @@ where
             .with_state(self.pipelines)
     }
 
-    pub fn serve(self, address: SocketAddr) -> std::io::Result<()> {
-        tokio::runtime::Runtime::new()?.block_on(async {
-            let listener = tokio::net::TcpListener::bind(address).await?;
-            let located = Self::blocking(self.pipelines.clone(), Pipelines::locations).await;
-
-            tracing::info!("serving on http://{}", listener.local_addr()?);
-            match located {
-                Ok(located) => tracing::info!(
-                    "reading {}",
-                    located
-                        .iter()
-                        .map(PipelineLocation::directory)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-                Err(cause) => tracing::warn!("reading no pipeline: {cause}"),
-            }
-
-            axum::serve(listener, self.router()).await
+    pub async fn serve(self, address: SocketAddr) -> std::io::Result<()> {
+        let listener = tokio::net::TcpListener::bind(address).await?;
+        let located = Self::blocking(self.pipelines.clone(), async |pipelines| {
+            pipelines.locations()
         })
+        .await;
+
+        tracing::info!("serving on http://{}", listener.local_addr()?);
+        match located {
+            Ok(located) => tracing::info!(
+                "reading {}",
+                located
+                    .iter()
+                    .map(PipelineLocation::directory)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Err(cause) => tracing::warn!("reading no pipeline: {cause}"),
+        }
+
+        axum::serve(listener, self.router()).await
     }
 
     async fn blocking<T: Send + 'static>(
-        pipelines: Arc<Pipelines<C, W>>,
-        read: impl FnOnce(&Pipelines<C, W>) -> Result<T, String> + Send + 'static,
+        pipelines: Arc<Pipelines<C, W, A>>,
+        read: impl AsyncFnOnce(&Pipelines<C, W, A>) -> Result<T, String> + Send + 'static,
     ) -> Result<T, String> {
-        // The pipeline is read from disk and the warehouse clients block, the BigQuery one on a
-        // runtime of its own.
-        tokio::task::spawn_blocking(move || read(&pipelines))
-            .await
-            .map_err(|unjoined| unjoined.to_string())?
+        // A page waits on its read on a thread of its own: the pipeline is read from disk, and a
+        // warehouse client may block, like DuckDB does, or hold what cannot be sent across threads.
+        // TODO: await the read in the handler itself once the warehouse clients are Send:
+        // - DuckDbClient holds an Arc<Mutex<Connection>> and runs each call in spawn_blocking
+        //   itself, as a DuckDB connection is Send but not Sync and its calls block; not
+        //   block_in_place, which panics on a current-thread runtime such as #[tokio::test]'s
+        // - DuckDbSchemaChanges reads its records whole like BigQuerySchemaChanges, as a Statement
+        //   cannot outlive the lock on the connection it borrows
+        // - DryRun records into an Arc<Mutex<_>> rather than an Rc<RefCell<_>>
+        // - trait_variant makes Send variants of WarehouseClient, SinkWarehouse and WarehouseFn,
+        //   which the pages ask for while the replay keeps asking for the local ones
+        // - the test clients, such as Recorder, are Send too
+        // No crate is relied on for it: async-duckdb does no more than a background thread, and
+        // duckdb-rs has no async API in sight.
+        tokio::task::spawn_blocking(move || {
+            tokio::runtime::Handle::current().block_on(read(&pipelines))
+        })
+        .await
+        .map_err(|unjoined| unjoined.to_string())?
     }
 
     fn html(status: StatusCode, screen: AnyView) -> (StatusCode, Html<String>) {
@@ -87,17 +104,19 @@ where
     }
 
     async fn build_logs(
-        State(pipelines): State<Arc<Pipelines<C, W>>>,
+        State(pipelines): State<Arc<Pipelines<C, W, A>>>,
     ) -> (StatusCode, Html<String>) {
         Self::index(pipelines, AppRoute::BuildLogs).await
     }
 
-    async fn checks(State(pipelines): State<Arc<Pipelines<C, W>>>) -> (StatusCode, Html<String>) {
+    async fn checks(
+        State(pipelines): State<Arc<Pipelines<C, W, A>>>,
+    ) -> (StatusCode, Html<String>) {
         Self::index(pipelines, AppRoute::Checks).await
     }
 
     async fn build_log(
-        State(pipelines): State<Arc<Pipelines<C, W>>>,
+        State(pipelines): State<Arc<Pipelines<C, W, A>>>,
         Path(name): Path<String>,
         Query(query): Query<QueryState<BuildLogQueryParam>>,
     ) -> (StatusCode, Html<String>) {
@@ -114,7 +133,7 @@ where
     }
 
     async fn check(
-        State(pipelines): State<Arc<Pipelines<C, W>>>,
+        State(pipelines): State<Arc<Pipelines<C, W, A>>>,
         Path(name): Path<String>,
         Query(query): Query<QueryState<CheckQueryParam>>,
     ) -> (StatusCode, Html<String>) {
@@ -129,8 +148,11 @@ where
         .await
     }
 
-    async fn index(pipelines: Arc<Pipelines<C, W>>, route: AppRoute) -> (StatusCode, Html<String>) {
-        match Self::blocking(pipelines, Pipelines::locations).await {
+    async fn index(
+        pipelines: Arc<Pipelines<C, W, A>>,
+        route: AppRoute,
+    ) -> (StatusCode, Html<String>) {
+        match Self::blocking(pipelines, async |pipelines| pipelines.locations()).await {
             Ok(located) => Self::html(
                 StatusCode::OK,
                 view! { <PipelinesScreen route=route pipelines=located /> }.into_any(),
@@ -140,14 +162,17 @@ where
     }
 
     async fn pipeline(
-        pipelines: Arc<Pipelines<C, W>>,
+        pipelines: Arc<Pipelines<C, W, A>>,
         name: String,
         route: AppRoute,
         screen: fn(AppRoute, Vec<PipelineLocation>, Option<PipelineOverview>) -> AnyView,
     ) -> (StatusCode, Html<String>) {
         let view = route.view();
-        let read = Self::blocking(pipelines, move |pipelines| {
-            Ok((pipelines.locations()?, pipelines.inspect(&name, view)?))
+        let read = Self::blocking(pipelines, async move |pipelines| {
+            Ok((
+                pipelines.locations()?,
+                pipelines.inspect(&name, view).await?,
+            ))
         })
         .await;
 
@@ -249,7 +274,7 @@ mod tests {
         assert!(page.contains("class=\"backdrop\""));
         assert!(page.contains("href=\"#closed\""));
         assert!(!page.contains("href=\"#\""));
-        assert!(page.contains("<dt>shard</dt><dd class=\"mono\">2026-09-20</dd>"));
+        assert!(page.contains("<dt>closed</dt><dd class=\"mono\">2026-09-21T00:00:00+00:00</dd>"));
     }
 
     #[tokio::test]

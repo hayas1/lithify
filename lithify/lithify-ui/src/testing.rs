@@ -4,12 +4,15 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
-use lithify_core::build_log::{BuildLog, Outcome, Run, Status};
+use lithify_core::build_log::{BuildLog, Run, Status, TableBuilt};
 use lithify_core::model::TableId;
-use lithify_core::sink::{SinkWarehouse, TablePath, WarehouseFn};
+use lithify_core::sink::{Namespace, SinkWarehouse, TablePath, WarehouseFn};
 use lithify_core::testing::{Engine, Recorder};
 use lithify_core::ts::Ts;
 use lithify_core::window::Window;
+
+use lithify_config::{Declaration, Placed, Places, Placing};
+use lithify_core::schedule::Schedule;
 
 use crate::pipelines::Pipelines;
 
@@ -20,11 +23,53 @@ pub enum Captured {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Memory {}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Cause {
+    cause: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kept {
-    Memory {},
-    Logged {},
-    Unreachable { cause: String },
+    Memory(Placed<Memory, Shelf>),
+    Logged(Placed<Memory, Shelf>),
+    Unreachable(Placed<Cause, Shelf>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Shelf {
+    prefix: String,
+}
+
+impl From<Shelf> for Namespace {
+    fn from(shelf: Shelf) -> Self {
+        Namespace::from(shelf.prefix.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, tag = "kind", rename_all = "lowercase")]
+pub enum Made {
+    Snapshot {},
+}
+
+impl Declaration for Made {
+    fn kind(&self) -> &'static str {
+        "snapshot"
+    }
+
+    fn built_from(&self) -> &'static str {
+        "snapshot"
+    }
+
+    fn schedule(&self, time_zone: chrono_tz::Tz) -> Option<Schedule> {
+        Some(Schedule::daily(chrono::NaiveTime::MIN, time_zone))
+    }
 }
 
 #[derive(Debug)]
@@ -42,16 +87,7 @@ impl Kept {
     pub fn logs() -> Vec<BuildLog> {
         let at = |rfc3339: &str| rfc3339.parse::<DateTime<Utc>>().unwrap();
         let built = |table: &str, opened: &str, closed: &str, base: Option<&str>, status| {
-            BuildLog::new(
-                &Run::new(
-                    Ulid::from_parts(1, 0),
-                    DateTime::UNIX_EPOCH,
-                    "snapshot",
-                    "daily",
-                    "primary",
-                    "{}",
-                    "0.1.0",
-                ),
+            TableBuilt::new(
                 Some(TableId::new("shop", table)),
                 Some(TableId::new("shop", table)),
                 base.map(|base| TablePath::new("mysql_shop", base)),
@@ -60,8 +96,18 @@ impl Kept {
                     &format!("{table}_{}", at(opened).format("%Y%m%d")),
                 )),
                 Window::new(Ts::from(at(opened)), Ts::from(at(closed))),
-                Outcome::new(status, at(closed)),
+                status,
+                Ts::from(at(closed)),
             )
+            .logged(&Run::new(
+                Ulid::from_parts(1, 0),
+                Ts::from(DateTime::UNIX_EPOCH),
+                &"snapshot".into(),
+                "daily",
+                "primary",
+                "{}",
+                "0.1.0",
+            ))
         };
 
         vec![
@@ -91,16 +137,45 @@ impl Kept {
 }
 
 impl SinkWarehouse for Kept {
+    type Location = Shelf;
     type Credential = ();
     type Error = Unreached;
 
-    fn with_client<F: WarehouseFn>(&self, _: &str, _: &(), f: F) -> Result<F::Output, Unreached> {
+    fn reaches(&self, _: &Shelf) -> bool {
+        true
+    }
+
+    async fn with_client<F: WarehouseFn>(
+        &self,
+        _: &Shelf,
+        _: &(),
+        f: F,
+    ) -> Result<F::Output, Unreached> {
         match self {
-            Self::Memory {} => Ok(f.call(&Recorder::new(Engine::default()))),
-            Self::Logged {} => {
-                Ok(f.call(&Recorder::new(Engine::default()).logging("mysql_shop", &Self::logs())))
-            }
-            Self::Unreachable { cause } => Err(Unreached(cause.clone())),
+            Self::Memory(_) => Ok(f.call(&Recorder::new(Engine::default())).await),
+            Self::Logged(_) => Ok(f
+                .call(
+                    &Recorder::new(Engine::default())
+                        .logging(&Namespace::from("mysql_shop"), &Self::logs()),
+                )
+                .await),
+            Self::Unreachable(placed) => Err(Unreached(placed.warehouse().cause.clone())),
+        }
+    }
+}
+
+impl Placing for Kept {
+    fn change_log(&self) -> Shelf {
+        match self {
+            Self::Memory(placed) | Self::Logged(placed) => placed.change_log().clone(),
+            Self::Unreachable(placed) => placed.change_log().clone(),
+        }
+    }
+
+    fn places(&self) -> Places<Shelf> {
+        match self {
+            Self::Memory(placed) | Self::Logged(placed) => placed.places().clone(),
+            Self::Unreachable(placed) => placed.places().clone(),
         }
     }
 }
@@ -108,25 +183,28 @@ impl SinkWarehouse for Kept {
 pub const INFRA: &str = r#"
     [default]
     source.capture.debezium.dialect = "mysql"
-    sink.change_log = "mysql_shop_cdc"
-    sink.artifacts.snapshot = "mysql_shop"
-    sink.artifacts.history = "mysql_shop_history"
-    sink.artifacts.shard = "%Y%m%d"
 
     [[source]]
     name = "primary"
 
     [[sink]]
     name = "rustfs"
-    warehouse.memory = {}
+
+    [sink.warehouse.memory]
+    change_log = { prefix = "mysql_shop_cdc" }
+    place.snapshot = [{ prefix = "mysql_shop" }]
 
     [[sink]]
     name = "warehouse"
-    warehouse.unreachable.cause = "JobCreationMode"
+
+    [sink.warehouse.unreachable]
+    cause = "JobCreationMode"
+    change_log = { prefix = "mysql_shop_cdc" }
+    place.snapshot = [{ prefix = "mysql_shop" }]
 "#;
 
 pub fn logged() -> String {
-    INFRA.replace("warehouse.memory = {}", "warehouse.logged = {}")
+    INFRA.replace("[sink.warehouse.memory]", "[sink.warehouse.logged]")
 }
 
 pub fn scratch(name: &str) -> PathBuf {
@@ -141,12 +219,17 @@ pub fn configure(directory: &Path, infra: &str) {
     std::fs::create_dir_all(directory).unwrap();
     std::fs::write(directory.join("infra.toml"), infra).unwrap();
     std::fs::write(
+        directory.join("artifact.toml"),
+        "[[artifact]]\nname = \"snapshot\"\nkind = \"snapshot\"\n",
+    )
+    .unwrap();
+    std::fs::write(
         directory.join("table.toml"),
         "[default]\nartifacts = [\"snapshot\"]\n",
     )
     .unwrap();
 }
 
-pub fn under(root: &Path) -> Pipelines<Captured, Kept> {
+pub fn under(root: &Path) -> Pipelines<Captured, Kept, Made> {
     Pipelines::new(root.to_owned(), ())
 }

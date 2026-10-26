@@ -1,11 +1,11 @@
 use std::collections::BTreeSet;
 use std::fmt::{self, Display, Formatter};
 
-use crate::build_log::{BuildLog, Latest};
+use crate::build_log::{BuildLog, Latest, Series, UnreadableBuildLog};
 use crate::model::TableId;
 use crate::schedule::Schedule;
-use crate::sink::{TablePath, WarehouseClient};
-use crate::ts::{Event, Ts};
+use crate::sink::{Namespace, TablePath, WarehouseClient};
+use crate::ts::{Event, Replay, Ts};
 use crate::window::Window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,11 +92,11 @@ pub struct Expectation {
     schedule: Schedule,
     since: Ts<Event>,
     capture: String,
-    now: Ts<Event>,
+    now: Ts<Replay>,
 }
 
 impl Expectation {
-    pub fn new(schedule: Schedule, since: Ts<Event>, capture: &str, now: Ts<Event>) -> Self {
+    pub fn new(schedule: Schedule, since: Ts<Event>, capture: &str, now: Ts<Replay>) -> Self {
         Self {
             schedule,
             since,
@@ -105,12 +105,17 @@ impl Expectation {
         }
     }
 
-    pub fn read<K: WarehouseClient>(
+    pub async fn read<K, E>(
         &self,
         client: &K,
-        namespace: &str,
-    ) -> Result<Inspection, K::Error> {
-        if !client.exists(&BuildLog::path(namespace))? {
+        namespace: &Namespace,
+        series: &Series,
+    ) -> Result<Inspection, E>
+    where
+        K: WarehouseClient,
+        E: From<K::Error> + From<UnreadableBuildLog>,
+    {
+        if !client.exists(&BuildLog::path(namespace)).await? {
             return Ok(Inspection {
                 schedule: self.schedule,
                 latest: Vec::new(),
@@ -118,11 +123,15 @@ impl Expectation {
             });
         }
 
-        let latest = client.build_logs(namespace, &Latest::Attempted.into())?;
-        let succeeded = client.build_logs(namespace, &Latest::Succeeded.into())?;
+        let latest = client
+            .build_logs::<E>(namespace, series, &Latest::Attempted.into())
+            .await?;
+        let succeeded = client
+            .build_logs::<E>(namespace, series, &Latest::Succeeded.into())
+            .await?;
         let mut present = BTreeSet::new();
         for target in succeeded.iter().filter_map(BuildLog::target) {
-            if client.exists(target)? {
+            if client.exists(target).await? {
                 present.insert(target.clone());
             }
         }
@@ -171,7 +180,7 @@ impl Expectation {
 
     fn due_until(&self, built_until: Ts<Event>) -> Option<Ts<Event>> {
         self.schedule
-            .windows(built_until, self.now)
+            .windows(built_until, self.now.as_event())
             .last()
             .map(|window| *window.to())
     }
@@ -238,11 +247,15 @@ mod tests {
     use chrono::{DateTime, Utc};
 
     use super::*;
-    use crate::build_log::{Outcome, Run, Status};
+    use crate::build_log::{Run, Status, TableBuilt};
     use crate::testing::{Engine, Recorder};
 
-    fn at(rfc3339: &str) -> Ts<Event> {
+    fn at<A>(rfc3339: &str) -> Ts<A> {
         Ts::from(rfc3339.parse::<DateTime<Utc>>().unwrap())
+    }
+
+    fn daily() -> Series {
+        Series::new("snapshot".into(), "daily")
     }
 
     fn day(date: &str) -> Window {
@@ -255,16 +268,7 @@ mod tests {
     }
 
     fn logged(run: u64, table: &str, window: Window, status: Status) -> BuildLog {
-        BuildLog::new(
-            &Run::new(
-                Ulid::from_parts(run, 0),
-                DateTime::UNIX_EPOCH,
-                "snapshot",
-                "daily",
-                "primary",
-                "{}",
-                "0.1.0",
-            ),
+        TableBuilt::new(
             Some(TableId::new("shop", table)),
             Some(TableId::new("shop", table)),
             None,
@@ -273,12 +277,27 @@ mod tests {
                 &format!("{table}_{}", window.from().milliseconds_since_epoch()),
             )),
             window,
-            Outcome::new(status, DateTime::from_timestamp_millis(0).unwrap()),
+            status,
+            Ts::from(DateTime::from_timestamp_millis(0).unwrap()),
         )
+        .logged(&Run::new(
+            Ulid::from_parts(run, 0),
+            Ts::from(DateTime::UNIX_EPOCH),
+            &"snapshot".into(),
+            "daily",
+            "primary",
+            "{}",
+            "0.1.0",
+        ))
     }
 
     fn expected(now: &str) -> Expectation {
-        Expectation::new(Schedule::Daily, at("2026-09-19T00:00:00Z"), "{}", at(now))
+        Expectation::new(
+            Schedule::default(),
+            at("2026-09-19T00:00:00Z"),
+            "{}",
+            at(now),
+        )
     }
 
     fn present(logs: &[BuildLog]) -> BTreeSet<TablePath> {
@@ -356,7 +375,7 @@ mod tests {
 
         assert_eq!(
             Expectation::new(
-                Schedule::Daily,
+                Schedule::default(),
                 at("2026-09-19T00:00:00Z"),
                 r#"{"debezium":{"dialect":"postgres"}}"#,
                 at("2026-09-21T05:00:00Z")
@@ -412,17 +431,25 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_warehouse_is_checked_against_the_tables_it_holds() {
+    #[tokio::test]
+    async fn a_warehouse_is_checked_against_the_tables_it_holds() {
         let people = logged(2, "people", day("2026-09-20"), Status::Succeeded);
         let pets = logged(2, "pets", day("2026-09-20"), Status::Succeeded);
         let client = Recorder::new(Engine::default())
-            .logging("mysql_shop", &[people.clone(), pets.clone()])
+            .logging(
+                &Namespace::from("mysql_shop"),
+                &[people.clone(), pets.clone()],
+            )
             .holding(&[people.target().unwrap().clone()]);
 
         assert_eq!(
             expected("2026-09-21T05:00:00Z")
-                .read(&client, "mysql_shop")
+                .read::<_, Box<dyn std::error::Error>>(
+                    &client,
+                    &Namespace::from("mysql_shop"),
+                    &daily()
+                )
+                .await
                 .unwrap()
                 .discrepancies(),
             [Discrepancy::Missing {
@@ -432,11 +459,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_warehouse_holding_no_build_log_was_never_built() {
+    #[tokio::test]
+    async fn a_warehouse_holding_no_build_log_was_never_built() {
         assert_eq!(
             expected("2026-09-21T05:00:00Z")
-                .read(&Recorder::new(Engine::default()), "mysql_shop")
+                .read::<_, Box<dyn std::error::Error>>(
+                    &Recorder::new(Engine::default()),
+                    &Namespace::from("mysql_shop"),
+                    &daily()
+                )
+                .await
                 .unwrap()
                 .discrepancies(),
             [Discrepancy::NeverBuilt {
@@ -445,8 +477,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_warehouse_is_inspected_for_the_latest_build_of_each_table() {
+    #[tokio::test]
+    async fn a_warehouse_is_inspected_for_the_latest_build_of_each_table() {
         let failed = logged(
             3,
             "people",
@@ -456,11 +488,15 @@ mod tests {
 
         assert_eq!(
             expected("2026-09-21T05:00:00Z")
-                .read(
-                    &Recorder::new(Engine::default())
-                        .logging("mysql_shop", std::slice::from_ref(&failed)),
-                    "mysql_shop"
+                .read::<_, Box<dyn std::error::Error>>(
+                    &Recorder::new(Engine::default()).logging(
+                        &Namespace::from("mysql_shop"),
+                        std::slice::from_ref(&failed)
+                    ),
+                    &Namespace::from("mysql_shop"),
+                    &daily()
                 )
+                .await
                 .unwrap()
                 .latest(),
             [failed]

@@ -1,9 +1,5 @@
 [default]
 source.capture.debezium.dialect = "postgres"
-sink.change_log = "postgres_shop_cdc"
-sink.artifacts.snapshot = "postgres_shop"
-sink.artifacts.history = "postgres_shop_history"
-sink.artifacts.shard = "%Y%m%d"
 
 [[source]]
 name = "primary"
@@ -12,13 +8,28 @@ topic_prefix = "postgres"
 
 [[sink]]
 name = "bigquery"
-warehouse.bigquery.project = "local-project"
-warehouse.bigquery.endpoint = "http://bigquery-emulator:9050"
-warehouse.bigquery.credentials = "anonymous"
+
+[sink.warehouse.bigquery]
+project = "local-project"
+endpoint = "http://bigquery-emulator:9050"
+credentials = "anonymous"
+change_log = { dataset = "postgres_shop_cdc" }
+place.snapshot = [{ dataset = "postgres_shop" }]
+place.instant_0900 = [{ dataset = "postgres_shop_0900" }]
+place.instant_1200 = [{ dataset = "postgres_shop_1200" }]
+place.instant_1800 = [{ dataset = "postgres_shop_1800" }]
+place.scd1 = [{ dataset = "postgres_shop_scd1" }]
+place.scd2 = [{ dataset = "postgres_shop_scd2" }]
 
 [[sink]]
 name = "duckdb_s3"
-warehouse.duckdb.s3.endpoint = "http://rustfs:9000"
-warehouse.duckdb.s3.region = "us-east-1"
-warehouse.duckdb.s3.bucket = "lithify"
-warehouse.duckdb.s3.format = "parquet"
+
+[sink.warehouse.duckdb]
+s3 = { endpoint = "http://rustfs:9000", region = "us-east-1", bucket = "lithify", format = "parquet" }
+change_log = { prefix = "postgres_shop_cdc" }
+place.snapshot = [{ prefix = "postgres_shop" }]
+place.instant_0900 = [{ prefix = "postgres_shop_0900" }]
+place.instant_1200 = [{ prefix = "postgres_shop_1200" }]
+place.instant_1800 = [{ prefix = "postgres_shop_1800" }]
+place.scd1 = [{ prefix = "postgres_shop_scd1" }]
+place.scd2 = [{ prefix = "postgres_shop_scd2" }]

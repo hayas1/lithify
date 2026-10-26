@@ -61,31 +61,33 @@ pub enum Dialect {
 
 #[cfg(feature = "duckdb")]
 impl DuckDbCapture for Config {
-    fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(
+    async fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(
         &self,
         topic_prefix: &str,
         f: F,
     ) -> F::Output {
         self.dialect
             .with_duckdb_change_logs(self, Self::DUCKDB_ENVELOPE, topic_prefix, f)
+            .await
     }
 }
 
 #[cfg(feature = "bigquery")]
 impl BigQueryCapture for Config {
-    fn with_bigquery_change_logs<F: BigQueryChangeLogsFn>(
+    async fn with_bigquery_change_logs<F: BigQueryChangeLogsFn>(
         &self,
         topic_prefix: &str,
         f: F,
     ) -> F::Output {
         self.dialect
             .with_bigquery_change_logs(self, Self::BIGQUERY_ENVELOPE, topic_prefix, f)
+            .await
     }
 }
 
 impl Dialect {
     #[cfg(feature = "duckdb")]
-    fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(
+    async fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(
         self,
         config: &Config,
         envelope: Option<&str>,
@@ -93,13 +95,19 @@ impl Dialect {
         f: F,
     ) -> F::Output {
         match self {
-            Self::MySql => f.call_duckdb(config.debezium(envelope, topic_prefix, MySql)),
-            Self::Postgres => f.call_duckdb(config.debezium(envelope, topic_prefix, Postgres)),
+            Self::MySql => {
+                f.call_duckdb(config.debezium(envelope, topic_prefix, MySql))
+                    .await
+            }
+            Self::Postgres => {
+                f.call_duckdb(config.debezium(envelope, topic_prefix, Postgres))
+                    .await
+            }
         }
     }
 
     #[cfg(feature = "bigquery")]
-    fn with_bigquery_change_logs<F: BigQueryChangeLogsFn>(
+    async fn with_bigquery_change_logs<F: BigQueryChangeLogsFn>(
         self,
         config: &Config,
         envelope: Option<&str>,
@@ -107,8 +115,14 @@ impl Dialect {
         f: F,
     ) -> F::Output {
         match self {
-            Self::MySql => f.call_bigquery(config.debezium(envelope, topic_prefix, MySql)),
-            Self::Postgres => f.call_bigquery(config.debezium(envelope, topic_prefix, Postgres)),
+            Self::MySql => {
+                f.call_bigquery(config.debezium(envelope, topic_prefix, MySql))
+                    .await
+            }
+            Self::Postgres => {
+                f.call_bigquery(config.debezium(envelope, topic_prefix, Postgres))
+                    .await
+            }
         }
     }
 }
@@ -133,14 +147,14 @@ mod tests {
     }
 
     #[cfg(feature = "duckdb")]
-    #[test]
-    fn a_source_names_the_topic_its_schema_changes_land_on_apart_from_its_prefix() {
+    #[tokio::test]
+    async fn a_source_names_the_topic_its_schema_changes_land_on_apart_from_its_prefix() {
         struct DdlTopic;
 
         impl DuckDbChangeLogsFn for DdlTopic {
             type Output = String;
 
-            fn call_duckdb<C>(self, logs: C) -> Self::Output
+            async fn call_duckdb<C>(self, logs: C) -> Self::Output
             where
                 C: ChangeLogs,
                 <C::Schema as SchemaChangeLog>::Record: duckdb::types::FromSql,
@@ -156,7 +170,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            config.with_duckdb_change_logs("mysql", DdlTopic),
+            config.with_duckdb_change_logs("mysql", DdlTopic).await,
             "mysql.schema-changes"
         );
     }
@@ -170,15 +184,15 @@ mod tests {
     }
 
     #[cfg(feature = "duckdb")]
-    #[test]
-    fn a_duckdb_fn_is_called_with_the_logs_of_the_dialect_on_the_prefix_under_the_value_of_each_record()
+    #[tokio::test]
+    async fn a_duckdb_fn_is_called_with_the_logs_of_the_dialect_on_the_prefix_under_the_value_of_each_record()
      {
         struct Probe;
 
         impl DuckDbChangeLogsFn for Probe {
             type Output = Probed;
 
-            fn call_duckdb<C>(self, logs: C) -> Self::Output
+            async fn call_duckdb<C>(self, logs: C) -> Self::Output
             where
                 C: ChangeLogs,
                 <C::Schema as SchemaChangeLog>::Record: duckdb::types::FromSql,
@@ -190,7 +204,9 @@ mod tests {
         let value = Some(ColumnPath::from("value"));
 
         assert_eq!(
-            Config::of(Dialect::MySql).with_duckdb_change_logs("mysql", Probe),
+            Config::of(Dialect::MySql)
+                .with_duckdb_change_logs("mysql", Probe)
+                .await,
             (
                 std::any::type_name::<Debezium<MySql>>(),
                 "mysql".to_owned(),
@@ -199,7 +215,9 @@ mod tests {
             )
         );
         assert_eq!(
-            Config::of(Dialect::Postgres).with_duckdb_change_logs("postgres", Probe),
+            Config::of(Dialect::Postgres)
+                .with_duckdb_change_logs("postgres", Probe)
+                .await,
             (
                 std::any::type_name::<Debezium<Postgres>>(),
                 "postgres".to_owned(),
@@ -210,14 +228,15 @@ mod tests {
     }
 
     #[cfg(feature = "bigquery")]
-    #[test]
-    fn a_bigquery_fn_is_called_with_the_logs_of_the_dialect_on_the_prefix_at_the_top_of_each_row() {
+    #[tokio::test]
+    async fn a_bigquery_fn_is_called_with_the_logs_of_the_dialect_on_the_prefix_at_the_top_of_each_row()
+     {
         struct Probe;
 
         impl BigQueryChangeLogsFn for Probe {
             type Output = Probed;
 
-            fn call_bigquery<C>(self, logs: C) -> Self::Output
+            async fn call_bigquery<C>(self, logs: C) -> Self::Output
             where
                 C: ChangeLogs,
                 <C::Schema as SchemaChangeLog>::Record: TryFrom<
@@ -230,7 +249,9 @@ mod tests {
         }
 
         assert_eq!(
-            Config::of(Dialect::MySql).with_bigquery_change_logs("mysql", Probe),
+            Config::of(Dialect::MySql)
+                .with_bigquery_change_logs("mysql", Probe)
+                .await,
             (
                 std::any::type_name::<Debezium<MySql>>(),
                 "mysql".to_owned(),
@@ -239,7 +260,9 @@ mod tests {
             )
         );
         assert_eq!(
-            Config::of(Dialect::Postgres).with_bigquery_change_logs("postgres", Probe),
+            Config::of(Dialect::Postgres)
+                .with_bigquery_change_logs("postgres", Probe)
+                .await,
             (
                 std::any::type_name::<Debezium<Postgres>>(),
                 "postgres".to_owned(),

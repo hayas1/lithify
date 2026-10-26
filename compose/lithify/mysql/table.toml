@@ -4,10 +4,15 @@ artifacts = ["snapshot"]
 [[table]]
 schema = "shop"
 name = "customers"
-artifacts = ["snapshot", "history"]
+artifacts = ["snapshot", "scd1", "scd2"]
+
+[[table]]
+schema = "shop"
+name = "products"
+artifacts = ["snapshot", "scd1", "scd2"]
 
 [[table]]
 schema = "shop"
 name = "orders"
-artifacts = ["snapshot", "history"]
+artifacts = ["snapshot", "instant_0900", "instant_1200", "instant_1800", "scd2"]
 column.attributes.mask = "null"

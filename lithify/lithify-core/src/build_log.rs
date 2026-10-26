@@ -1,19 +1,20 @@
 use std::fmt::{self, Display, Formatter};
 
-use chrono::{DateTime, Utc};
 use ulid::Ulid;
 
+use crate::artifact::{ArtifactName, UnbuildableArtifact};
+use crate::listener::Appearance;
 use crate::model::{ColumnType, TableId};
-use crate::sink::{TablePath, UnsupportedColumn, WarehouseSql};
+use crate::sink::{Namespace, TablePath, UnsupportedColumn, WarehouseSql};
 use crate::sql::SqlString;
-use crate::ts::{Event, Ts};
+use crate::ts::{Event, Replay, Ts};
 use crate::window::Window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Run {
     run_id: Ulid,
-    started_at: DateTime<Utc>,
-    artifact: String,
+    started_at: Ts<Replay>,
+    artifact: ArtifactName,
     schedule: String,
     source: String,
     capture: String,
@@ -23,8 +24,8 @@ pub struct Run {
 impl Run {
     pub fn new(
         run_id: Ulid,
-        started_at: DateTime<Utc>,
-        artifact: &str,
+        started_at: Ts<Replay>,
+        artifact: &ArtifactName,
         schedule: &str,
         source: &str,
         capture: &str,
@@ -33,12 +34,43 @@ impl Run {
         Self {
             run_id,
             started_at,
-            artifact: artifact.to_owned(),
+            artifact: artifact.clone(),
             schedule: schedule.to_owned(),
             source: source.to_owned(),
             capture: capture.to_owned(),
             version: version.to_owned(),
         }
+    }
+
+    pub fn advancing(&self, series: &Series) -> Self {
+        Self {
+            artifact: series.artifact.clone(),
+            schedule: series.schedule.clone(),
+            ..self.clone()
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Series {
+    artifact: ArtifactName,
+    schedule: String,
+}
+
+impl Series {
+    pub fn new(artifact: ArtifactName, schedule: &str) -> Self {
+        Self {
+            artifact,
+            schedule: schedule.to_owned(),
+        }
+    }
+
+    pub fn artifact(&self) -> &ArtifactName {
+        &self.artifact
+    }
+
+    pub fn schedule(&self) -> &str {
+        &self.schedule
     }
 }
 
@@ -71,29 +103,145 @@ impl Status {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Outcome {
-    status: Status,
-    finished_at: DateTime<Utc>,
+pub enum Base {
+    Built(TablePath),
+    Missing,
+    ChangeLog,
 }
 
-impl Outcome {
-    pub fn new(status: Status, finished_at: DateTime<Utc>) -> Self {
+impl Base {
+    pub fn appeared(&mut self, appearance: Appearance) {
+        if appearance.is_logged_from_start() {
+            *self = Self::ChangeLog;
+        }
+    }
+
+    pub fn as_built(&self) -> Option<&TablePath> {
+        match self {
+            Self::Built(built) => Some(built),
+            Self::Missing | Self::ChangeLog => None,
+        }
+    }
+}
+
+impl From<Option<TablePath>> for Base {
+    fn from(built: Option<TablePath>) -> Self {
+        built.map_or(Self::Missing, Self::Built)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableBuild {
+    table_from: Option<TableId>,
+    table_to: Option<TableId>,
+    base: Base,
+    target: Option<TablePath>,
+    window: Window,
+    making: Result<Vec<SqlString>, UnbuildableArtifact>,
+}
+
+impl TableBuild {
+    pub fn new(
+        table_from: Option<TableId>,
+        table_to: Option<TableId>,
+        base: Base,
+        target: Option<TablePath>,
+        window: Window,
+        making: Result<Vec<SqlString>, UnbuildableArtifact>,
+    ) -> Self {
         Self {
+            table_from,
+            table_to,
+            base,
+            target,
+            window,
+            making,
+        }
+    }
+
+    pub fn statements(&self) -> Result<&[SqlString], &UnbuildableArtifact> {
+        self.making.as_deref()
+    }
+
+    pub fn refusal(&self) -> Option<UnbuildableArtifact> {
+        match (&self.making, &self.base, &self.table_from) {
+            (Err(refused), _, _) => Some(refused.clone()),
+            (Ok(_), Base::Missing, Some(table)) => {
+                Some(UnbuildableArtifact::WithoutBase(table.clone()))
+            }
+            (Ok(_), _, _) => None,
+        }
+    }
+
+    pub fn built(self, status: Status, finished_at: Ts<Replay>) -> TableBuilt {
+        TableBuilt::new(
+            self.table_from,
+            self.table_to,
+            self.base.as_built().cloned(),
+            self.target,
+            self.window,
+            status,
+            finished_at,
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableBuilt {
+    table_from: Option<TableId>,
+    table_to: Option<TableId>,
+    base: Option<TablePath>,
+    target: Option<TablePath>,
+    window: Window,
+    status: Status,
+    finished_at: Ts<Replay>,
+}
+
+impl TableBuilt {
+    pub fn new(
+        table_from: Option<TableId>,
+        table_to: Option<TableId>,
+        base: Option<TablePath>,
+        target: Option<TablePath>,
+        window: Window,
+        status: Status,
+        finished_at: Ts<Replay>,
+    ) -> Self {
+        Self {
+            table_from,
+            table_to,
+            base,
+            target,
+            window,
             status,
             finished_at,
         }
+    }
+
+    pub fn logged(self, run: &Run) -> BuildLog {
+        BuildLog {
+            run: run.clone(),
+            built: self,
+        }
+    }
+
+    pub fn table(&self) -> Option<&TableId> {
+        self.table_to.as_ref().or(self.table_from.as_ref())
+    }
+
+    pub fn status(&self) -> &Status {
+        &self.status
+    }
+
+    fn lifecycle(&self) -> Option<Lifecycle> {
+        Lifecycle::of(self.table_from.as_ref(), self.table_to.as_ref())
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildLog {
     run: Run,
-    table_from: Option<TableId>,
-    table_to: Option<TableId>,
-    base: Option<TablePath>,
-    target: Option<TablePath>,
-    window: Window,
-    outcome: Outcome,
+    built: TableBuilt,
 }
 
 impl BuildLog {
@@ -117,29 +265,9 @@ impl BuildLog {
         ("version", ColumnType::Text),
     ];
 
-    pub fn new(
-        run: &Run,
-        table_from: Option<TableId>,
-        table_to: Option<TableId>,
-        base: Option<TablePath>,
-        target: Option<TablePath>,
-        window: Window,
-        outcome: Outcome,
-    ) -> Self {
-        Self {
-            run: run.clone(),
-            table_from,
-            table_to,
-            base,
-            target,
-            window,
-            outcome,
-        }
-    }
-
     pub fn create_table<W: WarehouseSql + ?Sized>(
         warehouse: &W,
-        namespace: &str,
+        namespace: &Namespace,
     ) -> Result<SqlString, UnsupportedColumn> {
         let columns = std::iter::once(&(Self::ID, ColumnType::Int64))
             .chain(Self::COLUMNS.iter())
@@ -154,20 +282,36 @@ impl BuildLog {
         Ok(warehouse.create_table(&Self::path(namespace), &columns))
     }
 
-    pub fn insert<W: WarehouseSql + ?Sized>(&self, warehouse: &W, namespace: &str) -> SqlString {
+    pub fn insert<W: WarehouseSql + ?Sized>(
+        logs: &[Self],
+        warehouse: &W,
+        namespace: &Namespace,
+    ) -> Option<SqlString> {
         let id = warehouse.identifier(Self::ID);
         let path = Self::path(namespace);
         let columns: Vec<_> = std::iter::once(Self::ID)
             .chain(Self::COLUMNS.iter().map(|(name, _)| *name))
             .map(|name| warehouse.identifier(name))
             .collect();
-        let select = SqlString::from(format!(
-            "SELECT COALESCE(MAX({id}), 0) + 1, {}\nFROM {}",
-            self.cells(warehouse).join(", "),
-            warehouse.table_ref(&path)
-        ));
+        let rows: Vec<_> = logs
+            .iter()
+            .zip(1..)
+            .map(|(log, offset)| {
+                format!(
+                    "SELECT COALESCE(MAX({id}), 0) + {offset}, {}\nFROM {}",
+                    log.cells(warehouse).join(", "),
+                    warehouse.table_ref(&path)
+                )
+            })
+            .collect();
 
-        warehouse.insert(&path, &columns, &select)
+        (!rows.is_empty()).then(|| {
+            warehouse.insert(
+                &path,
+                &columns,
+                &SqlString::from(rows.join("\nUNION ALL\n")),
+            )
+        })
     }
 
     fn projection<W: WarehouseSql + ?Sized>(warehouse: &W) -> Vec<String> {
@@ -186,8 +330,8 @@ impl BuildLog {
             .collect()
     }
 
-    pub fn path(namespace: &str) -> TablePath {
-        TablePath::new(namespace, "_lithify_log")
+    pub fn path(namespace: &Namespace) -> TablePath {
+        TablePath::new(namespace.clone(), "_lithify_log")
     }
 
     pub const ID: &str = "id";
@@ -200,16 +344,20 @@ impl BuildLog {
         &self.run.capture
     }
 
+    pub fn advances(&self, series: &Series) -> bool {
+        self.run.artifact == series.artifact && self.run.schedule == series.schedule
+    }
+
     pub fn table_from(&self) -> Option<&TableId> {
-        self.table_from.as_ref()
+        self.built.table_from.as_ref()
     }
 
     pub fn table_to(&self) -> Option<&TableId> {
-        self.table_to.as_ref()
+        self.built.table_to.as_ref()
     }
 
     pub fn last_success<'a>(&self, succeeded: &'a [BuildLog]) -> Option<&'a BuildLog> {
-        [self.table_to.as_ref(), self.table_from.as_ref()]
+        [self.built.table_to.as_ref(), self.built.table_from.as_ref()]
             .into_iter()
             .flatten()
             .find_map(|table| {
@@ -220,11 +368,11 @@ impl BuildLog {
     }
 
     pub fn lifecycle(&self) -> Option<Lifecycle> {
-        Lifecycle::of(self.table_from.as_ref(), self.table_to.as_ref())
+        self.built.lifecycle()
     }
 
     pub fn table(&self) -> Option<&TableId> {
-        self.table_to.as_ref().or(self.table_from.as_ref())
+        self.built.table()
     }
 
     fn named(&self) -> String {
@@ -235,19 +383,19 @@ impl BuildLog {
     }
 
     pub fn base(&self) -> Option<&TablePath> {
-        self.base.as_ref()
+        self.built.base.as_ref()
     }
 
     pub fn target(&self) -> Option<&TablePath> {
-        self.target.as_ref()
+        self.built.target.as_ref()
     }
 
     pub fn window(&self) -> &Window {
-        &self.window
+        &self.built.window
     }
 
     pub fn status(&self) -> &Status {
-        &self.outcome.status
+        &self.built.status
     }
 
     pub fn cells<W: WarehouseSql + ?Sized>(
@@ -256,21 +404,21 @@ impl BuildLog {
     ) -> [SqlString; Self::COLUMNS.len()] {
         [
             warehouse.literal(&self.run.run_id.to_string()),
-            warehouse.timestamp_millis(self.run.started_at.timestamp_millis()),
-            warehouse.literal(&self.run.artifact),
+            warehouse.timestamp_millis(self.run.started_at.milliseconds_since_epoch()),
+            warehouse.literal(self.run.artifact.as_str()),
             warehouse.literal(&self.run.schedule),
             warehouse.literal(&self.run.source),
             warehouse.literal(&self.run.capture),
-            Self::nullable(warehouse, self.table_from.as_ref()),
-            Self::nullable(warehouse, self.table_to.as_ref()),
+            Self::nullable(warehouse, self.built.table_from.as_ref()),
+            Self::nullable(warehouse, self.built.table_to.as_ref()),
             Self::nullable(warehouse, self.lifecycle().as_ref()),
-            Self::nullable(warehouse, self.base.as_ref()),
-            Self::nullable(warehouse, self.target.as_ref()),
-            warehouse.timestamp_millis(self.window.from().milliseconds_since_epoch()),
-            warehouse.timestamp_millis(self.window.to().milliseconds_since_epoch()),
-            warehouse.literal(&self.outcome.status.to_string()),
-            warehouse.timestamp_millis(self.outcome.finished_at.timestamp_millis()),
-            self.outcome
+            Self::nullable(warehouse, self.built.base.as_ref()),
+            Self::nullable(warehouse, self.built.target.as_ref()),
+            warehouse.timestamp_millis(self.built.window.from().milliseconds_since_epoch()),
+            warehouse.timestamp_millis(self.built.window.to().milliseconds_since_epoch()),
+            warehouse.literal(&self.built.status.to_string()),
+            warehouse.timestamp_millis(self.built.finished_at.milliseconds_since_epoch()),
+            self.built
                 .status
                 .error()
                 .map_or_else(|| SqlString::from("NULL"), |error| warehouse.literal(error)),
@@ -281,21 +429,21 @@ impl BuildLog {
     pub fn values(&self) -> [Option<String>; Self::COLUMNS.len()] {
         [
             Some(self.run.run_id.to_string()),
-            Some(self.run.started_at.to_rfc3339()),
-            Some(self.run.artifact.clone()),
+            Some(self.run.started_at.to_string()),
+            Some(self.run.artifact.to_string()),
             Some(self.run.schedule.clone()),
             Some(self.run.source.clone()),
             Some(self.run.capture.clone()),
-            self.table_from.as_ref().map(ToString::to_string),
-            self.table_to.as_ref().map(ToString::to_string),
+            self.built.table_from.as_ref().map(ToString::to_string),
+            self.built.table_to.as_ref().map(ToString::to_string),
             self.lifecycle().as_ref().map(ToString::to_string),
-            self.base.as_ref().map(ToString::to_string),
-            self.target.as_ref().map(ToString::to_string),
-            Some(self.window.from().to_string()),
-            Some(self.window.to().to_string()),
-            Some(self.outcome.status.to_string()),
-            Some(self.outcome.finished_at.to_rfc3339()),
-            self.outcome.status.error().map(str::to_owned),
+            self.built.base.as_ref().map(ToString::to_string),
+            self.built.target.as_ref().map(ToString::to_string),
+            Some(self.built.window.from().to_string()),
+            Some(self.built.window.to().to_string()),
+            Some(self.built.status.to_string()),
+            Some(self.built.finished_at.to_string()),
+            self.built.status.error().map(str::to_owned),
             Some(self.run.version.clone()),
         ]
     }
@@ -315,12 +463,13 @@ impl Display for BuildLog {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         let table = self.named();
         let target = self
+            .built
             .target
             .as_ref()
             .map(ToString::to_string)
             .unwrap_or_default();
 
-        match (&self.outcome.status, self.lifecycle()) {
+        match (&self.built.status, self.lifecycle()) {
             (Status::Succeeded, Some(Lifecycle::Dropped)) => write!(formatter, "dropped {table}"),
             (Status::Failed(error), Some(Lifecycle::Dropped)) => {
                 write!(formatter, "failed to drop {table}: {error}")
@@ -387,7 +536,11 @@ impl Latest {
     pub const ALIAS: &str = "latest";
     const DEPARTED: &str = "departed";
 
-    pub fn select<W: WarehouseSql + ?Sized>(&self, warehouse: &W, namespace: &str) -> SqlString {
+    pub fn select<W: WarehouseSql + ?Sized>(
+        &self,
+        warehouse: &W,
+        namespace: &Namespace,
+    ) -> SqlString {
         let partition = ["artifact", "schedule", "table_to"]
             .map(|name| warehouse.identifier(name))
             .join(", ");
@@ -499,7 +652,11 @@ impl From<Latest> for BuildLogQuery {
 }
 
 impl BuildLogQuery {
-    pub fn select<W: WarehouseSql + ?Sized>(&self, warehouse: &W, namespace: &str) -> SqlString {
+    pub fn select<W: WarehouseSql + ?Sized>(
+        &self,
+        warehouse: &W,
+        namespace: &Namespace,
+    ) -> SqlString {
         match self {
             Self::Latest(latest) => latest.select(warehouse, namespace),
             Self::All => SqlString::from(format!(
@@ -534,9 +691,13 @@ pub struct BuildLogRow {
 }
 
 impl BuildLogRow {
+    pub fn advances(&self, series: &Series) -> bool {
+        self.artifact == series.artifact.as_str() && self.schedule == series.schedule
+    }
+
     fn path(written: &str) -> Result<TablePath, UnreadableBuildLog> {
         written
-            .split_once('.')
+            .rsplit_once('.')
             .map(|(namespace, name)| TablePath::new(namespace, name))
             .ok_or_else(|| UnreadableBuildLog(format!("{written} names no table")))
     }
@@ -550,9 +711,8 @@ impl BuildLogRow {
             .transpose()
     }
 
-    fn instant(millis: i64) -> Result<DateTime<Utc>, UnreadableBuildLog> {
-        DateTime::from_timestamp_millis(millis)
-            .ok_or_else(|| UnreadableBuildLog(format!("{millis} is no instant")))
+    fn ts<A>(millis: i64) -> Result<Ts<A>, UnreadableBuildLog> {
+        Ts::try_from(millis).map_err(|_| UnreadableBuildLog(format!("{millis} is no instant")))
     }
 
     fn status(&self) -> Result<Status, UnreadableBuildLog> {
@@ -564,6 +724,30 @@ impl BuildLogRow {
     }
 }
 
+impl From<&BuildLog> for BuildLogRow {
+    fn from(log: &BuildLog) -> Self {
+        Self {
+            run_id: log.run.run_id.to_string(),
+            started_at: log.run.started_at.milliseconds_since_epoch(),
+            artifact: log.run.artifact.to_string(),
+            schedule: log.run.schedule.clone(),
+            source: log.run.source.clone(),
+            capture: log.run.capture.clone(),
+            table_from: log.built.table_from.as_ref().map(ToString::to_string),
+            table_to: log.built.table_to.as_ref().map(ToString::to_string),
+            lifecycle: log.lifecycle().as_ref().map(ToString::to_string),
+            base: log.built.base.as_ref().map(ToString::to_string),
+            target: log.built.target.as_ref().map(ToString::to_string),
+            window_from: log.built.window.from().milliseconds_since_epoch(),
+            window_to: log.built.window.to().milliseconds_since_epoch(),
+            status: log.built.status.to_string(),
+            finished_at: log.built.finished_at.milliseconds_since_epoch(),
+            error: log.built.status.error().map(str::to_owned),
+            version: log.run.version.clone(),
+        }
+    }
+}
+
 impl TryFrom<BuildLogRow> for BuildLog {
     type Error = UnreadableBuildLog;
 
@@ -571,26 +755,27 @@ impl TryFrom<BuildLogRow> for BuildLog {
         let run_id = Ulid::from_string(&row.run_id)
             .map_err(|_| UnreadableBuildLog(format!("{} is no run", row.run_id)))?;
 
-        let log = Self {
-            run: Run::new(
-                run_id,
-                BuildLogRow::instant(row.started_at)?,
-                &row.artifact,
-                &row.schedule,
-                &row.source,
-                &row.capture,
-                &row.version,
+        let log = TableBuilt::new(
+            BuildLogRow::table(row.table_from.as_deref())?,
+            BuildLogRow::table(row.table_to.as_deref())?,
+            row.base.as_deref().map(BuildLogRow::path).transpose()?,
+            row.target.as_deref().map(BuildLogRow::path).transpose()?,
+            Window::new(
+                BuildLogRow::ts(row.window_from)?,
+                BuildLogRow::ts(row.window_to)?,
             ),
-            table_from: BuildLogRow::table(row.table_from.as_deref())?,
-            table_to: BuildLogRow::table(row.table_to.as_deref())?,
-            base: row.base.as_deref().map(BuildLogRow::path).transpose()?,
-            target: row.target.as_deref().map(BuildLogRow::path).transpose()?,
-            window: Window::new(
-                Ts::from(BuildLogRow::instant(row.window_from)?),
-                Ts::from(BuildLogRow::instant(row.window_to)?),
-            ),
-            outcome: Outcome::new(row.status()?, BuildLogRow::instant(row.finished_at)?),
-        };
+            row.status()?,
+            BuildLogRow::ts(row.finished_at)?,
+        )
+        .logged(&Run::new(
+            run_id,
+            BuildLogRow::ts(row.started_at)?,
+            &ArtifactName::from(row.artifact.as_str()),
+            &row.schedule,
+            &row.source,
+            &row.capture,
+            &row.version,
+        ));
         let written = row
             .lifecycle
             .as_deref()
@@ -625,29 +810,77 @@ impl std::error::Error for UnreadableBuildLog {}
 
 #[cfg(test)]
 mod tests {
+    use chrono::DateTime;
+
     use super::*;
 
     fn logged(from: Option<&str>, to: Option<&str>) -> BuildLog {
-        BuildLog::new(
-            &Run::new(
-                Ulid::nil(),
-                DateTime::UNIX_EPOCH,
-                "snapshot",
-                "daily",
-                "primary",
-                "{}",
-                "0.1.0",
-            ),
+        TableBuilt::new(
             from.map(|table| TableId::new("shop", table)),
             to.map(|table| TableId::new("shop", table)),
             None,
             to.map(|_| TablePath::new("mysql_shop", "people_20260920")),
             Window::new(Ts::try_from(0).unwrap(), Ts::try_from(1).unwrap()),
-            Outcome::new(
-                Status::Succeeded,
-                DateTime::from_timestamp_millis(1).unwrap(),
-            ),
+            Status::Succeeded,
+            Ts::from(DateTime::from_timestamp_millis(1).unwrap()),
         )
+        .logged(&Run::new(
+            Ulid::nil(),
+            Ts::from(DateTime::UNIX_EPOCH),
+            &"snapshot".into(),
+            "daily",
+            "primary",
+            "{}",
+            "0.1.0",
+        ))
+    }
+
+    #[test]
+    fn a_table_built_is_logged_under_the_run_that_built_it_as_it_finished() {
+        let run = Run::new(
+            Ulid::nil(),
+            Ts::from(DateTime::UNIX_EPOCH),
+            &"snapshot".into(),
+            "daily",
+            "primary",
+            "{}",
+            "0.1.0",
+        );
+        let built = TableBuilt::new(
+            Some(TableId::new("shop", "people")),
+            Some(TableId::new("shop", "people")),
+            None,
+            Some(TablePath::new("mysql_shop", "people_20260920")),
+            Window::new(Ts::try_from(0).unwrap(), Ts::try_from(1).unwrap()),
+            Status::Succeeded,
+            Ts::try_from(1).unwrap(),
+        );
+
+        assert_eq!(built.logged(&run), logged(Some("people"), Some("people")));
+    }
+
+    #[test]
+    fn a_table_built_is_named_by_where_it_ended_or_where_it_began() {
+        let built = |from: Option<&str>, to: Option<&str>| {
+            TableBuilt::new(
+                from.map(|table| TableId::new("shop", table)),
+                to.map(|table| TableId::new("shop", table)),
+                None,
+                None,
+                Window::new(Ts::try_from(0).unwrap(), Ts::try_from(1).unwrap()),
+                Status::Succeeded,
+                Ts::try_from(1).unwrap(),
+            )
+        };
+
+        assert_eq!(
+            built(Some("people"), Some("persons")).table(),
+            Some(&TableId::new("shop", "persons"))
+        );
+        assert_eq!(
+            built(Some("pets"), None).table(),
+            Some(&TableId::new("shop", "pets"))
+        );
     }
 
     #[test]
@@ -680,6 +913,50 @@ mod tests {
                 ("version", Some("0.1.0")),
             ]
         );
+    }
+
+    #[test]
+    fn a_target_is_read_back_from_the_namespace_and_name_it_was_written_with() {
+        assert_eq!(
+            BuildLogRow::path("analytics-project.shop.people_20260920").unwrap(),
+            TablePath::new("analytics-project.shop", "people_20260920")
+        );
+    }
+
+    #[test]
+    fn a_run_advancing_another_series_is_the_same_run() {
+        let run = Run::new(
+            Ulid::nil(),
+            Ts::from(DateTime::UNIX_EPOCH),
+            &"snapshot".into(),
+            "daily",
+            "primary",
+            "{}",
+            "0.1.0",
+        );
+        let cut = run.advancing(&Series::new("instant".into(), "09:00"));
+
+        assert_eq!(
+            cut,
+            Run::new(
+                Ulid::nil(),
+                Ts::from(DateTime::UNIX_EPOCH),
+                &"instant".into(),
+                "09:00",
+                "primary",
+                "{}",
+                "0.1.0",
+            )
+        );
+    }
+
+    #[test]
+    fn a_build_log_advances_the_series_of_the_artifact_and_schedule_it_was_run_for() {
+        let logged = logged(Some("people"), Some("people"));
+
+        assert!(logged.advances(&Series::new("snapshot".into(), "daily")));
+        assert!(!logged.advances(&Series::new("instant".into(), "daily")));
+        assert!(!logged.advances(&Series::new("snapshot".into(), "09:00")));
     }
 
     #[test]
@@ -771,10 +1048,7 @@ mod tests {
     #[test]
     fn a_drop_that_failed_reads_as_the_table_it_failed_to_drop() {
         let mut failed = logged(Some("pets"), None);
-        failed.outcome = Outcome::new(
-            Status::Failed("no such table".to_owned()),
-            DateTime::from_timestamp_millis(1).unwrap(),
-        );
+        failed.built.status = Status::Failed("no such table".to_owned());
 
         assert_eq!(
             failed.to_string(),

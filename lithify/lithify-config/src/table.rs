@@ -3,9 +3,8 @@ use std::fmt::{self, Display, Formatter};
 
 use serde::{Deserialize, Serialize};
 
+use lithify_core::artifact::ArtifactName;
 use lithify_core::model::TableId;
-
-use crate::ArtifactKind;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -16,25 +15,11 @@ pub(crate) struct Listing {
     tables: Vec<ListedTable>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Defaults {
-    #[serde(default = "Defaults::snapshot")]
-    artifacts: BTreeSet<ArtifactKind>,
-}
-
-impl Defaults {
-    fn snapshot() -> BTreeSet<ArtifactKind> {
-        BTreeSet::from([ArtifactKind::Snapshot])
-    }
-}
-
-impl Default for Defaults {
-    fn default() -> Self {
-        Self {
-            artifacts: Self::snapshot(),
-        }
-    }
+    #[serde(default)]
+    artifacts: BTreeSet<ArtifactName>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -42,7 +27,7 @@ impl Default for Defaults {
 struct ListedTable {
     schema: String,
     name: String,
-    artifacts: Option<BTreeSet<ArtifactKind>>,
+    artifacts: Option<BTreeSet<ArtifactName>>,
     #[serde(default, rename = "column")]
     columns: BTreeMap<String, ListedColumn>,
 }
@@ -77,6 +62,11 @@ impl Tables {
     pub fn table(&self, id: &TableId) -> &Table {
         self.tables.get(id).unwrap_or(&self.default)
     }
+
+    pub fn listed(&self) -> impl Iterator<Item = (Option<&TableId>, &Table)> {
+        std::iter::once((None, &self.default))
+            .chain(self.tables.iter().map(|(id, table)| (Some(id), table)))
+    }
 }
 
 impl TryFrom<Listing> for Tables {
@@ -102,25 +92,61 @@ impl TryFrom<Listing> for Tables {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mislisting {
     TableListedTwice(TableId),
+    Undeclared {
+        table: Option<TableId>,
+        artifact: ArtifactName,
+    },
+    WithoutBase {
+        table: Option<TableId>,
+        artifact: ArtifactName,
+        base: ArtifactName,
+    },
+}
+
+impl Mislisting {
+    fn named(table: &Option<TableId>) -> String {
+        match table {
+            Some(table) => table.to_string(),
+            None => "a table listed nowhere".to_owned(),
+        }
+    }
 }
 
 impl Display for Mislisting {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::TableListedTwice(table) => write!(formatter, "{table} is listed twice"),
+            Self::Undeclared { table, artifact } => write!(
+                formatter,
+                "{} is built into {artifact}, which no sink places",
+                Self::named(table)
+            ),
+            Self::WithoutBase {
+                table,
+                artifact,
+                base,
+            } => write!(
+                formatter,
+                "{} is built into {artifact} but not into {base} it is built from",
+                Self::named(table)
+            ),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Table {
-    artifacts: BTreeSet<ArtifactKind>,
+    artifacts: BTreeSet<ArtifactName>,
     masks: BTreeMap<String, Mask>,
 }
 
 impl Table {
-    pub fn builds(&self, kind: ArtifactKind) -> bool {
-        self.artifacts.contains(&kind)
+    pub fn builds(&self, artifact: &ArtifactName) -> bool {
+        self.artifacts.contains(artifact)
+    }
+
+    pub fn artifacts(&self) -> impl Iterator<Item = &ArtifactName> {
+        self.artifacts.iter()
     }
 
     pub fn mask(&self, column: &str) -> Mask {
@@ -165,7 +191,7 @@ mod tests {
         [[table]]
         schema = "shop"
         name = "orders"
-        artifacts = ["snapshot", "history"]
+        artifacts = ["snapshot", "scd2"]
         column.attributes.mask = "null"
 
         [[table]]
@@ -186,24 +212,24 @@ mod tests {
     fn a_table_that_is_not_configured_takes_the_defaults() {
         let table = table("shop", "customers");
 
-        assert!(table.builds(ArtifactKind::Snapshot));
-        assert!(!table.builds(ArtifactKind::History));
+        assert!(table.builds(&"snapshot".into()));
+        assert!(!table.builds(&"scd2".into()));
     }
 
     #[test]
     fn a_configured_table_builds_the_artifacts_it_names() {
         let table = table("shop", "orders");
 
-        assert!(table.builds(ArtifactKind::Snapshot));
-        assert!(table.builds(ArtifactKind::History));
+        assert!(table.builds(&"snapshot".into()));
+        assert!(table.builds(&"scd2".into()));
     }
 
     #[test]
     fn a_table_can_be_left_out_of_every_artifact() {
         let table = table("shop", "audit_log");
 
-        assert!(!table.builds(ArtifactKind::Snapshot));
-        assert!(!table.builds(ArtifactKind::History));
+        assert!(!table.builds(&"snapshot".into()));
+        assert!(!table.builds(&"scd2".into()));
     }
 
     #[test]
@@ -233,21 +259,20 @@ mod tests {
     }
 
     #[test]
-    fn a_configuration_that_defaults_to_nothing_in_particular_snapshots_every_table() {
+    fn a_configuration_that_defaults_to_nothing_in_particular_builds_nothing_of_a_table_it_does_not_list()
+     {
         let table = tables("[default]")
             .table(&TableId::new("shop", "customers"))
             .clone();
 
-        assert!(table.builds(ArtifactKind::Snapshot));
-        assert!(!table.builds(ArtifactKind::History));
+        assert_eq!(table.artifacts().count(), 0);
     }
 
     #[test]
-    fn a_configuration_without_defaults_snapshots_every_table() {
+    fn a_configuration_without_defaults_builds_nothing_of_a_table_it_does_not_list() {
         let table = tables("").table(&TableId::new("shop", "customers")).clone();
 
-        assert!(table.builds(ArtifactKind::Snapshot));
-        assert!(!table.builds(ArtifactKind::History));
+        assert_eq!(table.artifacts().count(), 0);
     }
 
     #[test]
@@ -277,12 +302,5 @@ mod tests {
         );
 
         assert!(toml::from_str::<Listing>(&twice).is_err());
-    }
-
-    #[test]
-    fn an_unknown_artifact_is_rejected() {
-        let unknown = TABLES.replace("\"snapshot\", \"history\"", "\"snapshot\", \"cube\"");
-
-        assert!(toml::from_str::<Listing>(&unknown).is_err());
     }
 }

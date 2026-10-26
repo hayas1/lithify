@@ -20,7 +20,8 @@ lithify-cli = { workspace = true }
 lithify-config = { workspace = true }
 lithify-core = { workspace = true }
 lithify-protocol = { workspace = true, features = ["bigquery", "duckdb"] }
-lithify-strategy = { workspace = true }
+lithify-artifact = { workspace = true }
 mysql = { workspace = true }
 serde = { workspace = true }
+tokio = { workspace = true }
 toml = { workspace = true }

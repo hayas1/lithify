@@ -12,6 +12,9 @@ pub enum Event {}
 pub enum Processing {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Replay {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Ts<A> {
     at: DateTime<Utc>,
     axis: PhantomData<A>,
@@ -20,6 +23,16 @@ pub struct Ts<A> {
 impl<A> Ts<A> {
     pub fn milliseconds_since_epoch(&self) -> i64 {
         self.at.timestamp_millis()
+    }
+}
+
+impl Ts<Replay> {
+    pub fn now() -> Self {
+        Self::from(Utc::now())
+    }
+
+    pub fn as_event(self) -> Ts<Event> {
+        Ts::from(self.at)
     }
 }
 
@@ -107,6 +120,22 @@ mod tests {
     #[test]
     fn milliseconds_no_instant_can_hold_are_handed_back() {
         assert_eq!(Ts::<Event>::try_from(i64::MAX).unwrap_err(), i64::MAX);
+    }
+
+    #[test]
+    fn a_replay_reads_the_instant_it_is_on_the_clock() {
+        let before = Ts::<Replay>::from(Utc::now());
+        let now = Ts::<Replay>::now();
+
+        assert!(before <= now && now <= Ts::from(Utc::now()));
+    }
+
+    #[test]
+    fn an_instant_of_a_replay_is_read_as_an_event_at_the_same_instant() {
+        assert_eq!(
+            Ts::<Replay>::from(at("2026-09-20T05:00:00Z")).as_event(),
+            Ts::<Event>::from(at("2026-09-20T05:00:00Z"))
+        );
     }
 
     #[test]

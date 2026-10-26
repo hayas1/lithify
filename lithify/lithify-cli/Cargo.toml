@@ -18,17 +18,19 @@ path = "src/main.rs"
 
 [dependencies]
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
 clap = { workspace = true }
 duckdb = { workspace = true }
 lithify-config = { workspace = true }
 lithify-core = { workspace = true }
 lithify-protocol = { workspace = true, features = ["bigquery", "duckdb"] }
-lithify-strategy = { workspace = true }
+lithify-artifact = { workspace = true }
 lithify-ui = { workspace = true, optional = true }
 google-cloud-bigquery = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 ulid = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing-subscriber = { workspace = true }
 
 [features]
