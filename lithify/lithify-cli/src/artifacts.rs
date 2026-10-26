@@ -380,25 +380,27 @@ impl<'a> Declared<'a> {
         }
     }
 
-    fn next<P: StepTaker<Error = Unrunnable>>(
+    async fn next<P: StepTaker<Error = Unrunnable>>(
         &self,
-        stepping: &Stepping<P>,
+        stepping: &Stepping<'_, P>,
         snapshot: &SeriesLog,
         taken: &[Window],
     ) -> Result<Option<Step>, Unrunnable> {
         let (log, base) = (self.log(), self.base(snapshot));
 
         match self {
-            Self::Snapshot(declared) => stepping.next(&declared.artifact(), &log, base, taken),
-            Self::Instant(declared) => stepping.next(&declared.artifact(), &log, base, taken),
-            Self::Scd2(declared) => stepping.next(&declared.artifact(), &log, base, taken),
-            Self::Scd1(declared) => stepping.next(&declared.artifact(), &log, base, taken),
+            Self::Snapshot(declared) => {
+                stepping.next(&declared.artifact(), &log, base, taken).await
+            }
+            Self::Instant(declared) => stepping.next(&declared.artifact(), &log, base, taken).await,
+            Self::Scd2(declared) => stepping.next(&declared.artifact(), &log, base, taken).await,
+            Self::Scd1(declared) => stepping.next(&declared.artifact(), &log, base, taken).await,
         }
     }
 
-    fn take<P: StepTaker<Error = Unrunnable>, B: Report>(
+    async fn take<P: StepTaker<Error = Unrunnable>, B: Report>(
         &self,
-        stepping: &Stepping<P>,
+        stepping: &Stepping<'_, P>,
         snapshot: &SeriesLog,
         window: &Window,
         tables: &Tables,
@@ -409,16 +411,24 @@ impl<'a> Declared<'a> {
         journal.window(window);
         let output = match self {
             Self::Snapshot(declared) => {
-                stepping.take(&declared.artifact(), &log, base, window, tables, writer)
+                stepping
+                    .take(&declared.artifact(), &log, base, window, tables, writer)
+                    .await
             }
             Self::Instant(declared) => {
-                stepping.take(&declared.artifact(), &log, base, window, tables, writer)
+                stepping
+                    .take(&declared.artifact(), &log, base, window, tables, writer)
+                    .await
             }
             Self::Scd2(declared) => {
-                stepping.take(&declared.artifact(), &log, base, window, tables, writer)
+                stepping
+                    .take(&declared.artifact(), &log, base, window, tables, writer)
+                    .await
             }
             Self::Scd1(declared) => {
-                stepping.take(&declared.artifact(), &log, base, window, tables, writer)
+                stepping
+                    .take(&declared.artifact(), &log, base, window, tables, writer)
+                    .await
             }
         }?;
 
@@ -453,25 +463,27 @@ impl<'a> Lineup<'a> {
         &self.snapshot
     }
 
-    pub fn catch_up<P: StepTaker<Error = Unrunnable>, B: Report>(
+    pub async fn catch_up<P: StepTaker<Error = Unrunnable>, B: Report>(
         &self,
-        stepping: &Stepping<P>,
+        stepping: &Stepping<'_, P>,
         named: impl Fn(&Declared) -> bool,
         writer: &B,
         journal: &mut Journal,
     ) -> Result<(), Unrunnable> {
         let mut taken: BTreeMap<Series, Vec<Window>> = BTreeMap::new();
 
-        while let Some((series, window)) = self.step(stepping, &named, &taken, writer, journal)? {
+        while let Some((series, window)) =
+            self.step(stepping, &named, &taken, writer, journal).await?
+        {
             taken.entry(series).or_default().push(window);
         }
 
         Ok(())
     }
 
-    pub fn step<P: StepTaker<Error = Unrunnable>, B: Report>(
+    pub async fn step<P: StepTaker<Error = Unrunnable>, B: Report>(
         &self,
-        stepping: &Stepping<P>,
+        stepping: &Stepping<'_, P>,
         named: impl Fn(&Declared) -> bool,
         taken: &BTreeMap<Series, Vec<Window>>,
         writer: &B,
@@ -481,16 +493,18 @@ impl<'a> Lineup<'a> {
             let series = declared.series();
             let taken = taken.get(&series).map(Vec::as_slice).unwrap_or_default();
 
-            if let Some(step) = declared.next(stepping, &self.snapshot, taken)? {
+            if let Some(step) = declared.next(stepping, &self.snapshot, taken).await? {
                 let tables = Tables::Except(step.left_out().clone());
-                declared.take(
-                    stepping,
-                    &self.snapshot,
-                    step.window(),
-                    &tables,
-                    writer,
-                    journal,
-                )?;
+                declared
+                    .take(
+                        stepping,
+                        &self.snapshot,
+                        step.window(),
+                        &tables,
+                        writer,
+                        journal,
+                    )
+                    .await?;
 
                 return Ok(Some((series, step.window().clone())));
             }

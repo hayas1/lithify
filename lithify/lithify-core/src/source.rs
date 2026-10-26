@@ -94,13 +94,13 @@ pub trait SchemaChangeStream<L: SchemaChangeLog> {
         Self: 'a,
         L: 'a;
 
-    fn schema_changes<'a>(
+    async fn schema_changes<'a>(
         &'a self,
         log: &'a L,
         window: &Window,
     ) -> Result<Self::Changes<'a>, Self::Error>;
 
-    fn each_schema_change<E>(
+    async fn each_schema_change<E>(
         &self,
         log: &L,
         window: &Window,
@@ -109,7 +109,7 @@ pub trait SchemaChangeStream<L: SchemaChangeLog> {
     where
         Self::Error: Into<E>,
     {
-        let mut changes = self.schema_changes(log, window).map_err(Into::into)?;
+        let mut changes = self.schema_changes(log, window).await.map_err(Into::into)?;
 
         for change in changes.stream().map_err(Into::into)? {
             visit(change.map_err(Into::into)?)?;
@@ -118,7 +118,7 @@ pub trait SchemaChangeStream<L: SchemaChangeLog> {
         Ok(())
     }
 
-    fn catalog<E, V>(
+    async fn catalog<E, V>(
         &self,
         context: &V::Context,
         log: &L,
@@ -134,9 +134,10 @@ pub trait SchemaChangeStream<L: SchemaChangeLog> {
         self.each_schema_change(log, window, |change| {
             catalog.accept::<E, V>(context, &change, listener)
         })
+        .await
     }
 
-    fn catalog_at<E>(&self, log: &L, at: Ts<Event>) -> Result<CatalogModel<L::Position>, E>
+    async fn catalog_at<E>(&self, log: &L, at: Ts<Event>) -> Result<CatalogModel<L::Position>, E>
     where
         Self::Error: Into<E>,
         E: From<OutOfOrder>,
@@ -145,12 +146,13 @@ pub trait SchemaChangeStream<L: SchemaChangeLog> {
 
         self.each_schema_change::<E>(log, &Window::until(at), |change| {
             Ok(catalog.accept::<OutOfOrder, ()>(&(), &change, &mut ())?)
-        })?;
+        })
+        .await?;
 
         Ok(catalog)
     }
 
-    fn replay<E, V>(
+    async fn replay<E, V>(
         &self,
         context: &V::Context,
         log: &L,
@@ -162,19 +164,25 @@ pub trait SchemaChangeStream<L: SchemaChangeLog> {
         Self::Error: Into<E>,
         E: From<OutOfOrder> + From<V::Error>,
     {
-        let mut catalog = self.catalog_at::<E>(log, *window.from())?;
+        let mut catalog = self.catalog_at::<E>(log, *window.from()).await?;
 
-        self.catalog::<E, V>(context, log, window, &mut catalog, listener)?;
+        self.catalog::<E, V>(context, log, window, &mut catalog, listener)
+            .await?;
 
         Ok(catalog)
     }
 
-    fn table<E>(&self, log: &L, table: &TableId, at: Ts<Event>) -> Result<Option<TableModel>, E>
+    async fn table<E>(
+        &self,
+        log: &L,
+        table: &TableId,
+        at: Ts<Event>,
+    ) -> Result<Option<TableModel>, E>
     where
         Self::Error: Into<E>,
         E: From<OutOfOrder>,
     {
-        let catalog = self.catalog_at::<E>(log, at)?;
+        let catalog = self.catalog_at::<E>(log, at).await?;
 
         Ok(catalog.table(table).cloned())
     }

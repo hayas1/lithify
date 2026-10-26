@@ -30,6 +30,12 @@ Eras are the builder's own to cut: `EraTracker` closes one at each schema change
 
 When a builder seems to need something more, look first for the listener call that already tells it.
 
+### Only what talks to a warehouse waits
+
+A listener, a builder and `Finish` are synchronous, as they only fold what they are told into statements.
+What reads or writes a warehouse is async, `WarehouseClient`, `SchemaChangeStream` and the change log callbacks of each warehouse, and so is whatever steps on them, from `Replayer` up to the commands, which the CLI runs on a tokio runtime.
+No future is asked to be `Send`: a run steps one sink at a time, and a DuckDB connection cannot be shared across threads, so the pages read a pipeline on a blocking thread of their own and wait on it there.
+
 ### The last era ends where the artifact says
 
 No schema change ends the last era, so the builder closes it as it is finished, where the artifact says, a `snapshot` or an `instant` where its window closes, an `scd1` nowhere so as to read the change log up to now.

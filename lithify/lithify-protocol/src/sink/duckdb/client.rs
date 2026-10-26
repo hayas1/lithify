@@ -15,17 +15,21 @@ use crate::sink::execution::{Apply, DryRun};
 pub trait DuckDbChangeLogsFn {
     type Output;
 
-    fn call_duckdb<C>(self, logs: C) -> Self::Output
+    async fn call_duckdb<C>(self, logs: C) -> Self::Output
     where
         C: ChangeLogs,
         <C::Schema as SchemaChangeLog>::Record: FromSql;
 }
 
 pub trait DuckDbCapture {
-    fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(&self, topic_prefix: &str, f: F)
-    -> F::Output;
+    async fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(
+        &self,
+        topic_prefix: &str,
+        f: F,
+    ) -> F::Output;
 }
 
+// DuckDB answers on the calling thread, so executing a statement waits on nothing.
 pub trait DuckDbExecution {
     fn execute(&self, connection: &Connection, statement: &SqlString) -> Result<(), Error>;
 }
@@ -86,11 +90,11 @@ impl<R: DuckDbExecution> WarehouseClient for DuckDbClient<R> {
         &self.warehouse
     }
 
-    fn execute(&self, statement: &SqlString) -> Result<(), Self::Error> {
+    async fn execute(&self, statement: &SqlString) -> Result<(), Self::Error> {
         self.execution.execute(&self.connection, statement)
     }
 
-    fn exists(&self, table: &TablePath) -> Result<bool, Self::Error> {
+    async fn exists(&self, table: &TablePath) -> Result<bool, Self::Error> {
         let count: i64 = self.connection.query_row(
             self.warehouse.select_existence(table).as_str(),
             [],
@@ -100,7 +104,7 @@ impl<R: DuckDbExecution> WarehouseClient for DuckDbClient<R> {
         Ok(count > 0)
     }
 
-    fn build_log_rows(
+    async fn build_log_rows(
         &self,
         namespace: &Namespace,
         query: &BuildLogQuery,
@@ -172,7 +176,7 @@ where
         L: 'a,
         R: 'a;
 
-    fn schema_changes<'a>(
+    async fn schema_changes<'a>(
         &'a self,
         log: &'a L,
         window: &Window,
@@ -228,12 +232,12 @@ mod tests {
         Window::new(Ts::try_from(from).unwrap(), Ts::try_from(to).unwrap())
     }
 
-    fn read(window: &Window) -> Vec<String> {
+    async fn read(window: &Window) -> Vec<String> {
         let connection = Connection::open_in_memory().unwrap();
         connection.execute_batch(CHANGE_LOG).unwrap();
         let client = DuckDbClient::new(connection, DuckDbWarehouse::new("mysql_shop_cdc"));
         let log = Debezium::under("value", "mysql", MySql);
-        let mut changes = client.schema_changes(&log, window).unwrap();
+        let mut changes = client.schema_changes(&log, window).await.unwrap();
 
         changes
             .stream()
@@ -250,9 +254,9 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn the_schema_changes_of_a_window_arrive_in_the_order_the_source_logged_them() {
-        let statements = read(&window(0, 1789900000001));
+    #[tokio::test]
+    async fn the_schema_changes_of_a_window_arrive_in_the_order_the_source_logged_them() {
+        let statements = read(&window(0, 1789900000001)).await;
 
         assert_eq!(
             statements,
@@ -264,9 +268,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_window_holds_the_statements_whose_event_time_falls_within_it() {
-        let statements = read(&window(1789800000001, 1789900000000));
+    #[tokio::test]
+    async fn a_window_holds_the_statements_whose_event_time_falls_within_it() {
+        let statements = read(&window(1789800000001, 1789900000000)).await;
 
         assert_eq!(
             statements,
@@ -274,8 +278,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_table_is_modelled_as_the_schema_changes_of_a_window_left_it() {
+    #[tokio::test]
+    async fn a_table_is_modelled_as_the_schema_changes_of_a_window_left_it() {
         let connection = Connection::open_in_memory().unwrap();
         connection.execute_batch(CHANGE_LOG).unwrap();
         let client = DuckDbClient::new(connection, DuckDbWarehouse::new("mysql_shop_cdc"));
@@ -287,6 +291,7 @@ mod tests {
                 &TableId::new("shop", "customers"),
                 Ts::try_from(1789900000001).unwrap(),
             )
+            .await
             .unwrap()
             .unwrap();
 
@@ -299,23 +304,24 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_catalog_at_an_instant_holds_the_tables_the_schema_changes_before_it_left() {
+    #[tokio::test]
+    async fn a_catalog_at_an_instant_holds_the_tables_the_schema_changes_before_it_left() {
         let connection = Connection::open_in_memory().unwrap();
         connection.execute_batch(CHANGE_LOG).unwrap();
         let client = DuckDbClient::new(connection, DuckDbWarehouse::new("mysql_shop_cdc"));
         let log = Debezium::under("value", "mysql", MySql);
-        let tables = |at: i64| {
+        let tables = async |at: i64| {
             client
                 .catalog_at::<Unread>(&log, Ts::try_from(at).unwrap())
+                .await
                 .unwrap()
                 .tables()
                 .map(|table| table.id().to_string())
                 .collect::<Vec<_>>()
         };
 
-        assert!(tables(1789800000001).is_empty());
-        assert_eq!(tables(1789800000002), ["shop.customers"]);
+        assert!(tables(1789800000001).await.is_empty());
+        assert_eq!(tables(1789800000002).await, ["shop.customers"]);
     }
 
     #[derive(Debug)]
@@ -333,8 +339,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_client_runs_statements_on_its_connection() {
+    #[tokio::test]
+    async fn a_client_runs_statements_on_its_connection() {
         let client = DuckDbClient::new(
             Connection::open_in_memory().unwrap(),
             DuckDbWarehouse::new("mysql_shop_cdc"),
@@ -342,6 +348,7 @@ mod tests {
 
         client
             .execute(&SqlString::from("CREATE TABLE people AS SELECT 1 AS id"))
+            .await
             .unwrap();
 
         let id: i64 = client
@@ -388,24 +395,27 @@ mod tests {
         ))
     }
 
-    fn logging(logs: &[BuildLog]) -> DuckDbClient {
+    async fn logging(logs: &[BuildLog]) -> DuckDbClient {
         let client = DuckDbClient::new(
             Connection::open_in_memory().unwrap(),
             DuckDbWarehouse::new("mysql_shop_cdc"),
         );
         client
             .create_build_log::<Logged>(&Namespace::from("mysql_shop"))
+            .await
             .unwrap();
         client
             .append_build_logs(&Namespace::from("mysql_shop"), logs)
+            .await
             .unwrap();
 
         client
     }
 
-    fn latest(client: &DuckDbClient, latest: Latest) -> Vec<BuildLog> {
+    async fn latest(client: &DuckDbClient, latest: Latest) -> Vec<BuildLog> {
         client
             .build_logs::<Logged>(&Namespace::from("mysql_shop"), &daily(), &latest.into())
+            .await
             .unwrap()
     }
 
@@ -454,68 +464,72 @@ mod tests {
         ]
     }
 
-    #[test]
-    fn a_build_log_is_created_once_however_often_it_is_asked_for() {
-        let client = logging(&history()[..1]);
+    #[tokio::test]
+    async fn a_build_log_is_created_once_however_often_it_is_asked_for() {
+        let client = logging(&history()[..1]).await;
 
         client
             .create_build_log::<Logged>(&Namespace::from("mysql_shop"))
+            .await
             .unwrap();
 
-        assert_eq!(latest(&client, Latest::Attempted).len(), 1);
+        assert_eq!(latest(&client, Latest::Attempted).await.len(), 1);
     }
 
-    #[test]
-    fn a_build_log_reads_back_the_latest_record_of_each_table_as_it_was_written() {
+    #[tokio::test]
+    async fn a_build_log_reads_back_the_latest_record_of_each_table_as_it_was_written() {
         let history = history();
 
         assert_eq!(
-            latest(&logging(&history), Latest::Attempted),
+            latest(&logging(&history).await, Latest::Attempted).await,
             [history[3].clone(), history[4].clone()]
         );
     }
 
-    #[test]
-    fn a_build_log_reads_back_every_record_from_the_newest() {
+    #[tokio::test]
+    async fn a_build_log_reads_back_every_record_from_the_newest() {
         let history = history();
 
         assert_eq!(
             logging(&history)
+                .await
                 .build_logs::<Logged>(
                     &Namespace::from("mysql_shop"),
                     &daily(),
                     &BuildLogQuery::All
                 )
+                .await
                 .unwrap(),
             history.into_iter().rev().collect::<Vec<_>>()
         );
     }
 
-    #[test]
-    fn a_build_log_reads_the_latest_success_of_each_table() {
+    #[tokio::test]
+    async fn a_build_log_reads_the_latest_success_of_each_table() {
         let history = history();
 
         assert_eq!(
-            latest(&logging(&history), Latest::Succeeded),
+            latest(&logging(&history).await, Latest::Succeeded).await,
             [history[3].clone(), history[1].clone()]
         );
     }
 
-    #[test]
-    fn a_build_log_reads_the_latest_success_of_each_table_closing_at_an_instant() {
+    #[tokio::test]
+    async fn a_build_log_reads_the_latest_success_of_each_table_closing_at_an_instant() {
         let history = history();
 
         assert_eq!(
             latest(
-                &logging(&history),
+                &logging(&history).await,
                 Latest::SucceededUntil(Ts::try_from(W1.1).unwrap())
-            ),
+            )
+            .await,
             [history[2].clone(), history[1].clone()]
         );
     }
 
-    #[test]
-    fn a_build_log_reads_no_more_the_name_a_table_was_renamed_away_from() {
+    #[tokio::test]
+    async fn a_build_log_reads_no_more_the_name_a_table_was_renamed_away_from() {
         let renamed = logged_across(
             Some("customers"),
             Some("clients"),
@@ -526,17 +540,18 @@ mod tests {
         let client = logging(&[
             logged("customers", W1, Status::Succeeded, 1789949000000),
             renamed.clone(),
-        ]);
+        ])
+        .await;
 
         assert_eq!(
-            latest(&client, Latest::Attempted),
+            latest(&client, Latest::Attempted).await,
             std::slice::from_ref(&renamed)
         );
-        assert_eq!(latest(&client, Latest::Succeeded), [renamed]);
+        assert_eq!(latest(&client, Latest::Succeeded).await, [renamed]);
     }
 
-    #[test]
-    fn a_build_log_reads_a_name_again_once_a_table_is_created_under_it() {
+    #[tokio::test]
+    async fn a_build_log_reads_a_name_again_once_a_table_is_created_under_it() {
         let renamed = logged_across(
             Some("customers"),
             Some("clients"),
@@ -555,14 +570,15 @@ mod tests {
             logged("customers", W1, Status::Succeeded, 1789949000000),
             renamed.clone(),
             created.clone(),
-        ]);
+        ])
+        .await;
 
-        assert_eq!(latest(&client, Latest::Succeeded), [renamed, created]);
+        assert_eq!(latest(&client, Latest::Succeeded).await, [renamed, created]);
     }
 
-    #[test]
-    fn a_build_log_reads_the_base_of_a_window_under_the_name_it_closed_with_even_once_renamed_away()
-    {
+    #[tokio::test]
+    async fn a_build_log_reads_the_base_of_a_window_under_the_name_it_closed_with_even_once_renamed_away()
+     {
         let before = logged("customers", W1, Status::Succeeded, 1789949000000);
         let client = logging(&[
             before.clone(),
@@ -573,16 +589,17 @@ mod tests {
                 Status::Succeeded,
                 1790035300000,
             ),
-        ]);
+        ])
+        .await;
 
         assert_eq!(
-            latest(&client, Latest::SucceededUntil(Ts::try_from(W1.1).unwrap())),
+            latest(&client, Latest::SucceededUntil(Ts::try_from(W1.1).unwrap())).await,
             [before]
         );
     }
 
-    #[test]
-    fn a_build_log_still_reads_the_last_success_of_a_name_a_failed_build_renamed_away_from() {
+    #[tokio::test]
+    async fn a_build_log_still_reads_the_last_success_of_a_name_a_failed_build_renamed_away_from() {
         let before = logged("customers", W1, Status::Succeeded, 1789949000000);
         let renamed = logged_across(
             Some("customers"),
@@ -591,14 +608,15 @@ mod tests {
             Status::Failed("no era".to_owned()),
             1790035300000,
         );
-        let client = logging(&[before.clone(), renamed.clone()]);
+        let client = logging(&[before.clone(), renamed.clone()]).await;
 
-        assert_eq!(latest(&client, Latest::Attempted), [renamed]);
-        assert_eq!(latest(&client, Latest::Succeeded), [before]);
+        assert_eq!(latest(&client, Latest::Attempted).await, [renamed]);
+        assert_eq!(latest(&client, Latest::Succeeded).await, [before]);
     }
 
-    #[test]
-    fn a_build_log_reads_no_more_a_name_rebuilt_in_a_window_before_it_was_renamed_away_from() {
+    #[tokio::test]
+    async fn a_build_log_reads_no_more_a_name_rebuilt_in_a_window_before_it_was_renamed_away_from()
+    {
         let renamed = logged_across(
             Some("customers"),
             Some("clients"),
@@ -610,13 +628,14 @@ mod tests {
             logged("customers", W1, Status::Succeeded, 1789949000000),
             renamed.clone(),
             logged("customers", W1, Status::Succeeded, 1790121700000),
-        ]);
+        ])
+        .await;
 
-        assert_eq!(latest(&client, Latest::Succeeded), [renamed]);
+        assert_eq!(latest(&client, Latest::Succeeded).await, [renamed]);
     }
 
-    #[test]
-    fn a_build_log_reads_nothing_of_a_table_once_dropped() {
+    #[tokio::test]
+    async fn a_build_log_reads_nothing_of_a_table_once_dropped() {
         let client = logging(&[
             logged("customers", W1, Status::Succeeded, 1789949000000),
             logged_across(
@@ -626,45 +645,49 @@ mod tests {
                 Status::Succeeded,
                 1790035300000,
             ),
-        ]);
+        ])
+        .await;
 
-        assert_eq!(latest(&client, Latest::Attempted), []);
-        assert_eq!(latest(&client, Latest::Succeeded), []);
+        assert_eq!(latest(&client, Latest::Attempted).await, []);
+        assert_eq!(latest(&client, Latest::Succeeded).await, []);
     }
 
-    #[test]
-    fn a_client_tells_whether_a_table_stands_in_its_warehouse() {
-        let client = logging(&[]);
+    #[tokio::test]
+    async fn a_client_tells_whether_a_table_stands_in_its_warehouse() {
+        let client = logging(&[]).await;
 
         assert!(
             client
                 .exists(&TablePath::new("mysql_shop", "_lithify_log"))
+                .await
                 .unwrap()
         );
         assert!(
             !client
                 .exists(&TablePath::new("mysql_shop", "people_20260920"))
+                .await
                 .unwrap()
         );
         assert!(
             !client
                 .exists(&TablePath::new("elsewhere", "_lithify_log"))
+                .await
                 .unwrap()
         );
     }
 
-    #[test]
-    fn a_window_without_a_statement_reads_nothing() {
-        assert!(read(&window(0, 1789800000000)).is_empty());
+    #[tokio::test]
+    async fn a_window_without_a_statement_reads_nothing() {
+        assert!(read(&window(0, 1789800000000)).await.is_empty());
     }
 
-    #[test]
-    fn a_table_that_does_not_hold_a_change_log_is_rejected() {
+    #[tokio::test]
+    async fn a_table_that_does_not_hold_a_change_log_is_rejected() {
         let connection = Connection::open_in_memory().unwrap();
         let client = DuckDbClient::new(connection, DuckDbWarehouse::new("mysql_shop_cdc"));
         let log = Debezium::under("value", "mysql", MySql);
 
-        let changes = client.schema_changes(&log, &window(0, 1));
+        let changes = client.schema_changes(&log, &window(0, 1)).await;
 
         assert!(changes.is_err());
     }
@@ -721,8 +744,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_change_log_of_any_format_is_streamed_by_the_record_it_reads_in_the_order_of_its_processing_time()
+    #[tokio::test]
+    async fn a_change_log_of_any_format_is_streamed_by_the_record_it_reads_in_the_order_of_its_processing_time()
      {
         let connection = Connection::open_in_memory().unwrap();
         connection
@@ -736,7 +759,7 @@ mod tests {
             )
             .unwrap();
         let client = DuckDbClient::new(connection, DuckDbWarehouse::new("ledger"));
-        let mut changes = client.schema_changes(&Ledger, &window(0, 3)).unwrap();
+        let mut changes = client.schema_changes(&Ledger, &window(0, 3)).await.unwrap();
 
         let statements: Vec<String> = changes
             .stream()

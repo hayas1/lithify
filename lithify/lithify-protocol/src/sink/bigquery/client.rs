@@ -5,7 +5,6 @@ use google_cloud_bigquery::client::BigQuery;
 use google_cloud_bigquery::error::{QueryError, RowError};
 use google_cloud_bigquery::query::Row;
 use google_cloud_gax::client_builder;
-use tokio::runtime::Runtime;
 
 use lithify_core::build_log::{BuildLogQuery, BuildLogRow, UnreadableBuildLog};
 use lithify_core::event::MalformedEvent;
@@ -26,14 +25,14 @@ use crate::sink::execution::{Apply, DryRun};
 pub trait BigQueryChangeLogsFn {
     type Output;
 
-    fn call_bigquery<C>(self, logs: C) -> Self::Output
+    async fn call_bigquery<C>(self, logs: C) -> Self::Output
     where
         C: ChangeLogs,
         <C::Schema as SchemaChangeLog>::Record: TryFrom<Row, Error = RowError>;
 }
 
 pub trait BigQueryCapture {
-    fn with_bigquery_change_logs<F: BigQueryChangeLogsFn>(
+    async fn with_bigquery_change_logs<F: BigQueryChangeLogsFn>(
         &self,
         topic_prefix: &str,
         f: F,
@@ -41,33 +40,21 @@ pub trait BigQueryCapture {
 }
 
 pub trait BigQueryExecution {
-    fn execute(
-        &self,
-        client: &BigQuery,
-        runtime: &Runtime,
-        statement: &SqlString,
-    ) -> Result<(), Unqueryable>;
+    async fn execute(&self, client: &BigQuery, statement: &SqlString) -> Result<(), Unqueryable>;
 }
 
 impl BigQueryExecution for Apply {
-    fn execute(
-        &self,
-        client: &BigQuery,
-        runtime: &Runtime,
-        statement: &SqlString,
-    ) -> Result<(), Unqueryable> {
-        runtime.block_on(async {
-            client.query(statement.as_str()).until_done().await?;
+    async fn execute(&self, client: &BigQuery, statement: &SqlString) -> Result<(), Unqueryable> {
+        client.query(statement.as_str()).until_done().await?;
 
-            Ok(())
-        })
+        Ok(())
     }
 }
 
 // TODO: send the statement to BigQuery as a dry run, so it is checked and its scan estimated
 // rather than only recorded.
 impl BigQueryExecution for DryRun {
-    fn execute(&self, _: &BigQuery, _: &Runtime, statement: &SqlString) -> Result<(), Unqueryable> {
+    async fn execute(&self, _: &BigQuery, statement: &SqlString) -> Result<(), Unqueryable> {
         self.record(statement);
 
         Ok(())
@@ -77,13 +64,11 @@ impl BigQueryExecution for DryRun {
 pub struct BigQueryClient<R = Apply> {
     warehouse: BigQueryWarehouse,
     client: BigQuery,
-    runtime: Runtime,
     execution: R,
 }
 
 impl BigQueryClient {
-    pub fn open(config: &Config, change_log: &Location) -> Result<Self, Unqueryable> {
-        let runtime = Runtime::new().map_err(Unqueryable::Unrunnable)?;
+    pub async fn open(config: &Config, change_log: &Location) -> Result<Self, Unqueryable> {
         let builder = BigQuery::builder()
             .with_project_id(config.project())
             .with_endpoint(config.endpoint());
@@ -91,9 +76,7 @@ impl BigQueryClient {
             Credentials::Anonymous => builder.with_credentials(anonymous::Builder::new().build()),
             Credentials::Adc => builder,
         };
-        let client = runtime
-            .block_on(builder.build())
-            .map_err(Unqueryable::Unbuildable)?;
+        let client = builder.build().await.map_err(Unqueryable::Unbuildable)?;
 
         Ok(Self {
             warehouse: BigQueryWarehouse::new(
@@ -101,7 +84,6 @@ impl BigQueryClient {
                 Namespace::from(change_log.clone()),
             ),
             client,
-            runtime,
             execution: Apply,
         })
     }
@@ -116,25 +98,22 @@ impl<R> BigQueryClient<R> {
         BigQueryClient {
             warehouse: self.warehouse,
             client: self.client,
-            runtime: self.runtime,
             execution,
         }
     }
 
-    fn records<T>(&self, query: &SqlString) -> Result<Vec<T>, Unqueryable>
+    async fn records<T>(&self, query: &SqlString) -> Result<Vec<T>, Unqueryable>
     where
         T: TryFrom<Row, Error = RowError>,
     {
-        self.runtime.block_on(async {
-            let mut read = self.client.query(query.as_str()).until_done().await?.read();
-            let mut records = Vec::new();
+        let mut read = self.client.query(query.as_str()).until_done().await?.read();
+        let mut records = Vec::new();
 
-            while let Some(row) = read.next().await.transpose()? {
-                records.push(T::try_from(row)?);
-            }
+        while let Some(row) = read.next().await.transpose()? {
+            records.push(T::try_from(row)?);
+        }
 
-            Ok(records)
-        })
+        Ok(records)
     }
 }
 
@@ -145,8 +124,12 @@ impl OpenWarehouse for BigQueryWarehouse {
     type Credential = ();
     type Error = Unqueryable;
 
-    fn open(config: &Config, _: &(), change_log: &Location) -> Result<BigQueryClient, Unqueryable> {
-        BigQueryClient::open(config, change_log)
+    async fn open(
+        config: &Config,
+        _: &(),
+        change_log: &Location,
+    ) -> Result<BigQueryClient, Unqueryable> {
+        BigQueryClient::open(config, change_log).await
     }
 }
 
@@ -158,24 +141,26 @@ impl<R: BigQueryExecution> WarehouseClient for BigQueryClient<R> {
         &self.warehouse
     }
 
-    fn execute(&self, statement: &SqlString) -> Result<(), Self::Error> {
-        self.execution
-            .execute(&self.client, &self.runtime, statement)
+    async fn execute(&self, statement: &SqlString) -> Result<(), Self::Error> {
+        self.execution.execute(&self.client, statement).await
     }
 
-    fn exists(&self, table: &TablePath) -> Result<bool, Self::Error> {
-        let counted: Vec<BigQueryCount> = self.records(&self.warehouse.select_existence(table))?;
+    async fn exists(&self, table: &TablePath) -> Result<bool, Self::Error> {
+        let counted: Vec<BigQueryCount> = self
+            .records(&self.warehouse.select_existence(table))
+            .await?;
 
         Ok(counted.iter().any(|count| count.0 > 0))
     }
 
-    fn build_log_rows(
+    async fn build_log_rows(
         &self,
         namespace: &Namespace,
         query: &BuildLogQuery,
     ) -> Result<Vec<BuildLogRow>, Self::Error> {
         Ok(self
-            .records::<BigQueryBuildLogRow>(&query.select(&self.warehouse, namespace))?
+            .records::<BigQueryBuildLogRow>(&query.select(&self.warehouse, namespace))
+            .await?
             .into_iter()
             .map(|row| row.0)
             .collect())
@@ -213,13 +198,15 @@ where
         L: 'a,
         R: 'a;
 
-    fn schema_changes<'a>(
+    async fn schema_changes<'a>(
         &'a self,
         log: &'a L,
         window: &Window,
     ) -> Result<Self::Changes<'a>, Self::Error> {
         Ok(BigQuerySchemaChanges {
-            records: self.records(&self.warehouse.select_schema_changes(log, window))?,
+            records: self
+                .records(&self.warehouse.select_schema_changes(log, window))
+                .await?,
             log,
         })
     }
@@ -227,7 +214,6 @@ where
 
 #[derive(Debug)]
 pub enum Unqueryable {
-    Unrunnable(std::io::Error),
     Unbuildable(client_builder::Error),
     Unanswered(QueryError),
     Unreadable(RowError),
@@ -238,7 +224,6 @@ pub enum Unqueryable {
 impl Display for Unqueryable {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unrunnable(cause) => write!(formatter, "{cause}"),
             Self::Unbuildable(cause) => write!(formatter, "{cause}"),
             Self::Unanswered(cause) => write!(formatter, "{cause}"),
             Self::Unreadable(cause) => write!(formatter, "{cause}"),

@@ -44,7 +44,7 @@ impl<'a, P: StepTaker> Stepping<'a, P> {
         }
     }
 
-    pub fn up_to(self, date: NaiveDate, snapshot: &SeriesLog) -> Result<Self, P::Error> {
+    pub async fn up_to(self, date: NaiveDate, snapshot: &SeriesLog) -> Result<Self, P::Error> {
         let until = self
             .timeline
             .through(date)
@@ -52,7 +52,7 @@ impl<'a, P: StepTaker> Stepping<'a, P> {
         if until > self.timeline.range().end {
             return Err(Unsteppable::Unclosed(date).into());
         }
-        let standing = self.progress(snapshot)?.standing();
+        let standing = self.progress(snapshot).await?.standing();
 
         match standing.filter(|standing| *standing > until) {
             Some(built_until) => Err(Unsteppable::Overtaken { date, built_until }.into()),
@@ -63,16 +63,19 @@ impl<'a, P: StepTaker> Stepping<'a, P> {
         }
     }
 
-    pub fn next<A: Artifact>(
+    pub async fn next<A: Artifact>(
         &self,
         artifact: &A,
         log: &SeriesLog,
         base: Option<&SeriesLog>,
         taken: &[Window],
     ) -> Result<Option<Step>, P::Error> {
-        let progress = self.progress(log)?;
+        let progress = self.progress(log).await?;
         let derived = base.is_some();
-        let base = base.map(|base| self.progress(base)).transpose()?;
+        let base = match base {
+            Some(base) => Some(self.progress(base).await?),
+            None => None,
+        };
 
         Ok(progress.step(base.as_ref(), taken, |built, base| {
             self.window(artifact, built, base, derived)
@@ -100,7 +103,7 @@ impl<'a, P: StepTaker> Stepping<'a, P> {
         self.timeline.reached(&window).then_some(window)
     }
 
-    pub fn take<A: Artifact, B: BuildLogWriter>(
+    pub async fn take<A: Artifact, B: BuildLogWriter>(
         &self,
         artifact: &A,
         log: &SeriesLog,
@@ -109,31 +112,35 @@ impl<'a, P: StepTaker> Stepping<'a, P> {
         tables: &Tables,
         writer: &B,
     ) -> Result<B::Output, P::Error> {
-        let previous = self.built(base.unwrap_or(log), *window.from())?;
+        let previous = self.built(base.unwrap_or(log), *window.from()).await?;
 
-        self.taker.take(
-            artifact,
-            window,
-            &previous,
-            tables,
-            &writer.advancing(log.namespace(), log.series()),
-        )
+        self.taker
+            .take(
+                artifact,
+                window,
+                &previous,
+                tables,
+                &writer.advancing(log.namespace(), log.series()),
+            )
+            .await
     }
 
-    fn built(&self, log: &SeriesLog, closing: Ts<Event>) -> Result<Vec<BuildLog>, P::Error> {
-        self.taker.client().build_logs::<P::Error>(
-            log.namespace(),
-            log.series(),
-            &Latest::SucceededUntil(closing).into(),
-        )
+    async fn built(&self, log: &SeriesLog, closing: Ts<Event>) -> Result<Vec<BuildLog>, P::Error> {
+        self.latest(log, Latest::SucceededUntil(closing)).await
     }
 
-    fn progress(&self, log: &SeriesLog) -> Result<Progress, P::Error> {
-        let client = self.taker.client();
-        let read = |latest: Latest| {
-            client.build_logs::<P::Error>(log.namespace(), log.series(), &latest.into())
-        };
-        let progress = Progress::read(&read(Latest::Attempted)?, &read(Latest::Succeeded)?);
+    async fn latest(&self, log: &SeriesLog, latest: Latest) -> Result<Vec<BuildLog>, P::Error> {
+        self.taker
+            .client()
+            .build_logs::<P::Error>(log.namespace(), log.series(), &latest.into())
+            .await
+    }
+
+    async fn progress(&self, log: &SeriesLog) -> Result<Progress, P::Error> {
+        let progress = Progress::read(
+            &self.latest(log, Latest::Attempted).await?,
+            &self.latest(log, Latest::Succeeded).await?,
+        );
         let changed = progress
             .captures()
             .find(|logged| *logged != self.capture)

@@ -21,7 +21,7 @@ pub enum RunCommand {
 }
 
 impl RunCommand {
-    pub fn settle<P, B>(
+    pub async fn settle<P, B>(
         &self,
         sink: &Sink<WarehouseConfig, ArtifactConfig>,
         source: &Source<CaptureConfig>,
@@ -46,18 +46,24 @@ impl RunCommand {
 
         match self {
             Self::CatchUp { target, to: None } => {
-                lineup.catch_up(&stepping, target.named(), writer, journal)
+                lineup
+                    .catch_up(&stepping, target.named(), writer, journal)
+                    .await
             }
             Self::CatchUp {
                 target,
                 to: Some(date),
-            } => lineup.catch_up(
-                &stepping.up_to(*date, lineup.snapshot())?,
-                target.named(),
-                writer,
-                journal,
-            ),
-            Self::Build(target) => target.build(&lineup, &stepping, writer, journal),
+            } => {
+                lineup
+                    .catch_up(
+                        &stepping.up_to(*date, lineup.snapshot()).await?,
+                        target.named(),
+                        writer,
+                        journal,
+                    )
+                    .await
+            }
+            Self::Build(target) => target.build(&lineup, &stepping, writer, journal).await,
         }
     }
 }
@@ -80,10 +86,10 @@ impl Target {
         }
     }
 
-    fn build<P, B>(
+    async fn build<P, B>(
         &self,
-        lineup: &Lineup,
-        stepping: &Stepping<P>,
+        lineup: &Lineup<'_>,
+        stepping: &Stepping<'_, P>,
         writer: &B,
         journal: &mut Journal,
     ) -> Result<(), Unrunnable>
@@ -92,7 +98,8 @@ impl Target {
         B: Report,
     {
         if lineup
-            .step(stepping, self.named(), &Default::default(), writer, journal)?
+            .step(stepping, self.named(), &Default::default(), writer, journal)
+            .await?
             .is_none()
         {
             journal.note("nothing is left to build");
@@ -316,7 +323,7 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) fn settle(
+    pub(crate) async fn settle(
         pipeline: &Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig>,
         client: &DuckDbClient,
         command: &RunCommand,
@@ -333,19 +340,21 @@ pub(crate) mod tests {
             .unwrap();
         let mut journal = Journal::default();
 
-        command.settle(
-            sink,
-            source,
-            Ts::from(at(now)),
-            &Taking::new(
-                client,
-                source.capture(),
-                source.topic_prefix().unwrap(),
-                pipeline.tables(),
-            ),
-            &writer,
-            &mut journal,
-        )?;
+        command
+            .settle(
+                sink,
+                source,
+                Ts::from(at(now)),
+                &Taking::new(
+                    client,
+                    source.capture(),
+                    source.topic_prefix().unwrap(),
+                    pipeline.tables(),
+                ),
+                &writer,
+                &mut journal,
+            )
+            .await?;
 
         Ok(journal)
     }
@@ -361,12 +370,14 @@ pub(crate) mod tests {
         (target.to_owned(), base.to_owned())
     }
 
-    #[test]
-    fn a_shard_folds_onto_the_one_the_build_log_recorded_closing_at_its_opening() {
+    #[tokio::test]
+    async fn a_shard_folds_onto_the_one_the_build_log_recorded_closing_at_its_opening() {
         let pipeline = pipeline();
-        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]);
+        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]).await;
 
-        settle(&pipeline, &client, &up_to("2026-09-20"), NOW).unwrap();
+        settle(&pipeline, &client, &up_to("2026-09-20"), NOW)
+            .await
+            .unwrap();
 
         assert_eq!(
             built(&client),
@@ -377,10 +388,10 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn a_run_logs_the_instant_it_took_for_now_and_is_named_after_it() {
+    #[tokio::test]
+    async fn a_run_logs_the_instant_it_took_for_now_and_is_named_after_it() {
         let pipeline = pipeline();
-        let client = logged(PEOPLE, &[]);
+        let client = logged(PEOPLE, &[]).await;
 
         settle(
             &pipeline,
@@ -391,6 +402,7 @@ pub(crate) mod tests {
             },
             NOW,
         )
+        .await
         .unwrap();
 
         assert_eq!(
@@ -441,19 +453,20 @@ pub(crate) mod tests {
             'before': {'id': 8::BIGINT}, 'after': NULL::STRUCT(id BIGINT)})
         ) AS t(value)";
 
-    #[test]
-    fn a_change_is_built_into_the_shard_of_the_day_its_event_time_falls_on() {
+    #[tokio::test]
+    async fn a_change_is_built_into_the_shard_of_the_day_its_event_time_falls_on() {
         let pipeline = pipeline();
         let client = logged(
             PERSON_PROCESSED_PAST_THE_MIDNIGHT_ITS_EVENT_TIME_FALLS_BEFORE,
             &[],
-        );
+        )
+        .await;
         let to = RunCommand::CatchUp {
             target: Target::default(),
             to: Some("2026-09-20".parse().unwrap()),
         };
 
-        settle(&pipeline, &client, &to, NOW).unwrap();
+        settle(&pipeline, &client, &to, NOW).await.unwrap();
 
         assert_eq!(
             rows(
@@ -464,16 +477,16 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn changes_within_a_shard_are_folded_in_the_order_of_their_processing_time() {
+    #[tokio::test]
+    async fn changes_within_a_shard_are_folded_in_the_order_of_their_processing_time() {
         let pipeline = pipeline();
-        let client = logged(PERSON_DELETED_AT_AN_EVENT_TIME_BEFORE_ITS_CREATION, &[]);
+        let client = logged(PERSON_DELETED_AT_AN_EVENT_TIME_BEFORE_ITS_CREATION, &[]).await;
         let to = RunCommand::CatchUp {
             target: Target::default(),
             to: Some("2026-09-20".parse().unwrap()),
         };
 
-        settle(&pipeline, &client, &to, NOW).unwrap();
+        settle(&pipeline, &client, &to, NOW).await.unwrap();
 
         assert_eq!(
             rows(
@@ -484,25 +497,30 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn the_shard_the_change_log_opens_in_is_built_from_nothing() {
+    #[tokio::test]
+    async fn the_shard_the_change_log_opens_in_is_built_from_nothing() {
         let pipeline = pipeline();
-        let client = logged(PEOPLE, &[]);
+        let client = logged(PEOPLE, &[]).await;
 
-        settle(&pipeline, &client, &up_to("1970-01-01"), NOW).unwrap();
+        settle(&pipeline, &client, &up_to("1970-01-01"), NOW)
+            .await
+            .unwrap();
 
         assert_eq!(built(&client), [folded("mysql_shop.people_19700101", "")]);
     }
 
-    #[test]
-    fn the_shard_the_change_log_opens_in_is_built_before_anything_was_logged() {
+    #[tokio::test]
+    async fn the_shard_the_change_log_opens_in_is_built_before_anything_was_logged() {
         let pipeline = pipeline();
-        let client = logged(PEOPLE, &[]);
+        let client = logged(PEOPLE, &[]).await;
         client
             .execute(&SqlString::from("DROP TABLE mysql_shop._lithify_log"))
+            .await
             .unwrap();
 
-        settle(&pipeline, &client, &up_to("1970-01-01"), NOW).unwrap();
+        settle(&pipeline, &client, &up_to("1970-01-01"), NOW)
+            .await
+            .unwrap();
 
         assert_eq!(built(&client), [folded("mysql_shop.people_19700101", "")]);
     }
@@ -511,12 +529,12 @@ pub(crate) mod tests {
         RunCommand::Build(Target::new(artifact, None))
     }
 
-    #[test]
-    fn a_build_named_nothing_takes_the_one_step_the_build_log_says_is_next() {
+    #[tokio::test]
+    async fn a_build_named_nothing_takes_the_one_step_the_build_log_says_is_next() {
         let pipeline = pipeline();
-        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]);
+        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]).await;
 
-        settle(&pipeline, &client, &next(None), NOW).unwrap();
+        settle(&pipeline, &client, &next(None), NOW).await.unwrap();
 
         assert_eq!(
             built(&client),
@@ -527,9 +545,9 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn a_build_named_an_artifact_takes_the_next_step_of_that_artifact() {
-        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]);
+    #[tokio::test]
+    async fn a_build_named_an_artifact_takes_the_next_step_of_that_artifact() {
+        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]).await;
         let pipeline = crate::step::tests::opened(
             "next-scd2",
             &format!(
@@ -539,7 +557,9 @@ pub(crate) mod tests {
             "[default]\nartifacts = [\"snapshot\", \"scd2\"]\n",
         );
 
-        settle(&pipeline, &client, &next(Some("scd2")), NOW).unwrap();
+        settle(&pipeline, &client, &next(Some("scd2")), NOW)
+            .await
+            .unwrap();
 
         assert_eq!(built(&client), [folded("mysql_shop.people_20260919", "")]);
         assert_eq!(
@@ -580,13 +600,15 @@ pub(crate) mod tests {
             'before': NULL::STRUCT(id BIGINT), 'after': {'id': 9::BIGINT}})
         ) AS t(value)";
 
-    #[test]
-    fn a_catch_up_builds_a_table_with_nothing_to_fold_onto_again_from_the_start_of_its_source() {
+    #[tokio::test]
+    async fn a_catch_up_builds_a_table_with_nothing_to_fold_onto_again_from_the_start_of_its_source()
+     {
         let pipeline = pipeline();
         let client = logged(
             PETS_STANDING_BEFORE_THEY_WERE_BUILT,
             &[built_before("people", CAPTURE)],
-        );
+        )
+        .await;
 
         settle(
             &pipeline,
@@ -597,6 +619,7 @@ pub(crate) mod tests {
             },
             NOW,
         )
+        .await
         .unwrap();
 
         assert_eq!(
@@ -621,12 +644,14 @@ pub(crate) mod tests {
         .collect()
     }
 
-    #[test]
-    fn a_table_created_within_a_shard_is_built_from_nothing_beside_the_ones_folded() {
+    #[tokio::test]
+    async fn a_table_created_within_a_shard_is_built_from_nothing_beside_the_ones_folded() {
         let pipeline = pipeline();
-        let client = logged(PETS_CREATED_ON_20260920, &[built_before("people", CAPTURE)]);
+        let client = logged(PETS_CREATED_ON_20260920, &[built_before("people", CAPTURE)]).await;
 
-        settle(&pipeline, &client, &up_to("2026-09-20"), NOW).unwrap();
+        settle(&pipeline, &client, &up_to("2026-09-20"), NOW)
+            .await
+            .unwrap();
 
         assert_eq!(
             built(&client),
@@ -638,13 +663,14 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn a_table_renamed_within_a_window_folds_the_next_window_onto_what_it_was_built_into() {
+    #[tokio::test]
+    async fn a_table_renamed_within_a_window_folds_the_next_window_onto_what_it_was_built_into() {
         let pipeline = pipeline();
         let client = logged(
             PEOPLE_RENAMED_ON_20260920,
             &[built_before("people", CAPTURE)],
-        );
+        )
+        .await;
 
         settle(
             &pipeline,
@@ -655,6 +681,7 @@ pub(crate) mod tests {
             },
             NOW,
         )
+        .await
         .unwrap();
 
         assert_eq!(
@@ -690,15 +717,17 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn a_table_dropped_and_created_again_within_a_window_is_built_anew_and_folded_onto_after() {
+    #[tokio::test]
+    async fn a_table_dropped_and_created_again_within_a_window_is_built_anew_and_folded_onto_after()
+    {
         let client = logged(
             PETS_REPLACED_ON_20260920,
             &[
                 built_before("people", CAPTURE),
                 built_before("pets", CAPTURE),
             ],
-        );
+        )
+        .await;
 
         settle(
             &pipeline(),
@@ -709,6 +738,7 @@ pub(crate) mod tests {
             },
             NOW,
         )
+        .await
         .unwrap();
 
         assert_eq!(
@@ -729,15 +759,17 @@ pub(crate) mod tests {
         assert_eq!(ids(&client, "pets_20260921"), ["9"]);
     }
 
-    #[test]
-    fn a_table_created_again_in_a_later_window_is_built_anew_rather_than_onto_what_was_dropped() {
+    #[tokio::test]
+    async fn a_table_created_again_in_a_later_window_is_built_anew_rather_than_onto_what_was_dropped()
+     {
         let client = logged(
             PETS_DROPPED_ON_20260920_AND_CREATED_AGAIN_ON_20260921,
             &[
                 built_before("people", CAPTURE),
                 built_before("pets", CAPTURE),
             ],
-        );
+        )
+        .await;
 
         settle(
             &pipeline(),
@@ -748,6 +780,7 @@ pub(crate) mod tests {
             },
             NOW,
         )
+        .await
         .unwrap();
 
         assert_eq!(
@@ -763,8 +796,8 @@ pub(crate) mod tests {
         assert_eq!(ids(&client, "pets_20260921"), ["9"]);
     }
 
-    #[test]
-    fn a_table_refusing_a_schema_change_within_a_window_is_logged_as_failed_while_the_others_advance()
+    #[tokio::test]
+    async fn a_table_refusing_a_schema_change_within_a_window_is_logged_as_failed_while_the_others_advance()
      {
         let client = logged(
             PETS_REKEYED_ON_20260920,
@@ -772,7 +805,8 @@ pub(crate) mod tests {
                 built_before("people", CAPTURE),
                 built_before("pets", CAPTURE),
             ],
-        );
+        )
+        .await;
 
         settle(
             &pipeline(),
@@ -783,6 +817,7 @@ pub(crate) mod tests {
             },
             NOW,
         )
+        .await
         .unwrap();
 
         assert_eq!(
@@ -801,8 +836,8 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn a_table_dropped_within_a_window_is_logged_as_dropped_and_built_no_more() {
+    #[tokio::test]
+    async fn a_table_dropped_within_a_window_is_logged_as_dropped_and_built_no_more() {
         let pipeline = pipeline();
         let client = logged(
             PETS_DROPPED_ON_20260920,
@@ -810,7 +845,8 @@ pub(crate) mod tests {
                 built_before("people", CAPTURE),
                 built_before("pets", CAPTURE),
             ],
-        );
+        )
+        .await;
 
         settle(
             &pipeline,
@@ -821,6 +857,7 @@ pub(crate) mod tests {
             },
             NOW,
         )
+        .await
         .unwrap();
 
         assert_eq!(
@@ -842,6 +879,7 @@ pub(crate) mod tests {
                 Ts::from(at(NOW)),
             )
             .read::<_, Unrunnable>(&client, &Namespace::from("mysql_shop"), &Snapshot::days())
+            .await
             .unwrap()
             .discrepancies(),
             []
@@ -861,10 +899,10 @@ mod catch_up {
     };
     use crate::unrunnable::Unrunnable;
 
-    #[test]
-    fn a_pipeline_catches_up_window_by_window_folding_each_onto_the_one_before() {
+    #[tokio::test]
+    async fn a_pipeline_catches_up_window_by_window_folding_each_onto_the_one_before() {
         let pipeline = pipeline();
-        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]);
+        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]).await;
 
         settle(
             &pipeline,
@@ -875,6 +913,7 @@ mod catch_up {
             },
             "2026-09-22T05:00:00Z",
         )
+        .await
         .unwrap();
 
         assert_eq!(
@@ -906,10 +945,11 @@ mod catch_up {
         );
     }
 
-    #[test]
-    fn a_pipeline_built_for_the_first_time_builds_only_the_shard_closing_at_the_last_midnight() {
+    #[tokio::test]
+    async fn a_pipeline_built_for_the_first_time_builds_only_the_shard_closing_at_the_last_midnight()
+     {
         let pipeline = pipeline();
-        let client = logged(PEOPLE, &[]);
+        let client = logged(PEOPLE, &[]).await;
 
         settle(
             &pipeline,
@@ -920,6 +960,7 @@ mod catch_up {
             },
             "2026-09-22T05:00:00Z",
         )
+        .await
         .unwrap();
 
         assert_eq!(
@@ -941,10 +982,10 @@ mod catch_up {
         );
     }
 
-    #[test]
-    fn a_pipeline_caught_up_to_a_date_builds_no_shard_dated_after_it() {
+    #[tokio::test]
+    async fn a_pipeline_caught_up_to_a_date_builds_no_shard_dated_after_it() {
         let pipeline = pipeline();
-        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]);
+        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]).await;
 
         settle(
             &pipeline,
@@ -952,6 +993,7 @@ mod catch_up {
             &caught_up_to("2026-09-20"),
             "2026-09-22T05:00:00Z",
         )
+        .await
         .unwrap();
 
         assert_eq!(
@@ -969,10 +1011,10 @@ mod catch_up {
         );
     }
 
-    #[test]
-    fn a_pipeline_built_for_the_first_time_up_to_a_date_is_caught_up_from_there_after() {
+    #[tokio::test]
+    async fn a_pipeline_built_for_the_first_time_up_to_a_date_is_caught_up_from_there_after() {
         let pipeline = pipeline();
-        let client = logged(PEOPLE, &[]);
+        let client = logged(PEOPLE, &[]).await;
 
         settle(
             &pipeline,
@@ -980,6 +1022,7 @@ mod catch_up {
             &caught_up_to("2026-09-20"),
             "2026-09-22T05:00:00Z",
         )
+        .await
         .unwrap();
         settle(
             &pipeline,
@@ -990,6 +1033,7 @@ mod catch_up {
             },
             "2026-09-22T05:00:00Z",
         )
+        .await
         .unwrap();
 
         assert_eq!(
@@ -1010,17 +1054,18 @@ mod catch_up {
         );
     }
 
-    #[test]
-    fn a_pipeline_is_not_caught_up_to_a_date_whose_shard_has_not_closed() {
+    #[tokio::test]
+    async fn a_pipeline_is_not_caught_up_to_a_date_whose_shard_has_not_closed() {
         let pipeline = pipeline();
-        let client = logged(PEOPLE, &[]);
+        let client = logged(PEOPLE, &[]).await;
 
         let unclosed = settle(
             &pipeline,
             &client,
             &caught_up_to("2026-09-22"),
             "2026-09-22T05:00:00Z",
-        );
+        )
+        .await;
 
         assert!(matches!(
             unclosed,
@@ -1028,17 +1073,18 @@ mod catch_up {
         ));
     }
 
-    #[test]
-    fn a_pipeline_is_not_caught_up_to_a_date_before_its_source_began() {
+    #[tokio::test]
+    async fn a_pipeline_is_not_caught_up_to_a_date_before_its_source_began() {
         let pipeline = pipeline();
-        let client = logged(PEOPLE, &[]);
+        let client = logged(PEOPLE, &[]).await;
 
         let unsharded = settle(
             &pipeline,
             &client,
             &caught_up_to("1969-12-31"),
             "2026-09-22T05:00:00Z",
-        );
+        )
+        .await;
 
         assert!(matches!(
             unsharded,
@@ -1046,16 +1092,17 @@ mod catch_up {
         ));
     }
 
-    #[test]
-    fn a_pipeline_is_not_caught_up_to_a_date_the_build_log_has_already_built_past() {
+    #[tokio::test]
+    async fn a_pipeline_is_not_caught_up_to_a_date_the_build_log_has_already_built_past() {
         let pipeline = pipeline();
-        let client = logged(PEOPLE, &[]);
+        let client = logged(PEOPLE, &[]).await;
         settle(
             &pipeline,
             &client,
             &caught_up_to("2026-09-20"),
             "2026-09-22T05:00:00Z",
         )
+        .await
         .unwrap();
 
         let overtaken = settle(
@@ -1063,7 +1110,8 @@ mod catch_up {
             &client,
             &caught_up_to("2026-09-19"),
             "2026-09-22T05:00:00Z",
-        );
+        )
+        .await;
 
         assert!(matches!(
             overtaken,
@@ -1071,16 +1119,17 @@ mod catch_up {
         ));
     }
 
-    #[test]
-    fn a_pipeline_caught_up_to_the_date_it_was_last_built_to_builds_nothing() {
+    #[tokio::test]
+    async fn a_pipeline_caught_up_to_the_date_it_was_last_built_to_builds_nothing() {
         let pipeline = pipeline();
-        let client = logged(PEOPLE, &[]);
+        let client = logged(PEOPLE, &[]).await;
         settle(
             &pipeline,
             &client,
             &caught_up_to("2026-09-20"),
             "2026-09-22T05:00:00Z",
         )
+        .await
         .unwrap();
 
         let journal = settle(
@@ -1089,6 +1138,7 @@ mod catch_up {
             &caught_up_to("2026-09-20"),
             "2026-09-22T05:00:00Z",
         )
+        .await
         .unwrap();
 
         assert_eq!(journal.entries().count(), 0);
@@ -1101,10 +1151,10 @@ mod catch_up {
         }
     }
 
-    #[test]
-    fn a_pipeline_built_for_the_first_time_before_its_first_midnight_builds_nothing() {
+    #[tokio::test]
+    async fn a_pipeline_built_for_the_first_time_before_its_first_midnight_builds_nothing() {
         let pipeline = pipeline();
-        let client = logged(PEOPLE, &[]);
+        let client = logged(PEOPLE, &[]).await;
 
         let journal = settle(
             &pipeline,
@@ -1115,15 +1165,16 @@ mod catch_up {
             },
             "1970-01-01T23:00:00Z",
         )
+        .await
         .unwrap();
 
         assert_eq!(journal.entries().count(), 0);
     }
 
-    #[test]
-    fn a_pipeline_that_has_caught_up_builds_nothing() {
+    #[tokio::test]
+    async fn a_pipeline_that_has_caught_up_builds_nothing() {
         let pipeline = pipeline();
-        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]);
+        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]).await;
 
         let journal = settle(
             &pipeline,
@@ -1134,6 +1185,7 @@ mod catch_up {
             },
             "2026-09-20T23:00:00Z",
         )
+        .await
         .unwrap();
 
         assert_eq!(journal.entries().count(), 0);
@@ -1146,8 +1198,9 @@ mod catch_up {
         )
     }
 
-    #[test]
-    fn a_table_failing_in_a_window_stops_itself_alone_and_is_tried_again_by_the_next_catch_up() {
+    #[tokio::test]
+    async fn a_table_failing_in_a_window_stops_itself_alone_and_is_tried_again_by_the_next_catch_up()
+     {
         let pipeline = pipeline();
         let client = logged(
             BUILT_CHANGE_LOGS,
@@ -1155,7 +1208,8 @@ mod catch_up {
                 built_before("people", CAPTURE),
                 built_before("pets", CAPTURE),
             ],
-        );
+        )
+        .await;
         let attempted = |target: &str, status: &str| (target.to_owned(), status.to_owned());
 
         let journal = settle(
@@ -1167,6 +1221,7 @@ mod catch_up {
             },
             "2026-09-22T05:00:00Z",
         )
+        .await
         .unwrap();
         settle(
             &pipeline,
@@ -1177,6 +1232,7 @@ mod catch_up {
             },
             "2026-09-22T06:00:00Z",
         )
+        .await
         .unwrap();
 
         assert!(!journal.complete());
@@ -1191,8 +1247,8 @@ mod catch_up {
         );
     }
 
-    #[test]
-    fn a_pipeline_whose_capture_changed_since_its_last_run_is_not_caught_up() {
+    #[tokio::test]
+    async fn a_pipeline_whose_capture_changed_since_its_last_run_is_not_caught_up() {
         let pipeline = pipeline();
         let client = logged(
             PEOPLE,
@@ -1200,7 +1256,8 @@ mod catch_up {
                 "people",
                 r#"{"debezium":{"dialect":"postgres"}}"#,
             )],
-        );
+        )
+        .await;
 
         let changed = settle(
             &pipeline,
@@ -1210,7 +1267,8 @@ mod catch_up {
                 to: None,
             },
             "2026-09-22T05:00:00Z",
-        );
+        )
+        .await;
 
         assert!(matches!(
             changed,
@@ -1248,9 +1306,10 @@ mod derived {
         )
     }
 
-    #[test]
-    fn a_catch_up_folds_the_change_log_after_the_last_daily_snapshot_into_the_current_state() {
-        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]);
+    #[tokio::test]
+    async fn a_catch_up_folds_the_change_log_after_the_last_daily_snapshot_into_the_current_state()
+    {
+        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]).await;
         let pipeline = derived(
             "scd1",
             "[artifact.scd1]\n",
@@ -1267,6 +1326,7 @@ mod derived {
             },
             "2026-09-21T05:00:00Z",
         )
+        .await
         .unwrap();
 
         assert_eq!(
@@ -1291,9 +1351,9 @@ mod derived {
         );
     }
 
-    #[test]
-    fn a_catch_up_builds_the_current_state_again_only_once_its_snapshot_has_stepped() {
-        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]);
+    #[tokio::test]
+    async fn a_catch_up_builds_the_current_state_again_only_once_its_snapshot_has_stepped() {
+        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]).await;
         let pipeline = derived(
             "scd1-once",
             "[artifact.scd1]\n",
@@ -1315,6 +1375,7 @@ mod derived {
                 },
                 now,
             )
+            .await
             .unwrap();
         }
 
@@ -1330,9 +1391,9 @@ mod derived {
         );
     }
 
-    #[test]
-    fn a_catch_up_keeps_every_version_of_each_window_it_builds() {
-        let client = logged(PEOPLE, &[]);
+    #[tokio::test]
+    async fn a_catch_up_keeps_every_version_of_each_window_it_builds() {
+        let client = logged(PEOPLE, &[]).await;
         let pipeline = derived(
             "scd2",
             "[artifact.scd2]\nshard = \"%Y%m%d\"\n",
@@ -1349,6 +1410,7 @@ mod derived {
             },
             "2026-09-22T05:00:00Z",
         )
+        .await
         .unwrap();
 
         assert_eq!(
@@ -1370,9 +1432,9 @@ mod derived {
         );
     }
 
-    #[test]
-    fn a_catch_up_builds_an_artifact_only_for_the_tables_that_name_it() {
-        let client = logged(PEOPLE, &[]);
+    #[tokio::test]
+    async fn a_catch_up_builds_an_artifact_only_for_the_tables_that_name_it() {
+        let client = logged(PEOPLE, &[]).await;
         let pipeline = derived(
             "scd2-unnamed",
             "[artifact.scd2]\nshard = \"%Y%m%d\"\n",
@@ -1389,6 +1451,7 @@ mod derived {
             },
             "2026-09-22T05:00:00Z",
         )
+        .await
         .unwrap();
 
         assert_eq!(
@@ -1400,10 +1463,10 @@ mod derived {
         );
     }
 
-    #[test]
-    fn a_catch_up_cuts_an_instant_first_in_the_last_day_its_snapshot_was_built_for_and_then_each_day_after()
+    #[tokio::test]
+    async fn a_catch_up_cuts_an_instant_first_in_the_last_day_its_snapshot_was_built_for_and_then_each_day_after()
      {
-        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]);
+        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]).await;
         let pipeline = cut_at_six("cut-each-day");
         let cut = |target: &str, base: &str| (target.to_owned(), base.to_owned());
 
@@ -1416,6 +1479,7 @@ mod derived {
             },
             "2026-09-21T07:00:00Z",
         )
+        .await
         .unwrap();
         settle(
             &pipeline,
@@ -1426,6 +1490,7 @@ mod derived {
             },
             "2026-09-23T07:00:00Z",
         )
+        .await
         .unwrap();
 
         assert_eq!(
@@ -1460,9 +1525,9 @@ mod derived {
         );
     }
 
-    #[test]
-    fn a_catch_up_named_an_artifact_advances_that_one_alone() {
-        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]);
+    #[tokio::test]
+    async fn a_catch_up_named_an_artifact_advances_that_one_alone() {
+        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]).await;
         let pipeline = cut_at_six("one-at-a-time");
         let caught_up = |artifact, at: Option<&str>| RunCommand::CatchUp {
             target: Target::new(Some(artifact), at.map(|at| at.parse().unwrap())),
@@ -1481,11 +1546,13 @@ mod derived {
             &caught_up("snapshot", None),
             "2026-09-21T07:00:00Z",
         )
+        .await
         .unwrap();
         let untouched = !lithify_core::sink::WarehouseClient::exists(
             &client,
             &lithify_core::sink::TablePath::new("mysql_shop_instant", "_lithify_log"),
         )
+        .await
         .unwrap();
         settle(
             &pipeline,
@@ -1493,6 +1560,7 @@ mod derived {
             &caught_up("instant", Some("06:00")),
             "2026-09-21T07:00:00Z",
         )
+        .await
         .unwrap();
 
         assert!(untouched);
@@ -1505,9 +1573,9 @@ mod derived {
         );
     }
 
-    #[test]
-    fn an_instant_not_yet_reached_is_not_cut() {
-        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]);
+    #[tokio::test]
+    async fn an_instant_not_yet_reached_is_not_cut() {
+        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]).await;
 
         settle(
             &cut_at_six("not-yet-cut"),
@@ -1518,6 +1586,7 @@ mod derived {
             },
             "2026-09-22T05:00:00Z",
         )
+        .await
         .unwrap();
 
         assert!(
@@ -1527,6 +1596,7 @@ mod derived {
                     "mysql_shop_instant"
                 )),
             )
+            .await
             .unwrap()
         );
     }

@@ -55,13 +55,13 @@ enum Command {
 }
 
 impl Command {
-    fn execute(self) -> ExitCode {
+    async fn execute(self) -> ExitCode {
         let journal = match self {
-            Self::CatchUp(arguments) => arguments.journal(),
-            Self::Build(arguments) => arguments.journal(),
-            Self::Check(arguments) => arguments.journal(),
+            Self::CatchUp(arguments) => arguments.journal().await,
+            Self::Build(arguments) => arguments.journal().await,
+            Self::Check(arguments) => arguments.journal().await,
             #[cfg(feature = "serve")]
-            Self::Serve(arguments) => arguments.journal(),
+            Self::Serve(arguments) => arguments.journal().await,
         };
 
         match journal {
@@ -184,11 +184,14 @@ struct CatchUpArguments {
 }
 
 impl CatchUpArguments {
-    fn journal(self) -> Result<Journal, Unrunnable> {
-        self.pipeline.run().build(&RunCommand::CatchUp {
-            target: self.target.target(),
-            to: self.to,
-        })
+    async fn journal(self) -> Result<Journal, Unrunnable> {
+        self.pipeline
+            .run()
+            .build(&RunCommand::CatchUp {
+                target: self.target.target(),
+                to: self.to,
+            })
+            .await
     }
 }
 
@@ -207,13 +210,13 @@ struct BuildArguments {
 }
 
 impl BuildArguments {
-    fn journal(self) -> Result<Journal, Unrunnable> {
+    async fn journal(self) -> Result<Journal, Unrunnable> {
         let command = RunCommand::Build(self.target.target());
         let run = self.pipeline.run();
 
         match self.dry_run {
-            Some(into) => run.dry_run(&command, &into),
-            None => run.build(&command),
+            Some(into) => run.dry_run(&command, &into).await,
+            None => run.build(&command).await,
         }
     }
 }
@@ -225,8 +228,8 @@ struct CheckArguments {
 }
 
 impl CheckArguments {
-    fn journal(self) -> Result<Journal, Unrunnable> {
-        self.pipeline.run().check()
+    async fn journal(self) -> Result<Journal, Unrunnable> {
+        self.pipeline.run().check().await
     }
 }
 
@@ -251,25 +254,27 @@ struct ServeArguments {
 
 #[cfg(feature = "serve")]
 impl ServeArguments {
-    fn journal(self) -> Result<Journal, Unrunnable> {
+    async fn journal(self) -> Result<Journal, Unrunnable> {
         Board::new(
             Pipelines::<CaptureConfig, WarehouseConfig, ArtifactConfig>::new(
                 self.directory,
                 self.credential.credentials(),
             ),
         )
-        .serve(self.address)?;
+        .serve(self.address)
+        .await?;
 
         Ok(Journal::default())
     }
 }
 
-fn main() -> ExitCode {
+#[tokio::main]
+async fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .init();
 
-    Arguments::parse().command.execute()
+    Arguments::parse().command.execute().await
 }
 
 #[cfg(test)]

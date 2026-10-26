@@ -81,7 +81,7 @@ impl<X: DuckDbExecution> StepTaker for Taking<'_, DuckDbClient<X>> {
         self.client
     }
 
-    fn take<A: Artifact, B: BuildLogWriter>(
+    async fn take<A: Artifact, B: BuildLogWriter>(
         &self,
         artifact: &A,
         window: &Window,
@@ -89,18 +89,20 @@ impl<X: DuckDbExecution> StepTaker for Taking<'_, DuckDbClient<X>> {
         tables: &Tables,
         writer: &B,
     ) -> Result<B::Output, Unrunnable> {
-        self.capture.with_duckdb_change_logs(
-            self.topic_prefix,
-            Replaying::new(
-                self.client,
-                artifact,
-                window,
-                previous,
-                tables,
-                self.listing,
-                writer,
-            ),
-        )
+        self.capture
+            .with_duckdb_change_logs(
+                self.topic_prefix,
+                Replaying::new(
+                    self.client,
+                    artifact,
+                    window,
+                    previous,
+                    tables,
+                    self.listing,
+                    writer,
+                ),
+            )
+            .await
     }
 }
 
@@ -112,7 +114,7 @@ impl<X: BigQueryExecution> StepTaker for Taking<'_, BigQueryClient<X>> {
         self.client
     }
 
-    fn take<A: Artifact, B: BuildLogWriter>(
+    async fn take<A: Artifact, B: BuildLogWriter>(
         &self,
         artifact: &A,
         window: &Window,
@@ -120,18 +122,20 @@ impl<X: BigQueryExecution> StepTaker for Taking<'_, BigQueryClient<X>> {
         tables: &Tables,
         writer: &B,
     ) -> Result<B::Output, Unrunnable> {
-        self.capture.with_bigquery_change_logs(
-            self.topic_prefix,
-            Replaying::new(
-                self.client,
-                artifact,
-                window,
-                previous,
-                tables,
-                self.listing,
-                writer,
-            ),
-        )
+        self.capture
+            .with_bigquery_change_logs(
+                self.topic_prefix,
+                Replaying::new(
+                    self.client,
+                    artifact,
+                    window,
+                    previous,
+                    tables,
+                    self.listing,
+                    writer,
+                ),
+            )
+            .await
     }
 }
 
@@ -140,19 +144,21 @@ impl<X: DuckDbExecution, B: BuildLogWriter, A: Artifact> DuckDbChangeLogsFn
 {
     type Output = Result<B::Output, Unrunnable>;
 
-    fn call_duckdb<C>(self, logs: C) -> Self::Output
+    async fn call_duckdb<C>(self, logs: C) -> Self::Output
     where
         C: ChangeLogs,
         <C::Schema as SchemaChangeLog>::Record: FromSql,
     {
-        Replayer::new(self.client, &logs).run(
-            self.artifact,
-            self.window,
-            self.previous,
-            self.tables,
-            |table| self.listing.table(table).builds(A::KIND),
-            self.writer,
-        )
+        Replayer::new(self.client, &logs)
+            .run(
+                self.artifact,
+                self.window,
+                self.previous,
+                self.tables,
+                |table| self.listing.table(table).builds(A::KIND),
+                self.writer,
+            )
+            .await
     }
 }
 
@@ -161,19 +167,21 @@ impl<X: BigQueryExecution, B: BuildLogWriter, A: Artifact> BigQueryChangeLogsFn
 {
     type Output = Result<B::Output, Unrunnable>;
 
-    fn call_bigquery<C>(self, logs: C) -> Self::Output
+    async fn call_bigquery<C>(self, logs: C) -> Self::Output
     where
         C: ChangeLogs,
         <C::Schema as SchemaChangeLog>::Record: TryFrom<Row, Error = RowError>,
     {
-        Replayer::new(self.client, &logs).run(
-            self.artifact,
-            self.window,
-            self.previous,
-            self.tables,
-            |table| self.listing.table(table).builds(A::KIND),
-            self.writer,
-        )
+        Replayer::new(self.client, &logs)
+            .run(
+                self.artifact,
+                self.window,
+                self.previous,
+                self.tables,
+                |table| self.listing.table(table).builds(A::KIND),
+                self.writer,
+            )
+            .await
     }
 }
 
@@ -266,12 +274,12 @@ place.snapshot = [{ prefix = "mysql_shop" }]
         opened("pipeline", INFRA, "")
     }
 
-    fn dry_run(sink: &Sink<WarehouseConfig, ArtifactConfig>) -> DuckDbClient<DryRun> {
+    async fn dry_run(sink: &Sink<WarehouseConfig, ArtifactConfig>) -> DuckDbClient<DryRun> {
         let client = DuckDbClient::new(
             Connection::open_in_memory().unwrap(),
             DuckDbWarehouse::new(sink.change_log().clone()),
         );
-        client.execute(&SqlString::from(CHANGE_LOGS)).unwrap();
+        client.execute(&SqlString::from(CHANGE_LOGS)).await.unwrap();
 
         client.executing(DryRun::default())
     }
@@ -301,15 +309,15 @@ place.snapshot = [{ prefix = "mysql_shop" }]
             .collect()
     }
 
-    #[test]
-    fn a_dry_run_records_the_snapshot_of_every_table_the_schema_changes_left_standing() {
+    #[tokio::test]
+    async fn a_dry_run_records_the_snapshot_of_every_table_the_schema_changes_left_standing() {
         let pipeline = pipeline();
         let source = pipeline.sources().next().unwrap();
         let sink = pipeline
             .sinks()
             .find(|sink| sink.name() == "duckdb_s3")
             .unwrap();
-        let client = dry_run(sink);
+        let client = dry_run(sink).await;
         let window = Window::new(
             Ts::try_from(0).unwrap(),
             Ts::try_from(1789948800000).unwrap(),
@@ -329,6 +337,7 @@ place.snapshot = [{ prefix = "mysql_shop" }]
                     &snapshot_build(),
                 ),
             )
+            .await
             .unwrap();
         let created = statements(&client, "CREATE OR REPLACE TABLE \"mysql_shop\".\"people_");
 
@@ -340,19 +349,20 @@ place.snapshot = [{ prefix = "mysql_shop" }]
         assert!(
             !client
                 .exists(&TablePath::new("mysql_shop", "people_20260920"))
+                .await
                 .unwrap()
         );
     }
 
-    #[test]
-    fn a_dry_run_records_the_build_log_it_would_write_without_writing_it() {
+    #[tokio::test]
+    async fn a_dry_run_records_the_build_log_it_would_write_without_writing_it() {
         let pipeline = pipeline();
         let source = pipeline.sources().next().unwrap();
         let sink = pipeline
             .sinks()
             .find(|sink| sink.name() == "duckdb_s3")
             .unwrap();
-        let client = dry_run(sink);
+        let client = dry_run(sink).await;
         let window = Window::new(
             Ts::try_from(0).unwrap(),
             Ts::try_from(1789948800000).unwrap(),
@@ -372,6 +382,7 @@ place.snapshot = [{ prefix = "mysql_shop" }]
                     &snapshot_build(),
                 ),
             )
+            .await
             .unwrap();
 
         assert_eq!(
@@ -381,19 +392,20 @@ place.snapshot = [{ prefix = "mysql_shop" }]
         assert!(
             !client
                 .exists(&BuildLog::path(&Namespace::from("mysql_shop")))
+                .await
                 .unwrap()
         );
     }
 
-    #[test]
-    fn a_dry_run_logs_a_table_with_nothing_to_fold_onto_as_failed_as_a_build_does() {
+    #[tokio::test]
+    async fn a_dry_run_logs_a_table_with_nothing_to_fold_onto_as_failed_as_a_build_does() {
         let pipeline = pipeline();
         let source = pipeline.sources().next().unwrap();
         let sink = pipeline
             .sinks()
             .find(|sink| sink.name() == "duckdb_s3")
             .unwrap();
-        let client = dry_run(sink);
+        let client = dry_run(sink).await;
         let window = Window::new(
             Ts::try_from(1789862400000).unwrap(),
             Ts::try_from(1789948800000).unwrap(),
@@ -413,6 +425,7 @@ place.snapshot = [{ prefix = "mysql_shop" }]
                     &snapshot_build(),
                 ),
             )
+            .await
             .unwrap();
 
         assert_eq!(
@@ -423,15 +436,15 @@ place.snapshot = [{ prefix = "mysql_shop" }]
         );
     }
 
-    #[test]
-    fn a_dry_run_folds_each_table_onto_the_shard_its_last_build_log_targeted() {
+    #[tokio::test]
+    async fn a_dry_run_folds_each_table_onto_the_shard_its_last_build_log_targeted() {
         let pipeline = pipeline();
         let source = pipeline.sources().next().unwrap();
         let sink = pipeline
             .sinks()
             .find(|sink| sink.name() == "duckdb_s3")
             .unwrap();
-        let client = dry_run(sink);
+        let client = dry_run(sink).await;
         let window = Window::new(
             Ts::try_from(1789862400000).unwrap(),
             Ts::try_from(1789948800000).unwrap(),
@@ -452,6 +465,7 @@ place.snapshot = [{ prefix = "mysql_shop" }]
                     &snapshot_build(),
                 ),
             )
+            .await
             .unwrap();
 
         assert!(
@@ -490,24 +504,27 @@ place.snapshot = [{ prefix = "mysql_shop" }]
         ))
     }
 
-    pub(crate) fn logged(change_logs: &str, before: &[BuildLog]) -> DuckDbClient {
+    pub(crate) async fn logged(change_logs: &str, before: &[BuildLog]) -> DuckDbClient {
         let client = DuckDbClient::new(
             Connection::open_in_memory().unwrap(),
             DuckDbWarehouse::new("mysql_shop_cdc"),
         );
-        client.execute(&SqlString::from(change_logs)).unwrap();
+        client.execute(&SqlString::from(change_logs)).await.unwrap();
         client
             .execute(&SqlString::from(
                 "CREATE SCHEMA mysql_shop;
                  CREATE TABLE mysql_shop.people_20260919 AS SELECT 7::BIGINT AS id;
                  CREATE TABLE mysql_shop.pets_20260919 AS SELECT 7::BIGINT AS id",
             ))
+            .await
             .unwrap();
         client
             .create_build_log::<Unrunnable>(&Namespace::from("mysql_shop"))
+            .await
             .unwrap();
         client
             .append_build_logs(&Namespace::from("mysql_shop"), before)
+            .await
             .unwrap();
 
         client
@@ -563,7 +580,7 @@ place.snapshot = [{ prefix = "mysql_shop" }]
             .unwrap()
     }
 
-    fn built() -> (
+    async fn built() -> (
         Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig>,
         DuckDbClient,
     ) {
@@ -576,12 +593,15 @@ place.snapshot = [{ prefix = "mysql_shop" }]
             Connection::open_in_memory().unwrap(),
             DuckDbWarehouse::new(sink.change_log().clone()),
         );
-        client.execute(&SqlString::from(BUILT_CHANGE_LOGS)).unwrap();
+        client
+            .execute(&SqlString::from(BUILT_CHANGE_LOGS))
+            .await
+            .unwrap();
 
         (pipeline, client)
     }
 
-    fn build(
+    async fn build(
         pipeline: &Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig>,
         client: &DuckDbClient,
     ) -> Vec<BuildLog> {
@@ -612,14 +632,15 @@ place.snapshot = [{ prefix = "mysql_shop" }]
                         .unwrap(),
                 ),
             )
+            .await
             .unwrap()
     }
 
-    #[test]
-    fn a_build_settles_each_table_and_logs_it_once_whether_or_not_it_was_built() {
-        let (pipeline, client) = built();
+    #[tokio::test]
+    async fn a_build_settles_each_table_and_logs_it_once_whether_or_not_it_was_built() {
+        let (pipeline, client) = built().await;
 
-        let logs = build(&pipeline, &client);
+        let logs = build(&pipeline, &client).await;
 
         assert_eq!(logs.len(), 2);
         assert!(logs[1].to_string().contains("mysql.shop.pets"));
@@ -645,11 +666,11 @@ place.snapshot = [{ prefix = "mysql_shop" }]
         );
     }
 
-    #[test]
-    fn a_build_logs_the_run_the_capture_and_the_schedule_it_was_built_under() {
-        let (pipeline, client) = built();
+    #[tokio::test]
+    async fn a_build_logs_the_run_the_capture_and_the_schedule_it_was_built_under() {
+        let (pipeline, client) = built().await;
 
-        build(&pipeline, &client);
+        build(&pipeline, &client).await;
 
         assert_eq!(
             rows(
@@ -663,14 +684,14 @@ place.snapshot = [{ prefix = "mysql_shop" }]
         );
     }
 
-    #[test]
-    fn a_window_built_twice_settles_into_the_same_snapshot_and_reads_as_built_once() {
-        let (pipeline, client) = built();
+    #[tokio::test]
+    async fn a_window_built_twice_settles_into_the_same_snapshot_and_reads_as_built_once() {
+        let (pipeline, client) = built().await;
         let snapshot = "SELECT id::VARCHAR, 'kept' FROM mysql_shop.people_20260920 ORDER BY id";
 
-        let once = build(&pipeline, &client);
+        let once = build(&pipeline, &client).await;
         let built_once = rows(&client, snapshot);
-        let twice = build(&pipeline, &client);
+        let twice = build(&pipeline, &client).await;
 
         assert_eq!(rows(&client, snapshot), built_once);
         assert_ne!(once[0].run_id(), twice[0].run_id());
@@ -680,6 +701,7 @@ place.snapshot = [{ prefix = "mysql_shop" }]
                 &Snapshot::days(),
                 &Latest::Attempted.into(),
             )
+            .await
             .unwrap();
         assert_eq!(
             latest

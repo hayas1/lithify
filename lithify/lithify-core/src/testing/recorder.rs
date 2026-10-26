@@ -48,13 +48,13 @@ impl<W: Warehouse> WarehouseClient for Recorder<W> {
         &self.warehouse
     }
 
-    fn execute(&self, statement: &SqlString) -> Result<(), Self::Error> {
+    async fn execute(&self, statement: &SqlString) -> Result<(), Self::Error> {
         self.executed.borrow_mut().push(statement.to_string());
 
         Ok(())
     }
 
-    fn build_log_rows(
+    async fn build_log_rows(
         &self,
         _: &Namespace,
         query: &BuildLogQuery,
@@ -75,7 +75,7 @@ impl<W: Warehouse> WarehouseClient for Recorder<W> {
         })
     }
 
-    fn exists(&self, table: &TablePath) -> Result<bool, Self::Error> {
+    async fn exists(&self, table: &TablePath) -> Result<bool, Self::Error> {
         Ok(self.present.contains(table))
     }
 }

@@ -72,7 +72,7 @@ pub trait BuildLogWriter {
 
     fn advancing(&self, namespace: &Namespace, series: &Series) -> Self;
 
-    fn write<K, E>(&self, client: &K, built: Vec<TableBuilt>) -> Result<Self::Output, E>
+    async fn write<K, E>(&self, client: &K, built: Vec<TableBuilt>) -> Result<Self::Output, E>
     where
         K: WarehouseClient,
         E: From<K::Error> + From<UnbuildableArtifact>;
@@ -99,7 +99,7 @@ impl BuildLogWriter for BuildLogWrite {
         }
     }
 
-    fn write<K, E>(&self, client: &K, built: Vec<TableBuilt>) -> Result<Self::Output, E>
+    async fn write<K, E>(&self, client: &K, built: Vec<TableBuilt>) -> Result<Self::Output, E>
     where
         K: WarehouseClient,
         E: From<K::Error> + From<UnbuildableArtifact>,
@@ -108,8 +108,8 @@ impl BuildLogWriter for BuildLogWrite {
             .into_iter()
             .map(|built| built.logged(&self.run))
             .collect();
-        client.create_build_log::<E>(&self.namespace)?;
-        client.append_build_logs(&self.namespace, &logs)?;
+        client.create_build_log::<E>(&self.namespace).await?;
+        client.append_build_logs(&self.namespace, &logs).await?;
 
         Ok(logs)
     }
@@ -129,7 +129,7 @@ where
         Self { client, logs }
     }
 
-    pub fn built<A: Artifact, E>(
+    pub async fn built<A: Artifact, E>(
         &self,
         artifact: &'a A,
         window: &'a Window,
@@ -151,21 +151,25 @@ where
             },
             finishes,
         );
-        let catalog = self.client.replay::<E, _>(
-            self.client.warehouse(),
-            self.logs.schema_changes(),
-            window,
-            &mut listeners,
-        )?;
+        let catalog = self
+            .client
+            .replay::<E, _>(
+                self.client.warehouse(),
+                self.logs.schema_changes(),
+                window,
+                &mut listeners,
+            )
+            .await?;
+        let mut built = Vec::new();
 
-        Ok(listeners
-            .finish(self.client.warehouse(), catalog)?
-            .into_iter()
-            .map(|build| self.client.build(build))
-            .collect())
+        for build in listeners.finish(self.client.warehouse(), catalog)? {
+            built.push(self.client.build(build).await);
+        }
+
+        Ok(built)
     }
 
-    pub fn run<A: Artifact, B: BuildLogWriter, E>(
+    pub async fn run<A: Artifact, B: BuildLogWriter, E>(
         &self,
         artifact: &'a A,
         window: &'a Window,
@@ -181,11 +185,13 @@ where
             + From<<K as WarehouseClient>::Error>,
         <K as SchemaChangeStream<C::Schema>>::Error: Into<E>,
     {
-        let built = self.built::<A, E>(artifact, window, previous, |table| {
-            tables.includes(table) && builds(table)
-        })?;
+        let built = self
+            .built::<A, E>(artifact, window, previous, |table| {
+                tables.includes(table) && builds(table)
+            })
+            .await?;
 
-        writer.write(self.client, built)
+        writer.write(self.client, built).await
     }
 }
 
@@ -198,7 +204,7 @@ pub trait StepTaker {
 
     fn client(&self) -> &Self::Client;
 
-    fn take<A: Artifact, B: BuildLogWriter>(
+    async fn take<A: Artifact, B: BuildLogWriter>(
         &self,
         artifact: &A,
         window: &Window,

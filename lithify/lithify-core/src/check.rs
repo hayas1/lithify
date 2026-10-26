@@ -105,7 +105,7 @@ impl Expectation {
         }
     }
 
-    pub fn read<K, E>(
+    pub async fn read<K, E>(
         &self,
         client: &K,
         namespace: &Namespace,
@@ -115,7 +115,7 @@ impl Expectation {
         K: WarehouseClient,
         E: From<K::Error> + From<UnreadableBuildLog>,
     {
-        if !client.exists(&BuildLog::path(namespace))? {
+        if !client.exists(&BuildLog::path(namespace)).await? {
             return Ok(Inspection {
                 schedule: self.schedule,
                 latest: Vec::new(),
@@ -123,11 +123,15 @@ impl Expectation {
             });
         }
 
-        let latest = client.build_logs::<E>(namespace, series, &Latest::Attempted.into())?;
-        let succeeded = client.build_logs::<E>(namespace, series, &Latest::Succeeded.into())?;
+        let latest = client
+            .build_logs::<E>(namespace, series, &Latest::Attempted.into())
+            .await?;
+        let succeeded = client
+            .build_logs::<E>(namespace, series, &Latest::Succeeded.into())
+            .await?;
         let mut present = BTreeSet::new();
         for target in succeeded.iter().filter_map(BuildLog::target) {
-            if client.exists(target)? {
+            if client.exists(target).await? {
                 present.insert(target.clone());
             }
         }
@@ -427,8 +431,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_warehouse_is_checked_against_the_tables_it_holds() {
+    #[tokio::test]
+    async fn a_warehouse_is_checked_against_the_tables_it_holds() {
         let people = logged(2, "people", day("2026-09-20"), Status::Succeeded);
         let pets = logged(2, "pets", day("2026-09-20"), Status::Succeeded);
         let client = Recorder::new(Engine::default())
@@ -445,6 +449,7 @@ mod tests {
                     &Namespace::from("mysql_shop"),
                     &daily()
                 )
+                .await
                 .unwrap()
                 .discrepancies(),
             [Discrepancy::Missing {
@@ -454,8 +459,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_warehouse_holding_no_build_log_was_never_built() {
+    #[tokio::test]
+    async fn a_warehouse_holding_no_build_log_was_never_built() {
         assert_eq!(
             expected("2026-09-21T05:00:00Z")
                 .read::<_, Box<dyn std::error::Error>>(
@@ -463,6 +468,7 @@ mod tests {
                     &Namespace::from("mysql_shop"),
                     &daily()
                 )
+                .await
                 .unwrap()
                 .discrepancies(),
             [Discrepancy::NeverBuilt {
@@ -471,8 +477,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_warehouse_is_inspected_for_the_latest_build_of_each_table() {
+    #[tokio::test]
+    async fn a_warehouse_is_inspected_for_the_latest_build_of_each_table() {
         let failed = logged(
             3,
             "people",
@@ -490,6 +496,7 @@ mod tests {
                     &Namespace::from("mysql_shop"),
                     &daily()
                 )
+                .await
                 .unwrap()
                 .latest(),
             [failed]

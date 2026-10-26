@@ -92,12 +92,12 @@ struct Shards {
 }
 
 impl Shards {
-    fn over(replica: &Replica) -> Self {
+    async fn over(replica: &Replica) -> Self {
         let client = DuckDbClient::new(
             Connection::open_in_memory().unwrap(),
             DuckDbWarehouse::new("cdc"),
         );
-        client.execute(&ChangeLog(replica).create()).unwrap();
+        client.execute(&ChangeLog(replica).create()).await.unwrap();
 
         Self {
             client,
@@ -105,11 +105,11 @@ impl Shards {
         }
     }
 
-    fn build(&self, window: &Window, previous: Option<&BuildLog>) -> BuildLog {
-        self.build_into(&self.artifact, window, previous)
+    async fn build(&self, window: &Window, previous: Option<&BuildLog>) -> BuildLog {
+        self.build_into(&self.artifact, window, previous).await
     }
 
-    fn build_into<A: Artifact>(
+    async fn build_into<A: Artifact>(
         &self,
         artifact: &A,
         window: &Window,
@@ -121,7 +121,7 @@ impl Shards {
             .finish(self.client.warehouse(), ReplayEnd::standing(people(), None))
             .unwrap();
         for statement in build.statements().unwrap() {
-            self.client.execute(statement).unwrap();
+            self.client.execute(statement).await.unwrap();
         }
 
         build
@@ -177,66 +177,70 @@ fn replica() -> Replica {
         .upsert(DAY + 3_000, &[("id", Some("1")), ("name", Some("Ally"))])
 }
 
-#[test]
-fn a_snapshot_holds_what_the_source_held_as_its_window_closed() {
+#[tokio::test]
+async fn a_snapshot_holds_what_the_source_held_as_its_window_closed() {
     let replica = replica();
-    let shards = Shards::over(&replica);
+    let shards = Shards::over(&replica).await;
 
-    let built = shards.build(&day(0), None);
+    let built = shards.build(&day(0), None).await;
 
     assert_eq!(shards.rows(&built), replica.at(*day(0).to()));
 }
 
-#[test]
-fn a_snapshot_folded_onto_the_one_before_holds_what_the_source_held_as_its_window_closed() {
+#[tokio::test]
+async fn a_snapshot_folded_onto_the_one_before_holds_what_the_source_held_as_its_window_closed() {
     let replica = replica();
-    let shards = Shards::over(&replica);
+    let shards = Shards::over(&replica).await;
 
-    let first = shards.build(&day(0), None);
-    let second = shards.build(&day(1), Some(&first));
+    let first = shards.build(&day(0), None).await;
+    let second = shards.build(&day(1), Some(&first)).await;
 
     assert_eq!(shards.rows(&second), replica.at(*day(1).to()));
 }
 
-#[test]
-fn an_instant_holds_what_the_source_held_as_it_was_cut() {
+#[tokio::test]
+async fn an_instant_holds_what_the_source_held_as_it_was_cut() {
     let replica = replica();
-    let shards = Shards::over(&replica);
+    let shards = Shards::over(&replica).await;
     let six = Instant::new(
         NaiveTime::from_hms_opt(6, 0, 0).unwrap(),
         Schedule::default(),
         "shop_instant",
         Shard::new("%Y%m%d%H", chrono_tz::Tz::UTC),
     );
-    let first = shards.build(&day(0), None);
+    let first = shards.build(&day(0), None).await;
     let timeline = Timeline::new(Schedule::default(), *day(0).from()..*day(2).to());
     let cut = six.window(&day(1), &timeline).unwrap();
 
-    let instant = shards.build_into(
-        &six,
-        &cut,
-        six.base(std::slice::from_ref(&first), people().id(), &cut),
-    );
+    let instant = shards
+        .build_into(
+            &six,
+            &cut,
+            six.base(std::slice::from_ref(&first), people().id(), &cut),
+        )
+        .await;
 
     assert_eq!(shards.rows(&instant), replica.at(*cut.to()));
 }
 
-#[test]
-fn an_scd1_holds_what_the_source_holds_now_onto_the_last_daily_snapshot() {
+#[tokio::test]
+async fn an_scd1_holds_what_the_source_holds_now_onto_the_last_daily_snapshot() {
     let replica = replica();
-    let shards = Shards::over(&replica);
+    let shards = Shards::over(&replica).await;
     let scd1 = Scd1::new("shop_scd1");
-    let first = shards.build(&day(0), None);
+    let first = shards.build(&day(0), None).await;
     let built = Ts::try_from(DAY + 1_500).unwrap();
     let now = Ts::try_from(i64::from(i32::MAX)).unwrap();
     let timeline = Timeline::new(Schedule::default(), *day(0).from()..built);
     let window = scd1.window(&day(1), &timeline).unwrap();
 
-    let current = shards.build_into(
-        &scd1,
-        &window,
-        scd1.base(std::slice::from_ref(&first), people().id(), &window),
-    );
+    let current = shards
+        .build_into(
+            &scd1,
+            &window,
+            scd1.base(std::slice::from_ref(&first), people().id(), &window),
+        )
+        .await;
 
     assert_eq!(shards.rows(&current), replica.at(now));
 }
@@ -277,17 +281,19 @@ fn scd2() -> Scd2 {
     Scd2::new(Namespace::from("shop_scd2"), "%Y%m%d", chrono_tz::Tz::UTC)
 }
 
-#[test]
-fn an_scd2_holds_at_every_instant_the_version_the_source_held_then() {
+#[tokio::test]
+async fn an_scd2_holds_at_every_instant_the_version_the_source_held_then() {
     let replica = replica();
-    let shards = Shards::over(&replica);
+    let shards = Shards::over(&replica).await;
     let scd2 = scd2();
-    let first = shards.build_into(&scd2, &day(0), None);
-    let second = shards.build_into(
-        &scd2,
-        &day(1),
-        scd2.base(std::slice::from_ref(&first), people().id(), &day(1)),
-    );
+    let first = shards.build_into(&scd2, &day(0), None).await;
+    let second = shards
+        .build_into(
+            &scd2,
+            &day(1),
+            scd2.base(std::slice::from_ref(&first), people().id(), &day(1)),
+        )
+        .await;
     let versions = [
         scd2.closed(people().id(), &day(0)),
         scd2.closed(people().id(), &day(1)),
@@ -313,21 +319,21 @@ fn an_scd2_holds_at_every_instant_the_version_the_source_held_then() {
     }
 }
 
-#[test]
-fn an_scd2_built_again_for_a_window_holds_the_same_versions() {
+#[tokio::test]
+async fn an_scd2_built_again_for_a_window_holds_the_same_versions() {
     let replica = replica();
-    let shards = Shards::over(&replica);
+    let shards = Shards::over(&replica).await;
     let scd2 = scd2();
-    let first = shards.build_into(&scd2, &day(0), None);
+    let first = shards.build_into(&scd2, &day(0), None).await;
     let base = scd2.base(std::slice::from_ref(&first), people().id(), &day(1));
-    let second = shards.build_into(&scd2, &day(1), base);
+    let second = shards.build_into(&scd2, &day(1), base).await;
     let versions = [
         scd2.closed(people().id(), &day(1)),
         second.target().unwrap().clone(),
     ];
     let built = shards.as_of(&versions, DAY + 2_500);
 
-    shards.build_into(&scd2, &day(1), base);
+    shards.build_into(&scd2, &day(1), base).await;
 
     assert_eq!(shards.as_of(&versions, DAY + 2_500), built);
 }

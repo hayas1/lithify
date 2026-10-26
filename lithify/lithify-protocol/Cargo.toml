@@ -18,7 +18,6 @@ wkt = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sqlparser = { workspace = true }
-tokio = { workspace = true, optional = true }
 
 [features]
 bigquery = [
@@ -26,10 +25,10 @@ bigquery = [
     "dep:google-cloud-bigquery",
     "dep:google-cloud-gax",
     "dep:wkt",
-    "dep:tokio",
 ]
 duckdb = ["dep:duckdb"]
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["macros"] }
 chrono = { workspace = true }
 ulid = { workspace = true }

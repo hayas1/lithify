@@ -20,4 +20,5 @@ ulid = { workspace = true }
 testing = []
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["macros"] }
 tracing-subscriber = { workspace = true }

@@ -463,7 +463,7 @@ mod tests {
             )
         }
 
-        fn with_client<F: lithify_core::sink::WarehouseFn>(
+        async fn with_client<F: lithify_core::sink::WarehouseFn>(
             &self,
             _: &Lying,
             _: &(),

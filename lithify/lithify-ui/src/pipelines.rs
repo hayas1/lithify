@@ -216,16 +216,20 @@ where
             .collect())
     }
 
-    pub fn inspect(
+    pub async fn inspect(
         &self,
         name: &str,
         view: BuildLogView,
     ) -> Result<Option<PipelineOverview>, String> {
-        Ok(self
-            .directories()?
+        let directories = self.directories()?;
+        let found = directories
             .iter()
-            .find(|directory| Self::location(directory).name() == name)
-            .map(|directory| self.overview(directory, view)))
+            .find(|directory| Self::location(directory).name() == name);
+
+        Ok(match found {
+            Some(directory) => Some(self.overview(directory, view).await),
+            None => None,
+        })
     }
 
     fn directories(&self) -> Result<Vec<PathBuf>, String> {
@@ -247,20 +251,30 @@ where
         PipelineLocation::new(&name, &directory.display().to_string())
     }
 
-    fn overview(&self, directory: &Path, view: BuildLogView) -> PipelineOverview {
-        let sources = Pipeline::<C, W, A>::open(directory)
-            .map_err(|unreadable| unreadable.to_string())
-            .and_then(|pipeline| {
-                pipeline
-                    .sources()
-                    .map(|source| self.source(&pipeline, source, view))
-                    .collect()
-            });
+    async fn overview(&self, directory: &Path, view: BuildLogView) -> PipelineOverview {
+        let sources = match Pipeline::<C, W, A>::open(directory) {
+            Ok(pipeline) => self.sources(&pipeline, view).await,
+            Err(unreadable) => Err(unreadable.to_string()),
+        };
 
         PipelineOverview::new(Self::location(directory), sources)
     }
 
-    fn source(
+    async fn sources(
+        &self,
+        pipeline: &Pipeline<C, W, A>,
+        view: BuildLogView,
+    ) -> Result<Vec<SourceOverview>, String> {
+        let mut sources = Vec::new();
+
+        for source in pipeline.sources() {
+            sources.push(self.source(pipeline, source, view).await?);
+        }
+
+        Ok(sources)
+    }
+
+    async fn source(
         &self,
         pipeline: &Pipeline<C, W, A>,
         source: &Source<C>,
@@ -269,22 +283,19 @@ where
         let capture =
             serde_json::to_string(source.capture()).map_err(|unwritten| unwritten.to_string())?;
         let now = Ts::now();
+        let mut sinks = Vec::new();
 
-        Ok(SourceOverview::new(
-            source.name(),
-            pipeline
-                .sinks()
-                .map(|sink| {
-                    SinkOverview::new(
-                        sink.name(),
-                        self.inspection(sink, source, &capture, now, view),
-                    )
-                })
-                .collect(),
-        ))
+        for sink in pipeline.sinks() {
+            sinks.push(SinkOverview::new(
+                sink.name(),
+                self.inspection(sink, source, &capture, now, view).await,
+            ));
+        }
+
+        Ok(SourceOverview::new(source.name(), sinks))
     }
 
-    fn inspection(
+    async fn inspection(
         &self,
         sink: &Sink<W, A>,
         source: &Source<C>,
@@ -310,6 +321,7 @@ where
 
         sink.warehouse()
             .with_client(sink.change_log(), &self.credential, reading)
+            .await
             .map_err(|unopened| unopened.to_string())?
     }
 }
@@ -322,20 +334,25 @@ struct Reading<'a> {
 }
 
 impl Reading<'_> {
-    fn read<K: WarehouseClient>(&self, client: &K) -> Result<SinkInspection, Misread> {
-        let inspection =
-            self.expectation
-                .read::<K, Misread>(client, &self.namespace, &self.series)?;
+    async fn read<K: WarehouseClient>(&self, client: &K) -> Result<SinkInspection, Misread> {
+        let inspection = self
+            .expectation
+            .read::<K, Misread>(client, &self.namespace, &self.series)
+            .await?;
         let unbuilt = inspection.latest().is_empty();
         let inspection = SinkInspection::from(inspection);
 
         match (self.view, unbuilt) {
             (BuildLogView::Latest, _) | (BuildLogView::All, true) => Ok(inspection),
-            (BuildLogView::All, false) => Ok(inspection.showing(client.build_logs::<Misread>(
-                &self.namespace,
-                &self.series,
-                &BuildLogQuery::from(self.view),
-            )?)),
+            (BuildLogView::All, false) => Ok(inspection.showing(
+                client
+                    .build_logs::<Misread>(
+                        &self.namespace,
+                        &self.series,
+                        &BuildLogQuery::from(self.view),
+                    )
+                    .await?,
+            )),
         }
     }
 }
@@ -343,8 +360,8 @@ impl Reading<'_> {
 impl WarehouseFn for Reading<'_> {
     type Output = Result<SinkInspection, String>;
 
-    fn call<K: WarehouseClient>(self, client: &K) -> Self::Output {
-        self.read(client).map_err(|Misread(unread)| unread)
+    async fn call<K: WarehouseClient>(self, client: &K) -> Self::Output {
+        self.read(client).await.map_err(|Misread(unread)| unread)
     }
 }
 
@@ -361,9 +378,10 @@ mod tests {
     use super::*;
     use crate::testing::{INFRA, configure, logged, scratch, under};
 
-    fn tables(root: &Path, view: BuildLogView) -> Vec<String> {
+    async fn tables(root: &Path, view: BuildLogView) -> Vec<String> {
         under(root)
             .inspect("mysql", view)
+            .await
             .unwrap()
             .unwrap()
             .sources()
@@ -393,13 +411,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn each_sink_is_inspected_on_its_own_so_one_unreached_leaves_the_others_read() {
+    #[tokio::test]
+    async fn each_sink_is_inspected_on_its_own_so_one_unreached_leaves_the_others_read() {
         let root = scratch("inspected");
         configure(&root.join("mysql"), INFRA);
 
         let pipeline = under(&root)
             .inspect("mysql", BuildLogView::Latest)
+            .await
             .unwrap()
             .unwrap();
         let sources = pipeline.sources().unwrap();
@@ -414,23 +433,23 @@ mod tests {
         assert_eq!(sinks[1].found(), Err("JobCreationMode"));
     }
 
-    #[test]
-    fn a_sink_shows_its_latest_build_of_each_table_or_every_build_newest_first() {
+    #[tokio::test]
+    async fn a_sink_shows_its_latest_build_of_each_table_or_every_build_newest_first() {
         let root = scratch("viewed");
         configure(&root.join("mysql"), &logged());
 
         assert_eq!(
-            tables(&root, BuildLogView::Latest),
+            tables(&root, BuildLogView::Latest).await,
             ["people", "people", "pets"]
         );
         assert_eq!(
-            tables(&root, BuildLogView::All),
+            tables(&root, BuildLogView::All).await,
             ["pets", "people", "people"]
         );
     }
 
-    #[test]
-    fn a_pipeline_that_could_not_be_opened_is_inspected_beside_the_ones_that_were() {
+    #[tokio::test]
+    async fn a_pipeline_that_could_not_be_opened_is_inspected_beside_the_ones_that_were() {
         let root = scratch("unopened");
         configure(&root.join("mysql"), INFRA);
         configure(&root.join("postgres"), "[[source]]\nname = \"primary\"");
@@ -440,6 +459,7 @@ mod tests {
         assert!(
             pipelines
                 .inspect("mysql", BuildLogView::Latest)
+                .await
                 .unwrap()
                 .unwrap()
                 .sources()
@@ -448,13 +468,17 @@ mod tests {
         assert!(
             pipelines
                 .inspect("postgres", BuildLogView::Latest)
+                .await
                 .unwrap()
                 .unwrap()
                 .sources()
                 .is_err()
         );
         assert_eq!(
-            pipelines.inspect("oracle", BuildLogView::Latest).unwrap(),
+            pipelines
+                .inspect("oracle", BuildLogView::Latest)
+                .await
+                .unwrap(),
             None
         );
     }

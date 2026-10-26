@@ -40,13 +40,13 @@ fn people() -> TableModel {
     )
 }
 
-#[test]
-fn a_snapshot_holds_each_key_as_the_change_log_last_left_it() {
+#[tokio::test]
+async fn a_snapshot_holds_each_key_as_the_change_log_last_left_it() {
     let client = DuckDbClient::new(
         Connection::open_in_memory().unwrap(),
         DuckDbWarehouse::new("cdc"),
     );
-    client.execute(&SqlString::from(CHANGE_LOG)).unwrap();
+    client.execute(&SqlString::from(CHANGE_LOG)).await.unwrap();
     let log = Debezium::under("value", "mysql", MySql);
     let window = Window::new(Ts::try_from(0).unwrap(), Ts::try_from(10).unwrap());
     let artifact = Snapshot::new("shop_snapshot", Shard::new("%Y%m%d", chrono_tz::Tz::UTC));
@@ -57,7 +57,7 @@ fn a_snapshot_holds_each_key_as_the_change_log_last_left_it() {
     )
     .unwrap();
     for statement in build.statements().unwrap() {
-        client.execute(statement).unwrap();
+        client.execute(statement).await.unwrap();
     }
 
     let rows: Vec<(i64, String)> = client
@@ -114,7 +114,7 @@ fn rows(client: &DuckDbClient, query: &str) -> Vec<String> {
         .unwrap()
 }
 
-fn build_snapshots(client: &DuckDbClient, window: &Window) {
+async fn build_snapshots(client: &DuckDbClient, window: &Window) {
     let log = Debezium::under("value", "mysql", MySql);
     let artifact = Snapshot::new("shop_snapshot", Shard::new("%Y%m%d", chrono_tz::Tz::UTC));
     let mut listeners = TableListeners::new(
@@ -123,25 +123,29 @@ fn build_snapshots(client: &DuckDbClient, window: &Window) {
     );
     let catalog = client
         .replay::<Unbuilt, _>(client.warehouse(), &log, window, &mut listeners)
+        .await
         .unwrap();
     for build in listeners.finish(client.warehouse(), catalog).unwrap() {
         for statement in build.statements().unwrap() {
-            client.execute(statement).unwrap();
+            client.execute(statement).await.unwrap();
         }
     }
 }
 
-#[test]
-fn a_replay_of_the_schema_changes_builds_a_snapshot_of_every_table_left_standing() {
+#[tokio::test]
+async fn a_replay_of_the_schema_changes_builds_a_snapshot_of_every_table_left_standing() {
     let client = DuckDbClient::new(
         Connection::open_in_memory().unwrap(),
         DuckDbWarehouse::new("cdc"),
     );
-    client.execute(&SqlString::from(CHANGE_LOG)).unwrap();
-    client.execute(&SqlString::from(SCHEMA_CHANGES)).unwrap();
+    client.execute(&SqlString::from(CHANGE_LOG)).await.unwrap();
+    client
+        .execute(&SqlString::from(SCHEMA_CHANGES))
+        .await
+        .unwrap();
     let window = Window::new(Ts::try_from(0).unwrap(), Ts::try_from(10).unwrap());
 
-    build_snapshots(&client, &window);
+    build_snapshots(&client, &window).await;
 
     assert_eq!(
         rows(
@@ -166,17 +170,20 @@ fn a_replay_of_the_schema_changes_builds_a_snapshot_of_every_table_left_standing
     );
 }
 
-#[test]
-fn a_table_created_before_the_window_is_snapshotted_too() {
+#[tokio::test]
+async fn a_table_created_before_the_window_is_snapshotted_too() {
     let client = DuckDbClient::new(
         Connection::open_in_memory().unwrap(),
         DuckDbWarehouse::new("cdc"),
     );
-    client.execute(&SqlString::from(CHANGE_LOG)).unwrap();
-    client.execute(&SqlString::from(SCHEMA_CHANGES)).unwrap();
+    client.execute(&SqlString::from(CHANGE_LOG)).await.unwrap();
+    client
+        .execute(&SqlString::from(SCHEMA_CHANGES))
+        .await
+        .unwrap();
     let window = Window::new(Ts::try_from(1).unwrap(), Ts::try_from(10).unwrap());
 
-    build_snapshots(&client, &window);
+    build_snapshots(&client, &window).await;
 
     assert_eq!(
         rows(
@@ -221,18 +228,19 @@ const WIDENED: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
         'after': {'id': 1::BIGINT, 'name': 'Alicia', 'email': 'alicia@example.com'}})
     ) AS t(value)";
 
-#[test]
-fn a_column_added_within_the_window_is_filled_in_for_the_rows_last_changed_before_it() {
+#[tokio::test]
+async fn a_column_added_within_the_window_is_filled_in_for_the_rows_last_changed_before_it() {
     let client = DuckDbClient::new(
         Connection::open_in_memory().unwrap(),
         DuckDbWarehouse::new("cdc"),
     );
-    client.execute(&SqlString::from(WIDENED)).unwrap();
+    client.execute(&SqlString::from(WIDENED)).await.unwrap();
 
     build_snapshots(
         &client,
         &Window::new(Ts::try_from(0).unwrap(), Ts::try_from(10).unwrap()),
-    );
+    )
+    .await;
 
     assert_eq!(
         rows(
@@ -281,18 +289,19 @@ const RESHAPED: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
         'after': {'id': 1::BIGINT, 'name': 'Alicia', 'email': NULL::VARCHAR, 'phone': '0123', 'nickname': 'Ali'}})
     ) AS t(value)";
 
-#[test]
-fn columns_one_statement_dropped_and_added_reshape_the_rows_last_changed_before_it() {
+#[tokio::test]
+async fn columns_one_statement_dropped_and_added_reshape_the_rows_last_changed_before_it() {
     let client = DuckDbClient::new(
         Connection::open_in_memory().unwrap(),
         DuckDbWarehouse::new("cdc"),
     );
-    client.execute(&SqlString::from(RESHAPED)).unwrap();
+    client.execute(&SqlString::from(RESHAPED)).await.unwrap();
 
     build_snapshots(
         &client,
         &Window::new(Ts::try_from(0).unwrap(), Ts::try_from(10).unwrap()),
-    );
+    )
+    .await;
 
     assert_eq!(
         rows(
@@ -342,18 +351,19 @@ const RENAMED: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
         'after': {'id': 1::BIGINT, 'name': NULL::VARCHAR, 'full_name': 'Alicia Liddell'}})
     ) AS t(value)";
 
-#[test]
-fn a_column_renamed_within_the_window_keeps_the_values_of_the_rows_last_changed_before_it() {
+#[tokio::test]
+async fn a_column_renamed_within_the_window_keeps_the_values_of_the_rows_last_changed_before_it() {
     let client = DuckDbClient::new(
         Connection::open_in_memory().unwrap(),
         DuckDbWarehouse::new("cdc"),
     );
-    client.execute(&SqlString::from(RENAMED)).unwrap();
+    client.execute(&SqlString::from(RENAMED)).await.unwrap();
 
     build_snapshots(
         &client,
         &Window::new(Ts::try_from(0).unwrap(), Ts::try_from(10).unwrap()),
-    );
+    )
+    .await;
 
     assert_eq!(
         rows(
@@ -404,18 +414,19 @@ const MOVED: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
         'before': NULL::STRUCT(id BIGINT, name VARCHAR), 'after': {'id': 3::BIGINT, 'name': 'Carol'}})
     ) AS t(value)";
 
-#[test]
-fn a_table_renamed_within_the_window_is_snapshotted_under_its_new_name_with_every_row() {
+#[tokio::test]
+async fn a_table_renamed_within_the_window_is_snapshotted_under_its_new_name_with_every_row() {
     let client = DuckDbClient::new(
         Connection::open_in_memory().unwrap(),
         DuckDbWarehouse::new("cdc"),
     );
-    client.execute(&SqlString::from(MOVED)).unwrap();
+    client.execute(&SqlString::from(MOVED)).await.unwrap();
 
     build_snapshots(
         &client,
         &Window::new(Ts::try_from(0).unwrap(), Ts::try_from(10).unwrap()),
-    );
+    )
+    .await;
 
     assert_eq!(
         rows(
@@ -456,18 +467,19 @@ const STAMPED: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
         'before': NULL::STRUCT(id BIGINT, seen_at BIGINT), 'after': {'id': 1::BIGINT, 'seen_at': NULL::BIGINT}})
     ) AS t(value)";
 
-#[test]
-fn a_column_added_with_a_default_no_literal_spells_is_filled_with_null_rather_than_failing() {
+#[tokio::test]
+async fn a_column_added_with_a_default_no_literal_spells_is_filled_with_null_rather_than_failing() {
     let client = DuckDbClient::new(
         Connection::open_in_memory().unwrap(),
         DuckDbWarehouse::new("cdc"),
     );
-    client.execute(&SqlString::from(STAMPED)).unwrap();
+    client.execute(&SqlString::from(STAMPED)).await.unwrap();
 
     build_snapshots(
         &client,
         &Window::new(Ts::try_from(0).unwrap(), Ts::try_from(10).unwrap()),
-    );
+    )
+    .await;
 
     assert_eq!(
         rows(
@@ -515,18 +527,23 @@ const SIMULTANEOUS: &str = "CREATE SCHEMA IF NOT EXISTS cdc;
         'after': {'id': 1::BIGINT, 'name': 'Alicia', 'email': 'alicia@example.com'}})
     ) AS t(value)";
 
-#[test]
-fn changes_processed_in_the_instant_of_a_schema_change_fall_on_its_side_their_position_puts_them() {
+#[tokio::test]
+async fn changes_processed_in_the_instant_of_a_schema_change_fall_on_its_side_their_position_puts_them()
+ {
     let client = DuckDbClient::new(
         Connection::open_in_memory().unwrap(),
         DuckDbWarehouse::new("cdc"),
     );
-    client.execute(&SqlString::from(SIMULTANEOUS)).unwrap();
+    client
+        .execute(&SqlString::from(SIMULTANEOUS))
+        .await
+        .unwrap();
 
     build_snapshots(
         &client,
         &Window::new(Ts::try_from(0).unwrap(), Ts::try_from(10).unwrap()),
-    );
+    )
+    .await;
 
     assert_eq!(
         rows(

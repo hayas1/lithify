@@ -43,8 +43,8 @@ impl Run {
         }
     }
 
-    pub fn dry_run(&self, command: &RunCommand, into: &Path) -> Result<Journal, Unrunnable> {
-        self.each_sink(|sink, source, listing, journal| {
+    pub async fn dry_run(&self, command: &RunCommand, into: &Path) -> Result<Journal, Unrunnable> {
+        self.each_sink(async |sink, source, listing, journal| {
             let build = DeclaredSnapshot::of(sink)?.build(source, self.now)?;
 
             self.settle(
@@ -55,11 +55,13 @@ impl Run {
                 &DryRunBuildLogWrite::new(build, into, sink.name()),
                 journal,
             )
+            .await
         })
+        .await
     }
 
-    pub fn build(&self, command: &RunCommand) -> Result<Journal, Unrunnable> {
-        self.each_sink(|sink, source, listing, journal| {
+    pub async fn build(&self, command: &RunCommand) -> Result<Journal, Unrunnable> {
+        self.each_sink(async |sink, source, listing, journal| {
             self.settle(
                 command,
                 sink,
@@ -68,20 +70,23 @@ impl Run {
                 &DeclaredSnapshot::of(sink)?.build(source, self.now)?,
                 journal,
             )
+            .await
         })
+        .await
     }
 
-    pub fn check(&self) -> Result<Journal, Unrunnable> {
-        self.each_sink(|sink, source, _, journal| {
-            for discrepancy in self.inspection(sink, source)?.discrepancies() {
+    pub async fn check(&self) -> Result<Journal, Unrunnable> {
+        self.each_sink(async |sink, source, _, journal| {
+            for discrepancy in self.inspection(sink, source).await?.discrepancies() {
                 journal.discrepancy(discrepancy);
             }
 
             Ok(())
         })
+        .await
     }
 
-    fn inspection(
+    async fn inspection(
         &self,
         sink: &Sink<WarehouseConfig, ArtifactConfig>,
         source: &Source<CaptureConfig>,
@@ -96,16 +101,24 @@ impl Run {
         let (namespace, series) = (snapshot.namespace(), snapshot.series());
 
         match Self::reach(sink)? {
-            Reached::DuckDb(config, change_log) => expectation.read::<_, Unrunnable>(
-                &self.duckdb(config, change_log)?,
-                namespace,
-                &series,
-            ),
-            Reached::BigQuery(config, change_log) => expectation.read::<_, Unrunnable>(
-                &self.bigquery(config, change_log)?,
-                namespace,
-                &series,
-            ),
+            Reached::DuckDb(config, change_log) => {
+                expectation
+                    .read::<_, Unrunnable>(
+                        &self.duckdb(config, change_log).await?,
+                        namespace,
+                        &series,
+                    )
+                    .await
+            }
+            Reached::BigQuery(config, change_log) => {
+                expectation
+                    .read::<_, Unrunnable>(
+                        &self.bigquery(config, change_log).await?,
+                        namespace,
+                        &series,
+                    )
+                    .await
+            }
         }
     }
 
@@ -122,9 +135,9 @@ impl Run {
         Ok(source)
     }
 
-    fn each_sink(
+    async fn each_sink(
         &self,
-        mut act: impl FnMut(
+        mut act: impl AsyncFnMut(
             &Sink<WarehouseConfig, ArtifactConfig>,
             &Source<CaptureConfig>,
             &table::Tables,
@@ -139,7 +152,7 @@ impl Run {
         for sink in self.selected(&pipeline)? {
             journal.sink(sink.name());
 
-            if let Err(unrunnable) = act(sink, source, pipeline.tables(), &mut journal) {
+            if let Err(unrunnable) = act(sink, source, pipeline.tables(), &mut journal).await {
                 journal.failed(sink.name(), &unrunnable);
             }
         }
@@ -147,7 +160,7 @@ impl Run {
         Ok(journal)
     }
 
-    fn settle<B: Report>(
+    async fn settle<B: Report>(
         &self,
         command: &RunCommand,
         sink: &Sink<WarehouseConfig, ArtifactConfig>,
@@ -168,31 +181,37 @@ impl Run {
         match Self::reach(sink)? {
             Reached::DuckDb(config, change_log) => {
                 let client = self
-                    .duckdb(config, change_log)?
+                    .duckdb(config, change_log)
+                    .await?
                     .executing(writer.execution());
 
-                command.settle(
-                    sink,
-                    source,
-                    self.now,
-                    &Taking::new(&client, source.capture(), topic_prefix, listing),
-                    writer,
-                    journal,
-                )
+                command
+                    .settle(
+                        sink,
+                        source,
+                        self.now,
+                        &Taking::new(&client, source.capture(), topic_prefix, listing),
+                        writer,
+                        journal,
+                    )
+                    .await
             }
             Reached::BigQuery(config, change_log) => {
                 let client = self
-                    .bigquery(config, change_log)?
+                    .bigquery(config, change_log)
+                    .await?
                     .executing(writer.execution());
 
-                command.settle(
-                    sink,
-                    source,
-                    self.now,
-                    &Taking::new(&client, source.capture(), topic_prefix, listing),
-                    writer,
-                    journal,
-                )
+                command
+                    .settle(
+                        sink,
+                        source,
+                        self.now,
+                        &Taking::new(&client, source.capture(), topic_prefix, listing),
+                        writer,
+                        journal,
+                    )
+                    .await
             }
         }
     }
@@ -203,24 +222,20 @@ impl Run {
             .ok_or(Unrunnable::Unreached)
     }
 
-    fn duckdb(
+    async fn duckdb(
         &self,
         config: &Config,
         change_log: &duckdb::config::Location,
     ) -> Result<DuckDbClient, Unrunnable> {
-        Ok(DuckDbWarehouse::open(
-            config,
-            self.credentials.duckdb()?,
-            change_log,
-        )?)
+        Ok(DuckDbWarehouse::open(config, self.credentials.duckdb()?, change_log).await?)
     }
 
-    fn bigquery(
+    async fn bigquery(
         &self,
         config: &bigquery::config::Config,
         change_log: &bigquery::config::Location,
     ) -> Result<BigQueryClient, Unrunnable> {
-        Ok(BigQueryWarehouse::open(config, &(), change_log)?)
+        Ok(BigQueryWarehouse::open(config, &(), change_log).await?)
     }
 
     fn selected<'a>(

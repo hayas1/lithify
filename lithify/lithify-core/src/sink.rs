@@ -239,7 +239,7 @@ impl<W: ChangeLogSql + OpenWarehouse> Warehouse for W {}
 pub trait WarehouseFn {
     type Output;
 
-    fn call<K: WarehouseClient>(self, client: &K) -> Self::Output;
+    async fn call<K: WarehouseClient>(self, client: &K) -> Self::Output;
 }
 
 pub trait OpenWarehouse {
@@ -249,7 +249,7 @@ pub trait OpenWarehouse {
     type Credential;
     type Error: std::error::Error;
 
-    fn open(
+    async fn open(
         config: &Self::Config,
         credential: &Self::Credential,
         change_log: &Self::Location,
@@ -263,7 +263,7 @@ pub trait SinkWarehouse {
 
     fn reaches(&self, location: &Self::Location) -> bool;
 
-    fn with_client<F: WarehouseFn>(
+    async fn with_client<F: WarehouseFn>(
         &self,
         change_log: &Self::Location,
         credential: &Self::Credential,
@@ -280,15 +280,15 @@ pub trait WarehouseClient {
     // TODO: a client may come to be asked to create_table and the like rather than to
     // execute any statement, so that what a warehouse builds is named in this trait
     // instead of being spelled out as SQL by every artifact.
-    fn execute(&self, statement: &SqlString) -> Result<(), Self::Error>;
+    async fn execute(&self, statement: &SqlString) -> Result<(), Self::Error>;
 
-    fn build_log_rows(
+    async fn build_log_rows(
         &self,
         namespace: &Namespace,
         query: &BuildLogQuery,
     ) -> Result<Vec<BuildLogRow>, Self::Error>;
 
-    fn build_logs<E>(
+    async fn build_logs<E>(
         &self,
         namespace: &Namespace,
         series: &Series,
@@ -297,52 +297,52 @@ pub trait WarehouseClient {
     where
         E: From<Self::Error> + From<UnreadableBuildLog>,
     {
-        if !self.exists(&BuildLog::path(namespace))? {
+        if !self.exists(&BuildLog::path(namespace)).await? {
             return Ok(Vec::new());
         }
 
-        self.build_log_rows(namespace, query)?
+        self.build_log_rows(namespace, query)
+            .await?
             .into_iter()
             .filter(|row| row.advances(series))
             .map(|row| Ok(BuildLog::try_from(row)?))
             .collect()
     }
 
-    fn create_build_log<E>(&self, namespace: &Namespace) -> Result<(), E>
+    async fn create_build_log<E>(&self, namespace: &Namespace) -> Result<(), E>
     where
         E: From<Self::Error> + From<UnbuildableArtifact>,
     {
         let warehouse = self.warehouse();
 
-        self.execute(&warehouse.create_namespace(namespace))?;
+        self.execute(&warehouse.create_namespace(namespace)).await?;
         self.execute(
             &BuildLog::create_table(warehouse, namespace).map_err(UnbuildableArtifact::from)?,
-        )?;
+        )
+        .await?;
 
         Ok(())
     }
 
-    fn exists(&self, table: &TablePath) -> Result<bool, Self::Error>;
+    async fn exists(&self, table: &TablePath) -> Result<bool, Self::Error>;
 
-    fn append_build_logs(
+    async fn append_build_logs(
         &self,
         namespace: &Namespace,
         logs: &[BuildLog],
     ) -> Result<(), Self::Error> {
         match BuildLog::insert(logs, self.warehouse(), namespace) {
-            Some(insert) => self.execute(&insert),
+            Some(insert) => self.execute(&insert).await,
             None => Ok(()),
         }
     }
 
-    fn build(&self, build: TableBuild) -> TableBuilt {
+    async fn build(&self, build: TableBuild) -> TableBuilt {
         let status = match build.refusal() {
             Some(refused) => Status::Failed(refused.to_string()),
-            None => match build
-                .statements()
-                .unwrap_or_default()
-                .iter()
-                .try_for_each(|statement| self.execute(statement))
+            None => match self
+                .execute_all(build.statements().unwrap_or_default())
+                .await
             {
                 Ok(()) => Status::Succeeded,
                 Err(failed) => Status::Failed(failed.to_string()),
@@ -350,6 +350,14 @@ pub trait WarehouseClient {
         };
 
         build.built(status, Ts::now())
+    }
+
+    async fn execute_all(&self, statements: &[SqlString]) -> Result<(), Self::Error> {
+        for statement in statements {
+            self.execute(statement).await?;
+        }
+
+        Ok(())
     }
 }
 
@@ -379,13 +387,13 @@ mod tests {
         ]
     }
 
-    #[test]
-    fn a_client_builds_a_table_by_running_its_statements_in_order() {
+    #[tokio::test]
+    async fn a_client_builds_a_table_by_running_its_statements_in_order() {
         let client = Recorder::new(Engine::default());
 
         let built = client.build(people(Base::ChangeLog, Ok(statements())));
 
-        assert_eq!(built.status(), &Status::Succeeded);
+        assert_eq!(built.await.status(), &Status::Succeeded);
         assert_eq!(
             client.executed(),
             [
@@ -395,14 +403,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_client_builds_nothing_of_a_table_with_nothing_to_fold_onto() {
+    #[tokio::test]
+    async fn a_client_builds_nothing_of_a_table_with_nothing_to_fold_onto() {
         let client = Recorder::new(Engine::default());
 
         let built = client.build(people(Base::Missing, Ok(statements())));
 
         assert_eq!(
-            built.status(),
+            built.await.status(),
             &Status::Failed(
                 UnbuildableArtifact::WithoutBase(TableId::new("shop", "people")).to_string()
             )
@@ -410,14 +418,14 @@ mod tests {
         assert_eq!(client.executed(), Vec::<String>::new());
     }
 
-    #[test]
-    fn a_client_builds_nothing_of_a_table_its_builder_refused() {
+    #[tokio::test]
+    async fn a_client_builds_nothing_of_a_table_its_builder_refused() {
         let client = Recorder::new(Engine::default());
         let refused = UnbuildableArtifact::PrimaryKeyChanged(TableId::new("shop", "people"));
 
         let built = client.build(people(Base::ChangeLog, Err(refused.clone())));
 
-        assert_eq!(built.status(), &Status::Failed(refused.to_string()));
+        assert_eq!(built.await.status(), &Status::Failed(refused.to_string()));
         assert_eq!(client.executed(), Vec::<String>::new());
     }
 

@@ -108,7 +108,7 @@ impl OpenWarehouse for Engine {
     type Credential = ();
     type Error = Infallible;
 
-    fn open(_: &(), _: &(), _: &Namespace) -> Result<Recorder<Engine>, Infallible> {
+    async fn open(_: &(), _: &(), _: &Namespace) -> Result<Recorder<Engine>, Infallible> {
         Ok(Recorder::new(Engine::default()))
     }
 }

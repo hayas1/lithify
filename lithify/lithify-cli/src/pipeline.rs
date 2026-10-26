@@ -23,25 +23,25 @@ impl CaptureConfig {
 }
 
 impl DuckDbCapture for CaptureConfig {
-    fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(
+    async fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(
         &self,
         topic_prefix: &str,
         f: F,
     ) -> F::Output {
         match self {
-            Self::Debezium(debezium) => debezium.with_duckdb_change_logs(topic_prefix, f),
+            Self::Debezium(debezium) => debezium.with_duckdb_change_logs(topic_prefix, f).await,
         }
     }
 }
 
 impl BigQueryCapture for CaptureConfig {
-    fn with_bigquery_change_logs<F: BigQueryChangeLogsFn>(
+    async fn with_bigquery_change_logs<F: BigQueryChangeLogsFn>(
         &self,
         topic_prefix: &str,
         f: F,
     ) -> F::Output {
         match self {
-            Self::Debezium(debezium) => debezium.with_bigquery_change_logs(topic_prefix, f),
+            Self::Debezium(debezium) => debezium.with_bigquery_change_logs(topic_prefix, f).await,
         }
     }
 }
@@ -102,21 +102,19 @@ impl SinkWarehouse for WarehouseConfig {
         self.reach(location).is_some()
     }
 
-    fn with_client<F: WarehouseFn>(
+    async fn with_client<F: WarehouseFn>(
         &self,
         change_log: &LocationConfig,
         credentials: &Credentials,
         f: F,
     ) -> Result<F::Output, Unrunnable> {
         match self.reach(change_log).ok_or(Unrunnable::Unreached)? {
-            Reached::DuckDb(config, change_log) => Ok(f.call(&DuckDbWarehouse::open(
-                config,
-                credentials.duckdb()?,
-                change_log,
-            )?)),
-            Reached::BigQuery(config, change_log) => {
-                Ok(f.call(&BigQueryWarehouse::open(config, &(), change_log)?))
-            }
+            Reached::DuckDb(config, change_log) => Ok(f
+                .call(&DuckDbWarehouse::open(config, credentials.duckdb()?, change_log).await?)
+                .await),
+            Reached::BigQuery(config, change_log) => Ok(f
+                .call(&BigQueryWarehouse::open(config, &(), change_log).await?)
+                .await),
         }
     }
 }
@@ -163,14 +161,14 @@ mod tests {
         assert_eq!(debezium.dialect(), config::Dialect::MySql);
     }
 
-    #[test]
-    fn a_capture_calls_a_fn_with_the_logs_of_the_dialect_it_captures_in() {
+    #[tokio::test]
+    async fn a_capture_calls_a_fn_with_the_logs_of_the_dialect_it_captures_in() {
         struct Probe;
 
         impl DuckDbChangeLogsFn for Probe {
             type Output = &'static str;
 
-            fn call_duckdb<C>(self, _: C) -> Self::Output
+            async fn call_duckdb<C>(self, _: C) -> Self::Output
             where
                 C: ChangeLogs,
                 <C::Schema as SchemaChangeLog>::Record: duckdb::types::FromSql,
@@ -182,7 +180,7 @@ mod tests {
         let capture: CaptureConfig = toml::from_str("[debezium]\ndialect = \"postgres\"").unwrap();
 
         assert_eq!(
-            capture.with_duckdb_change_logs("postgres", Probe),
+            capture.with_duckdb_change_logs("postgres", Probe).await,
             std::any::type_name::<Debezium<Postgres>>()
         );
     }

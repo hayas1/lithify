@@ -60,7 +60,7 @@ impl OpenWarehouse for DuckDbWarehouse {
     type Credential = S3Credential;
     type Error = duckdb::Error;
 
-    fn open(
+    async fn open(
         config: &Config,
         credential: &S3Credential,
         change_log: &Location,

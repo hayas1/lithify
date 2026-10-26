@@ -88,12 +88,12 @@ impl BuildLogWriter for DryRunBuildLogWrite {
         }
     }
 
-    fn write<K, E>(&self, client: &K, built: Vec<TableBuilt>) -> Result<Self::Output, E>
+    async fn write<K, E>(&self, client: &K, built: Vec<TableBuilt>) -> Result<Self::Output, E>
     where
         K: WarehouseClient,
         E: From<K::Error> + From<UnbuildableArtifact>,
     {
-        self.build.write(client, built)
+        self.build.write(client, built).await
     }
 }
 

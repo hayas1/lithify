@@ -141,13 +141,20 @@ impl SinkWarehouse for Kept {
         true
     }
 
-    fn with_client<F: WarehouseFn>(&self, _: &Shelf, _: &(), f: F) -> Result<F::Output, Unreached> {
+    async fn with_client<F: WarehouseFn>(
+        &self,
+        _: &Shelf,
+        _: &(),
+        f: F,
+    ) -> Result<F::Output, Unreached> {
         match self {
-            Self::Memory(_) => Ok(f.call(&Recorder::new(Engine::default()))),
-            Self::Logged(_) => Ok(f.call(
-                &Recorder::new(Engine::default())
-                    .logging(&Namespace::from("mysql_shop"), &Self::logs()),
-            )),
+            Self::Memory(_) => Ok(f.call(&Recorder::new(Engine::default())).await),
+            Self::Logged(_) => Ok(f
+                .call(
+                    &Recorder::new(Engine::default())
+                        .logging(&Namespace::from("mysql_shop"), &Self::logs()),
+                )
+                .await),
             Self::Unreachable(placed) => Err(Unreached(placed.warehouse().cause.clone())),
         }
     }

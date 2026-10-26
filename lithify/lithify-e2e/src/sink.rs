@@ -3,6 +3,7 @@ use std::fmt::{self, Display, Formatter};
 
 use chrono::DateTime;
 use duckdb::types::{FromSql, TimeUnit, Value};
+use tokio::runtime::Runtime;
 
 use lithify_artifact::snapshot::Snapshot;
 use lithify_cli::pipeline::{self, CaptureConfig};
@@ -72,14 +73,20 @@ impl dyn Sink {
     }
 }
 
+// The verification steps a scenario one action at a time, so each call waits on the client here
+// rather than the whole run being driven as one future.
 pub struct DuckDb {
     client: DuckDbClient,
+    runtime: Runtime,
 }
 
 impl DuckDb {
     pub fn connect(store: &ObjectStore, change_log: &Location) -> Result<Self, Unbuildable> {
         Ok(Self {
             client: store.client(change_log)?,
+            runtime: tokio::runtime::Builder::new_current_thread()
+                .build()
+                .map_err(Unbuildable::Unrunnable)?,
         })
     }
 
@@ -127,7 +134,9 @@ impl DuckDb {
 
 impl Sink for DuckDb {
     fn execute(&mut self, statement: &str) -> Result<(), Unbuildable> {
-        Ok(self.client.execute(&SqlString::from(statement))?)
+        Ok(self
+            .runtime
+            .block_on(self.client.execute(&SqlString::from(statement)))?)
     }
 
     fn landed(
@@ -137,8 +146,9 @@ impl Sink for DuckDb {
         table: &TableId,
         at: Ts<Processing>,
     ) -> Result<u64, Unbuildable> {
-        let (topic, processing_time) =
-            capture.with_duckdb_change_logs(topic_prefix, Landing { table });
+        let (topic, processing_time) = self
+            .runtime
+            .block_on(capture.with_duckdb_change_logs(topic_prefix, Landing { table }));
 
         let warehouse = self.client.warehouse();
         let landed = self.client.connection().query_row(
@@ -166,14 +176,14 @@ impl Sink for DuckDb {
         table: &TableId,
         at: Ts<Event>,
     ) -> Result<TableModel, Unbuildable> {
-        let read = capture.with_duckdb_change_logs(
+        let read = self.runtime.block_on(capture.with_duckdb_change_logs(
             topic_prefix,
             Catalog {
                 client: &self.client,
                 table,
                 at,
             },
-        )?;
+        ))?;
 
         read.ok_or_else(|| Unbuildable::UnknownTable(table.clone()))
     }
@@ -186,7 +196,7 @@ impl Sink for DuckDb {
         artifact: &Snapshot,
         window: &Window,
     ) -> Result<(), Unbuildable> {
-        capture.with_duckdb_change_logs(
+        self.runtime.block_on(capture.with_duckdb_change_logs(
             topic_prefix,
             SnapshotBuild {
                 client: &self.client,
@@ -194,7 +204,7 @@ impl Sink for DuckDb {
                 artifact,
                 window,
             },
-        )
+        ))
     }
 
     fn rows(&mut self, table: &TablePath, model: &TableModel) -> Result<Rows, Unbuildable> {
@@ -243,7 +253,7 @@ struct Landing<'a> {
 impl DuckDbChangeLogsFn for Landing<'_> {
     type Output = (String, ColumnPath);
 
-    fn call_duckdb<C>(self, logs: C) -> Self::Output
+    async fn call_duckdb<C>(self, logs: C) -> Self::Output
     where
         C: ChangeLogs,
         <C::Schema as SchemaChangeLog>::Record: FromSql,
@@ -264,13 +274,14 @@ struct Catalog<'a> {
 impl DuckDbChangeLogsFn for Catalog<'_> {
     type Output = Result<Option<TableModel>, Unbuildable>;
 
-    fn call_duckdb<C>(self, logs: C) -> Self::Output
+    async fn call_duckdb<C>(self, logs: C) -> Self::Output
     where
         C: ChangeLogs,
         <C::Schema as SchemaChangeLog>::Record: FromSql,
     {
         self.client
             .table(logs.schema_changes(), self.table, self.at)
+            .await
     }
 }
 
@@ -284,13 +295,14 @@ struct SnapshotBuild<'a> {
 impl DuckDbChangeLogsFn for SnapshotBuild<'_> {
     type Output = Result<(), Unbuildable>;
 
-    fn call_duckdb<C>(self, logs: C) -> Self::Output
+    async fn call_duckdb<C>(self, logs: C) -> Self::Output
     where
         C: ChangeLogs,
         <C::Schema as SchemaChangeLog>::Record: FromSql,
     {
         let built = Replayer::new(self.client, &logs)
-            .built::<_, Unbuildable>(self.artifact, self.window, &[], |table| table == self.table)?
+            .built::<_, Unbuildable>(self.artifact, self.window, &[], |table| table == self.table)
+            .await?
             .into_iter()
             .find(|built| built.table() == Some(self.table))
             .ok_or_else(|| Unbuildable::UnknownTable(self.table.clone()))?;
@@ -305,6 +317,7 @@ impl DuckDbChangeLogsFn for SnapshotBuild<'_> {
 #[derive(Debug)]
 pub enum Unbuildable {
     Unqueryable(duckdb::Error),
+    Unrunnable(std::io::Error),
     UnknownTable(TableId),
     Unverified(&'static str),
     Unreached,
@@ -317,6 +330,7 @@ impl Display for Unbuildable {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unqueryable(cause) => write!(formatter, "{cause}"),
+            Self::Unrunnable(cause) => write!(formatter, "{cause}"),
             Self::UnknownTable(table) => write!(formatter, "{table} is not in the change log"),
             Self::Unverified(kind) => write!(formatter, "{kind} sinks cannot be verified yet"),
             Self::Unreached => write!(
