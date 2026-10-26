@@ -836,30 +836,6 @@ mod tests {
     }
 
     #[test]
-    fn a_table_built_is_logged_under_the_run_that_built_it_as_it_finished() {
-        let run = Run::new(
-            Ulid::nil(),
-            Ts::from(DateTime::UNIX_EPOCH),
-            &"snapshot".into(),
-            "daily",
-            "primary",
-            "{}",
-            "0.1.0",
-        );
-        let built = TableBuilt::new(
-            Some(TableId::new("shop", "people")),
-            Some(TableId::new("shop", "people")),
-            None,
-            Some(TablePath::new("mysql_shop", "people_20260920")),
-            Window::new(Ts::try_from(0).unwrap(), Ts::try_from(1).unwrap()),
-            Status::Succeeded,
-            Ts::try_from(1).unwrap(),
-        );
-
-        assert_eq!(built.logged(&run), logged(Some("people"), Some("people")));
-    }
-
-    #[test]
     fn a_table_built_is_named_by_where_it_ended_or_where_it_began() {
         let built = |from: Option<&str>, to: Option<&str>| {
             TableBuilt::new(

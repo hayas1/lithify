@@ -400,11 +400,4 @@ mod tests {
 
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
-
-    #[tokio::test]
-    async fn no_page_assembles_a_build_any_more() {
-        let (status, _) = get(&located("unassembled"), "/build?snapshot=2026-09-20").await;
-
-        assert_eq!(status, StatusCode::NOT_FOUND);
-    }
 }

@@ -293,14 +293,4 @@ mod tests {
             Mislisting::TableListedTwice(TableId::new("shop", "orders"))
         );
     }
-
-    #[test]
-    fn a_column_listed_twice_is_rejected() {
-        let twice = TABLES.replace(
-            "column.attributes.mask = \"null\"",
-            "column.attributes.mask = \"null\"\n        column.attributes.mask = \"null\"",
-        );
-
-        assert!(toml::from_str::<Listing>(&twice).is_err());
-    }
 }

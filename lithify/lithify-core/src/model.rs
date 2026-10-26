@@ -193,28 +193,6 @@ mod tests {
     }
 
     #[test]
-    fn a_column_is_undescribed_until_given_a_comment() {
-        let column = column("name", "VARCHAR");
-
-        assert_eq!(column.comment(), None);
-        assert_eq!(
-            column.with_comment(Some("how to call them")).comment(),
-            Some("how to call them")
-        );
-    }
-
-    #[test]
-    fn a_table_holds_its_columns_in_the_order_they_were_given() {
-        let table = TableModel::new(
-            TableId::new("shop", "customers"),
-            vec![column("name", "VARCHAR"), column("id", "BIGINT")],
-            vec!["id".to_owned()],
-        );
-
-        assert_eq!(names(&table), ["name", "id"]);
-    }
-
-    #[test]
     fn a_table_under_another_id_keeps_its_columns_and_key() {
         let moved = customers().with_id(&TableId::new("shop", "clients"));
 

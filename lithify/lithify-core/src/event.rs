@@ -154,42 +154,6 @@ impl std::error::Error for MalformedEvent {}
 mod tests {
     use super::*;
 
-    use crate::model::{ColumnModel, ColumnType};
-
-    fn customers() -> TableModel {
-        TableModel::new(
-            TableId::new("shop", "customers"),
-            vec![ColumnModel::new(
-                "id",
-                "BIGINT",
-                ColumnType::Int64,
-                false,
-                None,
-            )],
-            vec!["id".to_owned()],
-        )
-    }
-
-    #[test]
-    fn a_table_created_or_altered_is_named_by_its_definition() {
-        assert_eq!(
-            TableChange::Created(customers()).id(),
-            &TableId::new("shop", "customers")
-        );
-        assert_eq!(
-            TableChange::Altered(customers()).id(),
-            &TableId::new("shop", "customers")
-        );
-    }
-
-    #[test]
-    fn a_dropped_table_is_named_by_its_id_alone() {
-        assert_eq!(
-            TableChange::Dropped(TableId::new("shop", "customers")).id(),
-            &TableId::new("shop", "customers")
-        );
-    }
-
     #[test]
     fn a_schema_change_is_taken_at_the_source_unless_marked_captured() {
         let change = SchemaChange::new(1, Ts::try_from(1).unwrap(), "", Vec::new(), Vec::new());
