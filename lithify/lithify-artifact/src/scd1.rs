@@ -202,7 +202,7 @@ impl<L: RowChangeLog> Folding<'_, '_, L> {
         if self.fold.previous().is_some() {
             return Ok(());
         }
-        if table.primary_key().next().is_none() {
+        if table.primary_key().is_empty() {
             return Err(UnbuildableArtifact::WithoutPrimaryKey(table.id().clone()));
         }
 
@@ -884,7 +884,7 @@ mod tests {
         let orders = TableModel::new(
             TableId::new("shop", "orders"),
             vec![column("id", ColumnType::Int64)],
-            vec!["id".into()],
+            ["id"].into(),
         );
 
         let snapshots = snapshots(
@@ -920,7 +920,7 @@ mod tests {
         let orders = TableModel::new(
             TableId::new("shop", "orders"),
             vec![column("id", ColumnType::Int64)],
-            vec!["id".into()],
+            ["id"].into(),
         );
 
         let snapshots = snapshots(
@@ -1548,7 +1548,7 @@ mod tests {
                 column("order_id", ColumnType::Int64),
                 column("line_no", ColumnType::Int64),
             ],
-            vec!["order_id".into(), "line_no".into()],
+            ["order_id", "line_no"].into(),
         );
 
         let statement = statement(snapshots(items, vec![], || None));
@@ -1724,7 +1724,7 @@ mod tests {
         let orders = TableModel::new(
             TableId::new("shop", "orders"),
             vec![column("id", ColumnType::Int64)],
-            vec!["id".into()],
+            ["id"].into(),
         );
         let created = snapshots(
             customers(),
@@ -1766,7 +1766,7 @@ mod tests {
         let orders = TableModel::new(
             TableId::new("shop", "orders"),
             vec![column("id", ColumnType::Int64)],
-            vec!["id".into()],
+            ["id"].into(),
         );
         let captured = snapshots(
             customers(),
@@ -1869,7 +1869,7 @@ mod tests {
         let orders = TableModel::new(
             TableId::new("shop", "orders"),
             vec![column("id", ColumnType::Int64)],
-            vec!["id".into()],
+            ["id"].into(),
         );
         let missing = |change: TableChange| {
             snapshots(customers(), vec![self::change(150, change)], || None)

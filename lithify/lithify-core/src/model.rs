@@ -179,15 +179,49 @@ impl ColumnModel {
     }
 }
 
+// An empty key stands for a table without one, and every artifact checks for it with
+// `is_empty`. Building it only through `new(Vec<ColumnName>) -> Option<Self>`, as `NonZero`
+// is, with `TableModel` holding `Option<PrimaryKeyColumn>`, would leave a table without a key
+// one way to be told and let query builders take a key without checking it again; not done
+// while the check stays at the entry of each artifact.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PrimaryKeyColumn(Vec<ColumnName>);
+
+impl PrimaryKeyColumn {
+    pub fn columns(&self) -> impl Iterator<Item = &ColumnName> {
+        self.0.iter()
+    }
+
+    pub fn contains(&self, column: &ColumnName) -> bool {
+        self.0.contains(column)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl<const N: usize> From<[&str; N]> for PrimaryKeyColumn {
+    fn from(columns: [&str; N]) -> Self {
+        columns.into_iter().map(ColumnName::from).collect()
+    }
+}
+
+impl FromIterator<ColumnName> for PrimaryKeyColumn {
+    fn from_iter<I: IntoIterator<Item = ColumnName>>(columns: I) -> Self {
+        Self(columns.into_iter().collect())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableModel {
     id: TableId,
     columns: Vec<ColumnModel>,
-    primary_key: Vec<ColumnName>,
+    primary_key: PrimaryKeyColumn,
 }
 
 impl TableModel {
-    pub fn new(id: TableId, columns: Vec<ColumnModel>, primary_key: Vec<ColumnName>) -> Self {
+    pub fn new(id: TableId, columns: Vec<ColumnModel>, primary_key: PrimaryKeyColumn) -> Self {
         Self {
             id,
             columns,
@@ -207,8 +241,8 @@ impl TableModel {
         self.columns.iter().find(|column| column.name() == name)
     }
 
-    pub fn primary_key(&self) -> impl Iterator<Item = &ColumnName> {
-        self.primary_key.iter()
+    pub fn primary_key(&self) -> &PrimaryKeyColumn {
+        &self.primary_key
     }
 
     pub fn with_id(&self, id: &TableId) -> Self {
@@ -236,7 +270,7 @@ mod tests {
                 column("name", "VARCHAR"),
                 column("email", "VARCHAR"),
             ],
-            vec!["id".into()],
+            ["id"].into(),
         )
     }
 
@@ -250,6 +284,6 @@ mod tests {
 
         assert_eq!(moved.id(), &TableId::new("shop", "clients"));
         assert_eq!(names(&moved), ["id", "name", "email"]);
-        assert_eq!(moved.primary_key().collect::<Vec<_>>(), ["id"]);
+        assert_eq!(moved.primary_key().columns().collect::<Vec<_>>(), ["id"]);
     }
 }

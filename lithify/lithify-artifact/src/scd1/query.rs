@@ -72,7 +72,7 @@ impl<'a, L: RowChangeLog> ChangeLogQuery<'a, L> {
             .columns()
             .map(|column| {
                 let name = warehouse.column_ref(column.name());
-                let value = match table.primary_key().any(|key| key == column.name()) {
+                let value = match table.primary_key().contains(column.name()) {
                     true => self.keyed(warehouse, None, &name),
                     false => SqlString::from(format!("{after}.{name}")),
                 };
@@ -171,6 +171,7 @@ impl<'a, L: RowChangeLog> ChangeLogQuery<'a, L> {
     ) -> SqlString {
         let matched = table
             .primary_key()
+            .columns()
             .map(|column| warehouse.column_ref(column))
             .enumerate()
             .map(|(at, column)| {
@@ -193,6 +194,7 @@ impl<'a, L: RowChangeLog> ChangeLogQuery<'a, L> {
     fn latest<W: Warehouse>(&self, warehouse: &W, table: &TableModel) -> SqlString {
         let partition: Vec<String> = table
             .primary_key()
+            .columns()
             .map(|column| {
                 self.keyed(warehouse, None, &warehouse.column_ref(column))
                     .to_string()

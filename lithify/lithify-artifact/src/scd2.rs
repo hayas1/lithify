@@ -170,7 +170,7 @@ impl<L: RowChangeLog, W: Warehouse> Scd2Builder<'_, L, W> {
         let Some(table) = end.model() else {
             return Ok(None);
         };
-        if table.primary_key().next().is_none() {
+        if table.primary_key().is_empty() {
             return Err(UnbuildableArtifact::WithoutPrimaryKey(table.id().clone()));
         }
         let era = self.eras.last(table, Bound::EventTime(*self.window.to()));
@@ -202,6 +202,7 @@ impl<L: RowChangeLog, W: Warehouse> Scd2Builder<'_, L, W> {
         let columns = columns.join(", ");
         let keys: Vec<SqlString> = table
             .primary_key()
+            .columns()
             .map(|key| warehouse.column_ref(key))
             .collect();
         let partition = keys
@@ -435,7 +436,7 @@ mod tests {
                 .iter()
                 .map(|name| ColumnModel::new(name, "BIGINT", ColumnType::Int64, false, None))
                 .collect(),
-            vec!["id".into()],
+            ["id"].into(),
         )
     }
 

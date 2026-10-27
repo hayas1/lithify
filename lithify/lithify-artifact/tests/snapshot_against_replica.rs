@@ -15,7 +15,7 @@ use lithify_core::model::{ColumnModel, ColumnName, ColumnType, TableId, TableMod
 use lithify_core::runner::Replayer;
 use lithify_core::schedule::{Schedule, Timeline};
 use lithify_core::sink::{Namespace, TablePath, WarehouseClient};
-use lithify_core::testing::{ColumnDdl, Placed, Replica, Row};
+use lithify_core::testing::{CellValue, ColumnDdl, Placed, Replica, Row};
 use lithify_core::ts::{Event, Ts};
 use lithify_core::window::Window;
 use lithify_protocol::sink::duckdb::client::DuckDbClient;
@@ -31,7 +31,7 @@ fn people() -> TableModel {
             ColumnModel::new("id", "BIGINT", ColumnType::Int64, false, None),
             ColumnModel::new("name", "VARCHAR", ColumnType::Text, true, None),
         ],
-        vec!["id".into()],
+        ["id"].into(),
     )
 }
 
@@ -126,11 +126,7 @@ impl Shards {
     }
 
     fn read(&self, query: &str) -> Vec<Row> {
-        let mut statement = self
-            .client
-            .connection()
-            .prepare(&format!("SELECT COLUMNS(*)::VARCHAR FROM ({query})"))
-            .unwrap();
+        let mut statement = self.client.connection().prepare(query).unwrap();
         let mut rows = statement.query([]).unwrap();
         let names = rows.as_ref().unwrap().column_names();
         let mut read = Vec::new();
@@ -142,7 +138,7 @@ impl Shards {
                     .map(|(index, name)| {
                         (
                             ColumnName::from(name.as_str()),
-                            row.get::<_, Option<String>>(index).unwrap(),
+                            Self::cell(row.get(index).unwrap()),
                         )
                     })
                     .collect(),
@@ -152,6 +148,17 @@ impl Shards {
         read.sort();
 
         read
+    }
+
+    fn cell(value: duckdb::types::Value) -> CellValue {
+        match value {
+            duckdb::types::Value::Null => CellValue::Null,
+            duckdb::types::Value::SmallInt(number) => CellValue::Int(number.into()),
+            duckdb::types::Value::Int(number) => CellValue::Int(number.into()),
+            duckdb::types::Value::BigInt(number) => CellValue::Int(number),
+            duckdb::types::Value::Text(text) => CellValue::Text(text),
+            unread => panic!("a cell of {unread:?} is not read into a replica's"),
+        }
     }
 
     fn as_of(&self, tables: &[TablePath], at: i64) -> Vec<Row> {
@@ -173,6 +180,10 @@ impl Shards {
     }
 }
 
+fn at(millis: i64) -> Ts<Event> {
+    Ts::try_from(millis).unwrap()
+}
+
 fn day(from: i64) -> Window {
     Window::new(
         Ts::try_from(from * DAY).unwrap(),
@@ -185,21 +196,33 @@ fn replica() -> Replica {
     let id = people.id().clone();
 
     Replica::default()
-        .create(0, people)
-        .insert(1_000, &id, &[("id", Some("1")), ("name", Some("Alice"))])
-        .insert(2_000, &id, &[("id", Some("2")), ("name", Some("Bob"))])
-        .update(3_000, &id, &[("id", Some("1")), ("name", Some("Alicia"))])
-        .delete(DAY + 1_000, &id, &[("id", Some("2"))])
-        .insert(DAY + 2_000, &id, &[("id", Some("3")), ("name", None)])
-        .update(
-            DAY + 3_000,
+        .create(at(0), people)
+        .insert(
+            at(1_000),
             &id,
-            &[("id", Some("1")), ("name", Some("Ally"))],
+            &[("id", 1.into()), ("name", "Alice".into())],
+        )
+        .insert(at(2_000), &id, &[("id", 2.into()), ("name", "Bob".into())])
+        .update(
+            at(3_000),
+            &id,
+            &[("id", 1.into()), ("name", "Alicia".into())],
+        )
+        .delete(at(DAY + 1_000), &id, &[("id", 2.into())])
+        .insert(
+            at(DAY + 2_000),
+            &id,
+            &[("id", 3.into()), ("name", CellValue::Null)],
+        )
+        .update(
+            at(DAY + 3_000),
+            &id,
+            &[("id", 1.into()), ("name", "Ally".into())],
         )
 }
 
 fn held(replica: &Replica, at: Ts<Event>, table: &TableId) -> Vec<Row> {
-    let mut rows = replica.at(at).rows(table).unwrap_or_default();
+    let mut rows = replica.dump(at).rows(table).unwrap_or_default();
     rows.sort();
 
     rows
@@ -222,14 +245,14 @@ async fn a_snapshot_holds_what_the_source_held_as_its_window_closed() {
 async fn a_snapshot_holds_a_column_added_within_its_window_as_the_source_held_it() {
     let tier = ColumnModel::new("tier", "VARCHAR", ColumnType::Text, true, Some("gold"));
     let replica = replica()
-        .alter(DAY + 4_000, people().id(), vec![ColumnDdl::add(tier)])
+        .alter(at(DAY + 4_000), people().id(), vec![ColumnDdl::add(tier)])
         .update(
-            DAY + 5_000,
+            at(DAY + 5_000),
             people().id(),
             &[
-                ("id", Some("3")),
-                ("name", Some("Cy")),
-                ("tier", Some("silver")),
+                ("id", 3.into()),
+                ("name", "Cy".into()),
+                ("tier", "silver".into()),
             ],
         );
     let shards = Shards::over(&replica).await;
@@ -245,7 +268,11 @@ async fn a_snapshot_holds_a_column_added_within_its_window_as_the_source_held_it
 
 #[tokio::test]
 async fn a_snapshot_leaves_out_a_column_dropped_within_its_window_as_the_source_did() {
-    let replica = replica().alter(DAY + 4_000, people().id(), vec![ColumnDdl::drop("name")]);
+    let replica = replica().alter(
+        at(DAY + 4_000),
+        people().id(),
+        vec![ColumnDdl::drop("name")],
+    );
     let shards = Shards::over(&replica).await;
 
     let first = shards.build(&day(0), &[]).await;
@@ -261,14 +288,14 @@ async fn a_snapshot_leaves_out_a_column_dropped_within_its_window_as_the_source_
 async fn a_snapshot_carries_a_column_renamed_within_its_window_under_its_new_name() {
     let replica = replica()
         .alter(
-            DAY + 4_000,
+            at(DAY + 4_000),
             people().id(),
             vec![ColumnDdl::rename("name", "label")],
         )
         .insert(
-            DAY + 5_000,
+            at(DAY + 5_000),
             people().id(),
-            &[("id", Some("4")), ("label", Some("Dee"))],
+            &[("id", 4.into()), ("label", "Dee".into())],
         );
     let shards = Shards::over(&replica).await;
 
@@ -325,8 +352,8 @@ async fn an_scd1_holds_what_the_source_holds_now_onto_the_last_daily_snapshot() 
     let shards = Shards::over(&replica).await;
     let scd1 = Scd1::new("shop_scd1");
     let first = shards.build(&day(0), &[]).await;
-    let built = Ts::try_from(DAY + 1_500).unwrap();
-    let now = Ts::try_from(i64::from(i32::MAX)).unwrap();
+    let built = at(DAY + 1_500);
+    let now = at(i64::from(i32::MAX));
     let timeline = Timeline::new(Schedule::default(), *day(0).from()..built);
     let window = scd1.window(&day(1), &timeline).unwrap();
 
@@ -356,7 +383,7 @@ async fn an_scd2_holds_at_every_instant_the_version_the_source_held_then() {
         second.target().unwrap().clone(),
     ];
 
-    for at in [
+    for millis in [
         500,
         1_500,
         2_500,
@@ -368,9 +395,9 @@ async fn an_scd2_holds_at_every_instant_the_version_the_source_held_then() {
         2 * DAY,
     ] {
         assert_eq!(
-            shards.as_of(&versions, at),
-            held(&replica, Ts::try_from(at).unwrap(), people().id()),
-            "as of {at}"
+            shards.as_of(&versions, millis),
+            held(&replica, at(millis), people().id()),
+            "as of {millis}"
         );
     }
 }
@@ -435,18 +462,18 @@ async fn two_days(replica: &Replica) -> (Shards, Vec<BuildLog>) {
 async fn a_snapshot_casts_a_column_retyped_within_its_window_as_the_source_did() {
     let replica = replica()
         .insert(
-            DAY + 4_000,
+            at(DAY + 4_000),
             people().id(),
-            &[("id", Some("5")), ("name", Some("42"))],
+            &[("id", 5.into()), ("name", "42".into())],
         )
-        .delete(DAY + 4_500, people().id(), &[("id", Some("3"))])
+        .delete(at(DAY + 4_500), people().id(), &[("id", 3.into())])
         .update(
-            DAY + 4_600,
+            at(DAY + 4_600),
             people().id(),
-            &[("id", Some("1")), ("name", Some("7"))],
+            &[("id", 1.into()), ("name", "7".into())],
         )
         .alter(
-            DAY + 5_000,
+            at(DAY + 5_000),
             people().id(),
             vec![ColumnDdl::modify(number("name"))],
         );
@@ -463,7 +490,7 @@ async fn a_snapshot_casts_a_column_retyped_within_its_window_as_the_source_did()
 async fn a_snapshot_lands_each_column_where_the_statements_placed_it() {
     let replica = replica()
         .alter(
-            DAY + 4_000,
+            at(DAY + 4_000),
             people().id(),
             vec![
                 ColumnDdl::add(text("tier")).placed(Placed::First),
@@ -471,12 +498,12 @@ async fn a_snapshot_lands_each_column_where_the_statements_placed_it() {
             ],
         )
         .insert(
-            DAY + 5_000,
+            at(DAY + 5_000),
             people().id(),
             &[
-                ("id", Some("6")),
-                ("label", Some("Eve")),
-                ("tier", Some("gold")),
+                ("id", 6.into()),
+                ("label", "Eve".into()),
+                ("tier", "gold".into()),
             ],
         );
 
@@ -485,7 +512,7 @@ async fn a_snapshot_lands_each_column_where_the_statements_placed_it() {
 
     assert_eq!(
         shards.columns(built),
-        names(replica.at(*day(1).to()).table(people().id()).unwrap())
+        names(replica.dump(*day(1).to()).table(people().id()).unwrap())
     );
     assert_eq!(
         shards.rows(built),
@@ -496,11 +523,11 @@ async fn a_snapshot_lands_each_column_where_the_statements_placed_it() {
 #[tokio::test]
 async fn a_snapshot_of_a_table_renamed_within_its_window_holds_its_rows_under_its_new_name() {
     let replica = replica()
-        .rename(DAY + 4_000, people().id(), &persons())
+        .rename(at(DAY + 4_000), people().id(), &persons())
         .insert(
-            DAY + 5_000,
+            at(DAY + 5_000),
             &persons(),
-            &[("id", Some("6")), ("name", Some("Eve"))],
+            &[("id", 6.into()), ("name", "Eve".into())],
         );
 
     let (shards, built) = two_days(&replica).await;
@@ -515,18 +542,18 @@ async fn a_snapshot_of_a_table_renamed_within_its_window_holds_its_rows_under_it
 async fn a_snapshot_of_a_table_renamed_and_altered_by_one_statement_holds_both() {
     let replica = replica()
         .alter_into(
-            DAY + 4_000,
+            at(DAY + 4_000),
             people().id(),
             &persons(),
             vec![ColumnDdl::add(text("tier"))],
         )
         .insert(
-            DAY + 5_000,
+            at(DAY + 5_000),
             &persons(),
             &[
-                ("id", Some("6")),
-                ("name", Some("Eve")),
-                ("tier", Some("gold")),
+                ("id", 6.into()),
+                ("name", "Eve".into()),
+                ("tier", "gold".into()),
             ],
         );
 
@@ -540,7 +567,7 @@ async fn a_snapshot_of_a_table_renamed_and_altered_by_one_statement_holds_both()
 
 #[tokio::test]
 async fn a_table_dropped_within_its_window_is_built_no_more() {
-    let replica = replica().drop(DAY + 4_000, people().id());
+    let replica = replica().drop(at(DAY + 4_000), people().id());
 
     let (_, built) = two_days(&replica).await;
     let dropped = of(&built, people().id());
@@ -552,19 +579,19 @@ async fn a_table_dropped_within_its_window_is_built_no_more() {
 #[tokio::test]
 async fn a_table_dropped_and_created_again_within_its_window_holds_only_what_it_was_given_since() {
     let replica = replica()
-        .drop(DAY + 4_000, people().id())
+        .drop(at(DAY + 4_000), people().id())
         .create(
-            DAY + 5_000,
+            at(DAY + 5_000),
             TableModel::new(
                 people().id().clone(),
                 vec![number("id"), text("nickname")],
-                vec!["id".into()],
+                ["id"].into(),
             ),
         )
         .insert(
-            DAY + 6_000,
+            at(DAY + 6_000),
             people().id(),
-            &[("id", Some("8")), ("nickname", Some("Hal"))],
+            &[("id", 8.into()), ("nickname", "Hal".into())],
         );
 
     let (shards, built) = two_days(&replica).await;
@@ -581,17 +608,17 @@ async fn a_table_rekeyed_within_its_window_is_refused_while_the_others_are_built
     let pets = TableModel::new(
         TableId::new("shop", "pets"),
         vec![number("id"), text("kind")],
-        vec!["id".into()],
+        ["id"].into(),
     );
     let replica = replica()
-        .create(DAY + 3_500, pets.clone())
+        .create(at(DAY + 3_500), pets.clone())
         .insert(
-            DAY + 3_600,
+            at(DAY + 3_600),
             pets.id(),
-            &[("id", Some("1")), ("kind", Some("cat"))],
+            &[("id", 1.into()), ("kind", "cat".into())],
         )
         .alter(
-            DAY + 4_000,
+            at(DAY + 4_000),
             people().id(),
             vec![ColumnDdl::rekey(&["id", "name"])],
         );
@@ -610,18 +637,18 @@ async fn changes_in_the_instant_of_a_schema_change_fall_on_the_side_their_positi
     let tier = ColumnModel::new("tier", "VARCHAR", ColumnType::Text, true, Some("gold"));
     let replica = replica()
         .update(
-            DAY + 4_000,
+            at(DAY + 4_000),
             people().id(),
-            &[("id", Some("1")), ("name", Some("Before"))],
+            &[("id", 1.into()), ("name", "Before".into())],
         )
-        .alter(DAY + 4_000, people().id(), vec![ColumnDdl::add(tier)])
+        .alter(at(DAY + 4_000), people().id(), vec![ColumnDdl::add(tier)])
         .update(
-            DAY + 4_000,
+            at(DAY + 4_000),
             people().id(),
             &[
-                ("id", Some("3")),
-                ("name", Some("After")),
-                ("tier", Some("silver")),
+                ("id", 3.into()),
+                ("name", "After".into()),
+                ("tier", "silver".into()),
             ],
         );
 

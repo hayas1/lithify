@@ -28,7 +28,7 @@ fn customers() -> TableModel {
             column("created_at", "DATETIME", ColumnType::Timestamp),
             column("updated_at", "DATETIME", ColumnType::Timestamp),
         ],
-        vec!["id".into()],
+        ["id"].into(),
     )
 }
 

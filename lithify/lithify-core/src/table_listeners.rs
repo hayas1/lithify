@@ -352,7 +352,7 @@ mod tests {
                 .iter()
                 .map(|name| ColumnModel::new(name, "BIGINT", ColumnType::Int64, false, None))
                 .collect(),
-            vec!["id".into()],
+            ["id"].into(),
         )
     }
 
@@ -632,7 +632,7 @@ mod tests {
                 ColumnModel::new("id", "BIGINT", ColumnType::Int64, false, None)
                     .with_comment(Some("who they are")),
             ],
-            vec!["id".into()],
+            ["id"].into(),
         );
 
         assert_eq!(

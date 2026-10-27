@@ -1,9 +1,41 @@
 use std::collections::BTreeMap;
 
-use crate::model::{ColumnModel, ColumnName, ColumnType, TableId, TableModel};
+use crate::model::{ColumnModel, ColumnName, ColumnType, PrimaryKeyColumn, TableId, TableModel};
 use crate::ts::{Event, Ts};
 
-pub type Row = BTreeMap<ColumnName, Option<String>>;
+pub type Row = BTreeMap<ColumnName, CellValue>;
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CellValue {
+    Null,
+    Int(i64),
+    Text(String),
+}
+
+impl CellValue {
+    pub fn cast(&self, column_type: &ColumnType) -> Self {
+        match (self, column_type) {
+            (Self::Null, _) => Self::Null,
+            (Self::Text(text), ColumnType::Int16 | ColumnType::Int32 | ColumnType::Int64) => {
+                text.trim().parse().map_or(Self::Null, Self::Int)
+            }
+            (Self::Int(number), ColumnType::Text) => Self::Text(number.to_string()),
+            (held, _) => held.clone(),
+        }
+    }
+}
+
+impl From<i64> for CellValue {
+    fn from(number: i64) -> Self {
+        Self::Int(number)
+    }
+}
+
+impl From<&str> for CellValue {
+    fn from(text: &str) -> Self {
+        Self::Text(text.to_owned())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mutation {
@@ -88,7 +120,7 @@ pub enum ColumnDdl {
         column: ColumnModel,
         placed: Placed,
     },
-    Rekey(Vec<ColumnName>),
+    Rekey(PrimaryKeyColumn),
 }
 
 impl ColumnDdl {
@@ -157,15 +189,15 @@ pub struct Replica {
 }
 
 impl Replica {
-    pub fn create(self, at: i64, table: TableModel) -> Self {
+    pub fn create(self, at: Ts<Event>, table: TableModel) -> Self {
         self.mutated(at, Ddl::Create(table))
     }
 
-    pub fn drop(self, at: i64, table: &TableId) -> Self {
+    pub fn drop(self, at: Ts<Event>, table: &TableId) -> Self {
         self.mutated(at, Ddl::Drop(table.clone()))
     }
 
-    pub fn rename(self, at: i64, from: &TableId, to: &TableId) -> Self {
+    pub fn rename(self, at: Ts<Event>, from: &TableId, to: &TableId) -> Self {
         self.mutated(
             at,
             Ddl::Rename {
@@ -175,7 +207,7 @@ impl Replica {
         )
     }
 
-    pub fn alter(self, at: i64, table: &TableId, changes: Vec<ColumnDdl>) -> Self {
+    pub fn alter(self, at: Ts<Event>, table: &TableId, changes: Vec<ColumnDdl>) -> Self {
         self.mutated(
             at,
             Ddl::Alter {
@@ -188,7 +220,7 @@ impl Replica {
 
     pub fn alter_into(
         self,
-        at: i64,
+        at: Ts<Event>,
         table: &TableId,
         renamed: &TableId,
         changes: Vec<ColumnDdl>,
@@ -203,7 +235,7 @@ impl Replica {
         )
     }
 
-    pub fn insert(self, at: i64, table: &TableId, row: &[(&str, Option<&str>)]) -> Self {
+    pub fn insert(self, at: Ts<Event>, table: &TableId, row: &[(&str, CellValue)]) -> Self {
         self.mutated(
             at,
             Dml::Insert {
@@ -213,7 +245,7 @@ impl Replica {
         )
     }
 
-    pub fn update(self, at: i64, table: &TableId, row: &[(&str, Option<&str>)]) -> Self {
+    pub fn update(self, at: Ts<Event>, table: &TableId, row: &[(&str, CellValue)]) -> Self {
         self.mutated(
             at,
             Dml::Update {
@@ -223,7 +255,7 @@ impl Replica {
         )
     }
 
-    pub fn delete(self, at: i64, table: &TableId, key: &[(&str, Option<&str>)]) -> Self {
+    pub fn delete(self, at: Ts<Event>, table: &TableId, key: &[(&str, CellValue)]) -> Self {
         self.mutated(
             at,
             Dml::Delete {
@@ -237,18 +269,17 @@ impl Replica {
         &self.mutations
     }
 
-    pub fn at(&self, instant: Ts<Event>) -> ReplicaDump {
+    pub fn dump(&self, at: Ts<Event>) -> ReplicaDump {
         self.mutations
             .iter()
-            .take_while(|(at, _)| *at < instant)
+            .take_while(|(mutated, _)| *mutated < at)
             .fold(ReplicaDump::default(), |mut dump, (_, mutation)| {
                 dump.apply(mutation);
                 dump
             })
     }
 
-    pub fn mutated(mut self, at: i64, mutation: impl Into<Mutation>) -> Self {
-        let at = Ts::try_from(at).expect("a replica is mutated at an instant since the epoch");
+    pub fn mutated(mut self, at: Ts<Event>, mutation: impl Into<Mutation>) -> Self {
         assert!(
             self.mutations.last().is_none_or(|(last, _)| *last <= at),
             "a replica is mutated in the order of time"
@@ -258,10 +289,10 @@ impl Replica {
         self
     }
 
-    fn row(cells: &[(&str, Option<&str>)]) -> Row {
+    fn row(cells: &[(&str, CellValue)]) -> Row {
         cells
             .iter()
-            .map(|&(column, value)| (column.into(), value.map(str::to_owned)))
+            .map(|(column, value)| ((*column).into(), value.clone()))
             .collect()
     }
 }
@@ -285,7 +316,9 @@ impl ReplicaDump {
     pub fn row(&self, id: &TableId, key: &Row) -> Option<&Row> {
         let table = self.tables.get(id)?;
 
-        table.rows.get(&PrimaryKeyValue::of(&table.model, key))
+        table
+            .rows
+            .get(&PrimaryKeyValue::of(table.model.primary_key(), key))
     }
 
     pub fn apply(&mut self, mutation: &Mutation) {
@@ -300,7 +333,7 @@ impl ReplicaDump {
             .tables
             .get_mut(dml.table())
             .unwrap_or_else(|| panic!("{} is changed before it is created", dml.table()));
-        let key = PrimaryKeyValue::of(&table.model, dml.row());
+        let key = PrimaryKeyValue::of(table.model.primary_key(), dml.row());
 
         match dml {
             Dml::Insert { row, .. } | Dml::Update { row, .. } => {
@@ -352,14 +385,13 @@ impl ReplicaDump {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct PrimaryKeyValue(Vec<Option<String>>);
+struct PrimaryKeyValue(Vec<CellValue>);
 
 impl PrimaryKeyValue {
-    fn of(table: &TableModel, row: &Row) -> Self {
+    fn of(key: &PrimaryKeyColumn, row: &Row) -> Self {
         Self(
-            table
-                .primary_key()
-                .map(|column| row.get(column).cloned().flatten())
+            key.columns()
+                .map(|column| row.get(column).cloned().unwrap_or(CellValue::Null))
                 .collect(),
         )
     }
@@ -381,13 +413,16 @@ impl TableRows {
 
     fn alter(&mut self, change: &ColumnDdl) {
         let mut columns: Vec<ColumnModel> = self.model.columns().cloned().collect();
-        let mut key: Vec<ColumnName> = self.model.primary_key().cloned().collect();
+        let mut key = self.model.primary_key().clone();
 
         match change {
             ColumnDdl::Add { column, placed } => {
-                let default = column.default_value().map(str::to_owned);
+                let default = column
+                    .default_value()
+                    .map_or(CellValue::Null, CellValue::from)
+                    .cast(column.column_type());
                 for row in self.rows.values_mut() {
-                    row.insert(column.name().clone(), Self::cast(default.clone(), column));
+                    row.insert(column.name().clone(), default.clone());
                 }
                 let last = columns.len();
                 placed.place(&mut columns, column.clone(), last);
@@ -403,7 +438,7 @@ impl TableRows {
                     *column = Self::renamed(column, to);
                 }
                 self.carry(from, to);
-                Self::rename_in(&mut key, from, to);
+                key = Self::renamed_key(&key, from, to);
             }
             ColumnDdl::Change {
                 from,
@@ -418,10 +453,10 @@ impl TableRows {
                 placed.place(&mut columns, column.clone(), at);
                 self.carry(from, column.name());
                 for row in self.rows.values_mut() {
-                    let value = row.remove(column.name()).flatten();
-                    row.insert(column.name().clone(), Self::cast(value, column));
+                    let value = row.remove(column.name()).unwrap_or(CellValue::Null);
+                    row.insert(column.name().clone(), value.cast(column.column_type()));
                 }
-                Self::rename_in(&mut key, from, column.name());
+                key = Self::renamed_key(&key, from, column.name());
             }
             ColumnDdl::Rekey(rekeyed) => key = rekeyed.clone(),
         }
@@ -429,7 +464,7 @@ impl TableRows {
         self.model = TableModel::new(self.model.id().clone(), columns, key);
         self.rows = std::mem::take(&mut self.rows)
             .into_values()
-            .map(|row| (PrimaryKeyValue::of(&self.model, &row), row))
+            .map(|row| (PrimaryKeyValue::of(self.model.primary_key(), &row), row))
             .collect();
     }
 
@@ -437,22 +472,11 @@ impl TableRows {
         self.model
             .columns()
             .map(|column| {
-                let value = row.get(column.name()).cloned().flatten();
+                let value = row.get(column.name()).unwrap_or(&CellValue::Null);
 
-                (column.name().clone(), Self::cast(value, column))
+                (column.name().clone(), value.cast(column.column_type()))
             })
             .collect()
-    }
-
-    fn cast(value: Option<String>, column: &ColumnModel) -> Option<String> {
-        match column.column_type() {
-            ColumnType::Int16 | ColumnType::Int32 | ColumnType::Int64 => value?
-                .trim()
-                .parse::<i64>()
-                .ok()
-                .map(|number| number.to_string()),
-            _ => value,
-        }
     }
 
     fn renamed(column: &ColumnModel, to: &ColumnName) -> ColumnModel {
@@ -466,10 +490,11 @@ impl TableRows {
         .with_comment(column.comment())
     }
 
-    fn rename_in(key: &mut [ColumnName], from: &ColumnName, to: &ColumnName) {
-        for column in key.iter_mut().filter(|column| *column == from) {
-            *column = to.clone();
-        }
+    fn renamed_key(key: &PrimaryKeyColumn, from: &ColumnName, to: &ColumnName) -> PrimaryKeyColumn {
+        key.columns()
+            .map(|column| if column == from { to } else { column })
+            .cloned()
+            .collect()
     }
 
     fn carry(&mut self, from: &ColumnName, to: &ColumnName) {
@@ -525,26 +550,38 @@ mod tests {
 
     fn created() -> Replica {
         Replica::default().create(
-            0,
-            TableModel::new(people(), vec![id(), text("name")], vec!["id".into()]),
+            at(0),
+            TableModel::new(people(), vec![id(), text("name")], ["id"].into()),
         )
     }
 
     fn replica() -> Replica {
         created()
-            .insert(1, &people(), &[("id", Some("1")), ("name", Some("Alice"))])
-            .insert(2, &people(), &[("id", Some("2")), ("name", Some("Bob"))])
-            .update(3, &people(), &[("id", Some("1")), ("name", Some("Alicia"))])
-            .delete(4, &people(), &[("id", Some("2"))])
+            .insert(
+                at(1),
+                &people(),
+                &[("id", 1.into()), ("name", "Alice".into())],
+            )
+            .insert(
+                at(2),
+                &people(),
+                &[("id", 2.into()), ("name", "Bob".into())],
+            )
+            .update(
+                at(3),
+                &people(),
+                &[("id", 1.into()), ("name", "Alicia".into())],
+            )
+            .delete(at(4), &people(), &[("id", 2.into())])
     }
 
-    fn row(cells: &[(&str, Option<&str>)]) -> Row {
+    fn row(cells: &[(&str, CellValue)]) -> Row {
         Replica::row(cells)
     }
 
     fn names(replica: &Replica, instant: i64, table: &TableId) -> Vec<String> {
         replica
-            .at(at(instant))
+            .dump(at(instant))
             .table(table)
             .unwrap()
             .columns()
@@ -555,10 +592,10 @@ mod tests {
     #[test]
     fn a_replica_holds_each_key_as_the_last_change_before_an_instant_left_it() {
         assert_eq!(
-            replica().at(at(4)).rows(&people()),
+            replica().dump(at(4)).rows(&people()),
             Some(vec![
-                row(&[("id", Some("1")), ("name", Some("Alicia"))]),
-                row(&[("id", Some("2")), ("name", Some("Bob"))]),
+                row(&[("id", 1.into()), ("name", "Alicia".into())]),
+                row(&[("id", 2.into()), ("name", "Bob".into())]),
             ])
         );
     }
@@ -566,10 +603,10 @@ mod tests {
     #[test]
     fn a_replica_holds_nothing_of_a_change_at_the_instant_it_is_read_at() {
         assert_eq!(
-            replica().at(at(3)).rows(&people()),
+            replica().dump(at(3)).rows(&people()),
             Some(vec![
-                row(&[("id", Some("1")), ("name", Some("Alice"))]),
-                row(&[("id", Some("2")), ("name", Some("Bob"))]),
+                row(&[("id", 1.into()), ("name", "Alice".into())]),
+                row(&[("id", 2.into()), ("name", "Bob".into())]),
             ])
         );
     }
@@ -577,45 +614,49 @@ mod tests {
     #[test]
     fn a_deleted_key_leaves_a_replica() {
         assert_eq!(
-            replica().at(at(5)).rows(&people()),
-            Some(vec![row(&[("id", Some("1")), ("name", Some("Alicia"))])])
+            replica().dump(at(5)).rows(&people()),
+            Some(vec![row(&[("id", 1.into()), ("name", "Alicia".into())])])
         );
     }
 
     #[test]
     fn a_row_holds_every_column_of_its_table_even_one_left_unsaid() {
-        let replica = created().insert(1, &people(), &[("id", Some("1"))]);
+        let replica = created().insert(at(1), &people(), &[("id", 1.into())]);
 
         assert_eq!(
-            replica.at(at(2)).rows(&people()),
-            Some(vec![row(&[("id", Some("1")), ("name", None)])])
+            replica.dump(at(2)).rows(&people()),
+            Some(vec![row(&[("id", 1.into()), ("name", CellValue::Null)])])
         );
     }
 
     #[test]
     fn a_table_is_held_from_its_creation_until_its_drop() {
-        let replica = replica().drop(5, &people());
+        let replica = replica().drop(at(5), &people());
 
-        assert!(replica.at(at(0)).table(&people()).is_none());
-        assert!(replica.at(at(5)).table(&people()).is_some());
-        assert!(replica.at(at(6)).table(&people()).is_none());
+        assert!(replica.dump(at(0)).table(&people()).is_none());
+        assert!(replica.dump(at(5)).table(&people()).is_some());
+        assert!(replica.dump(at(6)).table(&people()).is_none());
     }
 
     #[test]
     fn a_table_renamed_carries_its_rows_under_its_new_name() {
-        let replica = replica().rename(5, &people(), &persons());
+        let replica = replica().rename(at(5), &people(), &persons());
 
-        assert_eq!(replica.at(at(6)).rows(&people()), None);
+        assert_eq!(replica.dump(at(6)).rows(&people()), None);
         assert_eq!(
-            replica.at(at(6)).rows(&persons()),
-            replica.at(at(5)).rows(&people())
+            replica.dump(at(6)).rows(&persons()),
+            replica.dump(at(5)).rows(&people())
         );
     }
 
     #[test]
     fn a_table_renamed_and_altered_by_one_statement_is_altered_under_its_new_name() {
-        let replica =
-            replica().alter_into(5, &people(), &persons(), vec![ColumnDdl::add(text("tier"))]);
+        let replica = replica().alter_into(
+            at(5),
+            &people(),
+            &persons(),
+            vec![ColumnDdl::add(text("tier"))],
+        );
 
         assert_eq!(names(&replica, 6, &persons()), ["id", "name", "tier"]);
     }
@@ -623,14 +664,14 @@ mod tests {
     #[test]
     fn a_column_added_fills_the_rows_already_there_with_its_default() {
         let tier = ColumnModel::new("tier", "VARCHAR", ColumnType::Text, true, Some("gold"));
-        let replica = replica().alter(5, &people(), vec![ColumnDdl::add(tier)]);
+        let replica = replica().alter(at(5), &people(), vec![ColumnDdl::add(tier)]);
 
         assert_eq!(
-            replica.at(at(6)).rows(&people()),
+            replica.dump(at(6)).rows(&people()),
             Some(vec![row(&[
-                ("id", Some("1")),
-                ("name", Some("Alicia")),
-                ("tier", Some("gold"))
+                ("id", 1.into()),
+                ("name", "Alicia".into()),
+                ("tier", "gold".into())
             ])])
         );
     }
@@ -639,12 +680,12 @@ mod tests {
     fn a_column_added_lands_where_the_statement_placed_it() {
         let replica = created()
             .alter(
-                1,
+                at(1),
                 &people(),
                 vec![ColumnDdl::add(text("tier")).placed(Placed::First)],
             )
             .alter(
-                2,
+                at(2),
                 &people(),
                 vec![ColumnDdl::add(text("email")).placed(Placed::After("id".into()))],
             );
@@ -657,31 +698,39 @@ mod tests {
 
     #[test]
     fn a_column_dropped_leaves_every_row() {
-        let replica = replica().alter(5, &people(), vec![ColumnDdl::drop("name")]);
+        let replica = replica().alter(at(5), &people(), vec![ColumnDdl::drop("name")]);
 
         assert_eq!(
-            replica.at(at(6)).rows(&people()),
-            Some(vec![row(&[("id", Some("1"))])])
+            replica.dump(at(6)).rows(&people()),
+            Some(vec![row(&[("id", 1.into())])])
         );
     }
 
     #[test]
     fn a_column_renamed_carries_its_values_under_its_new_name() {
-        let replica = replica().alter(5, &people(), vec![ColumnDdl::rename("name", "label")]);
+        let replica = replica().alter(at(5), &people(), vec![ColumnDdl::rename("name", "label")]);
 
         assert_eq!(
-            replica.at(at(6)).rows(&people()),
-            Some(vec![row(&[("id", Some("1")), ("label", Some("Alicia"))])])
+            replica.dump(at(6)).rows(&people()),
+            Some(vec![row(&[("id", 1.into()), ("label", "Alicia".into())])])
         );
     }
 
     #[test]
     fn a_column_retyped_casts_its_values_into_its_new_type() {
         let replica = created()
-            .insert(1, &people(), &[("id", Some("1")), ("name", Some(" 42"))])
-            .insert(2, &people(), &[("id", Some("2")), ("name", Some("Bob"))])
+            .insert(
+                at(1),
+                &people(),
+                &[("id", 1.into()), ("name", " 42".into())],
+            )
+            .insert(
+                at(2),
+                &people(),
+                &[("id", 2.into()), ("name", "Bob".into())],
+            )
             .alter(
-                3,
+                at(3),
                 &people(),
                 vec![ColumnDdl::modify(ColumnModel::new(
                     "name",
@@ -693,39 +742,52 @@ mod tests {
             );
 
         assert_eq!(
-            replica.at(at(4)).rows(&people()),
+            replica.dump(at(4)).rows(&people()),
             Some(vec![
-                row(&[("id", Some("1")), ("name", Some("42"))]),
-                row(&[("id", Some("2")), ("name", None)]),
+                row(&[("id", 1.into()), ("name", 42.into())]),
+                row(&[("id", 2.into()), ("name", CellValue::Null)]),
             ])
+        );
+    }
+
+    #[test]
+    fn a_column_retyped_into_text_holds_its_numbers_as_text() {
+        let replica = created()
+            .insert(at(1), &people(), &[("id", 1.into())])
+            .alter(at(2), &people(), vec![ColumnDdl::modify(text("id"))]);
+
+        assert_eq!(
+            replica.dump(at(3)).rows(&people()),
+            Some(vec![row(&[("id", "1".into()), ("name", CellValue::Null)])])
         );
     }
 
     #[test]
     fn a_column_changed_is_renamed_retyped_and_moved_at_once() {
         let replica = replica().alter(
-            5,
+            at(5),
             &people(),
             vec![ColumnDdl::change("name", text("label")).placed(Placed::First)],
         );
 
         assert_eq!(names(&replica, 6, &people()), ["label", "id"]);
         assert_eq!(
-            replica.at(at(6)).rows(&people()),
-            Some(vec![row(&[("id", Some("1")), ("label", Some("Alicia"))])])
+            replica.dump(at(6)).rows(&people()),
+            Some(vec![row(&[("id", 1.into()), ("label", "Alicia".into())])])
         );
     }
 
     #[test]
     fn a_renamed_key_column_keeps_the_key_on_it() {
-        let replica = replica().alter(5, &people(), vec![ColumnDdl::rename("id", "person_id")]);
+        let replica = replica().alter(at(5), &people(), vec![ColumnDdl::rename("id", "person_id")]);
 
         assert_eq!(
             replica
-                .at(at(6))
+                .dump(at(6))
                 .table(&people())
                 .unwrap()
                 .primary_key()
+                .columns()
                 .collect::<Vec<_>>(),
             ["person_id"]
         );
@@ -734,12 +796,16 @@ mod tests {
     #[test]
     fn a_table_rekeyed_holds_each_row_under_its_new_key() {
         let replica = replica()
-            .alter(5, &people(), vec![ColumnDdl::rekey(&["name"])])
-            .update(6, &people(), &[("id", Some("7")), ("name", Some("Alicia"))]);
+            .alter(at(5), &people(), vec![ColumnDdl::rekey(&["name"])])
+            .update(
+                at(6),
+                &people(),
+                &[("id", 7.into()), ("name", "Alicia".into())],
+            );
 
         assert_eq!(
-            replica.at(at(7)).rows(&people()),
-            Some(vec![row(&[("id", Some("7")), ("name", Some("Alicia"))])])
+            replica.dump(at(7)).rows(&people()),
+            Some(vec![row(&[("id", 7.into()), ("name", "Alicia".into())])])
         );
     }
 
@@ -747,21 +813,29 @@ mod tests {
     fn a_row_is_found_by_its_key() {
         assert_eq!(
             replica()
-                .at(at(4))
-                .row(&people(), &row(&[("id", Some("2"))])),
-            Some(&row(&[("id", Some("2")), ("name", Some("Bob"))]))
+                .dump(at(4))
+                .row(&people(), &row(&[("id", 2.into())])),
+            Some(&row(&[("id", 2.into()), ("name", "Bob".into())]))
         );
     }
 
     #[test]
     fn changes_of_one_instant_apply_in_the_order_they_were_made() {
         let replica = created()
-            .insert(1, &people(), &[("id", Some("1")), ("name", Some("Alice"))])
-            .update(1, &people(), &[("id", Some("1")), ("name", Some("Alicia"))]);
+            .insert(
+                at(1),
+                &people(),
+                &[("id", 1.into()), ("name", "Alice".into())],
+            )
+            .update(
+                at(1),
+                &people(),
+                &[("id", 1.into()), ("name", "Alicia".into())],
+            );
 
         assert_eq!(
-            replica.at(at(2)).rows(&people()),
-            Some(vec![row(&[("id", Some("1")), ("name", Some("Alicia"))])])
+            replica.dump(at(2)).rows(&people()),
+            Some(vec![row(&[("id", 1.into()), ("name", "Alicia".into())])])
         );
     }
 }

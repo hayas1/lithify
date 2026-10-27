@@ -279,8 +279,9 @@ impl<'a> Alteration<'a> {
             .map(Self::ColumnAdded);
         let rekeyed = before
             .primary_key()
+            .columns()
             .map(|key| lineage.name_of(key))
-            .ne(after.primary_key())
+            .ne(after.primary_key().columns())
             .then_some(Self::PrimaryKeyChanged);
 
         dropped
@@ -807,8 +808,8 @@ mod tests {
                     ),
                     Alteration::PrimaryKeyChanged => format!(
                         "primary key {id} {:?} -> {:?}",
-                        event.before().primary_key().collect::<Vec<_>>(),
-                        event.after().primary_key().collect::<Vec<_>>()
+                        event.before().primary_key().columns().collect::<Vec<_>>(),
+                        event.after().primary_key().columns().collect::<Vec<_>>()
                     ),
                 });
             self.entries.extend(entries);

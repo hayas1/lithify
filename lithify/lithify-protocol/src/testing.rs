@@ -3,7 +3,9 @@ use std::collections::BTreeMap;
 use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
 use lithify_core::sink::{ChangeLogSql, WarehouseSql};
 use lithify_core::sql::SqlString;
-use lithify_core::testing::{ColumnDdl, Ddl, Dml, Mutation, Placed, Replica, ReplicaDump, Row};
+use lithify_core::testing::{
+    CellValue, ColumnDdl, Ddl, Dml, Mutation, Placed, Replica, ReplicaDump, Row,
+};
 
 use crate::DuckDbWarehouse;
 
@@ -123,6 +125,7 @@ impl Landed {
     fn definition(table: &TableModel) -> String {
         let key = table
             .primary_key()
+            .columns()
             .map(|column| Landing::literal(column.as_str()))
             .collect::<Vec<_>>()
             .join(", ");
@@ -234,8 +237,8 @@ impl Topic {
                 format!(
                     "{}: {}",
                     Landing::literal(column.name().as_str()),
-                    Landing::nullable(
-                        row.get(column.name()).cloned().flatten().as_deref(),
+                    Cell(
+                        row.get(column.name()).unwrap_or(&CellValue::Null),
                         Self::sql_type(column)
                     )
                 )
@@ -256,6 +259,19 @@ impl Topic {
     }
 }
 
+struct Cell<'a>(&'a CellValue, &'a str);
+
+impl std::fmt::Display for Cell<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self(value, sql_type) = self;
+        match value {
+            CellValue::Null => write!(formatter, "NULL::{sql_type}"),
+            CellValue::Int(number) => write!(formatter, "{number}::{sql_type}"),
+            CellValue::Text(text) => write!(formatter, "{}::{sql_type}", Landing::literal(text)),
+        }
+    }
+}
+
 struct Statement<'a>(&'a Ddl);
 
 impl std::fmt::Display for Statement<'_> {
@@ -269,6 +285,7 @@ impl std::fmt::Display for Statement<'_> {
                         "PRIMARY KEY ({})",
                         table
                             .primary_key()
+                            .columns()
                             .map(|column| column.as_str())
                             .collect::<Vec<_>>()
                             .join(", ")
@@ -337,7 +354,7 @@ impl std::fmt::Display for Clause<'_> {
             ColumnDdl::Rekey(key) => write!(
                 formatter,
                 "DROP PRIMARY KEY, ADD PRIMARY KEY ({})",
-                key.iter()
+                key.columns()
                     .map(|column| column.as_str())
                     .collect::<Vec<_>>()
                     .join(", ")

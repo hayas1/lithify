@@ -148,7 +148,7 @@ impl Sink for DuckDb {
     ) -> Result<u64, Unbuildable> {
         let (topic, processing_time) = self
             .runtime
-            .block_on(capture.with_duckdb_change_logs(topic_prefix, Landing { table }));
+            .block_on(capture.with_duckdb_change_logs(topic_prefix, LandedTopic { table }));
 
         let warehouse = self.client.warehouse();
         let landed = self.client.connection().query_row(
@@ -246,11 +246,11 @@ impl From<&Value> for Cell {
     }
 }
 
-struct Landing<'a> {
+struct LandedTopic<'a> {
     table: &'a TableId,
 }
 
-impl DuckDbChangeLogsFn for Landing<'_> {
+impl DuckDbChangeLogsFn for LandedTopic<'_> {
     type Output = (String, ColumnPath);
 
     async fn call_duckdb<C>(self, logs: C) -> Self::Output
