@@ -36,7 +36,7 @@ fn people() -> TableModel {
             ColumnModel::new("id", "BIGINT", ColumnType::Int64, false, None),
             ColumnModel::new("name", "VARCHAR", ColumnType::Text, false, None),
         ],
-        vec!["id".to_owned()],
+        vec!["id".into()],
     )
 }
 

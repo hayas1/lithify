@@ -20,4 +20,4 @@ lithify-core = { workspace = true, features = ["testing"] }
 ulid = { workspace = true }
 serde_json = { workspace = true }
 duckdb = { workspace = true }
-lithify-protocol = { workspace = true, features = ["duckdb"] }
+lithify-protocol = { workspace = true, features = ["testing"] }

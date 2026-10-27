@@ -3,6 +3,8 @@
 
 pub mod sink;
 pub mod source;
+#[cfg(feature = "testing")]
+pub mod testing;
 
 pub use sink::bigquery::BigQueryWarehouse;
 pub use sink::duckdb::DuckDbWarehouse;

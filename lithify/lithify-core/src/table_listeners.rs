@@ -352,7 +352,7 @@ mod tests {
                 .iter()
                 .map(|name| ColumnModel::new(name, "BIGINT", ColumnType::Int64, false, None))
                 .collect(),
-            vec!["id".to_owned()],
+            vec!["id".into()],
         )
     }
 
@@ -632,7 +632,7 @@ mod tests {
                 ColumnModel::new("id", "BIGINT", ColumnType::Int64, false, None)
                     .with_comment(Some("who they are")),
             ],
-            vec!["id".to_owned()],
+            vec!["id".into()],
         );
 
         assert_eq!(
@@ -669,8 +669,8 @@ mod tests {
                     15,
                     vec![Hint::ColumnRename {
                         table: people(),
-                        from: "name".to_owned(),
-                        to: "full_name".to_owned(),
+                        from: "name".into(),
+                        to: "full_name".into(),
                     }],
                     vec![TableChange::Altered(table(people(), &["id", "full_name"]))]
                 )],

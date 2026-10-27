@@ -3,7 +3,7 @@ use std::convert::Infallible;
 use std::fmt;
 
 use crate::event::{Hint, SchemaChange, TableChange};
-use crate::model::{ColumnModel, TableId, TableModel};
+use crate::model::{ColumnModel, ColumnName, TableId, TableModel};
 use crate::position::Position;
 
 pub trait SchemaChangeListener<P> {
@@ -296,12 +296,12 @@ impl<'a> Alteration<'a> {
         let dropped: Vec<&str> = alterations
             .iter()
             .filter_map(Self::as_column_dropped)
-            .map(ColumnModel::name)
+            .map(|column| column.name().as_str())
             .collect();
         let added: Vec<&str> = alterations
             .iter()
             .filter_map(Self::as_column_added)
-            .map(ColumnModel::name)
+            .map(|column| column.name().as_str())
             .collect();
 
         if !dropped.is_empty() && !added.is_empty() {
@@ -370,7 +370,7 @@ impl<'a> Alteration<'a> {
 }
 
 struct ColumnLineage<'a> {
-    names: Vec<(&'a ColumnModel, &'a str)>,
+    names: Vec<(&'a ColumnModel, &'a ColumnName)>,
 }
 
 impl<'a> ColumnLineage<'a> {
@@ -388,8 +388,8 @@ impl<'a> ColumnLineage<'a> {
                 (Some(at), false) => names[at].1 = to,
                 _ => tracing::warn!(
                     table = %table,
-                    column = from,
-                    to,
+                    column = ?from,
+                    ?to,
                     statement = change.statement(),
                     "a statement renamed a column the table never had, or onto a name it already \
                      holds, so this rename is ignored and the column is matched by its name"
@@ -409,14 +409,14 @@ impl<'a> ColumnLineage<'a> {
             .map(move |&(previous, name)| (previous, after.column(name)))
     }
 
-    fn name_of(&self, previous: &'a str) -> &'a str {
+    fn name_of(&self, previous: &'a ColumnName) -> &'a ColumnName {
         self.names
             .iter()
             .find(|(column, _)| column.name() == previous)
             .map_or(previous, |&(_, name)| name)
     }
 
-    fn holds(&self, name: &str) -> bool {
+    fn holds(&self, name: &ColumnName) -> bool {
         self.names.iter().any(|&(_, held)| held == name)
     }
 }
@@ -631,8 +631,8 @@ impl<P: Position> CatalogModel<P> {
         for (table, from, to) in unseen {
             tracing::warn!(
                 table = %table,
-                column = from,
-                to,
+                column = ?from,
+                ?to,
                 statement = change.statement(),
                 "a statement renamed a column of a table the catalog never saw"
             );
@@ -837,7 +837,7 @@ mod tests {
         TableModel::new(
             customers(),
             columns,
-            primary_key.iter().map(|name| (*name).to_owned()).collect(),
+            primary_key.iter().map(|&name| name.into()).collect(),
         )
     }
 
@@ -1374,8 +1374,8 @@ mod tests {
     fn renaming(from: &str, to: &str) -> Hint {
         Hint::ColumnRename {
             table: customers(),
-            from: from.to_owned(),
-            to: to.to_owned(),
+            from: from.into(),
+            to: to.into(),
         }
     }
 
@@ -1968,8 +1968,8 @@ mod tests {
         let warning = warned(
             vec![Hint::ColumnRename {
                 table: orders(),
-                from: "note".to_owned(),
-                to: "remark".to_owned(),
+                from: "note".into(),
+                to: "remark".into(),
             }],
             vec![],
         );

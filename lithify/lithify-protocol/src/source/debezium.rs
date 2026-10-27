@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use lithify_core::event::{Hint, MalformedEvent, SchemaChange, TableChange};
-use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
+use lithify_core::model::{ColumnModel, ColumnName, ColumnType, TableId, TableModel};
 use lithify_core::position::{Coordinate, Position};
 use lithify_core::source::{
     CdcFormat, ChangeLog, ChangeLogs, ColumnPath, RowChangeLog, SchemaChangeLog,
@@ -176,7 +176,15 @@ impl<D: Dialect> Debezium<D> {
             .map(|column| self.column(column))
             .collect();
 
-        TableModel::new(id, columns, table.primary_key_column_names)
+        TableModel::new(
+            id,
+            columns,
+            table
+                .primary_key_column_names
+                .into_iter()
+                .map(ColumnName::from)
+                .collect(),
+        )
     }
 
     fn column(&self, column: DdlColumn) -> ColumnModel {
@@ -359,7 +367,11 @@ pub(crate) mod tests {
             panic!("expected an altered table");
         };
 
-        table.column("id").unwrap().comment().map(str::to_owned)
+        table
+            .column(&"id".into())
+            .unwrap()
+            .comment()
+            .map(str::to_owned)
     }
 
     #[test]

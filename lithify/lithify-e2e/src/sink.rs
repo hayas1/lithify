@@ -121,7 +121,7 @@ impl DuckDb {
         let warehouse = self.client.warehouse();
         let columns: Vec<String> = model
             .columns()
-            .map(|column| warehouse.identifier(column.name()).to_string())
+            .map(|column| warehouse.column_ref(column.name()).to_string())
             .collect();
 
         format!(

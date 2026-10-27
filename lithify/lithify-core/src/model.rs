@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::fmt;
 
 use crate::event::MalformedEvent;
@@ -47,6 +48,57 @@ impl TryFrom<&str> for TableId {
     }
 }
 
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ColumnName(String);
+
+impl ColumnName {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for ColumnName {
+    fn from(name: &str) -> Self {
+        Self(name.to_owned())
+    }
+}
+
+impl From<String> for ColumnName {
+    fn from(name: String) -> Self {
+        Self(name)
+    }
+}
+
+impl Borrow<str> for ColumnName {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for ColumnName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.0, formatter)
+    }
+}
+
+impl fmt::Display for ColumnName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl PartialEq<str> for ColumnName {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for ColumnName {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ColumnType {
     Bool,
@@ -69,7 +121,7 @@ pub enum ColumnType {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnModel {
-    name: String,
+    name: ColumnName,
     type_name: String,
     column_type: ColumnType,
     optional: bool,
@@ -86,7 +138,7 @@ impl ColumnModel {
         default_value: Option<&str>,
     ) -> Self {
         Self {
-            name: name.to_owned(),
+            name: ColumnName::from(name),
             type_name: type_name.to_owned(),
             column_type,
             optional,
@@ -102,7 +154,7 @@ impl ColumnModel {
         }
     }
 
-    pub fn name(&self) -> &str {
+    pub fn name(&self) -> &ColumnName {
         &self.name
     }
 
@@ -131,11 +183,11 @@ impl ColumnModel {
 pub struct TableModel {
     id: TableId,
     columns: Vec<ColumnModel>,
-    primary_key: Vec<String>,
+    primary_key: Vec<ColumnName>,
 }
 
 impl TableModel {
-    pub fn new(id: TableId, columns: Vec<ColumnModel>, primary_key: Vec<String>) -> Self {
+    pub fn new(id: TableId, columns: Vec<ColumnModel>, primary_key: Vec<ColumnName>) -> Self {
         Self {
             id,
             columns,
@@ -151,12 +203,12 @@ impl TableModel {
         self.columns.iter()
     }
 
-    pub fn column(&self, name: &str) -> Option<&ColumnModel> {
+    pub fn column(&self, name: &ColumnName) -> Option<&ColumnModel> {
         self.columns.iter().find(|column| column.name() == name)
     }
 
-    pub fn primary_key(&self) -> impl Iterator<Item = &str> {
-        self.primary_key.iter().map(String::as_str)
+    pub fn primary_key(&self) -> impl Iterator<Item = &ColumnName> {
+        self.primary_key.iter()
     }
 
     pub fn with_id(&self, id: &TableId) -> Self {
@@ -184,11 +236,11 @@ mod tests {
                 column("name", "VARCHAR"),
                 column("email", "VARCHAR"),
             ],
-            vec!["id".to_owned()],
+            vec!["id".into()],
         )
     }
 
-    fn names(table: &TableModel) -> Vec<&str> {
+    fn names(table: &TableModel) -> Vec<&ColumnName> {
         table.columns().map(ColumnModel::name).collect()
     }
 

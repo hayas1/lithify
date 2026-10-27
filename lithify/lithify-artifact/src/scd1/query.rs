@@ -71,7 +71,7 @@ impl<'a, L: RowChangeLog> ChangeLogQuery<'a, L> {
         let columns: Vec<String> = table
             .columns()
             .map(|column| {
-                let name = warehouse.identifier(column.name());
+                let name = warehouse.column_ref(column.name());
                 let value = match table.primary_key().any(|key| key == column.name()) {
                     true => self.keyed(warehouse, None, &name),
                     false => SqlString::from(format!("{after}.{name}")),
@@ -150,7 +150,7 @@ impl<'a, L: RowChangeLog> ChangeLogQuery<'a, L> {
         let columns: Vec<String> = next
             .columns()
             .map(|column| {
-                let name = warehouse.identifier(column.name());
+                let name = warehouse.column_ref(column.name());
 
                 Ok(format!("    {} AS {name}", carried(column, &name)?))
             })
@@ -171,7 +171,7 @@ impl<'a, L: RowChangeLog> ChangeLogQuery<'a, L> {
     ) -> SqlString {
         let matched = table
             .primary_key()
-            .map(|column| warehouse.identifier(column))
+            .map(|column| warehouse.column_ref(column))
             .enumerate()
             .map(|(at, column)| {
                 let matched = format!(
@@ -194,7 +194,7 @@ impl<'a, L: RowChangeLog> ChangeLogQuery<'a, L> {
         let partition: Vec<String> = table
             .primary_key()
             .map(|column| {
-                self.keyed(warehouse, None, &warehouse.identifier(column))
+                self.keyed(warehouse, None, &warehouse.column_ref(column))
                     .to_string()
             })
             .collect();
@@ -237,7 +237,7 @@ impl<'a, L: RowChangeLog> ChangeLogQuery<'a, L> {
         SqlString::from(
             table
                 .columns()
-                .map(|column| format!("{indent}{}", warehouse.identifier(column.name())))
+                .map(|column| format!("{indent}{}", warehouse.column_ref(column.name())))
                 .collect::<Vec<_>>()
                 .join(",\n"),
         )
@@ -253,7 +253,7 @@ impl<'a, L: RowChangeLog> ChangeLogQuery<'a, L> {
         let columns: Vec<String> = table
             .columns()
             .map(|column| {
-                let name = warehouse.identifier(column.name());
+                let name = warehouse.column_ref(column.name());
                 let read = warehouse.read(
                     &SqlString::from(format!("{after}.{name}")),
                     column.column_type(),

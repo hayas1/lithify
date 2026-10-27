@@ -350,7 +350,7 @@ impl<'a, A: Overwrite, L: RowChangeLog, W: Warehouse> Scd1Builder<'a, A, L, W> {
             .find(|(_, renamed)| renamed.name() == column.name())
             .map_or_else(
                 || name.clone(),
-                |(previous, _)| warehouse.identifier(previous.name()),
+                |(previous, _)| warehouse.column_ref(previous.name()),
             )
     }
 
@@ -595,7 +595,7 @@ mod tests {
         TableModel::new(
             TableId::new("shop", "customers"),
             columns,
-            key.iter().map(|column| (*column).to_owned()).collect(),
+            key.iter().map(|&column| column.into()).collect(),
         )
     }
 
@@ -630,8 +630,8 @@ mod tests {
     fn renamed(from: &str, to: &str) -> Hint {
         Hint::ColumnRename {
             table: TableId::new("shop", "customers"),
-            from: from.to_owned(),
-            to: to.to_owned(),
+            from: from.into(),
+            to: to.into(),
         }
     }
 
@@ -884,7 +884,7 @@ mod tests {
         let orders = TableModel::new(
             TableId::new("shop", "orders"),
             vec![column("id", ColumnType::Int64)],
-            vec!["id".to_owned()],
+            vec!["id".into()],
         );
 
         let snapshots = snapshots(
@@ -920,7 +920,7 @@ mod tests {
         let orders = TableModel::new(
             TableId::new("shop", "orders"),
             vec![column("id", ColumnType::Int64)],
-            vec!["id".to_owned()],
+            vec!["id".into()],
         );
 
         let snapshots = snapshots(
@@ -1548,7 +1548,7 @@ mod tests {
                 column("order_id", ColumnType::Int64),
                 column("line_no", ColumnType::Int64),
             ],
-            vec!["order_id".to_owned(), "line_no".to_owned()],
+            vec!["order_id".into(), "line_no".into()],
         );
 
         let statement = statement(snapshots(items, vec![], || None));
@@ -1724,7 +1724,7 @@ mod tests {
         let orders = TableModel::new(
             TableId::new("shop", "orders"),
             vec![column("id", ColumnType::Int64)],
-            vec!["id".to_owned()],
+            vec!["id".into()],
         );
         let created = snapshots(
             customers(),
@@ -1766,7 +1766,7 @@ mod tests {
         let orders = TableModel::new(
             TableId::new("shop", "orders"),
             vec![column("id", ColumnType::Int64)],
-            vec!["id".to_owned()],
+            vec!["id".into()],
         );
         let captured = snapshots(
             customers(),
@@ -1869,7 +1869,7 @@ mod tests {
         let orders = TableModel::new(
             TableId::new("shop", "orders"),
             vec![column("id", ColumnType::Int64)],
-            vec!["id".to_owned()],
+            vec!["id".into()],
         );
         let missing = |change: TableChange| {
             snapshots(customers(), vec![self::change(150, change)], || None)

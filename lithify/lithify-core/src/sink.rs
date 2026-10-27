@@ -5,7 +5,7 @@ use crate::build_log::{
     BuildLog, BuildLogQuery, BuildLogRow, Series, Status, TableBuild, TableBuilt,
     UnreadableBuildLog,
 };
-use crate::model::{ColumnModel, ColumnType};
+use crate::model::{ColumnModel, ColumnName, ColumnType};
 use crate::source::{ColumnPath, SchemaChangeLog};
 use crate::sql::SqlString;
 use crate::ts::Ts;
@@ -110,6 +110,10 @@ pub trait WarehouseSql {
     }
 
     fn table_ref(&self, table: &TablePath) -> SqlString;
+
+    fn column_ref(&self, column: &ColumnName) -> SqlString {
+        self.identifier(column.as_str())
+    }
 
     fn column_type(&self, column_type: &ColumnType) -> Result<SqlString, UnsupportedColumn>;
 

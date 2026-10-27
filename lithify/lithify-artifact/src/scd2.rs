@@ -197,10 +197,13 @@ impl<L: RowChangeLog, W: Warehouse> Scd2Builder<'_, L, W> {
         .map(ident);
         let columns: Vec<String> = table
             .columns()
-            .map(|column| ident(column.name()).to_string())
+            .map(|column| warehouse.column_ref(column.name()).to_string())
             .collect();
         let columns = columns.join(", ");
-        let keys: Vec<SqlString> = table.primary_key().map(ident).collect();
+        let keys: Vec<SqlString> = table
+            .primary_key()
+            .map(|key| warehouse.column_ref(key))
+            .collect();
         let partition = keys
             .iter()
             .map(SqlString::to_string)
@@ -432,7 +435,7 @@ mod tests {
                 .iter()
                 .map(|name| ColumnModel::new(name, "BIGINT", ColumnType::Int64, false, None))
                 .collect(),
-            vec!["id".to_owned()],
+            vec!["id".into()],
         )
     }
 
