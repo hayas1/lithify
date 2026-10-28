@@ -4,8 +4,9 @@ use crate::component::{
     BuildLogPanel, Callout, CheckPanel, MissingPipeline, PipelineCards, PipelineHeader, Shell,
     Sidebar, Sources, ViewToggle,
 };
-use crate::pipelines::{PipelineLocation, PipelineOverview};
+use crate::pipelines::PipelineOverview;
 use crate::route::AppRoute;
+use lithify_pipeline::pipelines::PipelineLocation;
 
 #[component]
 pub fn PipelinesScreen(route: AppRoute, pipelines: Vec<PipelineLocation>) -> impl IntoView {

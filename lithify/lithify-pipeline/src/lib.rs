@@ -7,6 +7,7 @@ pub mod build_log;
 pub mod check;
 pub mod infra;
 pub mod pipeline;
+pub mod pipelines;
 pub mod place;
 pub mod progress;
 pub mod runner;

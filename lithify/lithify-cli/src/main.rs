@@ -19,7 +19,7 @@ use lithify_core::artifact::ArtifactName;
 use lithify_core::ts::Ts;
 use lithify_protocol::sink::duckdb::store::{S3Credential, Secret};
 #[cfg(feature = "serve")]
-use lithify_ui::pipelines::Pipelines;
+use lithify_ui::pipelines::Survey;
 #[cfg(feature = "serve")]
 use lithify_ui::server::Board;
 
@@ -248,7 +248,7 @@ struct ServeArguments {
 impl ServeArguments {
     async fn journal(self) -> Result<Journal, Unrunnable> {
         Board::new(
-            Pipelines::<CaptureConfig, WarehouseConfig, ArtifactConfig>::new(
+            Survey::<CaptureConfig, WarehouseConfig, ArtifactConfig>::new(
                 self.directory,
                 self.credential.credentials(),
             ),

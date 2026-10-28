@@ -6,8 +6,10 @@ use lithify_core::model::TableId;
 use lithify_pipeline::build_log::{BuildLog, Status};
 use lithify_pipeline::schedule::Schedule;
 
+use lithify_pipeline::pipelines::PipelineLocation;
+
 use crate::pipelines::{
-    BuildLogView, PipelineLocation, PipelineOverview, SinkInspection, SinkOverview, SourceOverview,
+    BuildLogView, PipelineOverview, SinkInspection, SinkOverview, SourceOverview,
 };
 use crate::route::{AppRoute, Section};
 

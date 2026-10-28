@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -7,32 +7,10 @@ use lithify_core::ts::{Replay, Ts};
 use lithify_pipeline::build_log::{BuildLog, BuildLogQuery, Latest};
 use lithify_pipeline::check::{Inspecting, Inspection};
 use lithify_pipeline::infra::{Sink, Source};
+use lithify_pipeline::pipelines::{PipelineLocation, Pipelines};
 use lithify_pipeline::schedule::Schedule;
 use lithify_pipeline::warehouse::{SinkWarehouse, WarehouseControl, WarehouseFn};
 use lithify_pipeline::{Declaration, Pipeline, Placing};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PipelineLocation {
-    name: String,
-    directory: String,
-}
-
-impl PipelineLocation {
-    pub fn new(name: &str, directory: &str) -> Self {
-        Self {
-            name: name.to_owned(),
-            directory: directory.to_owned(),
-        }
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn directory(&self) -> &str {
-        &self.directory
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PipelineOverview {
@@ -186,13 +164,12 @@ impl From<Inspection> for SinkInspection {
     }
 }
 
-pub struct Pipelines<C, W: SinkWarehouse, A> {
-    root: PathBuf,
+pub struct Survey<C, W: SinkWarehouse, A> {
+    pipelines: Pipelines<C, W, A>,
     credential: W::Credential,
-    configured: std::marker::PhantomData<fn() -> (C, A)>,
 }
 
-impl<C, W, A> Pipelines<C, W, A>
+impl<C, W, A> Survey<C, W, A>
 where
     C: Clone + DeserializeOwned + Serialize,
     W: Clone + DeserializeOwned + Placing,
@@ -200,18 +177,15 @@ where
 {
     pub fn new(root: PathBuf, credential: W::Credential) -> Self {
         Self {
-            root,
+            pipelines: Pipelines::new(root),
             credential,
-            configured: std::marker::PhantomData,
         }
     }
 
     pub fn locations(&self) -> Result<Vec<PipelineLocation>, String> {
-        Ok(self
-            .directories()?
-            .iter()
-            .map(|directory| Self::location(directory))
-            .collect())
+        self.pipelines
+            .locations()
+            .map_err(|unlisted| unlisted.to_string())
     }
 
     pub async fn inspect(
@@ -219,43 +193,24 @@ where
         name: &str,
         view: BuildLogView,
     ) -> Result<Option<PipelineOverview>, String> {
-        let directories = self.directories()?;
-        let found = directories
-            .iter()
-            .find(|directory| Self::location(directory).name() == name);
+        let located = self
+            .pipelines
+            .located(name)
+            .map_err(|unlisted| unlisted.to_string())?;
 
-        Ok(match found {
-            Some(directory) => Some(self.overview(directory, view).await),
+        Ok(match located {
+            Some(location) => Some(self.overview(location, view).await),
             None => None,
         })
     }
 
-    fn directories(&self) -> Result<Vec<PathBuf>, String> {
-        let directories = Pipeline::<C, W, A>::directories(&self.root)
-            .map_err(|unreadable| unreadable.to_string())?;
-
-        match directories.is_empty() {
-            true => Err(format!("{} configures no pipeline", self.root.display())),
-            false => Ok(directories),
-        }
-    }
-
-    fn location(directory: &Path) -> PipelineLocation {
-        let name = directory
-            .file_name()
-            .unwrap_or(directory.as_os_str())
-            .to_string_lossy();
-
-        PipelineLocation::new(&name, &directory.display().to_string())
-    }
-
-    async fn overview(&self, directory: &Path, view: BuildLogView) -> PipelineOverview {
-        let sources = match Pipeline::<C, W, A>::open(directory) {
+    async fn overview(&self, location: PipelineLocation, view: BuildLogView) -> PipelineOverview {
+        let sources = match self.pipelines.open(&location) {
             Ok(pipeline) => self.sources(&pipeline, view).await,
             Err(unreadable) => Err(unreadable.to_string()),
         };
 
-        PipelineOverview::new(Self::location(directory), sources)
+        PipelineOverview::new(location, sources)
     }
 
     async fn sources(
@@ -355,11 +310,13 @@ impl<E: std::error::Error> From<E> for Misread {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
     use lithify_testing::pipeline::{Captured, INFRA, Kept, Made, configure, logged, scratch};
 
-    fn under(root: &Path) -> Pipelines<Captured, Kept, Made> {
-        Pipelines::new(root.to_owned(), ())
+    fn under(root: &Path) -> Survey<Captured, Kept, Made> {
+        Survey::new(root.to_owned(), ())
     }
 
     async fn tables(root: &Path, view: BuildLogView) -> Vec<String> {
@@ -378,21 +335,6 @@ mod tests {
             .filter_map(BuildLog::table)
             .map(|table| table.table().to_owned())
             .collect()
-    }
-
-    #[test]
-    fn the_pipelines_under_a_directory_are_located_in_the_order_of_their_names() {
-        let root = scratch("ordered");
-        configure(&root.join("postgres"), INFRA);
-        configure(&root.join("mysql"), INFRA);
-
-        assert_eq!(
-            under(&root).locations().unwrap(),
-            [
-                PipelineLocation::new("mysql", &root.join("mysql").display().to_string()),
-                PipelineLocation::new("postgres", &root.join("postgres").display().to_string())
-            ]
-        );
     }
 
     #[tokio::test]
@@ -465,11 +407,6 @@ mod tests {
                 .unwrap(),
             None
         );
-    }
-
-    #[test]
-    fn a_directory_configuring_no_pipeline_locates_none() {
-        assert!(under(&scratch("empty")).locations().is_err());
     }
 
     #[test]
