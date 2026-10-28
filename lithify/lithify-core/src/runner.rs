@@ -5,7 +5,7 @@ use std::fmt::{self, Display, Formatter};
 use chrono::NaiveDate;
 
 use crate::artifact::{Artifact, UnbuildableArtifact};
-use crate::build_log::{BuildLog, Run, Series, TableBuilt, UnreadableBuildLog};
+use crate::build_log::{BuildLog, Run, Series, TableBuild, TableBuilt, UnreadableBuildLog};
 use crate::listener::Finish;
 use crate::listener::OutOfOrder;
 use crate::model::TableId;
@@ -140,6 +140,29 @@ where
         E: From<OutOfOrder> + From<Infallible>,
         <K as SchemaChangeStream<C::Schema>>::Error: Into<E>,
     {
+        let mut built = Vec::new();
+
+        for build in self
+            .planned::<A, E>(artifact, window, previous, finishes)
+            .await?
+        {
+            built.push(self.client.build(build).await);
+        }
+
+        Ok(built)
+    }
+
+    pub async fn planned<A: Artifact, E>(
+        &self,
+        artifact: &'a A,
+        window: &'a Window,
+        previous: &[BuildLog],
+        finishes: impl Fn(&TableId) -> bool,
+    ) -> Result<Vec<TableBuild>, E>
+    where
+        E: From<OutOfOrder> + From<Infallible>,
+        <K as SchemaChangeStream<C::Schema>>::Error: Into<E>,
+    {
         let mut listeners = TableListeners::new(
             |table: &TableId| {
                 artifact.builder::<_, K::Warehouse>(
@@ -160,13 +183,7 @@ where
                 &mut listeners,
             )
             .await?;
-        let mut built = Vec::new();
-
-        for build in listeners.finish(self.client.warehouse(), catalog)? {
-            built.push(self.client.build(build).await);
-        }
-
-        Ok(built)
+        Ok(listeners.finish(self.client.warehouse(), catalog)?)
     }
 
     pub async fn run<A: Artifact, B: BuildLogWriter, E>(
