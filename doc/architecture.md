@@ -15,6 +15,48 @@ How the code is laid out and the rules it keeps, as opposed to the [design](desi
 | `lithify-testing` | What `cargo test` of the other crates builds on, as a dev-dependency alone: a replica of a source database and its history as the oracle, its change log landed in an in-memory DuckDB as Debezium would land it, the shards an artifact builds over it, and stand-ins for a change log, a warehouse and a pipeline |
 | `lithify-e2e` | Scenarios run against a pipeline on real services, for what `cargo test` cannot hold: what Debezium and the sinks actually write, the store, BigQuery, and the command line from end to end |
 
+### How the crates depend on one another
+
+An arrow points from a crate to one it depends on.
+`lithify-testing` and `lithify-e2e` are left out, as only tests and scenarios depend on them.
+
+```mermaid
+flowchart BT
+    pipeline[lithify-pipeline] --> core[lithify-core]
+    artifact[lithify-artifact] --> pipeline
+    protocol[lithify-protocol] --> pipeline
+    ui[lithify-ui] --> pipeline
+    cli[lithify-cli] --> artifact
+    cli --> protocol
+    cli --> ui
+```
+
+### How a step runs
+
+The control plane reads what the core is handed and runs what it plans; the core reads and writes nothing.
+
+```mermaid
+flowchart TD
+    subgraph pipeline[lithify-pipeline]
+        stepping[Stepping] -->|reads where each series stands| log[(build log)]
+        stepping -->|hands the next window to| taker[StepTaker]
+        taker --> runner[Runner]
+        runner -->|ArtifactControl::base| base[the table each folds onto]
+        runner -->|SchemaChangeStream::history| history[SchemaHistory]
+        runner -->|runs the statements through WarehouseClient| built[TableBuilt]
+        built --> writer[BuildLogWrite]
+        writer -->|WarehouseControl| log
+    end
+    subgraph core[lithify-core]
+        replayer[Replayer] --> listeners[TableListeners]
+        listeners -->|SchemaChangeListener, Finish| builder[an ArtifactBuilder per table]
+        builder --> build[TableBuild]
+    end
+    base --> replayer
+    history --> replayer
+    build --> runner
+```
+
 ## Rules
 
 ### The replay tells a builder everything it needs
