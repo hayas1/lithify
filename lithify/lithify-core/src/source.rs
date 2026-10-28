@@ -118,23 +118,34 @@ pub trait SchemaChangeStream<L: SchemaChangeLog> {
         Ok(())
     }
 
-    async fn catalog<E, V>(
+    async fn history<E>(&self, log: &L, window: &Window) -> Result<SchemaHistory<L::Position>, E>
+    where
+        Self::Error: Into<E>,
+    {
+        Ok(SchemaHistory::new(
+            self.collected::<E>(log, &Window::until(*window.from()))
+                .await?,
+            self.collected::<E>(log, window).await?,
+        ))
+    }
+
+    async fn collected<E>(
         &self,
-        context: &V::Context,
         log: &L,
         window: &Window,
-        catalog: &mut CatalogModel<L::Position>,
-        listener: &mut V,
-    ) -> Result<(), E>
+    ) -> Result<Vec<SchemaChange<L::Position>>, E>
     where
-        V: SchemaChangeListener<L::Position>,
         Self::Error: Into<E>,
-        E: From<OutOfOrder> + From<V::Error>,
     {
-        self.each_schema_change(log, window, |change| {
-            catalog.accept::<E, V>(context, &change, listener)
+        let mut changes = Vec::new();
+
+        self.each_schema_change::<E>(log, window, |change| {
+            changes.push(change);
+            Ok(())
         })
-        .await
+        .await?;
+
+        Ok(changes)
     }
 
     async fn catalog_at<E>(&self, log: &L, at: Ts<Event>) -> Result<CatalogModel<L::Position>, E>
@@ -142,34 +153,10 @@ pub trait SchemaChangeStream<L: SchemaChangeLog> {
         Self::Error: Into<E>,
         E: From<OutOfOrder>,
     {
-        let mut catalog = CatalogModel::default();
-
-        self.each_schema_change::<E>(log, &Window::until(at), |change| {
-            Ok(catalog.accept::<OutOfOrder, ()>(&(), &change, &mut ())?)
-        })
-        .await?;
-
-        Ok(catalog)
-    }
-
-    async fn replay<E, V>(
-        &self,
-        context: &V::Context,
-        log: &L,
-        window: &Window,
-        listener: &mut V,
-    ) -> Result<CatalogModel<L::Position>, E>
-    where
-        V: SchemaChangeListener<L::Position>,
-        Self::Error: Into<E>,
-        E: From<OutOfOrder> + From<V::Error>,
-    {
-        let mut catalog = self.catalog_at::<E>(log, *window.from()).await?;
-
-        self.catalog::<E, V>(context, log, window, &mut catalog, listener)
-            .await?;
-
-        Ok(catalog)
+        Ok(self
+            .history::<E>(log, &Window::new(at, at))
+            .await?
+            .replay::<OutOfOrder, ()>(&(), &mut ())?)
     }
 
     async fn table<E>(
@@ -196,4 +183,32 @@ pub trait SchemaChanges<L: SchemaChangeLog> {
     fn stream(
         &mut self,
     ) -> Result<impl Iterator<Item = Streamed<L::Position, Self::Error>>, Self::Error>;
+}
+
+pub struct SchemaHistory<P> {
+    opened: Vec<SchemaChange<P>>,
+    within: Vec<SchemaChange<P>>,
+}
+
+impl<P: Position> SchemaHistory<P> {
+    pub fn new(opened: Vec<SchemaChange<P>>, within: Vec<SchemaChange<P>>) -> Self {
+        Self { opened, within }
+    }
+
+    pub fn replay<E, V>(&self, context: &V::Context, listener: &mut V) -> Result<CatalogModel<P>, E>
+    where
+        V: SchemaChangeListener<P>,
+        E: From<OutOfOrder> + From<V::Error>,
+    {
+        let mut catalog = CatalogModel::default();
+
+        for change in &self.opened {
+            catalog.accept::<OutOfOrder, ()>(&(), change, &mut ())?;
+        }
+        for change in &self.within {
+            catalog.accept::<E, V>(context, change, listener)?;
+        }
+
+        Ok(catalog)
+    }
 }

@@ -119,7 +119,7 @@ impl BuildLogWriter for BuildLogWrite {
 
 pub struct Runner<'a, K, C> {
     client: &'a K,
-    replayer: Replayer<'a, K, C>,
+    logs: &'a C,
 }
 
 impl<'a, K, C> Runner<'a, K, C>
@@ -128,10 +128,7 @@ where
     K: SchemaChangeStream<C::Schema> + WarehouseControl,
 {
     pub fn new(client: &'a K, logs: &'a C) -> Self {
-        Self {
-            client,
-            replayer: Replayer::new(client, logs),
-        }
+        Self { client, logs }
     }
 
     pub async fn built<A: ArtifactControl, E>(
@@ -145,23 +142,24 @@ where
         E: From<OutOfOrder> + From<Infallible>,
         <K as SchemaChangeStream<C::Schema>>::Error: Into<E>,
     {
+        let history = self
+            .client
+            .history::<E>(self.logs.schema_changes(), window)
+            .await?;
         let mut built = Vec::new();
 
-        for build in self
-            .replayer
-            .planned::<A, E>(
-                artifact,
-                window,
-                |table| {
-                    artifact
-                        .base(previous, table, window)
-                        .and_then(BuildLog::target)
-                        .cloned()
-                },
-                finishes,
-            )
-            .await?
-        {
+        for build in Replayer::new(self.client.warehouse(), self.logs).planned::<A, E>(
+            &history,
+            artifact,
+            window,
+            |table| {
+                artifact
+                    .base(previous, table, window)
+                    .and_then(BuildLog::target)
+                    .cloned()
+            },
+            finishes,
+        )? {
             built.push(self.client.build(build).await);
         }
 
