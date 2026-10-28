@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use chrono_tz::Tz;
 
+use crate::warehouse::SinkWarehouse;
 use lithify_core::artifact::ArtifactName;
-use lithify_core::sink::SinkWarehouse;
 use lithify_core::ts::{Event, Ts};
 
 use crate::artifact::{Declaration, Declarations};
@@ -431,7 +431,7 @@ mod tests {
             )
         }
 
-        async fn with_client<F: lithify_core::sink::WarehouseFn>(
+        async fn with_client<F: crate::warehouse::WarehouseFn>(
             &self,
             _: &Lying,
             _: &(),

@@ -2,15 +2,17 @@ use chrono::{DateTime, NaiveTime, TimeDelta, Utc};
 use chrono_tz::Tz;
 use serde::Deserialize;
 
-use lithify_core::artifact::{Artifact, ArtifactName, Placement, UnbuildableArtifact};
-use lithify_core::build_log::{BuildLog, Series};
+use lithify_core::artifact::{Artifact, ArtifactName, UnbuildableArtifact};
 use lithify_core::model::TableId;
-use lithify_core::schedule::{Schedule, Timeline};
 use lithify_core::sink::{Namespace, TablePath, Warehouse};
 use lithify_core::source::RowChangeLog;
 use lithify_core::sql::SqlString;
 use lithify_core::ts::{Event, Ts};
 use lithify_core::window::Window;
+use lithify_pipeline::schedule::{Schedule, Timeline};
+
+use lithify_pipeline::artifact::{ArtifactControl, Placement};
+use lithify_pipeline::build_log::{BuildLog, Series};
 
 use crate::scd1::{Overwrite, Scd1Builder};
 use crate::shard::Shard;
@@ -92,11 +94,36 @@ impl Instant {
 impl Artifact for Instant {
     const KIND: &'static str = "instant";
 
+    type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = Scd1Builder<'a, Self, L, W>;
+
+    fn namespace(&self) -> &Namespace {
+        &self.namespace
+    }
+
+    // An instant is read as the data at the instant it is cut, unlike a snapshot read as a day, so
+    // it is named after the instant its window closes.
+    fn target(&self, table: &TableId, window: &Window) -> Result<TablePath, UnbuildableArtifact> {
+        Ok(TablePath::new(
+            self.namespace.clone(),
+            &self.shard.name(table, *window.to()),
+        ))
+    }
+
+    fn builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>(
+        &'a self,
+        log: &'a L,
+        table: TableId,
+        window: &'a Window,
+        base: Option<TablePath>,
+    ) -> Self::Builder<'a, L, W> {
+        Scd1Builder::new(self, log, table, window.clone(), base)
+    }
+}
+
+impl ArtifactControl for Instant {
     type From = Snapshot;
 
     type Config = InstantConfig;
-
-    type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = Scd1Builder<'a, Self, L, W>;
 
     fn declared(
         name: &ArtifactName,
@@ -112,10 +139,6 @@ impl Artifact for Instant {
         )
         .named(name.clone())
         .copied_into(placement.copies().to_vec())
-    }
-
-    fn namespace(&self) -> &Namespace {
-        &self.namespace
     }
 
     fn series(&self) -> Series {
@@ -138,31 +161,6 @@ impl Artifact for Instant {
         window: &Window,
     ) -> Option<&'b BuildLog> {
         Snapshot::shard_closing(&self.base, built, table, *window.from())
-    }
-
-    // An instant is read as the data at the instant it is cut, unlike a snapshot read as a day, so
-    // it is named after the instant its window closes.
-    fn target(&self, table: &TableId, window: &Window) -> Result<TablePath, UnbuildableArtifact> {
-        Ok(TablePath::new(
-            self.namespace.clone(),
-            &self.shard.name(table, *window.to()),
-        ))
-    }
-
-    fn builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>(
-        &'a self,
-        log: &'a L,
-        table: TableId,
-        window: &'a Window,
-        previous: Option<&BuildLog>,
-    ) -> Self::Builder<'a, L, W> {
-        Scd1Builder::new(
-            self,
-            log,
-            table,
-            window.clone(),
-            previous.and_then(BuildLog::target).cloned(),
-        )
     }
 }
 
@@ -189,8 +187,8 @@ impl Overwrite for Instant {
 mod tests {
     use ulid::Ulid;
 
-    use lithify_core::build_log::{Run, Status, TableBuilt};
-    use lithify_core::schedule::Timeline;
+    use lithify_pipeline::build_log::{Run, Status, TableBuilt};
+    use lithify_pipeline::schedule::Timeline;
 
     use super::*;
 

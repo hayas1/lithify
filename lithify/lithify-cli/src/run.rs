@@ -19,7 +19,7 @@ use crate::pipeline::{CaptureConfig, Reached, WarehouseConfig};
 use crate::report::{DryRunBuildLogWrite, Report};
 use crate::step::Taking;
 use crate::unrunnable::Unrunnable;
-use lithify_core::check::{Expectation, Inspection};
+use lithify_pipeline::check::{Expectation, Inspection};
 
 pub struct Run {
     directory: PathBuf,

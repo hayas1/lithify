@@ -4,20 +4,21 @@ use std::marker::PhantomData;
 use chrono_tz::Tz;
 use serde::Deserialize;
 
-use lithify_core::artifact::{
-    Artifact, ArtifactBuilder, ArtifactName, Placement, UnbuildableArtifact,
-};
-use lithify_core::build_log::{Base, BuildLog, Series, TableBuild};
+use lithify_core::artifact::{Artifact, ArtifactBuilder, ArtifactName, UnbuildableArtifact};
+use lithify_core::build::{Base, TableBuild};
 use lithify_core::era::{Bound, Era, EraTracker};
 use lithify_core::listener::{
     Alteration, Finish, ReplayEnd, SchemaChangeListener, TableAltered, TableCreated, TableRenamed,
 };
 use lithify_core::model::TableId;
-use lithify_core::schedule::{Schedule, Timeline};
 use lithify_core::sink::{Namespace, TablePath, Warehouse};
 use lithify_core::source::RowChangeLog;
 use lithify_core::sql::SqlString;
 use lithify_core::window::Window;
+use lithify_pipeline::schedule::{Schedule, Timeline};
+
+use lithify_pipeline::artifact::{ArtifactControl, Placement};
+use lithify_pipeline::build_log::{BuildLog, Series};
 
 use crate::scd1::query::ChangeLogQuery;
 use crate::shard::Shard;
@@ -72,20 +73,47 @@ impl Scd2 {
 impl Artifact for Scd2 {
     const KIND: &'static str = "scd2";
 
+    type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = Scd2Builder<'a, L, W>;
+
+    fn namespace(&self) -> &Namespace {
+        &self.namespace
+    }
+
+    fn target(&self, table: &TableId, window: &Window) -> Result<TablePath, UnbuildableArtifact> {
+        Ok(TablePath::new(
+            self.namespace.clone(),
+            &self.open.name(table, window.last()),
+        ))
+    }
+
+    fn builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>(
+        &'a self,
+        log: &'a L,
+        table: TableId,
+        window: &'a Window,
+        base: Option<TablePath>,
+    ) -> Self::Builder<'a, L, W> {
+        Scd2Builder {
+            scd2: self,
+            query: ChangeLogQuery::new(log),
+            window: window.clone(),
+            base: Base::from(base),
+            eras: EraTracker::since(Bound::EventTime(*window.from())),
+            opened_as: Some(table),
+            warehouse: PhantomData,
+        }
+    }
+}
+
+impl ArtifactControl for Scd2 {
     type From = Self;
 
     type Config = Scd2Config;
-
-    type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = Scd2Builder<'a, L, W>;
 
     // An scd2 is built into its first placement alone, as its versions are appended rather than
     // created whole and so cannot be copied as they are built.
     fn declared(name: &ArtifactName, config: &Scd2Config, placement: &Placement, zone: Tz) -> Self {
         Self::new(placement.namespace().clone(), config.shard(), zone).named(name.clone())
-    }
-
-    fn namespace(&self) -> &Namespace {
-        &self.namespace
     }
 
     fn series(&self) -> Series {
@@ -107,31 +135,6 @@ impl Artifact for Scd2 {
                 && log.table_to() == Some(table)
                 && log.window().to() == window.from()
         })
-    }
-
-    fn target(&self, table: &TableId, window: &Window) -> Result<TablePath, UnbuildableArtifact> {
-        Ok(TablePath::new(
-            self.namespace.clone(),
-            &self.open.name(table, window.last()),
-        ))
-    }
-
-    fn builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>(
-        &'a self,
-        log: &'a L,
-        table: TableId,
-        window: &'a Window,
-        previous: Option<&BuildLog>,
-    ) -> Self::Builder<'a, L, W> {
-        Scd2Builder {
-            scd2: self,
-            query: ChangeLogQuery::new(log),
-            window: window.clone(),
-            base: Base::from(previous.and_then(BuildLog::target).cloned()),
-            eras: EraTracker::since(Bound::EventTime(*window.from())),
-            opened_as: Some(table),
-            warehouse: PhantomData,
-        }
     }
 }
 
@@ -408,8 +411,8 @@ mod tests {
     use lithify_core::event::{SchemaChange, TableChange};
     use lithify_core::listener::{CatalogModel, OutOfOrder};
     use lithify_core::model::{ColumnModel, ColumnType, TableModel};
-    use lithify_core::schedule::Timeline;
     use lithify_core::ts::Ts;
+    use lithify_pipeline::schedule::Timeline;
     use lithify_testing::Engine;
 
     use super::*;

@@ -8,10 +8,8 @@ use tokio::runtime::Runtime;
 use lithify_artifact::snapshot::Snapshot;
 use lithify_cli::pipeline::{self, CaptureConfig};
 use lithify_core::artifact::UnbuildableArtifact;
-use lithify_core::build_log::Status;
 use lithify_core::listener::OutOfOrder;
 use lithify_core::model::{TableId, TableModel};
-use lithify_core::runner::Replayer;
 use lithify_core::sink::{ChangeLogSql, TablePath, WarehouseClient, WarehouseSql};
 use lithify_core::source::{
     ChangeLog, ChangeLogs, ColumnPath, RowChangeLog, SchemaChangeLog, SchemaChangeStream,
@@ -19,6 +17,8 @@ use lithify_core::source::{
 use lithify_core::sql::SqlString;
 use lithify_core::ts::{Event, Processing, Ts};
 use lithify_core::window::Window;
+use lithify_pipeline::build_log::Status;
+use lithify_pipeline::runner::Runner;
 use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbChangeLogsFn, DuckDbClient};
 use lithify_protocol::sink::duckdb::config::Location;
 use lithify_protocol::sink::duckdb::store::ObjectStore;
@@ -300,7 +300,7 @@ impl DuckDbChangeLogsFn for SnapshotBuild<'_> {
         C: ChangeLogs,
         <C::Schema as SchemaChangeLog>::Record: FromSql,
     {
-        let built = Replayer::new(self.client, &logs)
+        let built = Runner::new(self.client, &logs)
             .built::<_, Unbuildable>(self.artifact, self.window, &[], |table| table == self.table)
             .await?
             .into_iter()

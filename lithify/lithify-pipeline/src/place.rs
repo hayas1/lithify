@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 use serde::de::{self, DeserializeOwned, Deserializer};
 
+use crate::warehouse::SinkWarehouse;
 use lithify_core::artifact::ArtifactName;
-use lithify_core::sink::SinkWarehouse;
 
 pub trait Placing: SinkWarehouse {
     fn change_log(&self) -> Self::Location;

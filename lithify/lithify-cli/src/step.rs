@@ -2,11 +2,11 @@ use duckdb::types::FromSql;
 use google_cloud_bigquery::error::RowError;
 use google_cloud_bigquery::query::Row;
 
-use lithify_core::artifact::Artifact;
-use lithify_core::build_log::BuildLog;
-use lithify_core::runner::{BuildLogWriter, Replayer, StepTaker, Tables};
 use lithify_core::source::{ChangeLogs, SchemaChangeLog};
 use lithify_core::window::Window;
+use lithify_pipeline::artifact::ArtifactControl;
+use lithify_pipeline::build_log::BuildLog;
+use lithify_pipeline::runner::{BuildLogWriter, Runner, StepTaker, Tables};
 use lithify_pipeline::table;
 use lithify_protocol::sink::bigquery::client::{
     BigQueryCapture, BigQueryChangeLogsFn, BigQueryClient, BigQueryExecution,
@@ -28,7 +28,7 @@ pub struct Replaying<'a, K, B, A> {
     writer: &'a B,
 }
 
-impl<'a, K, B: BuildLogWriter, A: Artifact> Replaying<'a, K, B, A> {
+impl<'a, K, B: BuildLogWriter, A: ArtifactControl> Replaying<'a, K, B, A> {
     pub fn new(
         client: &'a K,
         artifact: &'a A,
@@ -81,7 +81,7 @@ impl<X: DuckDbExecution> StepTaker for Taking<'_, DuckDbClient<X>> {
         self.client
     }
 
-    async fn take<A: Artifact, B: BuildLogWriter>(
+    async fn take<A: ArtifactControl, B: BuildLogWriter>(
         &self,
         artifact: &A,
         window: &Window,
@@ -114,7 +114,7 @@ impl<X: BigQueryExecution> StepTaker for Taking<'_, BigQueryClient<X>> {
         self.client
     }
 
-    async fn take<A: Artifact, B: BuildLogWriter>(
+    async fn take<A: ArtifactControl, B: BuildLogWriter>(
         &self,
         artifact: &A,
         window: &Window,
@@ -139,7 +139,7 @@ impl<X: BigQueryExecution> StepTaker for Taking<'_, BigQueryClient<X>> {
     }
 }
 
-impl<X: DuckDbExecution, B: BuildLogWriter, A: Artifact> DuckDbChangeLogsFn
+impl<X: DuckDbExecution, B: BuildLogWriter, A: ArtifactControl> DuckDbChangeLogsFn
     for Replaying<'_, DuckDbClient<X>, B, A>
 {
     type Output = Result<B::Output, Unrunnable>;
@@ -149,7 +149,7 @@ impl<X: DuckDbExecution, B: BuildLogWriter, A: Artifact> DuckDbChangeLogsFn
         C: ChangeLogs,
         <C::Schema as SchemaChangeLog>::Record: FromSql,
     {
-        Replayer::new(self.client, &logs)
+        Runner::new(self.client, &logs)
             .run(
                 self.artifact,
                 self.window,
@@ -166,7 +166,7 @@ impl<X: DuckDbExecution, B: BuildLogWriter, A: Artifact> DuckDbChangeLogsFn
     }
 }
 
-impl<X: BigQueryExecution, B: BuildLogWriter, A: Artifact> BigQueryChangeLogsFn
+impl<X: BigQueryExecution, B: BuildLogWriter, A: ArtifactControl> BigQueryChangeLogsFn
     for Replaying<'_, BigQueryClient<X>, B, A>
 {
     type Output = Result<B::Output, Unrunnable>;
@@ -176,7 +176,7 @@ impl<X: BigQueryExecution, B: BuildLogWriter, A: Artifact> BigQueryChangeLogsFn
         C: ChangeLogs,
         <C::Schema as SchemaChangeLog>::Record: TryFrom<Row, Error = RowError>,
     {
-        Replayer::new(self.client, &logs)
+        Runner::new(self.client, &logs)
             .run(
                 self.artifact,
                 self.window,
@@ -200,6 +200,7 @@ pub(crate) mod tests {
     use lithify_core::sink::{Namespace, TablePath, WarehouseClient};
     use lithify_core::ts::Ts;
     use lithify_pipeline::Pipeline;
+    use lithify_pipeline::warehouse::WarehouseControl;
     use lithify_protocol::DuckDbWarehouse;
     use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbClient};
 
@@ -213,10 +214,10 @@ pub(crate) mod tests {
     use crate::pipeline::{CaptureConfig, WarehouseConfig};
     use lithify_artifact::snapshot::Snapshot;
     use lithify_core::artifact::UnbuildableArtifact;
-    use lithify_core::build_log::{BuildLog, Latest, Run, Status, TableBuilt};
     use lithify_core::model::TableId;
-    use lithify_core::runner::{BuildLogWrite, Tables};
+    use lithify_pipeline::build_log::{BuildLog, Latest, Run, Status, TableBuilt};
     use lithify_pipeline::infra::Sink;
+    use lithify_pipeline::runner::{BuildLogWrite, Tables};
     use lithify_protocol::sink::execution::DryRun;
 
     const CHANGE_LOGS: &str = "CREATE SCHEMA mysql_shop_cdc;

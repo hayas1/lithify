@@ -1,7 +1,7 @@
 use google_cloud_bigquery::error::{ConvertError, RowError};
 use google_cloud_bigquery::query::{FromSql, Row};
 
-use lithify_core::build_log::BuildLogRow;
+use lithify_pipeline::build_log::BuildLogRow;
 
 use crate::source::debezium::{DdlColumn, DebeziumDdl};
 

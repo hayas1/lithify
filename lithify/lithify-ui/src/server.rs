@@ -11,7 +11,7 @@ use leptos::prelude::*;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use lithify_core::sink::SinkWarehouse;
+use lithify_pipeline::warehouse::SinkWarehouse;
 use lithify_pipeline::{Declaration, Placing};
 
 use crate::pipelines::{PipelineLocation, PipelineOverview, Pipelines};

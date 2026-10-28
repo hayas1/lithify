@@ -1,10 +1,11 @@
 use std::path::{Path, PathBuf};
 
 use lithify_core::artifact::UnbuildableArtifact;
-use lithify_core::build_log::{BuildLog, Series, TableBuilt};
-use lithify_core::runner::{BuildLogWrite, BuildLogWriter};
-use lithify_core::sink::{Namespace, WarehouseClient};
+use lithify_core::sink::Namespace;
 use lithify_core::window::Window;
+use lithify_pipeline::build_log::{BuildLog, Series, TableBuilt};
+use lithify_pipeline::runner::{BuildLogWrite, BuildLogWriter};
+use lithify_pipeline::warehouse::WarehouseControl;
 use lithify_protocol::sink::bigquery::client::BigQueryExecution;
 use lithify_protocol::sink::duckdb::client::DuckDbExecution;
 use lithify_protocol::sink::execution::{Apply, DryRun};
@@ -90,7 +91,7 @@ impl BuildLogWriter for DryRunBuildLogWrite {
 
     async fn write<K, E>(&self, client: &K, built: Vec<TableBuilt>) -> Result<Self::Output, E>
     where
-        K: WarehouseClient,
+        K: WarehouseControl,
         E: From<K::Error> + From<UnbuildableArtifact>,
     {
         self.build.write(client, built).await
@@ -138,11 +139,11 @@ mod tests {
     use chrono::DateTime;
     use ulid::Ulid;
 
-    use lithify_core::build_log::{Run, Status, TableBuilt};
     use lithify_core::model::TableId;
     use lithify_core::sink::TablePath;
     use lithify_core::sql::SqlString;
     use lithify_core::ts::Ts;
+    use lithify_pipeline::build_log::{Run, Status, TableBuilt};
 
     use super::*;
 

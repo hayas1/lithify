@@ -1,13 +1,15 @@
 use chrono::NaiveDate;
 
-use crate::artifact::Artifact;
+use crate::artifact::ArtifactControl;
 use crate::build_log::{BuildLog, Latest, Series};
 use crate::progress::{Progress, Step};
 use crate::runner::{BuildLogWriter, StepTaker, Tables, Unsteppable};
 use crate::schedule::Timeline;
-use crate::sink::{Namespace, WarehouseClient};
-use crate::ts::{Event, Ts};
-use crate::window::Window;
+use lithify_core::sink::Namespace;
+
+use crate::warehouse::WarehouseControl;
+use lithify_core::ts::{Event, Ts};
+use lithify_core::window::Window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeriesLog {
@@ -63,7 +65,7 @@ impl<'a, P: StepTaker> Stepping<'a, P> {
         }
     }
 
-    pub async fn next<A: Artifact>(
+    pub async fn next<A: ArtifactControl>(
         &self,
         artifact: &A,
         log: &SeriesLog,
@@ -82,7 +84,7 @@ impl<'a, P: StepTaker> Stepping<'a, P> {
         }))
     }
 
-    fn window<A: Artifact>(
+    fn window<A: ArtifactControl>(
         &self,
         artifact: &A,
         built: Option<&Window>,
@@ -103,7 +105,7 @@ impl<'a, P: StepTaker> Stepping<'a, P> {
         self.timeline.reached(&window).then_some(window)
     }
 
-    pub async fn take<A: Artifact, B: BuildLogWriter>(
+    pub async fn take<A: ArtifactControl, B: BuildLogWriter>(
         &self,
         artifact: &A,
         log: &SeriesLog,

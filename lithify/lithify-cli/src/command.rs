@@ -1,11 +1,11 @@
 use chrono::NaiveDate;
 
 use lithify_core::artifact::ArtifactName;
-use lithify_core::runner::StepTaker;
-use lithify_core::schedule::Timeline;
-use lithify_core::stepping::Stepping;
 use lithify_core::ts::{Replay, Ts};
 use lithify_pipeline::infra::{Sink, Source};
+use lithify_pipeline::runner::StepTaker;
+use lithify_pipeline::schedule::Timeline;
+use lithify_pipeline::stepping::Stepping;
 
 use crate::artifacts::{ArtifactConfig, Declared, DeclaredSnapshot, Lineup};
 use crate::journal::Journal;
@@ -122,9 +122,9 @@ pub(crate) mod tests {
     use crate::step::Taking;
     use crate::step::tests::{CAPTURE, PEOPLE, at, built_before, logged, pipeline, rows};
     use lithify_artifact::snapshot::Snapshot;
-    use lithify_core::check::Expectation;
-    use lithify_core::schedule::Schedule;
     use lithify_core::sink::WarehouseClient;
+    use lithify_pipeline::check::Expectation;
+    use lithify_pipeline::schedule::Schedule;
 
     const NOW: &str = "2026-09-22T05:00:00Z";
 
@@ -897,7 +897,7 @@ pub(crate) mod tests {
 
 #[cfg(test)]
 mod catch_up {
-    use lithify_core::runner::Unsteppable;
+    use lithify_pipeline::runner::Unsteppable;
     use lithify_protocol::sink::duckdb::client::DuckDbClient;
 
     use crate::command::tests::settle;
@@ -1607,7 +1607,7 @@ mod derived {
         assert!(
             !lithify_core::sink::WarehouseClient::exists(
                 &client,
-                &lithify_core::build_log::BuildLog::path(&lithify_core::sink::Namespace::from(
+                &lithify_pipeline::build_log::BuildLog::path(&lithify_core::sink::Namespace::from(
                     "mysql_shop_instant"
                 )),
             )

@@ -1,13 +1,11 @@
 use std::convert::Infallible;
 use std::fmt;
 
-use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
-use crate::build_log::{BuildLog, Series, TableBuild};
+use crate::build::TableBuild;
 use crate::listener::{Finish, ReplayEnd, SchemaChangeListener};
 use crate::model::TableId;
-use crate::schedule::Timeline;
 use crate::sink::{Namespace, TablePath, UnsupportedColumn, Warehouse};
 use crate::source::RowChangeLog;
 use crate::sql::SqlString;
@@ -100,62 +98,14 @@ impl fmt::Display for ArtifactName {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Placement {
-    namespace: Namespace,
-    copies: Vec<Namespace>,
-}
-
-impl Placement {
-    pub fn new(namespace: Namespace, copies: Vec<Namespace>) -> Self {
-        Self { namespace, copies }
-    }
-
-    pub fn namespace(&self) -> &Namespace {
-        &self.namespace
-    }
-
-    pub fn copies(&self) -> &[Namespace] {
-        &self.copies
-    }
-}
-
-impl From<Namespace> for Placement {
-    fn from(namespace: Namespace) -> Self {
-        Self::new(namespace, Vec::new())
-    }
-}
-
 pub trait Artifact {
     const KIND: &'static str;
-
-    type From: Artifact;
-
-    type Config;
 
     type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>: ArtifactBuilder<L::Position, W>
     where
         Self: 'a;
 
-    fn declared(
-        name: &ArtifactName,
-        config: &Self::Config,
-        placement: &Placement,
-        zone: Tz,
-    ) -> Self;
-
     fn namespace(&self) -> &Namespace;
-
-    fn series(&self) -> Series;
-
-    fn window(&self, day: &Window, timeline: &Timeline) -> Option<Window>;
-
-    fn base<'b>(
-        &self,
-        built: &'b [BuildLog],
-        table: &TableId,
-        window: &Window,
-    ) -> Option<&'b BuildLog>;
 
     fn target(&self, table: &TableId, window: &Window) -> Result<TablePath, UnbuildableArtifact>;
 
@@ -164,7 +114,7 @@ pub trait Artifact {
         log: &'a L,
         table: TableId,
         window: &'a Window,
-        previous: Option<&BuildLog>,
+        base: Option<TablePath>,
     ) -> Self::Builder<'a, L, W>;
 }
 

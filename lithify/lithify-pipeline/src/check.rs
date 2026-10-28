@@ -2,11 +2,13 @@ use std::collections::BTreeSet;
 use std::fmt::{self, Display, Formatter};
 
 use crate::build_log::{BuildLog, Latest, Series, UnreadableBuildLog};
-use crate::model::TableId;
 use crate::schedule::Schedule;
-use crate::sink::{Namespace, TablePath, WarehouseClient};
-use crate::ts::{Event, Replay, Ts};
-use crate::window::Window;
+use lithify_core::model::TableId;
+use lithify_core::sink::{Namespace, TablePath};
+
+use crate::warehouse::WarehouseControl;
+use lithify_core::ts::{Event, Replay, Ts};
+use lithify_core::window::Window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Discrepancy {
@@ -112,7 +114,7 @@ impl Expectation {
         series: &Series,
     ) -> Result<Inspection, E>
     where
-        K: WarehouseClient,
+        K: WarehouseControl,
         E: From<K::Error> + From<UnreadableBuildLog>,
     {
         if !client.exists(&BuildLog::path(namespace)).await? {

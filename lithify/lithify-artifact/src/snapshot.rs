@@ -3,15 +3,17 @@ use chrono_tz::Tz;
 use serde::Deserialize;
 use serde::de::{self, Deserializer};
 
-use lithify_core::artifact::{Artifact, ArtifactName, Placement, UnbuildableArtifact};
-use lithify_core::build_log::{BuildLog, Series};
+use lithify_core::artifact::{Artifact, ArtifactName, UnbuildableArtifact};
 use lithify_core::model::TableId;
-use lithify_core::schedule::{Schedule, Timeline};
 use lithify_core::sink::{Namespace, TablePath, Warehouse};
 use lithify_core::source::RowChangeLog;
 use lithify_core::sql::SqlString;
 use lithify_core::ts::{Event, Ts};
 use lithify_core::window::Window;
+use lithify_pipeline::schedule::{Schedule, Timeline};
+
+use lithify_pipeline::artifact::{ArtifactControl, Placement};
+use lithify_pipeline::build_log::{BuildLog, Series};
 
 use crate::scd1::{Overwrite, Scd1Builder};
 use crate::shard::Shard;
@@ -108,46 +110,10 @@ impl Snapshot {
 impl Artifact for Snapshot {
     const KIND: &'static str = "snapshot";
 
-    type From = Self;
-
-    type Config = SnapshotConfig;
-
     type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = Scd1Builder<'a, Self, L, W>;
-
-    fn declared(
-        name: &ArtifactName,
-        config: &SnapshotConfig,
-        placement: &Placement,
-        zone: Tz,
-    ) -> Self {
-        Self::new(
-            placement.namespace().clone(),
-            Shard::new(config.shard(), zone),
-        )
-        .named(name.clone())
-        .scheduled(config.schedule(zone))
-        .copied_into(placement.copies().to_vec())
-    }
 
     fn namespace(&self) -> &Namespace {
         &self.namespace
-    }
-
-    fn series(&self) -> Series {
-        Self::days(&self.name)
-    }
-
-    fn window(&self, day: &Window, _: &Timeline) -> Option<Window> {
-        Some(day.clone())
-    }
-
-    fn base<'b>(
-        &self,
-        built: &'b [BuildLog],
-        table: &TableId,
-        window: &Window,
-    ) -> Option<&'b BuildLog> {
-        Self::shard_closing(&self.series(), built, table, *window.from())
     }
 
     // A snapshot is read as the data of a day, which means the day as it ended, so its shard is
@@ -165,15 +131,47 @@ impl Artifact for Snapshot {
         log: &'a L,
         table: TableId,
         window: &'a Window,
-        previous: Option<&BuildLog>,
+        base: Option<TablePath>,
     ) -> Self::Builder<'a, L, W> {
-        Scd1Builder::new(
-            self,
-            log,
-            table,
-            window.clone(),
-            previous.and_then(BuildLog::target).cloned(),
+        Scd1Builder::new(self, log, table, window.clone(), base)
+    }
+}
+
+impl ArtifactControl for Snapshot {
+    type From = Self;
+
+    type Config = SnapshotConfig;
+
+    fn declared(
+        name: &ArtifactName,
+        config: &SnapshotConfig,
+        placement: &Placement,
+        zone: Tz,
+    ) -> Self {
+        Self::new(
+            placement.namespace().clone(),
+            Shard::new(config.shard(), zone),
         )
+        .named(name.clone())
+        .scheduled(config.schedule(zone))
+        .copied_into(placement.copies().to_vec())
+    }
+
+    fn series(&self) -> Series {
+        Self::days(&self.name)
+    }
+
+    fn window(&self, day: &Window, _: &Timeline) -> Option<Window> {
+        Some(day.clone())
+    }
+
+    fn base<'b>(
+        &self,
+        built: &'b [BuildLog],
+        table: &TableId,
+        window: &Window,
+    ) -> Option<&'b BuildLog> {
+        Self::shard_closing(&self.series(), built, table, *window.from())
     }
 }
 
@@ -200,7 +198,7 @@ impl Overwrite for Snapshot {
 mod tests {
     use chrono::DateTime;
 
-    use lithify_core::build_log::{Run, Status, TableBuilt};
+    use lithify_pipeline::build_log::{Run, Status, TableBuilt};
 
     use super::*;
 

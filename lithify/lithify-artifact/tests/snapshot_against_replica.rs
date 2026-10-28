@@ -5,13 +5,13 @@ use lithify_artifact::scd1::Scd1;
 use lithify_artifact::scd2::Scd2;
 use lithify_artifact::shard::Shard;
 use lithify_artifact::snapshot::Snapshot;
-use lithify_core::artifact::Artifact;
-use lithify_core::build_log::{BuildLog, Status};
 use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
-use lithify_core::schedule::{Schedule, Timeline};
 use lithify_core::sink::{Namespace, TablePath};
 use lithify_core::ts::{Event, Ts};
 use lithify_core::window::Window;
+use lithify_pipeline::artifact::ArtifactControl;
+use lithify_pipeline::build_log::{BuildLog, Status};
+use lithify_pipeline::schedule::{Schedule, Timeline};
 use lithify_testing::{CellValue, ColumnDdl, Placed, Replica, Row, Shards};
 
 const DAY: i64 = 86_400_000;

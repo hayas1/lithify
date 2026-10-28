@@ -1,13 +1,14 @@
 use duckdb::types::{FromSql, Type};
 use duckdb::{Connection, Error, Statement};
+use lithify_pipeline::warehouse::WarehouseControl;
 
-use lithify_core::build_log::{BuildLogQuery, BuildLogRow};
 use lithify_core::sink::{ChangeLogSql, Namespace, TablePath, WarehouseClient, WarehouseSql};
 use lithify_core::source::{
     ChangeLogs, SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed,
 };
 use lithify_core::sql::SqlString;
 use lithify_core::window::Window;
+use lithify_pipeline::build_log::{BuildLogQuery, BuildLogRow};
 
 use crate::sink::duckdb::DuckDbWarehouse;
 use crate::sink::execution::{Apply, DryRun};
@@ -103,7 +104,9 @@ impl<R: DuckDbExecution> WarehouseClient for DuckDbClient<R> {
 
         Ok(count > 0)
     }
+}
 
+impl<R: DuckDbExecution> WarehouseControl for DuckDbClient<R> {
     async fn build_log_rows(
         &self,
         namespace: &Namespace,
@@ -197,8 +200,6 @@ mod tests {
     use crate::source::debezium::tests::described;
     use chrono::DateTime;
     use lithify_core::artifact::UnbuildableArtifact;
-    use lithify_core::build_log::Latest;
-    use lithify_core::build_log::{BuildLog, Run, Series, Status, TableBuilt, UnreadableBuildLog};
     use lithify_core::event::{MalformedEvent, SchemaChange};
     use lithify_core::listener::OutOfOrder;
     use lithify_core::model::TableId;
@@ -206,6 +207,10 @@ mod tests {
     use lithify_core::sink::TablePath;
     use lithify_core::source::{ChangeLog, ColumnPath};
     use lithify_core::ts::Ts;
+    use lithify_pipeline::build_log::Latest;
+    use lithify_pipeline::build_log::{
+        BuildLog, Run, Series, Status, TableBuilt, UnreadableBuildLog,
+    };
     use ulid::Ulid;
 
     const CHANGE_LOG: &str = "CREATE SCHEMA mysql_shop_cdc;

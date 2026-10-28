@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use lithify_core::sink::{Namespace, OpenWarehouse, SinkWarehouse, WarehouseFn};
+use lithify_core::sink::{Namespace, OpenWarehouse};
+
 use lithify_core::source::CdcFormat;
+use lithify_pipeline::warehouse::{SinkWarehouse, WarehouseFn};
 use lithify_pipeline::{Placed, Places, Placing};
 use lithify_protocol::sink::bigquery::client::{BigQueryCapture, BigQueryChangeLogsFn};
 use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbChangeLogsFn};

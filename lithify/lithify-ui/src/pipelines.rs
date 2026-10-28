@@ -3,12 +3,13 @@ use std::path::{Path, PathBuf};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use lithify_core::build_log::{BuildLog, BuildLogQuery, Latest, Series};
-use lithify_core::check::{Expectation, Inspection};
-use lithify_core::schedule::Schedule;
-use lithify_core::sink::{Namespace, SinkWarehouse, WarehouseClient, WarehouseFn};
+use lithify_core::sink::Namespace;
 use lithify_core::ts::{Replay, Ts};
+use lithify_pipeline::build_log::{BuildLog, BuildLogQuery, Latest, Series};
+use lithify_pipeline::check::{Expectation, Inspection};
 use lithify_pipeline::infra::{Sink, Source};
+use lithify_pipeline::schedule::Schedule;
+use lithify_pipeline::warehouse::{SinkWarehouse, WarehouseControl, WarehouseFn};
 use lithify_pipeline::{Declaration, Pipeline, Placing};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -333,7 +334,7 @@ struct Reading<'a> {
 }
 
 impl Reading<'_> {
-    async fn read<K: WarehouseClient>(&self, client: &K) -> Result<SinkInspection, Misread> {
+    async fn read<K: WarehouseControl>(&self, client: &K) -> Result<SinkInspection, Misread> {
         let inspection = self
             .expectation
             .read::<K, Misread>(client, &self.namespace, &self.series)
@@ -359,7 +360,7 @@ impl Reading<'_> {
 impl WarehouseFn for Reading<'_> {
     type Output = Result<SinkInspection, String>;
 
-    async fn call<K: WarehouseClient>(self, client: &K) -> Self::Output {
+    async fn call<K: WarehouseControl>(self, client: &K) -> Self::Output {
         self.read(client).await.map_err(|Misread(unread)| unread)
     }
 }
