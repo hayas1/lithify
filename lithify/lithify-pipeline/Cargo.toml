@@ -19,6 +19,7 @@ toml = { workspace = true }
 ulid = { workspace = true }
 
 [dev-dependencies]
+lithify-artifact = { workspace = true }
 lithify-protocol = { workspace = true }
 lithify-testing = { workspace = true }
 tokio = { workspace = true, features = ["macros"] }
