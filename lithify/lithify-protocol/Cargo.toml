@@ -27,7 +27,6 @@ bigquery = [
     "dep:wkt",
 ]
 duckdb = ["dep:duckdb"]
-testing = ["duckdb", "lithify-core/testing"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros"] }

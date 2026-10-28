@@ -1,10 +1,10 @@
 use std::convert::Infallible;
 
-use crate::artifact::UnbuildableArtifact;
-use crate::listener::OutOfOrder;
-use crate::model::TableId;
-use crate::position::{Coordinate, Position};
-use crate::source::{ChangeLog, ColumnPath, RowChangeLog};
+use lithify_core::artifact::UnbuildableArtifact;
+use lithify_core::listener::OutOfOrder;
+use lithify_core::model::TableId;
+use lithify_core::position::{Coordinate, Position};
+use lithify_core::source::{ChangeLog, ColumnPath, RowChangeLog};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Offset(pub u64);

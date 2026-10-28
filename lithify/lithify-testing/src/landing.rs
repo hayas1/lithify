@@ -3,11 +3,9 @@ use std::collections::BTreeMap;
 use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
 use lithify_core::sink::{ChangeLogSql, WarehouseSql};
 use lithify_core::sql::SqlString;
-use lithify_core::testing::{
-    CellValue, ColumnDdl, Ddl, Dml, Mutation, Placed, Replica, ReplicaDump, Row,
-};
+use lithify_protocol::DuckDbWarehouse;
 
-use crate::DuckDbWarehouse;
+use crate::replica::{CellValue, ColumnDdl, Ddl, Dml, Mutation, Placed, Replica, ReplicaDump, Row};
 
 pub struct Landing<'a> {
     replica: &'a Replica,

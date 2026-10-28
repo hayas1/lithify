@@ -375,7 +375,11 @@ impl<E: std::error::Error> From<E> for Misread {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{INFRA, configure, logged, scratch, under};
+    use lithify_testing::pipeline::{Captured, INFRA, Kept, Made, configure, logged, scratch};
+
+    fn under(root: &Path) -> Pipelines<Captured, Kept, Made> {
+        Pipelines::new(root.to_owned(), ())
+    }
 
     async fn tables(root: &Path, view: BuildLogView) -> Vec<String> {
         under(root)

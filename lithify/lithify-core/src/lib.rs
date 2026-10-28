@@ -18,7 +18,5 @@ pub mod source;
 pub mod sql;
 pub mod stepping;
 pub mod table_listeners;
-#[cfg(any(test, feature = "testing"))]
-pub mod testing;
 pub mod ts;
 pub mod window;

@@ -200,7 +200,12 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::testing::{INFRA, configure, logged, scratch, under};
+    use crate::pipelines::Pipelines;
+    use lithify_testing::pipeline::{Captured, INFRA, Kept, Made, configure, logged, scratch};
+
+    fn under(root: &Path) -> Pipelines<Captured, Kept, Made> {
+        Pipelines::new(root.to_owned(), ())
+    }
 
     fn located(name: &str) -> PathBuf {
         let root = scratch(&format!("server-{name}"));

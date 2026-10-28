@@ -409,11 +409,11 @@ mod tests {
     use lithify_core::listener::{CatalogModel, OutOfOrder};
     use lithify_core::model::{ColumnModel, ColumnType, TableModel};
     use lithify_core::schedule::Timeline;
-    use lithify_core::testing::Engine;
     use lithify_core::ts::Ts;
+    use lithify_testing::Engine;
 
     use super::*;
-    use lithify_core::testing::{Log, Offset, Untold};
+    use lithify_testing::{Log, Offset, Untold};
 
     const DAY: i64 = 86_400_000;
 

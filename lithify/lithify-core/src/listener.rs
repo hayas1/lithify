@@ -691,8 +691,6 @@ mod tests {
     use crate::model::{ColumnType, TableId};
     use crate::ts::Ts;
 
-    use crate::testing::Offset;
-
     impl Alteration<'_> {
         pub(crate) fn announcement(&self) -> String {
             match self {
@@ -718,14 +716,14 @@ mod tests {
         entries: Vec<String>,
     }
 
-    impl SchemaChangeListener<Offset> for Statements {
+    impl SchemaChangeListener<u64> for Statements {
         type Context = ();
         type Error = Infallible;
 
         fn visit_statement(
             &mut self,
             _: &(),
-            change: &SchemaChange<Offset>,
+            change: &SchemaChange<u64>,
         ) -> Result<(), Infallible> {
             self.entries
                 .push(format!("statement {} tables", change.tables().count()));
@@ -736,7 +734,7 @@ mod tests {
         fn leave_statement(
             &mut self,
             _: &(),
-            change: &SchemaChange<Offset>,
+            change: &SchemaChange<u64>,
         ) -> Result<(), Infallible> {
             self.entries
                 .push(format!("left statement {} tables", change.tables().count()));
@@ -747,7 +745,7 @@ mod tests {
         fn table_created(
             &mut self,
             _: &(),
-            event: &TableCreated<'_, Offset>,
+            event: &TableCreated<'_, u64>,
         ) -> Result<(), Infallible> {
             self.entries.push(format!("table {}", event.table().id()));
 
@@ -755,14 +753,14 @@ mod tests {
         }
     }
 
-    impl SchemaChangeListener<Offset> for Journal {
+    impl SchemaChangeListener<u64> for Journal {
         type Context = ();
         type Error = Infallible;
 
         fn table_created(
             &mut self,
             _: &(),
-            event: &TableCreated<'_, Offset>,
+            event: &TableCreated<'_, u64>,
         ) -> Result<(), Infallible> {
             self.entries.push(format!("created {}", event.table().id()));
 
@@ -772,7 +770,7 @@ mod tests {
         fn table_dropped(
             &mut self,
             _: &(),
-            event: &TableDropped<'_, Offset>,
+            event: &TableDropped<'_, u64>,
         ) -> Result<(), Infallible> {
             self.entries.push(format!("dropped {}", event.table().id()));
 
@@ -782,7 +780,7 @@ mod tests {
         fn table_altered(
             &mut self,
             _: &(),
-            event: &TableAltered<'_, Offset>,
+            event: &TableAltered<'_, u64>,
         ) -> Result<(), Infallible> {
             let id = event.after().id();
             let entries = event
@@ -842,13 +840,13 @@ mod tests {
         )
     }
 
-    fn change(offset: u64, tables: Vec<TableChange>) -> SchemaChange<Offset> {
+    fn change(offset: u64, tables: Vec<TableChange>) -> SchemaChange<u64> {
         hinted(offset, Vec::new(), tables)
     }
 
-    fn hinted(offset: u64, hints: Vec<Hint>, tables: Vec<TableChange>) -> SchemaChange<Offset> {
+    fn hinted(offset: u64, hints: Vec<Hint>, tables: Vec<TableChange>) -> SchemaChange<u64> {
         SchemaChange::new(
-            Offset(offset),
+            offset,
             Ts::try_from(offset as i64).unwrap(),
             "",
             tables,
@@ -856,7 +854,7 @@ mod tests {
         )
     }
 
-    fn created(offset: u64) -> SchemaChange<Offset> {
+    fn created(offset: u64) -> SchemaChange<u64> {
         change(
             offset,
             vec![TableChange::Created(table(
@@ -866,18 +864,14 @@ mod tests {
         )
     }
 
-    fn altered(
-        offset: u64,
-        columns: Vec<ColumnModel>,
-        primary_key: &[&str],
-    ) -> SchemaChange<Offset> {
+    fn altered(offset: u64, columns: Vec<ColumnModel>, primary_key: &[&str]) -> SchemaChange<u64> {
         change(
             offset,
             vec![TableChange::Altered(table(columns, primary_key))],
         )
     }
 
-    fn accept(catalog: &mut CatalogModel<Offset>, change: SchemaChange<Offset>) -> Vec<String> {
+    fn accept(catalog: &mut CatalogModel<u64>, change: SchemaChange<u64>) -> Vec<String> {
         let mut journal = Journal::default();
         catalog
             .accept::<OutOfOrder, _>(&(), &change, &mut journal)
@@ -1142,14 +1136,14 @@ mod tests {
         }
     }
 
-    impl SchemaChangeListener<Offset> for Steps {
+    impl SchemaChangeListener<u64> for Steps {
         type Context = ();
         type Error = Infallible;
 
         fn table_renamed(
             &mut self,
             _: &(),
-            event: &TableRenamed<'_, Offset>,
+            event: &TableRenamed<'_, u64>,
         ) -> Result<(), Infallible> {
             self.take(
                 format!("renamed {} to {}", event.before().id(), event.after().id()),
@@ -1163,7 +1157,7 @@ mod tests {
         fn table_altered(
             &mut self,
             _: &(),
-            event: &TableAltered<'_, Offset>,
+            event: &TableAltered<'_, u64>,
         ) -> Result<(), Infallible> {
             let announced: Vec<String> = event
                 .alterations()
@@ -1324,15 +1318,11 @@ mod tests {
 
     struct Refusing;
 
-    impl SchemaChangeListener<Offset> for Refusing {
+    impl SchemaChangeListener<u64> for Refusing {
         type Context = ();
         type Error = Halted;
 
-        fn table_altered(
-            &mut self,
-            _: &(),
-            event: &TableAltered<'_, Offset>,
-        ) -> Result<(), Halted> {
+        fn table_altered(&mut self, _: &(), event: &TableAltered<'_, u64>) -> Result<(), Halted> {
             Err(Halted::Refused(event.after().id().to_string()))
         }
     }
@@ -1391,7 +1381,7 @@ mod tests {
         before: TableModel,
         hints: Vec<Hint>,
         tables: Vec<TableChange>,
-    ) -> (Steps, CatalogModel<Offset>) {
+    ) -> (Steps, CatalogModel<u64>) {
         let mut catalog = CatalogModel::default();
         catalog
             .accept::<OutOfOrder, _>(&(), &change(1, vec![TableChange::Created(before)]), &mut ())
@@ -1719,7 +1709,7 @@ mod tests {
                 .accept::<OutOfOrder, _>(
                     &(),
                     &SchemaChange::new(
-                        Offset(2),
+                        2,
                         Ts::try_from(2).unwrap(),
                         "ALTER TABLE customers DROP name, ADD full_name VARCHAR(64)",
                         tables,
@@ -1798,14 +1788,14 @@ mod tests {
         told: Vec<(TableId, Appearance)>,
     }
 
-    impl SchemaChangeListener<Offset> for Appearances {
+    impl SchemaChangeListener<u64> for Appearances {
         type Context = ();
         type Error = Infallible;
 
         fn table_created(
             &mut self,
             _: &(),
-            event: &TableCreated<'_, Offset>,
+            event: &TableCreated<'_, u64>,
         ) -> Result<(), Infallible> {
             self.told
                 .push((event.table().id().clone(), event.appearance()));
@@ -1814,7 +1804,7 @@ mod tests {
         }
     }
 
-    fn appearances(changes: Vec<SchemaChange<Offset>>) -> Vec<(TableId, Appearance)> {
+    fn appearances(changes: Vec<SchemaChange<u64>>) -> Vec<(TableId, Appearance)> {
         let mut catalog = CatalogModel::default();
         let mut appearances = Appearances::default();
 

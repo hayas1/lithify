@@ -217,14 +217,12 @@ mod tests {
     use crate::ts::Ts;
     use crate::window::Window;
 
-    use crate::testing::Offset;
-
-    fn bound(bound: &Bound<Offset>) -> String {
+    fn bound(bound: &Bound<u64>) -> String {
         match bound {
             Bound::EventTime(at) => at.milliseconds_since_epoch().to_string(),
             Bound::Position {
                 at,
-                position: Offset(offset),
+                position: offset,
             } => format!("{}@{offset}", at.milliseconds_since_epoch()),
             Bound::Open => "open".to_owned(),
         }
@@ -238,13 +236,13 @@ mod tests {
     #[derive(Debug)]
     struct Story {
         table: TableId,
-        eras: EraTracker<Offset>,
+        eras: EraTracker<u64>,
         refusing: bool,
         told: Vec<String>,
     }
 
     impl Story {
-        fn tell(&mut self, era: &Era<Offset>) {
+        fn tell(&mut self, era: &Era<u64>) {
             self.told.push(format!(
                 "era {:?} {}..{}",
                 era.table()
@@ -257,36 +255,24 @@ mod tests {
         }
     }
 
-    impl SchemaChangeListener<Offset> for Story {
+    impl SchemaChangeListener<u64> for Story {
         type Context = ();
         type Error = Untold;
 
-        fn table_created(
-            &mut self,
-            _: &(),
-            event: &TableCreated<'_, Offset>,
-        ) -> Result<(), Untold> {
+        fn table_created(&mut self, _: &(), event: &TableCreated<'_, u64>) -> Result<(), Untold> {
             self.eras = EraTracker::since(Bound::from(event.change()));
             self.told.push(format!("created {}", event.table().id()));
 
             Ok(())
         }
 
-        fn table_dropped(
-            &mut self,
-            _: &(),
-            event: &TableDropped<'_, Offset>,
-        ) -> Result<(), Untold> {
+        fn table_dropped(&mut self, _: &(), event: &TableDropped<'_, u64>) -> Result<(), Untold> {
             self.told.push(format!("dropped {}", event.table().id()));
 
             Ok(())
         }
 
-        fn table_renamed(
-            &mut self,
-            _: &(),
-            event: &TableRenamed<'_, Offset>,
-        ) -> Result<(), Untold> {
+        fn table_renamed(&mut self, _: &(), event: &TableRenamed<'_, u64>) -> Result<(), Untold> {
             if let Some(era) = self.eras.renamed(event) {
                 self.tell(&era);
             }
@@ -299,11 +285,7 @@ mod tests {
             Ok(())
         }
 
-        fn table_altered(
-            &mut self,
-            _: &(),
-            event: &TableAltered<'_, Offset>,
-        ) -> Result<(), Untold> {
+        fn table_altered(&mut self, _: &(), event: &TableAltered<'_, u64>) -> Result<(), Untold> {
             if self.refusing {
                 return Err(Untold::Refused(self.table.clone()));
             }
@@ -322,7 +304,7 @@ mod tests {
         }
     }
 
-    impl Finish<Offset> for Story {
+    impl Finish<u64> for Story {
         type Input = ReplayEnd<Untold>;
         type Output = (TableId, Vec<String>, Option<Untold>);
         type FinishError = Infallible;
@@ -360,23 +342,17 @@ mod tests {
         Window::new(Ts::try_from(10).unwrap(), Ts::try_from(20).unwrap())
     }
 
-    fn change(at: i64, tables: Vec<TableChange>) -> SchemaChange<Offset> {
+    fn change(at: i64, tables: Vec<TableChange>) -> SchemaChange<u64> {
         hinted(at, Vec::new(), tables)
     }
 
-    fn hinted(at: i64, hints: Vec<Hint>, tables: Vec<TableChange>) -> SchemaChange<Offset> {
-        SchemaChange::new(
-            Offset(at as u64),
-            Ts::try_from(at).unwrap(),
-            "",
-            tables,
-            hints,
-        )
+    fn hinted(at: i64, hints: Vec<Hint>, tables: Vec<TableChange>) -> SchemaChange<u64> {
+        SchemaChange::new(at as u64, Ts::try_from(at).unwrap(), "", tables, hints)
     }
 
     fn stories(
-        before: Vec<SchemaChange<Offset>>,
-        within: Vec<SchemaChange<Offset>>,
+        before: Vec<SchemaChange<u64>>,
+        within: Vec<SchemaChange<u64>>,
     ) -> Vec<(TableId, Vec<String>)> {
         let mut catalog = CatalogModel::default();
         for change in &before {
@@ -555,7 +531,7 @@ mod tests {
                     vec![TableChange::Created(table(people(), &["id"]))]
                 )],
                 vec![SchemaChange::new(
-                    Offset(99),
+                    99,
                     Ts::try_from(15).unwrap(),
                     "",
                     vec![TableChange::Altered(table(people(), &["id", "name"]))],

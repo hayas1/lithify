@@ -578,12 +578,12 @@ mod tests {
     use lithify_core::sink::{TablePath, UnsupportedColumn};
     use lithify_core::source::ColumnPath;
     use lithify_core::table_listeners::TableListeners;
-    use lithify_core::testing::Engine;
+    use lithify_testing::Engine;
 
     use lithify_core::ts::Ts;
     use lithify_core::window::Window;
 
-    use lithify_core::testing::{Log, Offset, Untold};
+    use lithify_testing::{Log, Offset, Untold};
 
     fn column(name: &str, column_type: ColumnType) -> ColumnModel {
         let type_name = format!("{column_type:?}");

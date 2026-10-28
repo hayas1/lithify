@@ -16,8 +16,8 @@ serde = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros"] }
-lithify-core = { workspace = true, features = ["testing"] }
 ulid = { workspace = true }
 serde_json = { workspace = true }
 duckdb = { workspace = true }
-lithify-protocol = { workspace = true, features = ["testing"] }
+lithify-protocol = { workspace = true, features = ["duckdb"] }
+lithify-testing = { workspace = true }

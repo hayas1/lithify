@@ -16,9 +16,7 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 ulid = { workspace = true }
 
-[features]
-testing = []
-
 [dev-dependencies]
+lithify-testing = { workspace = true }
 tokio = { workspace = true, features = ["macros"] }
 tracing-subscriber = { workspace = true }

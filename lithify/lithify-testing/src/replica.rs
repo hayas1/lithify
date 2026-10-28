@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 
-use crate::model::{ColumnModel, ColumnName, ColumnType, PrimaryKeyColumn, TableId, TableModel};
-use crate::ts::{Event, Ts};
+use lithify_core::model::{
+    ColumnModel, ColumnName, ColumnType, PrimaryKeyColumn, TableId, TableModel,
+};
+use lithify_core::ts::{Event, Ts};
 
 pub type Row = BTreeMap<ColumnName, CellValue>;
 

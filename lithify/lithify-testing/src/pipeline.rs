@@ -7,14 +7,13 @@ use ulid::Ulid;
 use lithify_core::build_log::{BuildLog, Run, Status, TableBuilt};
 use lithify_core::model::TableId;
 use lithify_core::sink::{Namespace, SinkWarehouse, TablePath, WarehouseFn};
-use lithify_core::testing::{Engine, Recorder};
 use lithify_core::ts::Ts;
 use lithify_core::window::Window;
 
 use lithify_config::{Declaration, Placed, Places, Placing};
 use lithify_core::schedule::Schedule;
 
-use crate::pipelines::Pipelines;
+use crate::{Engine, Recorder};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -228,8 +227,4 @@ pub fn configure(directory: &Path, infra: &str) {
         "[default]\nartifacts = [\"snapshot\"]\n",
     )
     .unwrap();
-}
-
-pub fn under(root: &Path) -> Pipelines<Captured, Kept, Made> {
-    Pipelines::new(root.to_owned(), ())
 }

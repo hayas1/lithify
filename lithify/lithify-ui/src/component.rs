@@ -612,7 +612,7 @@ mod tests {
     use lithify_core::window::Window;
 
     use super::*;
-    use crate::testing::Kept;
+    use lithify_testing::pipeline::Kept;
 
     fn listed(logs: Vec<BuildLog>) -> Vec<TableRow> {
         TableRow::listed(&SinkInspection::new(Schedule::default(), logs, vec![]))

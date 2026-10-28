@@ -1,9 +1,9 @@
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 
-use crate::build_log::{BuildLog, BuildLogQuery, BuildLogRow, Latest};
-use crate::sink::{Namespace, TablePath, Warehouse, WarehouseClient};
-use crate::sql::SqlString;
+use lithify_core::build_log::{BuildLog, BuildLogQuery, BuildLogRow, Latest};
+use lithify_core::sink::{Namespace, TablePath, Warehouse, WarehouseClient};
+use lithify_core::sql::SqlString;
 
 pub struct Recorder<W> {
     warehouse: W,

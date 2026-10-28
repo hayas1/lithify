@@ -12,6 +12,8 @@ How the code is laid out and the rules it keeps, as opposed to the [design](desi
 | `lithify-config` | Reading a pipeline, generic over the kinds of capture, warehouse and artifact it is given |
 | `lithify-cli` | The one place that lists every kind, as enums of the configuration it accepts, and the commands |
 | `lithify-ui` | Pages showing what the build log holds |
+| `lithify-testing` | What `cargo test` of the other crates builds on, as a dev-dependency alone: a replica of a source database and its history as the oracle, its change log landed in an in-memory DuckDB as Debezium would land it, the shards an artifact builds over it, and stand-ins for a change log, a warehouse and a pipeline |
+| `lithify-e2e` | Scenarios run against a pipeline on real services, for what `cargo test` cannot hold: what Debezium and the sinks actually write, the store, BigQuery, and the command line from end to end |
 
 ## Rules
 
