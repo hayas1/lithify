@@ -3,10 +3,9 @@ use std::path::{Path, PathBuf};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use lithify_core::sink::Namespace;
 use lithify_core::ts::{Replay, Ts};
-use lithify_pipeline::build_log::{BuildLog, BuildLogQuery, Latest, Series};
-use lithify_pipeline::check::{Expectation, Inspection};
+use lithify_pipeline::build_log::{BuildLog, BuildLogQuery, Latest};
+use lithify_pipeline::check::{Inspecting, Inspection};
 use lithify_pipeline::infra::{Sink, Source};
 use lithify_pipeline::schedule::Schedule;
 use lithify_pipeline::warehouse::{SinkWarehouse, WarehouseControl, WarehouseFn};
@@ -279,15 +278,13 @@ where
         source: &Source<C>,
         view: BuildLogView,
     ) -> Result<SourceOverview, String> {
-        let capture =
-            serde_json::to_string(source.capture()).map_err(|unwritten| unwritten.to_string())?;
         let now = Ts::now();
         let mut sinks = Vec::new();
 
         for sink in pipeline.sinks() {
             sinks.push(SinkOverview::new(
                 sink.name(),
-                self.inspection(sink, source, &capture, now, view).await,
+                self.inspection(sink, source, now, view).await,
             ));
         }
 
@@ -298,24 +295,12 @@ where
         &self,
         sink: &Sink<W, A>,
         source: &Source<C>,
-        capture: &str,
         now: Ts<Replay>,
         view: BuildLogView,
     ) -> Result<SinkInspection, String> {
-        let undeclared = || format!("{} places no snapshot", sink.name());
-        let (snapshot, schedule) = sink
-            .artifacts()
-            .find_map(|(name, declared)| Some((name, declared.schedule(sink.time_zone())?)))
-            .ok_or_else(undeclared)?;
-        let expectation = Expectation::new(schedule, source.since(), capture, now);
         let reading = Reading {
-            expectation: &expectation,
-            series: Series::new(snapshot.clone(), &schedule.to_string()),
-            namespace: sink
-                .place(snapshot)
-                .and_then(<[_]>::first)
-                .map(|place| place.clone().into())
-                .ok_or_else(undeclared)?,
+            inspecting: Inspecting::of(sink, source, now)
+                .map_err(|uninspectable| uninspectable.to_string())?,
             view,
         };
 
@@ -326,19 +311,14 @@ where
     }
 }
 
-struct Reading<'a> {
-    expectation: &'a Expectation,
-    series: Series,
-    namespace: Namespace,
+struct Reading {
+    inspecting: Inspecting,
     view: BuildLogView,
 }
 
-impl Reading<'_> {
+impl Reading {
     async fn read<K: WarehouseControl>(&self, client: &K) -> Result<SinkInspection, Misread> {
-        let inspection = self
-            .expectation
-            .read::<K, Misread>(client, &self.namespace, &self.series)
-            .await?;
+        let inspection = self.inspecting.read::<K, Misread>(client).await?;
         let unbuilt = inspection.latest().is_empty();
         let inspection = SinkInspection::from(inspection);
 
@@ -347,8 +327,8 @@ impl Reading<'_> {
             (BuildLogView::All, false) => Ok(inspection.showing(
                 client
                     .build_logs::<Misread>(
-                        &self.namespace,
-                        &self.series,
+                        self.inspecting.namespace(),
+                        self.inspecting.series(),
                         &BuildLogQuery::from(self.view),
                     )
                     .await?,
@@ -357,7 +337,7 @@ impl Reading<'_> {
     }
 }
 
-impl WarehouseFn for Reading<'_> {
+impl WarehouseFn for Reading {
     type Output = Result<SinkInspection, String>;
 
     async fn call<K: WarehouseControl>(self, client: &K) -> Self::Output {

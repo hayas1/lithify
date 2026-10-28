@@ -321,6 +321,12 @@ impl<C> Source<C> {
     }
 }
 
+impl<C: Serialize> Source<C> {
+    pub fn written_capture(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(&self.capture)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sink<W: SinkWarehouse, A> {
     name: String,

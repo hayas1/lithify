@@ -14,6 +14,7 @@ chrono-tz = { workspace = true }
 lithify-core = { workspace = true }
 semigroup = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 toml = { workspace = true }
 ulid = { workspace = true }
 

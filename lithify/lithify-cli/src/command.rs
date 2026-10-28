@@ -42,7 +42,7 @@ impl RunCommand {
                 DeclaredSnapshot::of(sink)?.schedule(),
                 source.since()..now.as_event(),
             ),
-            source.capture().to_json()?,
+            source.written_capture()?,
         );
 
         match self {

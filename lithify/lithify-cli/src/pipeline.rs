@@ -18,12 +18,6 @@ pub enum CaptureConfig {
     Debezium(<DebeziumFormat as CdcFormat>::Config),
 }
 
-impl CaptureConfig {
-    pub fn to_json(&self) -> Result<String, serde_json::Error> {
-        serde_json::to_string(self)
-    }
-}
-
 impl DuckDbCapture for CaptureConfig {
     async fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(
         &self,

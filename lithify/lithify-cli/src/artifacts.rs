@@ -170,7 +170,7 @@ impl DeclaredSnapshot {
                 series.artifact(),
                 series.schedule(),
                 source.name(),
-                &source.capture().to_json()?,
+                &source.written_capture()?,
                 env!("CARGO_PKG_VERSION"),
             ),
         ))
