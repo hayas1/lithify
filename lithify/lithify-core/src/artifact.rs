@@ -101,6 +101,8 @@ impl fmt::Display for ArtifactName {
 pub trait Artifact {
     const KIND: &'static str;
 
+    type From: Artifact;
+
     type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>: ArtifactBuilder<L::Position, W>
     where
         Self: 'a;

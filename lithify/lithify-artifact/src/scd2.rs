@@ -73,6 +73,8 @@ impl Scd2 {
 impl Artifact for Scd2 {
     const KIND: &'static str = "scd2";
 
+    type From = Self;
+
     type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = Scd2Builder<'a, L, W>;
 
     fn namespace(&self) -> &Namespace {
@@ -106,8 +108,6 @@ impl Artifact for Scd2 {
 }
 
 impl ArtifactControl for Scd2 {
-    type From = Self;
-
     type Config = Scd2Config;
 
     // An scd2 is built into its first placement alone, as its versions are appended rather than

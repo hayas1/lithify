@@ -42,8 +42,6 @@ impl From<Namespace> for Placement {
 }
 
 pub trait ArtifactControl: Artifact {
-    type From: ArtifactControl;
-
     type Config;
 
     fn declared(

@@ -110,6 +110,8 @@ impl Snapshot {
 impl Artifact for Snapshot {
     const KIND: &'static str = "snapshot";
 
+    type From = Self;
+
     type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = Scd1Builder<'a, Self, L, W>;
 
     fn namespace(&self) -> &Namespace {
@@ -138,8 +140,6 @@ impl Artifact for Snapshot {
 }
 
 impl ArtifactControl for Snapshot {
-    type From = Self;
-
     type Config = SnapshotConfig;
 
     fn declared(

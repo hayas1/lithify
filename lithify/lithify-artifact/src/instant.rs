@@ -94,6 +94,8 @@ impl Instant {
 impl Artifact for Instant {
     const KIND: &'static str = "instant";
 
+    type From = Snapshot;
+
     type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = Scd1Builder<'a, Self, L, W>;
 
     fn namespace(&self) -> &Namespace {
@@ -121,8 +123,6 @@ impl Artifact for Instant {
 }
 
 impl ArtifactControl for Instant {
-    type From = Snapshot;
-
     type Config = InstantConfig;
 
     fn declared(

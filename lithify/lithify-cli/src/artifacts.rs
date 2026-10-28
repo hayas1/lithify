@@ -76,10 +76,10 @@ impl Declaration for ArtifactConfig {
 
     fn built_from(&self) -> &'static str {
         match self {
-            Self::Snapshot(_) => <Snapshot as ArtifactControl>::From::KIND,
-            Self::Instant(_) => <Instant as ArtifactControl>::From::KIND,
-            Self::Scd1(_) => <Scd1 as ArtifactControl>::From::KIND,
-            Self::Scd2(_) => <Scd2 as ArtifactControl>::From::KIND,
+            Self::Snapshot(_) => <Snapshot as Artifact>::From::KIND,
+            Self::Instant(_) => <Instant as Artifact>::From::KIND,
+            Self::Scd1(_) => <Scd1 as Artifact>::From::KIND,
+            Self::Scd2(_) => <Scd2 as Artifact>::From::KIND,
         }
     }
 

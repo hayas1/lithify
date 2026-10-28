@@ -76,6 +76,8 @@ impl Scd1 {
 impl Artifact for Scd1 {
     const KIND: &'static str = "scd1";
 
+    type From = Snapshot;
+
     type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = Scd1Builder<'a, Self, L, W>;
 
     fn namespace(&self) -> &Namespace {
@@ -101,8 +103,6 @@ impl Artifact for Scd1 {
 }
 
 impl ArtifactControl for Scd1 {
-    type From = Snapshot;
-
     type Config = Scd1Config;
 
     fn declared(
