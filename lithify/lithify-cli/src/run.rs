@@ -1,10 +1,10 @@
 use std::path::{Path, PathBuf};
 
-use lithify_config::Pipeline;
-use lithify_config::infra::{Sink, Source};
-use lithify_config::table;
 use lithify_core::sink::OpenWarehouse;
 use lithify_core::ts::{Replay, Ts};
+use lithify_pipeline::Pipeline;
+use lithify_pipeline::infra::{Sink, Source};
+use lithify_pipeline::table;
 use lithify_protocol::sink::bigquery::client::BigQueryClient;
 use lithify_protocol::sink::duckdb::client::DuckDbClient;
 use lithify_protocol::sink::duckdb::config::Config;

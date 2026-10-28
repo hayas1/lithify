@@ -1,5 +1,5 @@
 [package]
-name = "lithify-config"
+name = "lithify-pipeline"
 version.workspace = true
 description.workspace = true
 authors.workspace = true

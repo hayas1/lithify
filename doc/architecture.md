@@ -9,7 +9,7 @@ How the code is laid out and the rules it keeps, as opposed to the [design](desi
 | `lithify-core` | The vocabulary every other crate speaks: the schedule and the days it cuts, the replay of schema changes and the listeners it tells, the `Artifact` trait, the build log, and stepping a series window by window |
 | `lithify-artifact` | One module for each kind of artifact, each naming its tables and building them from what the replay tells it |
 | `lithify-protocol` | The change log formats and the warehouses lithify reads and writes |
-| `lithify-config` | Reading a pipeline, generic over the kinds of capture, warehouse and artifact it is given |
+| `lithify-pipeline` | The control plane, so far reading a pipeline, generic over the kinds of capture, warehouse and artifact it is given |
 | `lithify-cli` | The one place that lists every kind, as enums of the configuration it accepts, and the commands |
 | `lithify-ui` | Pages showing what the build log holds |
 | `lithify-testing` | What `cargo test` of the other crates builds on, as a dev-dependency alone: a replica of a source database and its history as the oracle, its change log landed in an in-memory DuckDB as Debezium would land it, the shards an artifact builds over it, and stand-ins for a change log, a warehouse and a pipeline |

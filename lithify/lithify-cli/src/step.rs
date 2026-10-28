@@ -2,12 +2,12 @@ use duckdb::types::FromSql;
 use google_cloud_bigquery::error::RowError;
 use google_cloud_bigquery::query::Row;
 
-use lithify_config::table;
 use lithify_core::artifact::Artifact;
 use lithify_core::build_log::BuildLog;
 use lithify_core::runner::{BuildLogWriter, Replayer, StepTaker, Tables};
 use lithify_core::source::{ChangeLogs, SchemaChangeLog};
 use lithify_core::window::Window;
+use lithify_pipeline::table;
 use lithify_protocol::sink::bigquery::client::{
     BigQueryCapture, BigQueryChangeLogsFn, BigQueryClient, BigQueryExecution,
 };
@@ -197,9 +197,9 @@ impl<X: BigQueryExecution, B: BuildLogWriter, A: Artifact> BigQueryChangeLogsFn
 pub(crate) mod tests {
     use duckdb::Connection;
 
-    use lithify_config::Pipeline;
     use lithify_core::sink::{Namespace, TablePath, WarehouseClient};
     use lithify_core::ts::Ts;
+    use lithify_pipeline::Pipeline;
     use lithify_protocol::DuckDbWarehouse;
     use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbClient};
 
@@ -212,11 +212,11 @@ pub(crate) mod tests {
     use crate::artifacts::{ArtifactConfig, DeclaredSnapshot};
     use crate::pipeline::{CaptureConfig, WarehouseConfig};
     use lithify_artifact::snapshot::Snapshot;
-    use lithify_config::infra::Sink;
     use lithify_core::artifact::UnbuildableArtifact;
     use lithify_core::build_log::{BuildLog, Latest, Run, Status, TableBuilt};
     use lithify_core::model::TableId;
     use lithify_core::runner::{BuildLogWrite, Tables};
+    use lithify_pipeline::infra::Sink;
     use lithify_protocol::sink::execution::DryRun;
 
     const CHANGE_LOGS: &str = "CREATE SCHEMA mysql_shop_cdc;
@@ -271,8 +271,10 @@ place.snapshot = [{ prefix = "mysql_shop" }]
         artifacts: &str,
         infra: &str,
         listed: &str,
-    ) -> Result<Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig>, lithify_config::Unreadable>
-    {
+    ) -> Result<
+        Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig>,
+        lithify_pipeline::Unreadable,
+    > {
         let directory =
             std::env::temp_dir().join(format!("lithify-cli-{name}-{}", Ulid::generate()));
         std::fs::create_dir_all(&directory).unwrap();

@@ -11,7 +11,7 @@ readme = "../README.md"
 members = [
     "lithify-cli",
     "lithify-e2e",
-    "lithify-config",
+    "lithify-pipeline",
     "lithify-core",
     "lithify-protocol",
     "lithify-artifact",
@@ -22,7 +22,7 @@ resolver = "3"
 
 [workspace.dependencies]
 lithify-cli = { version = "0.1.0", path = "lithify-cli" }
-lithify-config = { version = "0.1.0", path = "lithify-config" }
+lithify-pipeline = { version = "0.1.0", path = "lithify-pipeline" }
 lithify-core = { version = "0.1.0", path = "lithify-core" }
 lithify-protocol = { version = "0.1.0", path = "lithify-protocol" }
 lithify-artifact = { version = "0.1.0", path = "lithify-artifact" }

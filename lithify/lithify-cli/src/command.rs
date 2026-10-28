@@ -1,11 +1,11 @@
 use chrono::NaiveDate;
 
-use lithify_config::infra::{Sink, Source};
 use lithify_core::artifact::ArtifactName;
 use lithify_core::runner::StepTaker;
 use lithify_core::schedule::Timeline;
 use lithify_core::stepping::Stepping;
 use lithify_core::ts::{Replay, Ts};
+use lithify_pipeline::infra::{Sink, Source};
 
 use crate::artifacts::{ArtifactConfig, Declared, DeclaredSnapshot, Lineup};
 use crate::journal::Journal;
@@ -111,9 +111,9 @@ impl Target {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use lithify_config::Pipeline;
     use lithify_core::sink::Namespace;
     use lithify_core::sql::SqlString;
+    use lithify_pipeline::Pipeline;
     use lithify_protocol::sink::duckdb::client::DuckDbClient;
 
     use super::*;
@@ -1287,7 +1287,7 @@ mod catch_up {
 
 #[cfg(test)]
 mod derived {
-    use lithify_config::Pipeline;
+    use lithify_pipeline::Pipeline;
 
     use crate::command::tests::settle;
     use crate::command::{RunCommand, Target};

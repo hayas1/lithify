@@ -9,8 +9,6 @@ use lithify_artifact::instant::Instant;
 use lithify_artifact::scd1::Scd1;
 use lithify_artifact::scd2::Scd2;
 use lithify_artifact::snapshot::Snapshot;
-use lithify_config::Declaration;
-use lithify_config::infra::{Sink, Source};
 use lithify_core::artifact::{Artifact, ArtifactName, Placement};
 use lithify_core::build_log::{Run, Series};
 use lithify_core::progress::Step;
@@ -20,6 +18,8 @@ use lithify_core::sink::Namespace;
 use lithify_core::stepping::{SeriesLog, Stepping};
 use lithify_core::ts::{Replay, Ts};
 use lithify_core::window::Window;
+use lithify_pipeline::Declaration;
+use lithify_pipeline::infra::{Sink, Source};
 
 use crate::journal::Journal;
 use crate::pipeline::{CaptureConfig, WarehouseConfig};
@@ -377,17 +377,17 @@ mod tests {
     use std::path::Path;
 
     use lithify_artifact::shard::Shard;
-    use lithify_config::Pipeline;
     use lithify_core::artifact::Artifact;
     use lithify_core::model::TableId;
     use lithify_core::sink::TablePath;
     use lithify_core::window::Window;
+    use lithify_pipeline::Pipeline;
 
     use super::*;
     use crate::pipeline::CaptureConfig;
     use lithify_core::build_log::{Status, TableBuilt};
 
-    use lithify_config::{Cause, Misdeclaring};
+    use lithify_pipeline::{Cause, Misdeclaring};
 
     use crate::step::tests::{ARTIFACTS, INFRA, opened, opening};
 

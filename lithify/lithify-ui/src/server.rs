@@ -11,8 +11,8 @@ use leptos::prelude::*;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use lithify_config::{Declaration, Placing};
 use lithify_core::sink::SinkWarehouse;
+use lithify_pipeline::{Declaration, Placing};
 
 use crate::pipelines::{PipelineLocation, PipelineOverview, Pipelines};
 use crate::route::{AppRoute, BuildLogQueryParam, CheckQueryParam, QueryState};

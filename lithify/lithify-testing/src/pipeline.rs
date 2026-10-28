@@ -10,8 +10,8 @@ use lithify_core::sink::{Namespace, SinkWarehouse, TablePath, WarehouseFn};
 use lithify_core::ts::Ts;
 use lithify_core::window::Window;
 
-use lithify_config::{Declaration, Placed, Places, Placing};
 use lithify_core::schedule::Schedule;
+use lithify_pipeline::{Declaration, Placed, Places, Placing};
 
 use crate::{Engine, Recorder};
 
