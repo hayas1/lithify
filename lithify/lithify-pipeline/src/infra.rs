@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use chrono_tz::Tz;
 
+use crate::warehouse::SinkWarehouse;
 use lithify_core::artifact::ArtifactName;
-use lithify_core::sink::SinkWarehouse;
 use lithify_core::ts::{Event, Ts};
 
 use crate::artifact::{Declaration, Declarations};
@@ -321,6 +321,12 @@ impl<C> Source<C> {
     }
 }
 
+impl<C: Serialize> Source<C> {
+    pub fn written_capture(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(&self.capture)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sink<W: SinkWarehouse, A> {
     name: String,
@@ -431,7 +437,7 @@ mod tests {
             )
         }
 
-        async fn with_client<F: lithify_core::sink::WarehouseFn>(
+        async fn with_client<F: crate::warehouse::WarehouseFn>(
             &self,
             _: &Lying,
             _: &(),

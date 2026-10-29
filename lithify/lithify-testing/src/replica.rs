@@ -1,9 +1,10 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use lithify_core::model::{
     ColumnModel, ColumnName, ColumnType, PrimaryKeyColumn, TableId, TableModel,
 };
 use lithify_core::ts::{Event, Ts};
+use lithify_core::window::Window;
 
 pub type Row = BTreeMap<ColumnName, CellValue>;
 
@@ -96,6 +97,27 @@ pub enum Ddl {
 }
 
 impl Ddl {
+    fn pass(&self, passages: &mut Vec<(Option<TableId>, Option<TableId>)>) {
+        let (table, passed) = match self {
+            Self::Create(model) => return passages.push((None, Some(model.id().clone()))),
+            Self::Drop(table) => (table, None),
+            Self::Rename { from, to }
+            | Self::Alter {
+                table: from,
+                renamed: Some(to),
+                ..
+            } => (from, Some(to.clone())),
+            Self::Alter { renamed: None, .. } => return,
+        };
+
+        if let Some((_, standing)) = passages
+            .iter_mut()
+            .find(|(_, standing)| standing.as_ref() == Some(table))
+        {
+            *standing = passed;
+        }
+    }
+
     pub fn table(&self) -> &TableId {
         match self {
             Self::Create(table) => table.id(),
@@ -265,6 +287,27 @@ impl Replica {
                 row: Self::row(key),
             },
         )
+    }
+
+    pub fn passages(&self, window: &Window) -> BTreeSet<(Option<TableId>, Option<TableId>)> {
+        let mut passages: Vec<_> = self
+            .dump(*window.from())
+            .tables
+            .keys()
+            .map(|table| (Some(table.clone()), Some(table.clone())))
+            .collect();
+
+        for (_, mutation) in self
+            .mutations
+            .iter()
+            .filter(|(at, _)| window.range().contains(at))
+        {
+            if let Mutation::Ddl(ddl) = mutation {
+                ddl.pass(&mut passages);
+            }
+        }
+
+        passages.into_iter().collect()
     }
 
     pub fn mutations(&self) -> &[(Ts<Event>, Mutation)] {
@@ -589,6 +632,61 @@ mod tests {
             .columns()
             .map(|column| column.name().to_string())
             .collect()
+    }
+
+    fn pets() -> TableId {
+        TableId::new("shop", "pets")
+    }
+
+    fn passage(from: Option<TableId>, to: Option<TableId>) -> (Option<TableId>, Option<TableId>) {
+        (from, to)
+    }
+
+    #[test]
+    fn a_table_passes_through_a_window_it_was_not_touched_in_under_its_own_name() {
+        assert_eq!(
+            replica().passages(&Window::new(at(1), at(5))),
+            [passage(Some(people()), Some(people()))].into()
+        );
+    }
+
+    #[test]
+    fn a_table_renamed_within_a_window_passes_from_its_old_name_to_its_new_one() {
+        let replica = created().rename(at(2), &people(), &persons()).alter_into(
+            at(3),
+            &persons(),
+            &pets(),
+            vec![],
+        );
+
+        assert_eq!(
+            replica.passages(&Window::new(at(1), at(5))),
+            [passage(Some(people()), Some(pets()))].into()
+        );
+    }
+
+    #[test]
+    fn a_table_created_or_dropped_within_a_window_passes_from_or_into_nothing() {
+        let replica = created()
+            .drop(at(2), &people())
+            .create(at(3), TableModel::new(pets(), vec![id()], ["id"].into()));
+
+        assert_eq!(
+            replica.passages(&Window::new(at(1), at(5))),
+            [passage(None, Some(pets())), passage(Some(people()), None)].into()
+        );
+    }
+
+    #[test]
+    fn a_table_created_and_dropped_within_a_window_passes_from_nothing_into_nothing() {
+        let replica = Replica::default()
+            .create(at(2), TableModel::new(pets(), vec![id()], ["id"].into()))
+            .drop(at(3), &pets());
+
+        assert_eq!(
+            replica.passages(&Window::new(at(1), at(5))),
+            [passage(None, None)].into()
+        );
     }
 
     #[test]

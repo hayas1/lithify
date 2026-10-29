@@ -4,13 +4,13 @@ use chrono::{DateTime, Utc};
 
 use std::collections::BTreeSet;
 
-use lithify_core::build_log::{BuildLog, Run, Series, Status, TableBuilt};
-use lithify_core::check::*;
 use lithify_core::model::TableId;
-use lithify_core::schedule::Schedule;
 use lithify_core::sink::{Namespace, TablePath};
 use lithify_core::ts::Ts;
 use lithify_core::window::Window;
+use lithify_pipeline::build_log::{BuildLog, Run, Series, Status, TableBuilt};
+use lithify_pipeline::check::*;
+use lithify_pipeline::schedule::Schedule;
 use lithify_testing::{Engine, Recorder};
 
 fn at<A>(rfc3339: &str) -> Ts<A> {

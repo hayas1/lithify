@@ -9,17 +9,18 @@ use lithify_artifact::instant::Instant;
 use lithify_artifact::scd1::Scd1;
 use lithify_artifact::scd2::Scd2;
 use lithify_artifact::snapshot::Snapshot;
-use lithify_config::Declaration;
-use lithify_config::infra::{Sink, Source};
-use lithify_core::artifact::{Artifact, ArtifactName, Placement};
-use lithify_core::build_log::{Run, Series};
-use lithify_core::progress::Step;
-use lithify_core::runner::{BuildLogWrite, StepTaker, Tables};
-use lithify_core::schedule::Schedule;
+use lithify_core::artifact::{Artifact, ArtifactName};
 use lithify_core::sink::Namespace;
-use lithify_core::stepping::{SeriesLog, Stepping};
 use lithify_core::ts::{Replay, Ts};
 use lithify_core::window::Window;
+use lithify_pipeline::Declaration;
+use lithify_pipeline::artifact::{ArtifactControl, Placement};
+use lithify_pipeline::build_log::{Run, Series};
+use lithify_pipeline::infra::{Sink, Source};
+use lithify_pipeline::progress::Step;
+use lithify_pipeline::runner::{BuildLogWrite, StepTaker, Tables};
+use lithify_pipeline::schedule::Schedule;
+use lithify_pipeline::stepping::{SeriesLog, Stepping};
 
 use crate::journal::Journal;
 use crate::pipeline::{CaptureConfig, WarehouseConfig};
@@ -29,14 +30,14 @@ use crate::unrunnable::Unrunnable;
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum ArtifactConfig {
-    Snapshot(<Snapshot as Artifact>::Config),
-    Instant(<Instant as Artifact>::Config),
-    Scd1(<Scd1 as Artifact>::Config),
-    Scd2(<Scd2 as Artifact>::Config),
+    Snapshot(<Snapshot as ArtifactControl>::Config),
+    Instant(<Instant as ArtifactControl>::Config),
+    Scd1(<Scd1 as ArtifactControl>::Config),
+    Scd2(<Scd2 as ArtifactControl>::Config),
 }
 
 impl ArtifactConfig {
-    pub fn as_snapshot(&self) -> Option<&<Snapshot as Artifact>::Config> {
+    pub fn as_snapshot(&self) -> Option<&<Snapshot as ArtifactControl>::Config> {
         match self {
             Self::Snapshot(config) => Some(config),
             Self::Instant(_) | Self::Scd1(_) | Self::Scd2(_) => None,
@@ -169,7 +170,7 @@ impl DeclaredSnapshot {
                 series.artifact(),
                 series.schedule(),
                 source.name(),
-                &source.capture().to_json()?,
+                &source.written_capture()?,
                 env!("CARGO_PKG_VERSION"),
             ),
         ))
@@ -184,7 +185,7 @@ pub enum Declared {
 }
 
 impl Declared {
-    fn artifact<A: Artifact>(
+    fn artifact<A: ArtifactControl>(
         sink: &Sink<WarehouseConfig, ArtifactConfig>,
         name: &ArtifactName,
         config: &A::Config,
@@ -377,17 +378,17 @@ mod tests {
     use std::path::Path;
 
     use lithify_artifact::shard::Shard;
-    use lithify_config::Pipeline;
     use lithify_core::artifact::Artifact;
     use lithify_core::model::TableId;
     use lithify_core::sink::TablePath;
     use lithify_core::window::Window;
+    use lithify_pipeline::Pipeline;
 
     use super::*;
     use crate::pipeline::CaptureConfig;
-    use lithify_core::build_log::{Status, TableBuilt};
+    use lithify_pipeline::build_log::{Status, TableBuilt};
 
-    use lithify_config::{Cause, Misdeclaring};
+    use lithify_pipeline::{Cause, Misdeclaring};
 
     use crate::step::tests::{ARTIFACTS, INFRA, opened, opening};
 

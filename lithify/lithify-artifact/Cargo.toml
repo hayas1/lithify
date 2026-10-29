@@ -12,6 +12,7 @@ readme.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 chrono-tz = { workspace = true }
 lithify-core = { workspace = true }
+lithify-pipeline = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]

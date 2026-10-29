@@ -5,8 +5,8 @@ use std::time::Duration;
 use lithify_cli::artifacts::ArtifactConfig;
 use lithify_cli::pipeline::{CaptureConfig, WarehouseConfig};
 use lithify_cli::unrunnable::Unrunnable;
-use lithify_config::Pipeline;
 use lithify_core::ts::{Replay, Ts};
+use lithify_pipeline::Pipeline;
 
 use crate::pipeline::{ConnectedPipeline, Watch};
 use crate::runnable::Report;
@@ -79,7 +79,7 @@ impl Run {
 #[derive(Debug)]
 pub enum Unverifiable {
     Missing(std::io::Error),
-    Unreadable(lithify_config::Unreadable),
+    Unreadable(lithify_pipeline::Unreadable),
     Unreachable(Unreachable),
     Unbuildable(Unbuildable),
     Unrunnable(Unrunnable),
@@ -114,8 +114,8 @@ impl Display for Unverifiable {
 
 impl std::error::Error for Unverifiable {}
 
-impl From<lithify_config::Unreadable> for Unverifiable {
-    fn from(cause: lithify_config::Unreadable) -> Self {
+impl From<lithify_pipeline::Unreadable> for Unverifiable {
+    fn from(cause: lithify_pipeline::Unreadable) -> Self {
         Self::Unreadable(cause)
     }
 }

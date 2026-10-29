@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
 
-use lithify_core::sink::SinkWarehouse;
+use crate::warehouse::SinkWarehouse;
 
 use crate::artifact::{Declaration, Declarations, Declaring};
 use crate::infra::{self, Sink, Source};
@@ -232,7 +232,7 @@ mod tests {
             )
         }
 
-        async fn with_client<F: lithify_core::sink::WarehouseFn>(
+        async fn with_client<F: crate::warehouse::WarehouseFn>(
             &self,
             _: &Lying,
             _: &(),

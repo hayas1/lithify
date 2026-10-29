@@ -122,8 +122,10 @@ async fn build_snapshots(client: &DuckDbClient, window: &Window) {
         |_: &TableId| true,
     );
     let catalog = client
-        .replay::<Unbuilt, _>(client.warehouse(), &log, window, &mut listeners)
+        .history::<Unbuilt>(&log, window)
         .await
+        .unwrap()
+        .replay::<Unbuilt, _>(client.warehouse(), &mut listeners)
         .unwrap();
     for build in listeners.finish(client.warehouse(), catalog).unwrap() {
         for statement in build.statements().unwrap() {

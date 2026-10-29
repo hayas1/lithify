@@ -1,9 +1,9 @@
 use std::fmt::Display;
 
-use lithify_core::build_log::BuildLog;
 use lithify_core::window::Window;
+use lithify_pipeline::build_log::BuildLog;
 
-use lithify_core::check::Discrepancy;
+use lithify_pipeline::check::Discrepancy;
 
 #[derive(Debug, Default)]
 pub struct Journal {
@@ -53,10 +53,10 @@ impl Journal {
 mod tests {
     use chrono::DateTime;
 
-    use lithify_core::build_log::{Run, Status, TableBuilt};
     use lithify_core::model::TableId;
     use lithify_core::sink::TablePath;
     use lithify_core::ts::Ts;
+    use lithify_pipeline::build_log::{Run, Status, TableBuilt};
 
     use super::*;
 

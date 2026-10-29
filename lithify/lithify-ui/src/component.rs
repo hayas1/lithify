@@ -2,12 +2,14 @@ use chrono::DateTime;
 use chrono_tz::Tz;
 use leptos::prelude::*;
 
-use lithify_core::build_log::{BuildLog, Status};
 use lithify_core::model::TableId;
-use lithify_core::schedule::Schedule;
+use lithify_pipeline::build_log::{BuildLog, Status};
+use lithify_pipeline::schedule::Schedule;
+
+use lithify_pipeline::pipelines::PipelineLocation;
 
 use crate::pipelines::{
-    BuildLogView, PipelineLocation, PipelineOverview, SinkInspection, SinkOverview, SourceOverview,
+    BuildLogView, PipelineOverview, SinkInspection, SinkOverview, SourceOverview,
 };
 use crate::route::{AppRoute, Section};
 
@@ -606,10 +608,10 @@ mod tests {
     use chrono::DateTime;
     use ulid::Ulid;
 
-    use lithify_core::build_log::{Run, TableBuilt};
     use lithify_core::sink::TablePath;
     use lithify_core::ts::Ts;
     use lithify_core::window::Window;
+    use lithify_pipeline::build_log::{Run, TableBuilt};
 
     use super::*;
     use lithify_testing::pipeline::Kept;

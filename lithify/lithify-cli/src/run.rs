@@ -1,10 +1,10 @@
 use std::path::{Path, PathBuf};
 
-use lithify_config::Pipeline;
-use lithify_config::infra::{Sink, Source};
-use lithify_config::table;
 use lithify_core::sink::OpenWarehouse;
 use lithify_core::ts::{Replay, Ts};
+use lithify_pipeline::Pipeline;
+use lithify_pipeline::infra::{Sink, Source};
+use lithify_pipeline::table;
 use lithify_protocol::sink::bigquery::client::BigQueryClient;
 use lithify_protocol::sink::duckdb::client::DuckDbClient;
 use lithify_protocol::sink::duckdb::config::Config;
@@ -19,7 +19,8 @@ use crate::pipeline::{CaptureConfig, Reached, WarehouseConfig};
 use crate::report::{DryRunBuildLogWrite, Report};
 use crate::step::Taking;
 use crate::unrunnable::Unrunnable;
-use lithify_core::check::{Expectation, Inspection};
+use lithify_pipeline::check::{Inspecting, Inspection};
+use lithify_pipeline::warehouse::SinkWarehouse;
 
 pub struct Run {
     directory: PathBuf,
@@ -91,35 +92,12 @@ impl Run {
         sink: &Sink<WarehouseConfig, ArtifactConfig>,
         source: &Source<CaptureConfig>,
     ) -> Result<Inspection, Unrunnable> {
-        let snapshot = DeclaredSnapshot::of(sink)?;
-        let expectation = Expectation::new(
-            snapshot.schedule(),
-            source.since(),
-            &source.capture().to_json()?,
-            self.now,
-        );
-        let (namespace, series) = (snapshot.namespace(), snapshot.series());
+        let inspecting = Inspecting::of(sink, source, self.now)?;
 
-        match Self::reach(sink)? {
-            Reached::DuckDb(config, change_log) => {
-                expectation
-                    .read::<_, Unrunnable>(
-                        &self.duckdb(config, change_log).await?,
-                        namespace,
-                        &series,
-                    )
-                    .await
-            }
-            Reached::BigQuery(config, change_log) => {
-                expectation
-                    .read::<_, Unrunnable>(
-                        &self.bigquery(config, change_log).await?,
-                        namespace,
-                        &series,
-                    )
-                    .await
-            }
-        }
+        Ok(sink
+            .warehouse()
+            .with_client(sink.change_log(), &self.credentials, &inspecting)
+            .await??)
     }
 
     fn source(

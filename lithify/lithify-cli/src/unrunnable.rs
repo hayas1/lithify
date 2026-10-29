@@ -1,11 +1,12 @@
 use std::convert::Infallible;
 use std::fmt::{self, Display, Formatter};
 
-use lithify_config::Unreadable;
 use lithify_core::artifact::{ArtifactName, UnbuildableArtifact};
-use lithify_core::build_log::UnreadableBuildLog;
 use lithify_core::listener::OutOfOrder;
-use lithify_core::runner::Unsteppable;
+use lithify_pipeline::Unreadable;
+use lithify_pipeline::build_log::UnreadableBuildLog;
+use lithify_pipeline::check::Uninspectable;
+use lithify_pipeline::runner::Unsteppable;
 use lithify_protocol::sink::bigquery::client::Unqueryable;
 
 #[derive(Debug)]
@@ -32,6 +33,7 @@ pub enum Unrunnable {
     Unsteppable(Unsteppable),
     Unlogged(UnreadableBuildLog),
     Uncredentialed(&'static str),
+    Uninspectable(Uninspectable),
 }
 
 impl Display for Unrunnable {
@@ -65,6 +67,7 @@ impl Display for Unrunnable {
                 "the change log lies in a warehouse other than the one it is sunk into"
             ),
             Self::Unsteppable(cause) => write!(formatter, "{cause}"),
+            Self::Uninspectable(cause) => write!(formatter, "{cause}"),
             Self::Unlogged(cause) => write!(formatter, "{cause}"),
             Self::Uncredentialed(warehouse) => write!(
                 formatter,
@@ -85,6 +88,7 @@ impl std::error::Error for Unrunnable {
             Self::Unwritable(cause) => Some(cause),
             Self::Unserializable(cause) => Some(cause),
             Self::Unsteppable(cause) => Some(cause),
+            Self::Uninspectable(cause) => Some(cause),
             Self::Unlogged(cause) => Some(cause),
             Self::UnknownSink(_)
             | Self::Unreached
@@ -106,6 +110,12 @@ impl From<Unreadable> for Unrunnable {
 impl From<UnreadableBuildLog> for Unrunnable {
     fn from(cause: UnreadableBuildLog) -> Self {
         Self::Unlogged(cause)
+    }
+}
+
+impl From<Uninspectable> for Unrunnable {
+    fn from(cause: Uninspectable) -> Self {
+        Self::Uninspectable(cause)
     }
 }
 

@@ -1,14 +1,8 @@
 use std::fmt;
 
-use crate::artifact::UnbuildableArtifact;
-use crate::build_log::{
-    BuildLog, BuildLogQuery, BuildLogRow, Series, Status, TableBuild, TableBuilt,
-    UnreadableBuildLog,
-};
 use crate::model::{ColumnModel, ColumnName, ColumnType};
 use crate::source::{ColumnPath, SchemaChangeLog};
 use crate::sql::SqlString;
-use crate::ts::Ts;
 use crate::window::Window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -240,12 +234,6 @@ pub trait Warehouse: ChangeLogSql + OpenWarehouse {}
 
 impl<W: ChangeLogSql + OpenWarehouse> Warehouse for W {}
 
-pub trait WarehouseFn {
-    type Output;
-
-    async fn call<K: WarehouseClient>(self, client: &K) -> Self::Output;
-}
-
 pub trait OpenWarehouse {
     type Config;
     type Location;
@@ -260,21 +248,6 @@ pub trait OpenWarehouse {
     ) -> Result<Self::Client, Self::Error>;
 }
 
-pub trait SinkWarehouse {
-    type Location: Clone + fmt::Debug + PartialEq + Eq + Into<Namespace>;
-    type Credential;
-    type Error: std::error::Error;
-
-    fn reaches(&self, location: &Self::Location) -> bool;
-
-    async fn with_client<F: WarehouseFn>(
-        &self,
-        change_log: &Self::Location,
-        credential: &Self::Credential,
-        f: F,
-    ) -> Result<F::Output, Self::Error>;
-}
-
 pub trait WarehouseClient {
     type Warehouse: Warehouse;
     type Error: std::error::Error;
@@ -286,75 +259,7 @@ pub trait WarehouseClient {
     // instead of being spelled out as SQL by every artifact.
     async fn execute(&self, statement: &SqlString) -> Result<(), Self::Error>;
 
-    async fn build_log_rows(
-        &self,
-        namespace: &Namespace,
-        query: &BuildLogQuery,
-    ) -> Result<Vec<BuildLogRow>, Self::Error>;
-
-    async fn build_logs<E>(
-        &self,
-        namespace: &Namespace,
-        series: &Series,
-        query: &BuildLogQuery,
-    ) -> Result<Vec<BuildLog>, E>
-    where
-        E: From<Self::Error> + From<UnreadableBuildLog>,
-    {
-        if !self.exists(&BuildLog::path(namespace)).await? {
-            return Ok(Vec::new());
-        }
-
-        self.build_log_rows(namespace, query)
-            .await?
-            .into_iter()
-            .filter(|row| row.advances(series))
-            .map(|row| Ok(BuildLog::try_from(row)?))
-            .collect()
-    }
-
-    async fn create_build_log<E>(&self, namespace: &Namespace) -> Result<(), E>
-    where
-        E: From<Self::Error> + From<UnbuildableArtifact>,
-    {
-        let warehouse = self.warehouse();
-
-        self.execute(&warehouse.create_namespace(namespace)).await?;
-        self.execute(
-            &BuildLog::create_table(warehouse, namespace).map_err(UnbuildableArtifact::from)?,
-        )
-        .await?;
-
-        Ok(())
-    }
-
     async fn exists(&self, table: &TablePath) -> Result<bool, Self::Error>;
-
-    async fn append_build_logs(
-        &self,
-        namespace: &Namespace,
-        logs: &[BuildLog],
-    ) -> Result<(), Self::Error> {
-        match BuildLog::insert(logs, self.warehouse(), namespace) {
-            Some(insert) => self.execute(&insert).await,
-            None => Ok(()),
-        }
-    }
-
-    async fn build(&self, build: TableBuild) -> TableBuilt {
-        let status = match build.refusal() {
-            Some(refused) => Status::Failed(refused.to_string()),
-            None => match self
-                .execute_all(build.statements().unwrap_or_default())
-                .await
-            {
-                Ok(()) => Status::Succeeded,
-                Err(failed) => Status::Failed(failed.to_string()),
-            },
-        };
-
-        build.built(status, Ts::now())
-    }
 
     async fn execute_all(&self, statements: &[SqlString]) -> Result<(), Self::Error> {
         for statement in statements {

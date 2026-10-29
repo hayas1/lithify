@@ -21,7 +21,7 @@ chrono = { workspace = true }
 chrono-tz = { workspace = true }
 clap = { workspace = true }
 duckdb = { workspace = true }
-lithify-config = { workspace = true }
+lithify-pipeline = { workspace = true }
 lithify-core = { workspace = true }
 lithify-protocol = { workspace = true, features = ["bigquery", "duckdb"] }
 lithify-artifact = { workspace = true }

@@ -3,13 +3,13 @@ use duckdb::Connection;
 use duckdb::types::Value;
 use ulid::Ulid;
 
-use lithify_core::artifact::Artifact;
-use lithify_core::build_log::{BuildLog, Run, Status};
 use lithify_core::model::ColumnName;
-use lithify_core::runner::Replayer;
 use lithify_core::sink::WarehouseClient;
 use lithify_core::ts::Ts;
 use lithify_core::window::Window;
+use lithify_pipeline::artifact::ArtifactControl;
+use lithify_pipeline::build_log::{BuildLog, Run, Status};
+use lithify_pipeline::runner::Runner;
 use lithify_protocol::sink::duckdb::client::DuckDbClient;
 use lithify_protocol::{Debezium, DuckDbWarehouse, MySql};
 
@@ -30,7 +30,7 @@ impl Shards {
         Self { client }
     }
 
-    pub async fn build<A: Artifact>(
+    pub async fn build<A: ArtifactControl>(
         &self,
         artifact: &A,
         window: &Window,
@@ -44,7 +44,7 @@ impl Shards {
         built
     }
 
-    pub async fn settle<A: Artifact>(
+    pub async fn settle<A: ArtifactControl>(
         &self,
         artifact: &A,
         window: &Window,
@@ -61,7 +61,7 @@ impl Shards {
             "0.1.0",
         );
 
-        Replayer::new(&self.client, &log)
+        Runner::new(&self.client, &log)
             .built::<_, Box<dyn std::error::Error>>(artifact, window, previous, |_| true)
             .await
             .unwrap()

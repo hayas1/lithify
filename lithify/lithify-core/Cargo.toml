@@ -10,11 +10,8 @@ readme.workspace = true
 
 [dependencies]
 chrono = { workspace = true, features = ["clock"] }
-chrono-tz = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
 tracing = { workspace = true }
-ulid = { workspace = true }
 
 [dev-dependencies]
 lithify-testing = { workspace = true }

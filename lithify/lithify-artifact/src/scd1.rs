@@ -3,21 +3,22 @@ use std::marker::PhantomData;
 
 use serde::Deserialize;
 
-use lithify_core::artifact::{
-    Artifact, ArtifactBuilder, ArtifactName, Placement, UnbuildableArtifact,
-};
-use lithify_core::build_log::{Base, BuildLog, Series, TableBuild};
+use lithify_core::artifact::{Artifact, ArtifactBuilder, ArtifactName, UnbuildableArtifact};
+use lithify_core::build::{Base, TableBuild};
 use lithify_core::era::{Bound, Era, EraTracker};
 use lithify_core::listener::{
     Alteration, Finish, ReplayEnd, SchemaChangeListener, TableAltered, TableCreated, TableRenamed,
 };
 use lithify_core::model::{ColumnModel, TableId, TableModel};
-use lithify_core::schedule::Timeline;
 use lithify_core::sink::{Namespace, TablePath, Warehouse};
 use lithify_core::source::RowChangeLog;
 use lithify_core::sql::SqlString;
 use lithify_core::ts::{Event, Ts};
 use lithify_core::window::Window;
+use lithify_pipeline::schedule::Timeline;
+
+use lithify_pipeline::artifact::{ArtifactControl, Placement};
+use lithify_pipeline::build_log::{BuildLog, Series};
 
 use crate::snapshot::Snapshot;
 use fold::Fold;
@@ -77,9 +78,32 @@ impl Artifact for Scd1 {
 
     type From = Snapshot;
 
-    type Config = Scd1Config;
-
     type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = Scd1Builder<'a, Self, L, W>;
+
+    fn namespace(&self) -> &Namespace {
+        &self.namespace
+    }
+
+    fn target(&self, table: &TableId, _: &Window) -> Result<TablePath, UnbuildableArtifact> {
+        Ok(TablePath::new(
+            self.namespace.clone(),
+            &format!("{}_scd_type_1", table.table()),
+        ))
+    }
+
+    fn builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>(
+        &'a self,
+        log: &'a L,
+        table: TableId,
+        window: &'a Window,
+        base: Option<TablePath>,
+    ) -> Self::Builder<'a, L, W> {
+        Scd1Builder::new(self, log, table, window.clone(), base)
+    }
+}
+
+impl ArtifactControl for Scd1 {
+    type Config = Scd1Config;
 
     fn declared(
         name: &ArtifactName,
@@ -90,10 +114,6 @@ impl Artifact for Scd1 {
         Self::new(placement.namespace().clone())
             .named(name.clone())
             .copied_into(placement.copies().to_vec())
-    }
-
-    fn namespace(&self) -> &Namespace {
-        &self.namespace
     }
 
     fn series(&self) -> Series {
@@ -114,29 +134,6 @@ impl Artifact for Scd1 {
         window: &Window,
     ) -> Option<&'b BuildLog> {
         Snapshot::shard_closing(&self.base, built, table, *window.from())
-    }
-
-    fn target(&self, table: &TableId, _: &Window) -> Result<TablePath, UnbuildableArtifact> {
-        Ok(TablePath::new(
-            self.namespace.clone(),
-            &format!("{}_scd_type_1", table.table()),
-        ))
-    }
-
-    fn builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>(
-        &'a self,
-        log: &'a L,
-        table: TableId,
-        window: &'a Window,
-        previous: Option<&BuildLog>,
-    ) -> Self::Builder<'a, L, W> {
-        Scd1Builder::new(
-            self,
-            log,
-            table,
-            window.clone(),
-            previous.and_then(BuildLog::target).cloned(),
-        )
     }
 }
 
@@ -516,8 +513,8 @@ mod tests {
     use chrono::DateTime;
     use chrono_tz::Tz;
 
-    use lithify_core::build_log::{Run, TableBuilt};
-    use lithify_core::schedule::{Schedule, Timeline};
+    use lithify_pipeline::build_log::{Run, TableBuilt};
+    use lithify_pipeline::schedule::{Schedule, Timeline};
 
     use super::*;
     use crate::shard::Shard;
@@ -569,7 +566,6 @@ mod tests {
     }
 
     use lithify_core::artifact::{Artifact, UnbuildableArtifact};
-    use lithify_core::build_log::{Lifecycle, Status};
     use lithify_core::era::Bound;
     use lithify_core::event::{Hint, SchemaChange, TableChange};
     use lithify_core::listener::{CatalogModel, OutOfOrder};
@@ -578,6 +574,7 @@ mod tests {
     use lithify_core::sink::{TablePath, UnsupportedColumn};
     use lithify_core::source::ColumnPath;
     use lithify_core::table_listeners::TableListeners;
+    use lithify_pipeline::build_log::{Lifecycle, Status};
     use lithify_testing::Engine;
 
     use lithify_core::ts::Ts;
@@ -733,10 +730,7 @@ mod tests {
         run: &Run,
         finished_at: DateTime<chrono::Utc>,
     ) -> BuildLog {
-        snapshot
-            .build()
-            .built(Status::Succeeded, Ts::from(finished_at))
-            .logged(run)
+        TableBuilt::finished(snapshot.build(), Status::Succeeded, Ts::from(finished_at)).logged(run)
     }
 
     fn snapshots_in<W: Warehouse + Clone>(
@@ -1653,7 +1647,7 @@ mod tests {
             &Log,
             TableId::new("shop", "customers"),
             &window,
-            Some(&previous),
+            previous.target().cloned(),
         );
 
         assert_eq!(

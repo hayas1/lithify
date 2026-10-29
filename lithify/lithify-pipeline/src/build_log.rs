@@ -2,13 +2,13 @@ use std::fmt::{self, Display, Formatter};
 
 use ulid::Ulid;
 
-use crate::artifact::{ArtifactName, UnbuildableArtifact};
-use crate::listener::Appearance;
-use crate::model::{ColumnType, TableId};
-use crate::sink::{Namespace, TablePath, UnsupportedColumn, WarehouseSql};
-use crate::sql::SqlString;
-use crate::ts::{Event, Replay, Ts};
-use crate::window::Window;
+use lithify_core::artifact::ArtifactName;
+use lithify_core::build::TableBuild;
+use lithify_core::model::{ColumnType, TableId};
+use lithify_core::sink::{Namespace, TablePath, UnsupportedColumn, WarehouseSql};
+use lithify_core::sql::SqlString;
+use lithify_core::ts::{Event, Replay, Ts};
+use lithify_core::window::Window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Run {
@@ -103,90 +103,6 @@ impl Status {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Base {
-    Built(TablePath),
-    Missing,
-    ChangeLog,
-}
-
-impl Base {
-    pub fn appeared(&mut self, appearance: Appearance) {
-        if appearance.is_logged_from_start() {
-            *self = Self::ChangeLog;
-        }
-    }
-
-    pub fn as_built(&self) -> Option<&TablePath> {
-        match self {
-            Self::Built(built) => Some(built),
-            Self::Missing | Self::ChangeLog => None,
-        }
-    }
-}
-
-impl From<Option<TablePath>> for Base {
-    fn from(built: Option<TablePath>) -> Self {
-        built.map_or(Self::Missing, Self::Built)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TableBuild {
-    table_from: Option<TableId>,
-    table_to: Option<TableId>,
-    base: Base,
-    target: Option<TablePath>,
-    window: Window,
-    making: Result<Vec<SqlString>, UnbuildableArtifact>,
-}
-
-impl TableBuild {
-    pub fn new(
-        table_from: Option<TableId>,
-        table_to: Option<TableId>,
-        base: Base,
-        target: Option<TablePath>,
-        window: Window,
-        making: Result<Vec<SqlString>, UnbuildableArtifact>,
-    ) -> Self {
-        Self {
-            table_from,
-            table_to,
-            base,
-            target,
-            window,
-            making,
-        }
-    }
-
-    pub fn statements(&self) -> Result<&[SqlString], &UnbuildableArtifact> {
-        self.making.as_deref()
-    }
-
-    pub fn refusal(&self) -> Option<UnbuildableArtifact> {
-        match (&self.making, &self.base, &self.table_from) {
-            (Err(refused), _, _) => Some(refused.clone()),
-            (Ok(_), Base::Missing, Some(table)) => {
-                Some(UnbuildableArtifact::WithoutBase(table.clone()))
-            }
-            (Ok(_), _, _) => None,
-        }
-    }
-
-    pub fn built(self, status: Status, finished_at: Ts<Replay>) -> TableBuilt {
-        TableBuilt::new(
-            self.table_from,
-            self.table_to,
-            self.base.as_built().cloned(),
-            self.target,
-            self.window,
-            status,
-            finished_at,
-        )
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableBuilt {
     table_from: Option<TableId>,
     table_to: Option<TableId>,
@@ -198,6 +114,18 @@ pub struct TableBuilt {
 }
 
 impl TableBuilt {
+    pub fn finished(build: TableBuild, status: Status, finished_at: Ts<Replay>) -> Self {
+        Self::new(
+            build.table_from().cloned(),
+            build.table_to().cloned(),
+            build.base().as_built().cloned(),
+            build.target().cloned(),
+            build.window().clone(),
+            status,
+            finished_at,
+        )
+    }
+
     pub fn new(
         table_from: Option<TableId>,
         table_to: Option<TableId>,

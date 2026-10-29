@@ -5,8 +5,8 @@ use google_cloud_bigquery::client::BigQuery;
 use google_cloud_bigquery::error::{QueryError, RowError};
 use google_cloud_bigquery::query::Row;
 use google_cloud_gax::client_builder;
+use lithify_pipeline::warehouse::WarehouseControl;
 
-use lithify_core::build_log::{BuildLogQuery, BuildLogRow, UnreadableBuildLog};
 use lithify_core::event::MalformedEvent;
 use lithify_core::sink::{
     ChangeLogSql, Namespace, OpenWarehouse, TablePath, WarehouseClient, WarehouseSql,
@@ -16,6 +16,7 @@ use lithify_core::source::{
 };
 use lithify_core::sql::SqlString;
 use lithify_core::window::Window;
+use lithify_pipeline::build_log::{BuildLogQuery, BuildLogRow, UnreadableBuildLog};
 
 use crate::sink::bigquery::BigQueryWarehouse;
 use crate::sink::bigquery::config::{Config, Credentials, Location};
@@ -152,7 +153,9 @@ impl<R: BigQueryExecution> WarehouseClient for BigQueryClient<R> {
 
         Ok(counted.iter().any(|count| count.0 > 0))
     }
+}
 
+impl<R: BigQueryExecution> WarehouseControl for BigQueryClient<R> {
     async fn build_log_rows(
         &self,
         namespace: &Namespace,

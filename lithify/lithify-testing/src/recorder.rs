@@ -1,9 +1,10 @@
+use lithify_pipeline::warehouse::WarehouseControl;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 
-use lithify_core::build_log::{BuildLog, BuildLogQuery, BuildLogRow, Latest};
 use lithify_core::sink::{Namespace, TablePath, Warehouse, WarehouseClient};
 use lithify_core::sql::SqlString;
+use lithify_pipeline::build_log::{BuildLog, BuildLogQuery, BuildLogRow, Latest};
 
 pub struct Recorder<W> {
     warehouse: W,
@@ -54,6 +55,12 @@ impl<W: Warehouse> WarehouseClient for Recorder<W> {
         Ok(())
     }
 
+    async fn exists(&self, table: &TablePath) -> Result<bool, Self::Error> {
+        Ok(self.present.contains(table))
+    }
+}
+
+impl<W: Warehouse> WarehouseControl for Recorder<W> {
     async fn build_log_rows(
         &self,
         _: &Namespace,
@@ -73,9 +80,5 @@ impl<W: Warehouse> WarehouseClient for Recorder<W> {
                 .collect(),
             BuildLogQuery::All => logged.rev().collect(),
         })
-    }
-
-    async fn exists(&self, table: &TablePath) -> Result<bool, Self::Error> {
-        Ok(self.present.contains(table))
     }
 }

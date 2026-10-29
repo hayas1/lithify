@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
 
-use lithify_config::{Placed, Places, Placing};
-use lithify_core::sink::{Namespace, OpenWarehouse, SinkWarehouse, WarehouseFn};
+use lithify_core::sink::{Namespace, OpenWarehouse};
+
 use lithify_core::source::CdcFormat;
+use lithify_pipeline::warehouse::{SinkWarehouse, WarehouseFn};
+use lithify_pipeline::{Placed, Places, Placing};
 use lithify_protocol::sink::bigquery::client::{BigQueryCapture, BigQueryChangeLogsFn};
 use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbChangeLogsFn};
 use lithify_protocol::{BigQueryWarehouse, DebeziumFormat, DuckDbWarehouse};
@@ -14,12 +16,6 @@ use crate::unrunnable::Unrunnable;
 #[serde(deny_unknown_fields, rename_all = "lowercase")]
 pub enum CaptureConfig {
     Debezium(<DebeziumFormat as CdcFormat>::Config),
-}
-
-impl CaptureConfig {
-    pub fn to_json(&self) -> Result<String, serde_json::Error> {
-        serde_json::to_string(self)
-    }
 }
 
 impl DuckDbCapture for CaptureConfig {

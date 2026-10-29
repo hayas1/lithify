@@ -1,12 +1,19 @@
 use std::collections::BTreeSet;
 use std::fmt::{self, Display, Formatter};
 
+use serde::Serialize;
+
+use lithify_core::artifact::ArtifactName;
+use lithify_core::model::TableId;
+use lithify_core::sink::{Namespace, TablePath};
+use lithify_core::ts::{Event, Replay, Ts};
+use lithify_core::window::Window;
+
+use crate::artifact::Declaration;
 use crate::build_log::{BuildLog, Latest, Series, UnreadableBuildLog};
-use crate::model::TableId;
+use crate::infra::{Sink, Source};
 use crate::schedule::Schedule;
-use crate::sink::{Namespace, TablePath, WarehouseClient};
-use crate::ts::{Event, Replay, Ts};
-use crate::window::Window;
+use crate::warehouse::{SinkWarehouse, WarehouseControl, WarehouseFn};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Discrepancy {
@@ -88,6 +95,135 @@ impl Inspection {
     }
 }
 
+pub struct Inspecting {
+    expectation: Expectation,
+    namespace: Namespace,
+    series: Series,
+}
+
+impl Inspecting {
+    pub fn of<C, W, A>(
+        sink: &Sink<W, A>,
+        source: &Source<C>,
+        now: Ts<Replay>,
+    ) -> Result<Self, Uninspectable>
+    where
+        C: Serialize,
+        W: SinkWarehouse,
+        A: Declaration,
+    {
+        let (artifact, schedule) = Self::scheduled(sink)?;
+        let namespace = sink
+            .place(artifact)
+            .and_then(<[_]>::first)
+            .map(|place| place.clone().into())
+            .ok_or_else(|| Uninspectable::Unplaced {
+                sink: sink.name().to_owned(),
+                artifact: artifact.clone(),
+            })?;
+
+        Ok(Self {
+            expectation: Expectation::new(
+                schedule,
+                source.since(),
+                &source
+                    .written_capture()
+                    .map_err(|unwritten| Uninspectable::Unwritten(unwritten.to_string()))?,
+                now,
+            ),
+            namespace,
+            series: Series::new(artifact.clone(), &schedule.to_string()),
+        })
+    }
+
+    fn scheduled<W: SinkWarehouse, A: Declaration>(
+        sink: &Sink<W, A>,
+    ) -> Result<(&ArtifactName, Schedule), Uninspectable> {
+        let mut scheduled = sink
+            .artifacts()
+            .filter_map(|(name, declared)| Some((name, declared.schedule(sink.time_zone())?)));
+        let found = scheduled
+            .next()
+            .ok_or_else(|| Uninspectable::Unscheduled(sink.name().to_owned()))?;
+
+        match scheduled.next() {
+            Some(_) => Err(Uninspectable::ScheduledTwice(sink.name().to_owned())),
+            None => Ok(found),
+        }
+    }
+
+    pub fn namespace(&self) -> &Namespace {
+        &self.namespace
+    }
+
+    pub fn series(&self) -> &Series {
+        &self.series
+    }
+
+    pub async fn read<K, E>(&self, client: &K) -> Result<Inspection, E>
+    where
+        K: WarehouseControl,
+        E: From<K::Error> + From<UnreadableBuildLog>,
+    {
+        self.expectation
+            .read(client, &self.namespace, &self.series)
+            .await
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Uninspectable {
+    Unscheduled(String),
+    ScheduledTwice(String),
+    Unplaced {
+        sink: String,
+        artifact: ArtifactName,
+    },
+    Unwritten(String),
+    Unread(String),
+}
+
+impl Display for Uninspectable {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unscheduled(sink) => {
+                write!(formatter, "{sink} declares no scheduled artifact to check")
+            }
+            Self::ScheduledTwice(sink) => write!(
+                formatter,
+                "{sink} declares more than one scheduled artifact, which a check does not tell apart yet"
+            ),
+            Self::Unplaced { sink, artifact } => {
+                write!(formatter, "{sink} places {artifact} nowhere")
+            }
+            Self::Unwritten(cause) => {
+                write!(formatter, "the capture could not be written: {cause}")
+            }
+            Self::Unread(cause) => formatter.write_str(cause),
+        }
+    }
+}
+
+impl std::error::Error for Uninspectable {}
+
+impl WarehouseFn for &Inspecting {
+    type Output = Result<Inspection, Uninspectable>;
+
+    async fn call<K: WarehouseControl>(self, client: &K) -> Self::Output {
+        self.read::<K, Unread>(client)
+            .await
+            .map_err(|Unread(cause)| Uninspectable::Unread(cause))
+    }
+}
+
+struct Unread(String);
+
+impl<E: std::error::Error> From<E> for Unread {
+    fn from(cause: E) -> Self {
+        Self(cause.to_string())
+    }
+}
+
 pub struct Expectation {
     schedule: Schedule,
     since: Ts<Event>,
@@ -112,7 +248,7 @@ impl Expectation {
         series: &Series,
     ) -> Result<Inspection, E>
     where
-        K: WarehouseClient,
+        K: WarehouseControl,
         E: From<K::Error> + From<UnreadableBuildLog>,
     {
         if !client.exists(&BuildLog::path(namespace)).await? {

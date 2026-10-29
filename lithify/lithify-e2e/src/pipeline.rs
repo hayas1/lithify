@@ -4,11 +4,11 @@ use chrono::Utc;
 
 use lithify_cli::artifacts::{ArtifactConfig, DeclaredSnapshot};
 use lithify_cli::pipeline::{CaptureConfig, WarehouseConfig};
-use lithify_config::{Pipeline, infra};
 use lithify_core::artifact::Artifact;
 use lithify_core::model::{TableId, TableModel};
 use lithify_core::ts::{Event, Processing, Ts};
 use lithify_core::window::Window;
+use lithify_pipeline::{Pipeline, infra};
 
 use crate::row::Rows;
 use crate::run::Unverifiable;
