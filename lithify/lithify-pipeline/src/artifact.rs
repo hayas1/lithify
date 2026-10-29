@@ -267,17 +267,7 @@ mod tests {
         }
     }
 
-    const DECLARED: &str = r#"
-        [[artifact]]
-        name = "daily"
-        kind = "snapshot"
-        shard = "%Y%m%d"
-
-        [[artifact]]
-        name = "copy"
-        kind = "copy"
-        base = "daily"
-    "#;
+    const DECLARED: &str = include_str!("../testdata/artifact/declared.toml");
 
     fn declared(written: &str) -> Result<Declarations<Made>, Misdeclaring> {
         Declarations::try_from(toml::from_str::<Declaring>(written).unwrap())

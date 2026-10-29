@@ -184,21 +184,7 @@ pub enum Mask {
 mod tests {
     use super::*;
 
-    const TABLES: &str = r#"
-        [default]
-        artifacts = ["snapshot"]
-
-        [[table]]
-        schema = "shop"
-        name = "orders"
-        artifacts = ["snapshot", "scd2"]
-        column.attributes.mask = "null"
-
-        [[table]]
-        schema = "shop"
-        name = "audit_log"
-        artifacts = []
-    "#;
+    const TABLES: &str = include_str!("../testdata/table/tables.toml");
 
     fn tables(listed: &str) -> Tables {
         Tables::try_from(toml::from_str::<Listing>(listed).unwrap()).unwrap()

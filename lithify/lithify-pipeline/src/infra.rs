@@ -492,24 +492,9 @@ mod tests {
 
     fn declarations() -> Declarations<Made> {
         Declarations::try_from(
-            toml::from_str::<crate::artifact::Declaring>(
-                r#"
-                [[artifact]]
-                name = "snapshot"
-                kind = "snapshot"
-                shard = "%Y%m%d"
-
-                [[artifact]]
-                name = "copy"
-                kind = "copy"
-                base = "snapshot"
-
-                [[artifact]]
-                name = "nine"
-                kind = "copy"
-                base = "snapshot"
-                "#,
-            )
+            toml::from_str::<crate::artifact::Declaring>(include_str!(
+                "../testdata/infra/declarations.toml"
+            ))
             .unwrap(),
         )
         .unwrap()
@@ -527,61 +512,15 @@ mod tests {
         })
     }
 
-    const INFRA: &str = r#"
-        [default]
-        source.capture.debezium.dialect = "mysql"
+    const INFRA: &str = include_str!("../testdata/infra/infra.toml");
 
-        [[source]]
-        name = "primary"
-        since = "1970-01-01T00:00:00Z"
-        topic_prefix = "mysql"
+    const SERVER: &str = include_str!("../testdata/infra/server.toml");
 
-        [[source]]
-        name = "replica"
-        since = "2026-09-21T00:00:00Z"
+    const WAREHOUSE: &str = include_str!("../testdata/infra/warehouse.toml");
 
-        capture.debezium.dialect = "postgres"
+    const NAMED: &str = include_str!("../testdata/infra/named.toml");
 
-        [[sink]]
-        name = "rustfs"
-
-        [sink.warehouse.files]
-        bucket = "lithify"
-        change_log = { prefix = "mysql_shop_cdc" }
-        place.snapshot = [{ prefix = "mysql_shop" }]
-        place.nine = [{ prefix = "mysql_shop_0900" }]
-
-        [[sink]]
-        name = "warehouse"
-
-        [sink.warehouse.warehouse]
-        project = "local-project"
-        change_log = { dataset = "mysql_shop_archive" }
-        place.snapshot = [{ dataset = "mysql_shop" }]
-        place.copy = [{ dataset = "mysql_shop_copy" }]
-    "#;
-
-    const SERVER: &str = r#"
-        [[source]]
-        name = "primary"
-        since = "1970-01-01T00:00:00Z"
-
-        capture.debezium.dialect = "mysql"
-    "#;
-
-    const WAREHOUSE: &str = r#"
-        [sink.warehouse.files]
-        bucket = "lithify"
-        change_log = { prefix = "mysql_shop_cdc" }
-    "#;
-
-    const NAMED: &str = r#"
-        name = "rustfs"
-    "#;
-
-    const ARTIFACTS: &str = r#"
-        place.snapshot = [{ prefix = "mysql_shop" }]
-    "#;
+    const ARTIFACTS: &str = include_str!("../testdata/infra/artifacts.toml");
 
     fn wiring(written: &str) -> Wiring<Captured, Sunk> {
         toml::from_str(written).unwrap()

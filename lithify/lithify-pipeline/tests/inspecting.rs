@@ -27,7 +27,7 @@ fn inspecting(pipeline: &Pipeline<Captured, Kept, Made>) -> Result<Inspecting, U
     Inspecting::of(sink, source, now())
 }
 
-const SNAPSHOT: &str = "[[artifact]]\nname = \"snapshot\"\nkind = \"snapshot\"\n";
+const SNAPSHOT: &str = include_str!("../testdata/inspecting/snapshot.toml");
 
 #[test]
 fn a_sink_is_inspected_under_the_first_place_of_the_artifact_it_schedules() {

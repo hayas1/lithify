@@ -420,38 +420,12 @@ pub(crate) mod tests {
         );
     }
 
-    const PERSON_PROCESSED_PAST_THE_MIDNIGHT_ITS_EVENT_TIME_FALLS_BEFORE: &str = "CREATE SCHEMA mysql_shop_cdc;
-        CREATE TABLE mysql_shop_cdc.mysql AS SELECT * FROM (VALUES
-          ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
-            'ddl': 'CREATE TABLE people (id BIGINT)',
-            'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
-              'table': {'primaryKeyColumnNames': ['id'], 'columns': [
-                {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
-                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]})
-        ) AS t(value);
-        CREATE TABLE mysql_shop_cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
-          ({'op': 'c', 'ts_ms': 1789948800001::BIGINT,
-            'source': {'file': 'binlog.000001', 'pos': 3::BIGINT, 'gtid': NULL, 'ts_ms': 1789948799999::BIGINT},
-            'before': NULL::STRUCT(id BIGINT), 'after': {'id': 8::BIGINT}})
-        ) AS t(value)";
+    const PERSON_PROCESSED_PAST_THE_MIDNIGHT_ITS_EVENT_TIME_FALLS_BEFORE: &str = include_str!(
+        "../testdata/command/person_processed_past_the_midnight_its_event_time_falls_before.sql"
+    );
 
-    const PERSON_DELETED_AT_AN_EVENT_TIME_BEFORE_ITS_CREATION: &str = "CREATE SCHEMA mysql_shop_cdc;
-        CREATE TABLE mysql_shop_cdc.mysql AS SELECT * FROM (VALUES
-          ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
-            'ddl': 'CREATE TABLE people (id BIGINT)',
-            'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
-              'table': {'primaryKeyColumnNames': ['id'], 'columns': [
-                {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
-                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]})
-        ) AS t(value);
-        CREATE TABLE mysql_shop_cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
-          ({'op': 'c', 'ts_ms': 1789948799100::BIGINT,
-            'source': {'file': 'binlog.000001', 'pos': 3::BIGINT, 'gtid': NULL, 'ts_ms': 1789948799000::BIGINT},
-            'before': NULL::STRUCT(id BIGINT), 'after': {'id': 8::BIGINT}}),
-          ({'op': 'd', 'ts_ms': 1789948799200::BIGINT,
-            'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL, 'ts_ms': 1789948798000::BIGINT},
-            'before': {'id': 8::BIGINT}, 'after': NULL::STRUCT(id BIGINT)})
-        ) AS t(value)";
+    const PERSON_DELETED_AT_AN_EVENT_TIME_BEFORE_ITS_CREATION: &str =
+        include_str!("../testdata/command/person_deleted_at_an_event_time_before_its_creation.sql");
 
     #[tokio::test]
     async fn a_change_is_built_into_the_shard_of_the_day_its_event_time_falls_on() {
@@ -578,31 +552,8 @@ pub(crate) mod tests {
         );
     }
 
-    const PETS_STANDING_BEFORE_THEY_WERE_BUILT: &str = "CREATE SCHEMA mysql_shop_cdc;
-        CREATE TABLE mysql_shop_cdc.mysql AS SELECT * FROM (VALUES
-          ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
-            'ddl': 'CREATE TABLE people (id BIGINT)',
-            'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
-              'table': {'primaryKeyColumnNames': ['id'], 'columns': [
-                {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
-                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]}),
-          ({'source': {'file': 'binlog.000001', 'pos': 2::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
-            'ddl': 'CREATE TABLE pets (id BIGINT)',
-            'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"pets\"',
-              'table': {'primaryKeyColumnNames': ['id'], 'columns': [
-                {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
-                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]})
-        ) AS t(value);
-        CREATE TABLE mysql_shop_cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
-          ({'op': 'c', 'ts_ms': 1789862400001::BIGINT,
-            'source': {'file': 'binlog.000001', 'pos': 3::BIGINT, 'gtid': NULL, 'ts_ms': 1789862400001::BIGINT},
-            'before': NULL::STRUCT(id BIGINT), 'after': {'id': 8::BIGINT}})
-        ) AS t(value);
-        CREATE TABLE mysql_shop_cdc.\"mysql.shop.pets\" AS SELECT * FROM (VALUES
-          ({'op': 'c', 'ts_ms': 1000::BIGINT,
-            'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL, 'ts_ms': 1000::BIGINT},
-            'before': NULL::STRUCT(id BIGINT), 'after': {'id': 9::BIGINT}})
-        ) AS t(value)";
+    const PETS_STANDING_BEFORE_THEY_WERE_BUILT: &str =
+        include_str!("../testdata/command/pets_standing_before_they_were_built.sql");
 
     #[tokio::test]
     async fn a_catch_up_builds_a_table_with_nothing_to_fold_onto_again_from_the_start_of_its_source()

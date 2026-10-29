@@ -329,34 +329,7 @@ impl From<toml::de::Error> for Unwritable {
 mod tests {
     use super::*;
 
-    const SCENARIO: &str = r#"
-        [pipeline]
-        path = "../compose/lithify/mysql"
-
-        [source.primary]
-        url = "mysql://root:root@mysql:3306/shop"
-
-        [sink.rustfs]
-
-        [sink.warehouse]
-
-        [setup]
-        source.primary.query = ["CREATE TABLE IF NOT EXISTS shop.people (id BIGINT PRIMARY KEY)"]
-
-        [cleanup]
-        source.primary.query = ["DROP TABLE IF EXISTS shop.people"]
-        sink.rustfs.query = ["DROP TABLE IF EXISTS mysql_shop.people"]
-        sink.warehouse.query = ["DROP TABLE IF EXISTS `mysql_shop.people`"]
-
-        [[step]]
-        name = "rows the scenario inserts"
-        source.primary.query = ["INSERT INTO shop.people VALUES (1)"]
-
-        [[step]]
-        name = "the snapshot of the rows"
-        build = [{ snapshot = { sink = "rustfs", source = "primary", table = "shop.people" } }]
-        assert = [{ snapshot = { sink = "rustfs", source = "primary", table = "shop.people" } }]
-    "#;
+    const SCENARIO: &str = include_str!("../testdata/scenario/scenario.toml");
 
     fn scenario() -> Scenario {
         SCENARIO.parse().unwrap()
@@ -476,8 +449,8 @@ mod tests {
     #[test]
     fn building_from_a_source_the_scenario_does_not_connect_is_rejected() {
         let written = SCENARIO.replace(
-            "sink = \"rustfs\", source = \"primary\", table = \"shop.people\" } }]\n        assert",
-            "sink = \"rustfs\", source = \"replica\", table = \"shop.people\" } }]\n        assert",
+            "sink = \"rustfs\", source = \"primary\", table = \"shop.people\" } }]\nassert",
+            "sink = \"rustfs\", source = \"replica\", table = \"shop.people\" } }]\nassert",
         );
 
         assert!(matches!(

@@ -114,12 +114,7 @@ mod tests {
         }
     }
 
-    const PLACED: &str = r#"
-        bucket = "lithify"
-        change_log = { prefix = "mysql_shop_cdc" }
-        place.snapshot = [{ prefix = "mysql_shop" }, { prefix = "shop" }]
-        place.instant_0900 = [{ prefix = "mysql_shop_0900" }]
-    "#;
+    const PLACED: &str = include_str!("../testdata/place/placed.toml");
 
     fn placed(written: &str) -> Placed<Bucket, Prefix> {
         toml::from_str(written).unwrap()

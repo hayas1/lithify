@@ -188,7 +188,7 @@ mod tests {
         assert!(unknown.is_err());
     }
 
-    const BIGQUERY: &str = "[bigquery]\nproject = \"local-project\"\nchange_log = { dataset = \"mysql_shop_cdc\" }\nplace.snapshot = [{ dataset = \"mysql_shop\" }]";
+    const BIGQUERY: &str = include_str!("../testdata/pipeline/bigquery.toml");
 
     #[test]
     fn a_pipeline_is_sunk_into_a_warehouse_this_program_reads() {

@@ -1,0 +1,10 @@
+[[artifact]]
+name = "snapshot"
+kind = "snapshot"
+at = "00:00"
+shard = "%Y%m%d"
+
+[[artifact]]
+name = "copy"
+kind = "copy"
+base = "snapshot"

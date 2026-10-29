@@ -1,0 +1,3 @@
+[[source]]
+name = "primary"
+capture.debezium.dialect = "mysql"

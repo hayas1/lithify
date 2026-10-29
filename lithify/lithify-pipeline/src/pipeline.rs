@@ -264,11 +264,11 @@ mod tests {
         Debezium(debezium::Config),
     }
 
-    const ARTIFACTS: &str = "[[artifact]]\nname = \"snapshot\"\nkind = \"snapshot\"\nat = \"00:00\"\nshard = \"%Y%m%d\"\n\n[[artifact]]\nname = \"copy\"\nkind = \"copy\"\nbase = \"snapshot\"\n";
+    const ARTIFACTS: &str = include_str!("../testdata/pipeline/artifacts.toml");
 
-    const SOURCE: &str = "[[source]]\nname = \"primary\"\ncapture.debezium.dialect = \"mysql\"\n";
+    const SOURCE: &str = include_str!("../testdata/pipeline/source.toml");
 
-    const SINK: &str = "[[sink]]\nname = \"rustfs\"\n[sink.warehouse.duckdb]\ns3 = { endpoint = \"http://rustfs:9000\", region = \"us-east-1\", bucket = \"lithify\", format = \"parquet\" }\nchange_log = { prefix = \"mysql_shop_cdc\" }\nplace.snapshot = [{ prefix = \"mysql_shop\" }]\n";
+    const SINK: &str = include_str!("../testdata/pipeline/sink.toml");
 
     fn configure(directory: &Path, infra: &str, listed: &str) {
         std::fs::write(directory.join("infra.toml"), infra).unwrap();

@@ -220,52 +220,15 @@ pub(crate) mod tests {
     use lithify_pipeline::runner::{BuildLogWrite, Tables};
     use lithify_protocol::sink::execution::DryRun;
 
-    const CHANGE_LOGS: &str = "CREATE SCHEMA mysql_shop_cdc;
-        CREATE TABLE mysql_shop_cdc.mysql AS SELECT * FROM (VALUES
-          ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
-            'ddl': 'CREATE TABLE people (id BIGINT)',
-            'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
-              'table': {'primaryKeyColumnNames': ['id'], 'columns': [
-                {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
-                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]})
-        ) AS t(value)";
+    const CHANGE_LOGS: &str = include_str!("../testdata/step/change_logs.sql");
 
     fn snapshot(sink: &Sink<WarehouseConfig, ArtifactConfig>) -> Snapshot {
         DeclaredSnapshot::of(sink).unwrap().artifact()
     }
 
-    pub(crate) const ARTIFACTS: &str = r#"
-[[artifact]]
-name = "snapshot"
-kind = "snapshot"
-shard = "%Y%m%d"
-"#;
+    pub(crate) const ARTIFACTS: &str = include_str!("../testdata/step/artifacts.toml");
 
-    pub(crate) const INFRA: &str = r#"
-[default]
-source.capture.debezium.dialect = "mysql"
-
-[[source]]
-name = "primary"
-since = "1970-01-01T00:00:00Z"
-topic_prefix = "mysql"
-
-[[sink]]
-name = "bigquery"
-
-[sink.warehouse.bigquery]
-project = "local-project"
-change_log = { dataset = "mysql_shop_cdc" }
-place.snapshot = [{ dataset = "mysql_shop" }]
-
-[[sink]]
-name = "duckdb_s3"
-
-[sink.warehouse.duckdb]
-s3 = { endpoint = "http://rustfs:9000", region = "us-east-1", bucket = "lithify", format = "parquet" }
-change_log = { prefix = "mysql_shop_cdc" }
-place.snapshot = [{ prefix = "mysql_shop" }]
-"#;
+    pub(crate) const INFRA: &str = include_str!("../testdata/step/infra.toml");
 
     pub(crate) fn opening(
         name: &str,
@@ -562,44 +525,10 @@ place.snapshot = [{ prefix = "mysql_shop" }]
         client
     }
 
-    pub(crate) const PEOPLE: &str = "CREATE SCHEMA mysql_shop_cdc;
-        CREATE TABLE mysql_shop_cdc.mysql AS SELECT * FROM (VALUES
-          ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
-            'ddl': 'CREATE TABLE people (id BIGINT)',
-            'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
-              'table': {'primaryKeyColumnNames': ['id'], 'columns': [
-                {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
-                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]})
-        ) AS t(value);
-        CREATE TABLE mysql_shop_cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
-          ({'op': 'c', 'ts_ms': 1789948800001::BIGINT,
-            'source': {'file': 'binlog.000001', 'pos': 3::BIGINT, 'gtid': NULL, 'ts_ms': 1789948800001::BIGINT},
-            'before': NULL::STRUCT(id BIGINT), 'after': {'id': 8::BIGINT}})
-        ) AS t(value)";
+    pub(crate) const PEOPLE: &str = include_str!("../testdata/step/people.sql");
 
-    pub(crate) const BUILT_CHANGE_LOGS: &str = "CREATE SCHEMA mysql_shop_cdc;
-        CREATE TABLE mysql_shop_cdc.mysql AS SELECT * FROM (VALUES
-          ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
-            'ddl': 'CREATE TABLE people (id BIGINT)',
-            'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
-              'table': {'primaryKeyColumnNames': ['id'], 'columns': [
-                {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
-                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]}),
-          ({'source': {'file': 'binlog.000001', 'pos': 2::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
-            'ddl': 'CREATE TABLE pets (id BIGINT)',
-            'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"pets\"',
-              'table': {'primaryKeyColumnNames': ['id'], 'columns': [
-                {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
-                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]})
-        ) AS t(value);
-        CREATE TABLE mysql_shop_cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
-          ({'op': 'r', 'ts_ms': 1789862400001::BIGINT,
-            'source': {'file': 'binlog.000001', 'pos': 3::BIGINT, 'gtid': NULL, 'ts_ms': 1789862400001::BIGINT},
-            'before': NULL::STRUCT(id BIGINT), 'after': {'id': 1::BIGINT}}),
-          ({'op': 'r', 'ts_ms': 1789862400001::BIGINT,
-            'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL, 'ts_ms': 1789862400001::BIGINT},
-            'before': NULL::STRUCT(id BIGINT), 'after': {'id': 2::BIGINT}})
-        ) AS t(value)";
+    pub(crate) const BUILT_CHANGE_LOGS: &str =
+        include_str!("../testdata/step/built_change_logs.sql");
 
     pub(crate) fn rows(client: &DuckDbClient, query: &str) -> Vec<(String, String)> {
         client

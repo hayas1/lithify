@@ -1,0 +1,23 @@
+[default]
+source.capture.debezium.dialect = "mysql"
+
+[[source]]
+name = "primary"
+since = "1970-01-01T00:00:00Z"
+topic_prefix = "mysql"
+
+[[sink]]
+name = "bigquery"
+
+[sink.warehouse.bigquery]
+project = "local-project"
+change_log = { dataset = "mysql_shop_cdc" }
+place.snapshot = [{ dataset = "mysql_shop" }]
+
+[[sink]]
+name = "duckdb_s3"
+
+[sink.warehouse.duckdb]
+s3 = { endpoint = "http://rustfs:9000", region = "us-east-1", bucket = "lithify", format = "parquet" }
+change_log = { prefix = "mysql_shop_cdc" }
+place.snapshot = [{ prefix = "mysql_shop" }]

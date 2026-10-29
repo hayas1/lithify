@@ -180,28 +180,7 @@ impl Placing for Kept {
     }
 }
 
-pub const INFRA: &str = r#"
-    [default]
-    source.capture.debezium.dialect = "mysql"
-
-    [[source]]
-    name = "primary"
-
-    [[sink]]
-    name = "rustfs"
-
-    [sink.warehouse.memory]
-    change_log = { prefix = "mysql_shop_cdc" }
-    place.snapshot = [{ prefix = "mysql_shop" }]
-
-    [[sink]]
-    name = "warehouse"
-
-    [sink.warehouse.unreachable]
-    cause = "JobCreationMode"
-    change_log = { prefix = "mysql_shop_cdc" }
-    place.snapshot = [{ prefix = "mysql_shop" }]
-"#;
+pub const INFRA: &str = include_str!("../testdata/pipeline/infra.toml");
 
 pub fn logged() -> String {
     INFRA.replace("[sink.warehouse.memory]", "[sink.warehouse.logged]")

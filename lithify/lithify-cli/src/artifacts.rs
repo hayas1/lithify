@@ -442,7 +442,7 @@ mod tests {
         }
     }
 
-    const INSTANTS: &str = "[[artifact]]\nname = \"six\"\nkind = \"instant\"\nbase = \"snapshot\"\nat = \"06:00\"\nshard = \"%Y%m%d%H\"\n\n[[artifact]]\nname = \"eighteen\"\nkind = \"instant\"\nbase = \"snapshot\"\nat = \"18:00\"\nshard = \"%Y%m%d%H\"\n";
+    const INSTANTS: &str = include_str!("../testdata/artifacts/instants.toml");
 
     #[test]
     fn a_sink_cuts_only_the_instants_it_places() {
