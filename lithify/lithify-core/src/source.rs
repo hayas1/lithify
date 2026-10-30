@@ -195,6 +195,14 @@ impl<P: Position> SchemaHistory<P> {
         Self { opened, within }
     }
 
+    pub fn opened(&self) -> &[SchemaChange<P>] {
+        &self.opened
+    }
+
+    pub fn within(&self) -> &[SchemaChange<P>] {
+        &self.within
+    }
+
     pub fn replay<E, V>(&self, context: &V::Context, listener: &mut V) -> Result<CatalogModel<P>, E>
     where
         V: SchemaChangeListener<P>,

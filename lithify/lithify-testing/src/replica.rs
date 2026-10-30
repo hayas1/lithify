@@ -1,10 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use lithify_core::event::{Hint, SchemaChange, TableChange};
 use lithify_core::model::{
     ColumnModel, ColumnName, ColumnType, PrimaryKeyColumn, TableId, TableModel,
 };
+use lithify_core::source::SchemaHistory;
 use lithify_core::ts::{Event, Ts};
 use lithify_core::window::Window;
+
+use crate::change_log::Offset;
 
 pub type Row = BTreeMap<ColumnName, CellValue>;
 
@@ -118,6 +122,56 @@ impl Ddl {
         }
     }
 
+    fn schema_change(
+        &self,
+        position: Offset,
+        at: Ts<Event>,
+        after: &ReplicaDump,
+    ) -> SchemaChange<Offset> {
+        let altered = |table: &TableId| {
+            TableChange::Altered(
+                after
+                    .table(table)
+                    .unwrap_or_else(|| panic!("{table} is altered before it is created"))
+                    .clone(),
+            )
+        };
+        let (tables, hints) = match self {
+            Self::Create(model) => (TableChange::Created(model.clone()), vec![]),
+            Self::Drop(table) => (TableChange::Dropped(table.clone()), vec![]),
+            Self::Rename { from, to } => (
+                altered(to),
+                vec![Hint::TableRename {
+                    from: from.clone(),
+                    to: to.clone(),
+                }],
+            ),
+            Self::Alter {
+                table,
+                renamed,
+                changes,
+            } => (
+                altered(renamed.as_ref().unwrap_or(table)),
+                renamed
+                    .iter()
+                    .map(|renamed| Hint::TableRename {
+                        from: table.clone(),
+                        to: renamed.clone(),
+                    })
+                    .chain(changes.iter().filter_map(|change| change.renaming(table)))
+                    .collect(),
+            ),
+        };
+
+        SchemaChange::new(
+            position,
+            Ts::try_from(at.milliseconds_since_epoch()).unwrap(),
+            "",
+            vec![tables],
+            hints,
+        )
+    }
+
     pub fn table(&self) -> &TableId {
         match self {
             Self::Create(table) => table.id(),
@@ -184,6 +238,20 @@ impl ColumnDdl {
 
     pub fn rekey(key: &[&str]) -> Self {
         Self::Rekey(key.iter().map(|&column| column.into()).collect())
+    }
+
+    fn renaming(&self, table: &TableId) -> Option<Hint> {
+        let (from, to) = match self {
+            Self::Rename { from, to } => (from, to),
+            Self::Change { from, column, .. } if from != column.name() => (from, column.name()),
+            Self::Add { .. } | Self::Drop(_) | Self::Change { .. } | Self::Rekey(_) => return None,
+        };
+
+        Some(Hint::ColumnRename {
+            table: table.clone(),
+            from: from.clone(),
+            to: to.clone(),
+        })
     }
 
     pub fn placed(self, at: Placed) -> Self {
@@ -308,6 +376,28 @@ impl Replica {
         }
 
         passages.into_iter().collect()
+    }
+
+    pub fn history(&self, window: &Window) -> SchemaHistory<Offset> {
+        let mut after = ReplicaDump::default();
+        let (mut opened, mut within) = (Vec::new(), Vec::new());
+
+        for (position, (at, mutation)) in self.mutations.iter().enumerate() {
+            if at >= window.to() {
+                break;
+            }
+            after.apply(mutation);
+            let Mutation::Ddl(ddl) = mutation else {
+                continue;
+            };
+            let change = ddl.schema_change(Offset(position as u64), *at, &after);
+            match at < window.from() {
+                true => opened.push(change),
+                false => within.push(change),
+            }
+        }
+
+        SchemaHistory::new(opened, within)
     }
 
     pub fn mutations(&self) -> &[(Ts<Event>, Mutation)] {
@@ -572,6 +662,7 @@ impl Placed {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lithify_core::event::{Hint, SchemaChange, TableChange};
 
     fn at(millis: i64) -> Ts<Event> {
         Ts::try_from(millis).unwrap()
@@ -686,6 +777,81 @@ mod tests {
         assert_eq!(
             replica.passages(&Window::new(at(1), at(5))),
             [passage(None, None)].into()
+        );
+    }
+
+    fn told(changes: &[SchemaChange<Offset>]) -> Vec<(Vec<TableChange>, Vec<Hint>)> {
+        changes
+            .iter()
+            .map(|change| {
+                (
+                    change.tables().cloned().collect(),
+                    change.hints().cloned().collect(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_replica_tells_the_schema_changes_before_a_window_apart_from_the_ones_within_it() {
+        let people = TableModel::new(people(), vec![id(), text("name")], ["id"].into());
+        let history = created()
+            .insert(at(1), &people.id().clone(), &[("id", 1.into())])
+            .drop(at(3), people.id())
+            .history(&Window::new(at(2), at(5)));
+
+        assert_eq!(
+            told(history.opened()),
+            [(vec![TableChange::Created(people.clone())], vec![])]
+        );
+        assert_eq!(
+            told(history.within()),
+            [(vec![TableChange::Dropped(people.id().clone())], vec![])]
+        );
+    }
+
+    #[test]
+    fn a_replica_tells_a_table_renamed_as_altered_under_its_new_name_with_a_hint_of_its_old_one() {
+        let history = created()
+            .rename(at(2), &people(), &persons())
+            .history(&Window::new(at(1), at(5)));
+
+        assert_eq!(
+            told(history.within()),
+            [(
+                vec![TableChange::Altered(TableModel::new(
+                    persons(),
+                    vec![id(), text("name")],
+                    ["id"].into()
+                ))],
+                vec![Hint::TableRename {
+                    from: people(),
+                    to: persons()
+                }]
+            )]
+        );
+    }
+
+    #[test]
+    fn a_replica_tells_a_column_renamed_with_a_hint_of_its_old_name() {
+        let history = created()
+            .alter(at(2), &people(), vec![ColumnDdl::rename("name", "title")])
+            .history(&Window::new(at(1), at(5)));
+
+        assert_eq!(
+            told(history.within()),
+            [(
+                vec![TableChange::Altered(TableModel::new(
+                    people(),
+                    vec![id(), text("title")],
+                    ["id"].into()
+                ))],
+                vec![Hint::ColumnRename {
+                    table: people(),
+                    from: "name".into(),
+                    to: "title".into()
+                }]
+            )]
         );
     }
 

@@ -1,31 +1,31 @@
 use std::convert::Infallible;
 
 use crate::artifact::Artifact;
-use crate::build::TableBuild;
+use crate::build::{TableBuild, TableBuilder};
 use crate::listener::{Finish, OutOfOrder};
 use crate::model::TableId;
 use crate::sink::{TablePath, Warehouse};
-use crate::source::{ChangeLogs, SchemaHistory};
+use crate::source::{RowChangeLog, SchemaHistory};
 use crate::table_listeners::TableListeners;
 use crate::window::Window;
 
-pub struct Replayer<'a, W, C> {
+pub struct Replayer<'a, W, L> {
     warehouse: &'a W,
-    logs: &'a C,
+    log: &'a L,
 }
 
-impl<'a, W, C> Replayer<'a, W, C>
+impl<'a, W, L> Replayer<'a, W, L>
 where
     W: Warehouse,
-    C: ChangeLogs,
+    L: RowChangeLog,
 {
-    pub fn new(warehouse: &'a W, logs: &'a C) -> Self {
-        Self { warehouse, logs }
+    pub fn new(warehouse: &'a W, log: &'a L) -> Self {
+        Self { warehouse, log }
     }
 
     pub fn planned<A: Artifact, E>(
         &self,
-        history: &SchemaHistory<C::Position>,
+        history: &SchemaHistory<L::Position>,
         artifact: &'a A,
         window: &'a Window,
         base: impl Fn(&TableId) -> Option<TablePath>,
@@ -35,11 +35,13 @@ where
         E: From<OutOfOrder> + From<Infallible>,
     {
         let mut listeners = TableListeners::new(
-            |table: &TableId| {
-                artifact.builder::<_, W>(
-                    self.logs.row_changes(),
-                    table.clone(),
+            |table: &TableId, encounter| {
+                TableBuilder::opening::<L, W>(
+                    artifact,
+                    self.log,
                     window,
+                    table,
+                    encounter,
                     base(table),
                 )
             },

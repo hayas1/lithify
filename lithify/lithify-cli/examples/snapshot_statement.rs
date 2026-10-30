@@ -3,14 +3,15 @@ use ulid::Ulid;
 
 use lithify_artifact::shard::Shard;
 use lithify_artifact::snapshot::Snapshot;
-use lithify_core::artifact::Artifact;
-use lithify_core::listener::{Finish, ReplayEnd};
+use lithify_core::artifact::{Artifact, ArtifactBuilder};
+use lithify_core::build::Base;
+use lithify_core::listener::ReplayEnd;
 use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
 use lithify_core::sink::{TablePath, Warehouse};
 use lithify_core::ts::Ts;
 use lithify_core::window::Window;
 use lithify_pipeline::build_log::{BuildLog, Run, Status, TableBuilt};
-use lithify_protocol::{BigQueryWarehouse, Debezium, DuckDbWarehouse, MySql, MySqlPosition};
+use lithify_protocol::{BigQueryWarehouse, Debezium, DuckDbWarehouse, MySql};
 
 fn column(name: &str, type_name: &str, column_type: ColumnType) -> ColumnModel {
     ColumnModel::new(name, type_name, column_type, false, None)
@@ -65,20 +66,14 @@ fn statements<W: Warehouse>(warehouse: W) -> String {
         .map(|shard| previous(&window, &shard));
     let snapshot = artifact.builder::<_, W>(
         &log,
-        customers().id().clone(),
         &window,
-        previous.as_ref().and_then(BuildLog::target).cloned(),
+        Base::from(previous.as_ref().and_then(BuildLog::target).cloned()),
     );
-    let build = Finish::<MySqlPosition>::finish(
-        snapshot,
-        &warehouse,
-        ReplayEnd::standing(customers(), None),
-    )
-    .unwrap();
+    let statements = snapshot
+        .create(&warehouse, &ReplayEnd::standing(customers(), None))
+        .unwrap();
 
-    build
-        .statements()
-        .unwrap()
+    statements
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>()

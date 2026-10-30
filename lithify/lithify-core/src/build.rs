@@ -1,8 +1,15 @@
-use crate::artifact::UnbuildableArtifact;
-use crate::listener::Appearance;
+use std::convert::Infallible;
+
+use crate::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
+use crate::event::SchemaChange;
+use crate::listener::{
+    Finish, ReplayEnd, SchemaChangeListener, TableAltered, TableCreated, TableDropped, TableRenamed,
+};
 use crate::model::TableId;
-use crate::sink::TablePath;
+use crate::sink::{TablePath, Warehouse};
+use crate::source::RowChangeLog;
 use crate::sql::SqlString;
+use crate::table_listeners::Encounter;
 use crate::window::Window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,12 +20,6 @@ pub enum Base {
 }
 
 impl Base {
-    pub fn appeared(&mut self, appearance: Appearance) {
-        if appearance.is_logged_from_start() {
-            *self = Self::ChangeLog;
-        }
-    }
-
     pub fn as_built(&self) -> Option<&TablePath> {
         match self {
             Self::Built(built) => Some(built),
@@ -94,5 +95,126 @@ impl TableBuild {
             }
             (Ok(_), _, _) => None,
         }
+    }
+}
+
+// One table as an artifact builds it: what every artifact records of the table alike, the name it
+// opened the window under and what it is built onto, around the fold the artifact keeps of it.
+pub struct TableBuilder<'a, A, B> {
+    artifact: &'a A,
+    window: &'a Window,
+    table_from: Option<TableId>,
+    base: Base,
+    builder: B,
+}
+
+impl<'a, A, B> TableBuilder<'a, A, B> {
+    pub fn opening<L, W>(
+        artifact: &'a A,
+        log: &'a L,
+        window: &'a Window,
+        table: &TableId,
+        encounter: Encounter,
+        built: Option<TablePath>,
+    ) -> Self
+    where
+        A: Artifact<Builder<'a, L, W> = B>,
+        L: RowChangeLog + 'a,
+        W: Warehouse + 'a,
+    {
+        let base = encounter.base(built);
+
+        Self {
+            artifact,
+            window,
+            table_from: encounter.table_from(table),
+            builder: artifact.builder::<L, W>(log, window, base.clone()),
+            base,
+        }
+    }
+}
+
+impl<P, A, B> SchemaChangeListener<P> for TableBuilder<'_, A, B>
+where
+    B: SchemaChangeListener<P, Error = UnbuildableArtifact>,
+{
+    type Context = B::Context;
+    type Error = UnbuildableArtifact;
+
+    fn visit_statement(
+        &mut self,
+        context: &B::Context,
+        change: &SchemaChange<P>,
+    ) -> Result<(), UnbuildableArtifact> {
+        self.builder.visit_statement(context, change)
+    }
+
+    fn leave_statement(
+        &mut self,
+        context: &B::Context,
+        change: &SchemaChange<P>,
+    ) -> Result<(), UnbuildableArtifact> {
+        self.builder.leave_statement(context, change)
+    }
+
+    fn table_created(
+        &mut self,
+        context: &B::Context,
+        event: &TableCreated<'_, P>,
+    ) -> Result<(), UnbuildableArtifact> {
+        self.builder.table_created(context, event)
+    }
+
+    fn table_dropped(
+        &mut self,
+        context: &B::Context,
+        event: &TableDropped<'_, P>,
+    ) -> Result<(), UnbuildableArtifact> {
+        self.builder.table_dropped(context, event)
+    }
+
+    fn table_renamed(
+        &mut self,
+        context: &B::Context,
+        event: &TableRenamed<'_, P>,
+    ) -> Result<(), UnbuildableArtifact> {
+        self.builder.table_renamed(context, event)
+    }
+
+    fn table_altered(
+        &mut self,
+        context: &B::Context,
+        event: &TableAltered<'_, P>,
+    ) -> Result<(), UnbuildableArtifact> {
+        self.builder.table_altered(context, event)
+    }
+}
+
+impl<P, A, B> Finish<P> for TableBuilder<'_, A, B>
+where
+    A: Artifact,
+    B: ArtifactBuilder<P>,
+{
+    type Input = ReplayEnd<UnbuildableArtifact>;
+    type Output = TableBuild;
+    type FinishError = Infallible;
+
+    fn finish(
+        self,
+        context: &B::Context,
+        end: ReplayEnd<UnbuildableArtifact>,
+    ) -> Result<TableBuild, Infallible> {
+        let target = end
+            .model()
+            .and_then(|table| self.artifact.target(table.id(), self.window).ok());
+
+        Ok(TableBuild::new(
+            self.table_from,
+            end.model().map(|table| table.id().clone()),
+            self.base,
+            target,
+            self.window.clone(),
+            self.builder.create(context, &end),
+        ))
     }
 }

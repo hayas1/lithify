@@ -39,6 +39,7 @@ google-cloud-bigquery = "=0.16.1-preview"
 google-cloud-gax = "1.14"
 leptos = { version = "0.8.22", features = ["ssr"] }
 mysql = "28.0.2"
+proptest = "1"
 semigroup = { version = "0.6.0", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.151"

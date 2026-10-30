@@ -3,6 +3,7 @@ use chrono_tz::Tz;
 use serde::Deserialize;
 
 use lithify_core::artifact::{Artifact, ArtifactName, UnbuildableArtifact};
+use lithify_core::build::Base;
 use lithify_core::model::TableId;
 use lithify_core::sink::{Namespace, TablePath, Warehouse};
 use lithify_core::source::RowChangeLog;
@@ -114,11 +115,10 @@ impl Artifact for Instant {
     fn builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>(
         &'a self,
         log: &'a L,
-        table: TableId,
         window: &'a Window,
-        base: Option<TablePath>,
+        base: Base,
     ) -> Self::Builder<'a, L, W> {
-        Scd1Builder::new(self, log, table, window.clone(), base)
+        Scd1Builder::new(self, log, window.clone(), base)
     }
 }
 

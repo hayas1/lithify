@@ -1,14 +1,13 @@
-use std::convert::Infallible;
 use std::marker::PhantomData;
 
 use chrono_tz::Tz;
 use serde::Deserialize;
 
 use lithify_core::artifact::{Artifact, ArtifactBuilder, ArtifactName, UnbuildableArtifact};
-use lithify_core::build::{Base, TableBuild};
+use lithify_core::build::Base;
 use lithify_core::era::{Bound, Era, EraTracker};
 use lithify_core::listener::{
-    Alteration, Finish, ReplayEnd, SchemaChangeListener, TableAltered, TableCreated, TableRenamed,
+    Alteration, ReplayEnd, SchemaChangeListener, TableAltered, TableCreated, TableRenamed,
 };
 use lithify_core::model::TableId;
 use lithify_core::sink::{Namespace, TablePath, Warehouse};
@@ -91,17 +90,15 @@ impl Artifact for Scd2 {
     fn builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>(
         &'a self,
         log: &'a L,
-        table: TableId,
         window: &'a Window,
-        base: Option<TablePath>,
+        base: Base,
     ) -> Self::Builder<'a, L, W> {
         Scd2Builder {
             scd2: self,
             query: ChangeLogQuery::new(log),
             window: window.clone(),
-            base: Base::from(base),
+            base,
             eras: EraTracker::since(Bound::EventTime(*window.from())),
-            opened_as: Some(table),
             warehouse: PhantomData,
         }
     }
@@ -146,8 +143,6 @@ pub struct Scd2Builder<'a, L: RowChangeLog, W> {
     window: Window,
     base: Base,
     eras: EraTracker<L::Position>,
-    // The table as the window opened, which the build log records; None for one created within it.
-    opened_as: Option<TableId>,
     warehouse: PhantomData<fn(&W)>,
 }
 
@@ -325,10 +320,6 @@ impl<L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Position> for Scd2Bu
         event: &TableCreated<'_, L::Position>,
     ) -> Result<(), Self::Error> {
         self.eras = EraTracker::since(Bound::from(event.change()));
-        self.base.appeared(event.appearance());
-        if event.appearance().is_creation() {
-            self.opened_as = None;
-        }
 
         Ok(())
     }
@@ -355,28 +346,7 @@ impl<L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Position> for Scd2Bu
     }
 }
 
-impl<L: RowChangeLog, W: Warehouse> Finish<L::Position> for Scd2Builder<'_, L, W> {
-    type Input = ReplayEnd<UnbuildableArtifact>;
-    type Output = TableBuild;
-    type FinishError = Infallible;
-
-    fn finish(
-        self,
-        warehouse: &W,
-        end: ReplayEnd<UnbuildableArtifact>,
-    ) -> Result<TableBuild, Infallible> {
-        Ok(TableBuild::new(
-            self.opened_as.clone(),
-            end.model().map(|table| table.id().clone()),
-            self.base.clone(),
-            self.target(&end),
-            self.window.clone(),
-            self.create(warehouse, &end),
-        ))
-    }
-}
-
-impl<L: RowChangeLog, W: Warehouse> ArtifactBuilder<L::Position, W> for Scd2Builder<'_, L, W> {
+impl<L: RowChangeLog, W: Warehouse> ArtifactBuilder<L::Position> for Scd2Builder<'_, L, W> {
     fn select(
         &self,
         warehouse: &W,
@@ -457,8 +427,7 @@ mod tests {
     fn an_scd2_whose_table_changed_its_schema_within_the_window_is_refused() {
         let scd2 = Scd2::new(Namespace::from("mysql_shop_scd2"), "%Y%m%d", Tz::UTC);
         let window = Window::new(Ts::try_from(10).unwrap(), Ts::try_from(20).unwrap());
-        let mut versions =
-            scd2.builder::<Log, Engine>(&Log, TableId::new("shop", "people"), &window, None);
+        let mut versions = scd2.builder::<Log, Engine>(&Log, &window, Base::Missing);
         let mut catalog = CatalogModel::default();
         catalog
             .accept::<OutOfOrder, _>(

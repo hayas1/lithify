@@ -148,18 +148,20 @@ where
             .await?;
         let mut built = Vec::new();
 
-        for build in Replayer::new(self.client.warehouse(), self.logs).planned::<A, E>(
-            &history,
-            artifact,
-            window,
-            |table| {
-                artifact
-                    .base(previous, table, window)
-                    .and_then(BuildLog::target)
-                    .cloned()
-            },
-            finishes,
-        )? {
+        for build in Replayer::new(self.client.warehouse(), self.logs.row_changes())
+            .planned::<A, E>(
+                &history,
+                artifact,
+                window,
+                |table| {
+                    artifact
+                        .base(previous, table, window)
+                        .and_then(BuildLog::target)
+                        .cloned()
+                },
+                finishes,
+            )?
+        {
             built.push(self.client.build(build).await);
         }
 

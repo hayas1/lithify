@@ -1,13 +1,15 @@
 use std::collections::BTreeMap;
-use std::collections::btree_map::Entry;
+use std::collections::btree_map;
 use std::convert::Infallible;
 
+use crate::build::Base;
 use crate::listener::{
     Appearance, CatalogModel, Finish, ReplayEnd, SchemaChangeListener, TableAltered, TableCreated,
     TableDropped, TableRenamed,
 };
 use crate::model::{TableId, TableModel};
 use crate::position::Position;
+use crate::sink::TablePath;
 
 pub struct TableListeners<F, G, L, E> {
     make_listener: F,
@@ -16,19 +18,48 @@ pub struct TableListeners<F, G, L, E> {
     dropped: Vec<(TableId, Track<L, E>)>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Encounter {
+    Opened,
+    Appeared(Appearance),
+}
+
+impl Encounter {
+    pub fn base(&self, built: Option<TablePath>) -> Base {
+        match self {
+            Self::Appeared(appearance) if appearance.is_logged_from_start() => Base::ChangeLog,
+            Self::Appeared(_) | Self::Opened => Base::from(built),
+        }
+    }
+
+    pub fn table_from(&self, table: &TableId) -> Option<TableId> {
+        match self.is_creation() {
+            true => None,
+            false => Some(table.clone()),
+        }
+    }
+
+    fn is_creation(&self) -> bool {
+        match self {
+            Self::Appeared(appearance) => appearance.is_creation(),
+            Self::Opened => false,
+        }
+    }
+}
+
 // One table as the listeners follow it: its listener and, once that listener has refused a
 // schema change, why, so the table stops alone while the others go on.
 struct Track<L, E> {
     listener: L,
-    appearance: Option<Appearance>,
+    encounter: Encounter,
     refusal: Option<E>,
 }
 
 impl<L, E> Track<L, E> {
-    fn new(listener: L, appearance: Option<Appearance>) -> Self {
+    fn new(listener: L, encounter: Encounter) -> Self {
         Self {
             listener,
-            appearance,
+            encounter,
             refusal: None,
         }
     }
@@ -40,8 +71,7 @@ impl<L, E> Track<L, E> {
     }
 
     fn is_created_within(&self) -> bool {
-        self.appearance
-            .is_some_and(|appearance| appearance.is_creation())
+        self.encounter.is_creation()
     }
 
     fn finish<P>(
@@ -81,7 +111,7 @@ impl<F, G, L, E> TableListeners<F, G, L, E> {
 
 impl<F, G, L, E> TableListeners<F, G, L, E>
 where
-    F: FnMut(&TableId) -> L,
+    F: FnMut(&TableId, Encounter) -> L,
 {
     fn track(&mut self, table: &TableId) -> &mut Track<L, E> {
         let Self {
@@ -91,8 +121,11 @@ where
         } = self;
 
         match standing.entry(table.clone()) {
-            Entry::Occupied(track) => track.into_mut(),
-            Entry::Vacant(vacant) => vacant.insert(Track::new(make_listener(table), None)),
+            btree_map::Entry::Occupied(track) => track.into_mut(),
+            btree_map::Entry::Vacant(vacant) => vacant.insert(Track::new(
+                make_listener(table, Encounter::Opened),
+                Encounter::Opened,
+            )),
         }
     }
 }
@@ -100,7 +133,7 @@ where
 impl<P, F, G, L, E> SchemaChangeListener<P> for TableListeners<F, G, L, E>
 where
     P: Position,
-    F: FnMut(&TableId) -> L,
+    F: FnMut(&TableId, Encounter) -> L,
     L: SchemaChangeListener<P, Error = E>,
 {
     type Context = L::Context;
@@ -111,9 +144,10 @@ where
         context: &Self::Context,
         event: &TableCreated<'_, P>,
     ) -> Result<(), Self::Error> {
+        let encounter = Encounter::Appeared(event.appearance());
         let mut track = Track::new(
-            (self.make_listener)(event.table().id()),
-            Some(event.appearance()),
+            (self.make_listener)(event.table().id(), encounter),
+            encounter,
         );
 
         track.tell(|listener| listener.table_created(context, event));
@@ -128,10 +162,12 @@ where
         event: &TableDropped<'_, P>,
     ) -> Result<(), Self::Error> {
         let table = event.table().id();
-        let mut track = self
-            .standing
-            .remove(table)
-            .unwrap_or_else(|| Track::new((self.make_listener)(table), None));
+        let mut track = self.standing.remove(table).unwrap_or_else(|| {
+            Track::new(
+                (self.make_listener)(table, Encounter::Opened),
+                Encounter::Opened,
+            )
+        });
 
         track.tell(|listener| listener.table_dropped(context, event));
         // A table created within the window and gone by its end left nothing to build or resume.
@@ -169,7 +205,7 @@ where
 impl<P, F, G, L, E> Finish<P> for TableListeners<F, G, L, E>
 where
     P: Position,
-    F: FnMut(&TableId) -> L,
+    F: FnMut(&TableId, Encounter) -> L,
     G: Fn(&TableId) -> bool,
     L: Finish<P, Error = E, Input = ReplayEnd<E>>,
 {
@@ -192,10 +228,12 @@ where
             .into_iter()
             .filter(|table| (self.finishes)(table))
             .map(|table| {
-                let track = self
-                    .standing
-                    .remove(&table)
-                    .unwrap_or_else(|| Track::new((self.make_listener)(&table), None));
+                let track = self.standing.remove(&table).unwrap_or_else(|| {
+                    Track::new(
+                        (self.make_listener)(&table, Encounter::Opened),
+                        Encounter::Opened,
+                    )
+                });
 
                 let standing = catalog.remove(&table);
 
@@ -361,7 +399,7 @@ mod tests {
                 .unwrap();
         }
         let mut tracker = TableListeners::new(
-            |table: &TableId| Story {
+            |table: &TableId, _: Encounter| Story {
                 table: table.clone(),
                 eras: EraTracker::since(Bound::EventTime(*ten_to_twenty().from())),
                 refusing: false,
@@ -400,7 +438,7 @@ mod tests {
             )
             .unwrap();
         let mut listeners = TableListeners::new(
-            |table: &TableId| Story {
+            |table: &TableId, _: Encounter| Story {
                 table: table.clone(),
                 eras: EraTracker::since(Bound::EventTime(*ten_to_twenty().from())),
                 refusing: *table == people(),
@@ -464,7 +502,7 @@ mod tests {
             )
             .unwrap();
         let listeners = TableListeners::new(
-            |table: &TableId| Story {
+            |table: &TableId, _: Encounter| Story {
                 table: table.clone(),
                 eras: EraTracker::since(Bound::EventTime(*ten_to_twenty().from())),
                 refusing: false,
@@ -829,5 +867,40 @@ mod tests {
                 ]
             )]
         );
+    }
+
+    fn built() -> TablePath {
+        TablePath::new("shelf", "people_before")
+    }
+
+    #[test]
+    fn a_table_the_window_opened_with_is_built_onto_what_its_name_was_built_into() {
+        assert_eq!(Encounter::Opened.base(Some(built())), Base::Built(built()));
+        assert_eq!(Encounter::Opened.table_from(&people()), Some(people()));
+    }
+
+    #[test]
+    fn a_table_discovered_within_the_window_is_built_onto_what_its_name_was_built_into() {
+        let discovered = Encounter::Appeared(Appearance::Discovered);
+
+        assert_eq!(discovered.base(Some(built())), Base::Built(built()));
+        assert_eq!(discovered.base(None), Base::Missing);
+        assert_eq!(discovered.table_from(&people()), Some(people()));
+    }
+
+    #[test]
+    fn a_table_created_within_the_window_is_built_from_nothing_onto_the_change_log() {
+        let created = Encounter::Appeared(Appearance::Created);
+
+        assert_eq!(created.base(Some(built())), Base::ChangeLog);
+        assert_eq!(created.table_from(&people()), None);
+    }
+
+    #[test]
+    fn a_table_captured_within_the_window_is_built_from_its_name_onto_the_change_log() {
+        let captured = Encounter::Appeared(Appearance::Captured);
+
+        assert_eq!(captured.base(Some(built())), Base::ChangeLog);
+        assert_eq!(captured.table_from(&people()), Some(people()));
     }
 }

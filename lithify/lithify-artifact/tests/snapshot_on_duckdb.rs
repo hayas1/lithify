@@ -4,18 +4,19 @@ use duckdb::Connection;
 
 use lithify_artifact::shard::Shard;
 use lithify_artifact::snapshot::Snapshot;
-use lithify_core::artifact::{Artifact, UnbuildableArtifact};
+use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
+use lithify_core::build::Base;
 use lithify_core::listener::OutOfOrder;
-use lithify_core::listener::{Finish, ReplayEnd};
+use lithify_core::listener::ReplayEnd;
 use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
+use lithify_core::runner::Replayer;
 use lithify_core::sink::WarehouseClient;
 use lithify_core::source::SchemaChangeStream;
 use lithify_core::sql::SqlString;
-use lithify_core::table_listeners::TableListeners;
 use lithify_core::ts::Ts;
 use lithify_core::window::Window;
 use lithify_protocol::sink::duckdb::client::DuckDbClient;
-use lithify_protocol::{Debezium, DuckDbWarehouse, MySql, MySqlPosition};
+use lithify_protocol::{Debezium, DuckDbWarehouse, MySql};
 
 const CHANGE_LOG: &str = include_str!("../testdata/snapshot_on_duckdb/change_log.sql");
 
@@ -40,13 +41,11 @@ async fn a_snapshot_holds_each_key_as_the_change_log_last_left_it() {
     let log = Debezium::under("value", "mysql", MySql);
     let window = Window::new(Ts::try_from(0).unwrap(), Ts::try_from(10).unwrap());
     let artifact = Snapshot::new("shop_snapshot", Shard::new("%Y%m%d", chrono_tz::Tz::UTC));
-    let build = Finish::<MySqlPosition>::finish(
-        artifact.builder::<_, DuckDbWarehouse>(&log, people().id().clone(), &window, None),
-        client.warehouse(),
-        ReplayEnd::standing(people(), None),
-    )
-    .unwrap();
-    for statement in build.statements().unwrap() {
+    let statements = artifact
+        .builder::<_, DuckDbWarehouse>(&log, &window, Base::Missing)
+        .create(client.warehouse(), &ReplayEnd::standing(people(), None))
+        .unwrap();
+    for statement in &statements {
         client.execute(statement).await.unwrap();
     }
 
@@ -78,17 +77,11 @@ fn rows(client: &DuckDbClient, query: &str) -> Vec<String> {
 async fn build_snapshots(client: &DuckDbClient, window: &Window) {
     let log = Debezium::under("value", "mysql", MySql);
     let artifact = Snapshot::new("shop_snapshot", Shard::new("%Y%m%d", chrono_tz::Tz::UTC));
-    let mut listeners = TableListeners::new(
-        |table: &TableId| artifact.builder::<_, DuckDbWarehouse>(&log, table.clone(), window, None),
-        |_: &TableId| true,
-    );
-    let catalog = client
-        .history::<Unbuilt>(&log, window)
-        .await
-        .unwrap()
-        .replay::<Unbuilt, _>(client.warehouse(), &mut listeners)
+    let history = client.history::<Unbuilt>(&log, window).await.unwrap();
+    let builds = Replayer::new(client.warehouse(), &log)
+        .planned::<_, Unbuilt>(&history, &artifact, window, |_| None, |_| true)
         .unwrap();
-    for build in listeners.finish(client.warehouse(), catalog).unwrap() {
+    for build in builds {
         for statement in build.statements().unwrap() {
             client.execute(statement).await.unwrap();
         }

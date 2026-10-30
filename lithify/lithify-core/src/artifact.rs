@@ -3,8 +3,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::build::TableBuild;
-use crate::listener::{Finish, ReplayEnd, SchemaChangeListener};
+use crate::build::Base;
+use crate::listener::{ReplayEnd, SchemaChangeListener};
 use crate::model::TableId;
 use crate::sink::{Namespace, TablePath, UnsupportedColumn, Warehouse};
 use crate::source::RowChangeLog;
@@ -103,7 +103,7 @@ pub trait Artifact {
 
     type From: Artifact;
 
-    type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>: ArtifactBuilder<L::Position, W>
+    type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>: ArtifactBuilder<L::Position, Context = W>
     where
         Self: 'a;
 
@@ -114,24 +114,21 @@ pub trait Artifact {
     fn builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>(
         &'a self,
         log: &'a L,
-        table: TableId,
         window: &'a Window,
-        base: Option<TablePath>,
+        base: Base,
     ) -> Self::Builder<'a, L, W>;
 }
 
-pub trait ArtifactBuilder<P, W>: SchemaChangeListener<P, Context = W, Error = UnbuildableArtifact>
-    + Finish<P, Input = ReplayEnd<UnbuildableArtifact>, Output = TableBuild, FinishError = Infallible>
-{
+pub trait ArtifactBuilder<P>: SchemaChangeListener<P, Error = UnbuildableArtifact> {
     fn select(
         &self,
-        warehouse: &W,
+        warehouse: &Self::Context,
         end: &ReplayEnd<UnbuildableArtifact>,
     ) -> Result<SqlString, UnbuildableArtifact>;
 
     fn create(
         &self,
-        warehouse: &W,
+        warehouse: &Self::Context,
         end: &ReplayEnd<UnbuildableArtifact>,
     ) -> Result<Vec<SqlString>, UnbuildableArtifact>;
 }
