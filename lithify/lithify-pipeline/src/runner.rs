@@ -7,6 +7,7 @@ use serde::Serialize;
 use ulid::Ulid;
 
 use lithify_core::artifact::UnbuildableArtifact;
+use lithify_core::build::BuildContext;
 use lithify_core::listener::OutOfOrder;
 use lithify_core::model::TableId;
 use lithify_core::runner::Replayer;
@@ -174,21 +175,20 @@ where
             .await?;
         let mut built = Vec::new();
 
-        for build in Replayer::new(self.client.warehouse(), self.logs.row_changes())
-            .planned::<A, E>(
-                &history,
-                artifact,
-                namespace,
-                window,
-                |table| {
-                    artifact
-                        .base(previous, table, window)
-                        .and_then(BuildLog::target)
-                        .cloned()
-                },
-                finishes,
-            )?
-        {
+        let context = BuildContext::new(self.client.warehouse(), namespace);
+
+        for build in Replayer::new(context, self.logs.row_changes()).planned::<A, E>(
+            &history,
+            artifact,
+            window,
+            |table| {
+                artifact
+                    .base(previous, table, window)
+                    .and_then(BuildLog::target)
+                    .cloned()
+            },
+            finishes,
+        )? {
             built.push(self.client.build(build).await);
         }
 
