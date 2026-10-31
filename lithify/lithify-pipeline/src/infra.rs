@@ -9,10 +9,14 @@ use chrono_tz::Tz;
 
 use crate::warehouse::SinkWarehouse;
 use lithify_core::artifact::ArtifactName;
+use lithify_core::sink::Namespace;
 use lithify_core::ts::{Event, Ts};
 
 use crate::artifact::{Declaration, Declarations};
+use crate::build_log::Series;
 use crate::place::{Places, Placing};
+use crate::schedule::Schedule;
+use crate::stepping::SeriesLog;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -200,15 +204,44 @@ impl<W: Clone + Placing> WiredSink<W> {
         for (artifact, _) in places.iter() {
             Self::placed(&name, artifact, declarations, &places)?;
         }
+        let artifacts = declarations.placed(&places);
+        let (scheduled, schedule) = Self::scheduled(&name, &artifacts, &places, time_zone)?;
 
         Ok(Sink {
             change_log: warehouse.change_log(),
-            artifacts: declarations.placed(&places),
+            artifacts,
             places,
+            scheduled,
+            schedule,
             warehouse,
             time_zone,
             name,
         })
+    }
+
+    fn scheduled<A: Declaration>(
+        sink: &str,
+        artifacts: &Declarations<A>,
+        places: &Places<W::Location>,
+        time_zone: Tz,
+    ) -> Result<(SeriesLog, Schedule), Miswiring> {
+        let mut scheduled = artifacts.iter().filter_map(|(name, declared)| {
+            let schedule = declared.schedule(time_zone)?;
+            let series = Series::new(name.clone(), &schedule.to_string());
+
+            Some((
+                SeriesLog::new(places.get(name)?.clone().into(), series),
+                schedule,
+            ))
+        });
+        let found = scheduled
+            .next()
+            .ok_or_else(|| Miswiring::Unscheduled(sink.to_owned()))?;
+
+        match scheduled.next() {
+            Some(_) => Err(Miswiring::ScheduledTwice(sink.to_owned())),
+            None => Ok(found),
+        }
     }
 
     fn placed<A: Declaration>(
@@ -248,6 +281,8 @@ pub enum Miswiring {
         artifact: ArtifactName,
         base: ArtifactName,
     },
+    Unscheduled(String),
+    ScheduledTwice(String),
     SinkNamedTwice(String),
 }
 
@@ -281,6 +316,13 @@ impl Display for Miswiring {
             } => write!(
                 formatter,
                 "{sink} places {artifact} without {base} it is built from"
+            ),
+            Self::Unscheduled(sink) => {
+                write!(formatter, "{sink} places nothing its days close by")
+            }
+            Self::ScheduledTwice(sink) => write!(
+                formatter,
+                "{sink} places more than one artifact its days close by"
             ),
             Self::SinkNamedTwice(name) => write!(formatter, "{name} is sunk into twice"),
         }
@@ -326,6 +368,8 @@ pub struct Sink<W: SinkWarehouse, A> {
     warehouse: W,
     artifacts: Declarations<A>,
     places: Places<W::Location>,
+    scheduled: SeriesLog,
+    schedule: Schedule,
     time_zone: Tz,
 }
 
@@ -352,6 +396,18 @@ impl<W: SinkWarehouse, A> Sink<W, A> {
 
     pub fn place(&self, artifact: &ArtifactName) -> Option<&W::Location> {
         self.places.get(artifact)
+    }
+
+    pub fn namespace(&self, artifact: &ArtifactName) -> Option<Namespace> {
+        self.place(artifact).cloned().map(Into::into)
+    }
+
+    pub fn scheduled(&self) -> &SeriesLog {
+        &self.scheduled
+    }
+
+    pub fn schedule(&self) -> Schedule {
+        self.schedule
     }
 
     pub fn time_zone(&self) -> Tz {
@@ -460,6 +516,7 @@ mod tests {
     enum Made {
         Snapshot { shard: String },
         Copy { base: ArtifactName },
+        History { shard: String },
     }
 
     impl Declaration for Made {
@@ -467,17 +524,28 @@ mod tests {
             match self {
                 Self::Snapshot { .. } => "snapshot",
                 Self::Copy { .. } => "copy",
+                Self::History { .. } => "history",
             }
         }
 
         fn built_from(&self) -> &'static str {
-            "snapshot"
+            match self {
+                Self::Snapshot { .. } | Self::Copy { .. } => "snapshot",
+                Self::History { .. } => "history",
+            }
         }
 
         fn base(&self) -> Option<&ArtifactName> {
             match self {
-                Self::Snapshot { .. } => None,
+                Self::Snapshot { .. } | Self::History { .. } => None,
                 Self::Copy { base } => Some(base),
+            }
+        }
+
+        fn schedule(&self, time_zone: Tz) -> Option<Schedule> {
+            match self {
+                Self::Snapshot { .. } => Some(Schedule::daily(chrono::NaiveTime::MIN, time_zone)),
+                Self::Copy { .. } | Self::History { .. } => None,
             }
         }
     }
@@ -813,6 +881,69 @@ mod tests {
         assert_eq!(
             wiring.sinks(&declarations()).unwrap()[0].place(&"snapshot".into()),
             Some(&prefix("mysql_shop"))
+        );
+    }
+
+    #[test]
+    fn a_sink_advances_by_the_series_of_the_one_artifact_it_places_on_a_schedule() {
+        assert_eq!(
+            sinks()[1].scheduled(),
+            &SeriesLog::new(
+                Namespace::from("mysql_shop"),
+                Series::new("snapshot".into(), "daily")
+            )
+        );
+    }
+
+    #[test]
+    fn a_sink_closes_its_days_as_the_artifact_it_places_on_a_schedule_is_cut() {
+        let zoned = format!("time_zone = \"Asia/Tokyo\"\n{INFRA}");
+
+        assert_eq!(
+            wiring(&zoned).sinks(&declarations()).unwrap()[0].schedule(),
+            Schedule::daily(chrono::NaiveTime::MIN, chrono_tz::Asia::Tokyo)
+        );
+    }
+
+    #[test]
+    fn a_sink_finds_each_artifact_in_the_namespace_its_place_names() {
+        assert_eq!(
+            sinks()[1].namespace(&"copy".into()),
+            Some(Namespace::from("mysql_shop_copy"))
+        );
+    }
+
+    #[test]
+    fn a_sink_placing_nothing_on_a_schedule_is_rejected() {
+        let wiring = wired(
+            SERVER,
+            &format!("{WAREHOUSE}place.versions = {{ prefix = \"mysql_shop_versions\" }}\n"),
+        );
+
+        assert_eq!(
+            wiring.sinks(&declarations()).unwrap_err(),
+            Miswiring::Unscheduled("rustfs".into())
+        );
+    }
+
+    #[test]
+    fn a_sink_placing_two_artifacts_on_a_schedule_is_rejected() {
+        let twice = INFRA.replace(
+            "place.nine = { prefix = \"mysql_shop_0900\" }",
+            "place.weekly = { prefix = \"mysql_shop_weekly\" }",
+        );
+        let declarations = Declarations::<Made>::try_from(
+            toml::from_str::<crate::artifact::Declaring>(&format!(
+                "{}\n[[artifact]]\nname = \"weekly\"\nkind = \"snapshot\"\nshard = \"%Y%m%d\"\n",
+                include_str!("../testdata/infra/declarations.toml")
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            wiring(&twice).sinks(&declarations).unwrap_err(),
+            Miswiring::ScheduledTwice("rustfs".into())
         );
     }
 

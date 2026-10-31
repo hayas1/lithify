@@ -7,7 +7,7 @@ use lithify_pipeline::runner::StepTaker;
 use lithify_pipeline::schedule::Timeline;
 use lithify_pipeline::stepping::Stepping;
 
-use crate::artifacts::{ArtifactConfig, Declared, DeclaredSnapshot, Lineup};
+use crate::artifacts::{ArtifactConfig, Declared, Lineup};
 use crate::journal::Journal;
 use crate::pipeline::{CaptureConfig, WarehouseConfig};
 use crate::report::Report;
@@ -38,10 +38,7 @@ impl RunCommand {
         let lineup = Lineup::of(sink)?;
         let stepping = Stepping::new(
             taker,
-            Timeline::new(
-                DeclaredSnapshot::of(sink)?.schedule(),
-                source.since()..now.as_event(),
-            ),
+            Timeline::new(sink.schedule(), source.since()..now.as_event()),
             source.written_capture()?,
         );
 
@@ -114,6 +111,7 @@ pub(crate) mod tests {
     use lithify_core::sink::Namespace;
     use lithify_core::sql::SqlString;
     use lithify_pipeline::Pipeline;
+    use lithify_pipeline::runner::BuildLogWrite;
     use lithify_protocol::sink::duckdb::client::DuckDbClient;
 
     use super::*;
@@ -334,10 +332,8 @@ pub(crate) mod tests {
             .sinks()
             .find(|sink| sink.name() == "duckdb_s3")
             .unwrap();
-        let writer = DeclaredSnapshot::of(sink)
-            .unwrap()
-            .build(source, Ts::from(at(now)))
-            .unwrap();
+        let writer =
+            BuildLogWrite::of(sink, source, Ts::from(at(now)), env!("CARGO_PKG_VERSION")).unwrap();
         let mut journal = Journal::default();
 
         command

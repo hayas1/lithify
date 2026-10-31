@@ -42,23 +42,6 @@ fn a_sink_is_inspected_under_the_first_place_of_the_artifact_it_schedules() {
     );
 }
 
-#[test]
-fn a_sink_scheduling_two_artifacts_is_not_told_apart_by_a_check() {
-    let pipeline = opened(
-        "inspected-twice",
-        &INFRA.replace(
-            "place.snapshot = { prefix = \"mysql_shop\" }",
-            "place.snapshot = { prefix = \"mysql_shop\" }\n    place.copy = { prefix = \"mysql_copy\" }",
-        ),
-        &format!("{SNAPSHOT}[[artifact]]\nname = \"copy\"\nkind = \"snapshot\"\n"),
-    );
-
-    assert_eq!(
-        inspecting(&pipeline).err(),
-        Some(Uninspectable::ScheduledTwice("rustfs".to_owned()))
-    );
-}
-
 #[tokio::test]
 async fn a_sink_is_inspected_by_the_build_log_its_warehouse_holds() {
     let pipeline = opened("inspected-logged", &logged(), SNAPSHOT);

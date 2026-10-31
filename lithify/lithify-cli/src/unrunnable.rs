@@ -24,7 +24,6 @@ pub enum Unrunnable {
         sink: String,
         artifact: ArtifactName,
     },
-    SnapshotPlacedTwice(String),
     Unbased {
         artifact: ArtifactName,
         base: ArtifactName,
@@ -52,9 +51,6 @@ impl Display for Unrunnable {
             Self::WithoutSource => write!(formatter, "this pipeline captures no server"),
             Self::Undeclared { sink, artifact } => {
                 write!(formatter, "{sink} places no {artifact}")
-            }
-            Self::SnapshotPlacedTwice(sink) => {
-                write!(formatter, "{sink} places more than one snapshot")
             }
             Self::Unbased { artifact, base } => {
                 write!(
@@ -93,7 +89,6 @@ impl std::error::Error for Unrunnable {
             Self::UnknownSink(_)
             | Self::Unreached
             | Self::Undeclared { .. }
-            | Self::SnapshotPlacedTwice(_)
             | Self::Unbased { .. }
             | Self::WithoutSource
             | Self::Uncredentialed(_) => None,

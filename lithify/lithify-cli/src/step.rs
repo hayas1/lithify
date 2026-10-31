@@ -232,7 +232,7 @@ pub(crate) mod tests {
     use lithify_core::sql::SqlString;
 
     use super::*;
-    use crate::artifacts::{ArtifactConfig, DeclaredSnapshot};
+    use crate::artifacts::ArtifactConfig;
     use crate::pipeline::{CaptureConfig, WarehouseConfig};
     use lithify_artifact::snapshot::Snapshot;
     use lithify_core::artifact::UnbuildableArtifact;
@@ -245,11 +245,11 @@ pub(crate) mod tests {
     const CHANGE_LOGS: &str = include_str!("../testdata/step/change_logs.sql");
 
     fn snapshot(sink: &Sink<WarehouseConfig, ArtifactConfig>) -> Snapshot {
-        DeclaredSnapshot::of(sink).unwrap().artifact()
+        ArtifactConfig::snapshot(sink, sink.scheduled().series().artifact()).unwrap()
     }
 
     fn namespace(sink: &Sink<WarehouseConfig, ArtifactConfig>) -> Namespace {
-        DeclaredSnapshot::of(sink).unwrap().namespace().clone()
+        sink.scheduled().namespace().clone()
     }
 
     fn listed<'t>(
@@ -622,10 +622,13 @@ pub(crate) mod tests {
                     &window,
                     &[],
                     listed(pipeline.tables(), sink),
-                    &DeclaredSnapshot::of(sink)
-                        .unwrap()
-                        .build(source, Ts::from(at("2026-09-22T05:00:00Z")))
-                        .unwrap(),
+                    &BuildLogWrite::of(
+                        sink,
+                        source,
+                        Ts::from(at("2026-09-22T05:00:00Z")),
+                        env!("CARGO_PKG_VERSION"),
+                    )
+                    .unwrap(),
                 ),
             )
             .await

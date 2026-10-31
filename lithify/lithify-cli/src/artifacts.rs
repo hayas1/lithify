@@ -1,9 +1,7 @@
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use serde::Deserialize;
-use ulid::Ulid;
 
 use lithify_artifact::instant::Instant;
 use lithify_artifact::scd1::Scd1;
@@ -11,21 +9,19 @@ use lithify_artifact::scd2::Scd2;
 use lithify_artifact::snapshot::Snapshot;
 use lithify_artifact::snapshot_provide::SnapshotProvide;
 use lithify_core::artifact::{Artifact, ArtifactName};
-use lithify_core::model::TableId;
-use lithify_core::sink::{Namespace, TablePath};
-use lithify_core::ts::{Replay, Ts};
+use lithify_core::sink::Namespace;
 use lithify_core::window::Window;
 use lithify_pipeline::Declaration;
 use lithify_pipeline::artifact::ArtifactControl;
-use lithify_pipeline::build_log::{Run, Series};
-use lithify_pipeline::infra::{Sink, Source};
+use lithify_pipeline::build_log::Series;
+use lithify_pipeline::infra::Sink;
 use lithify_pipeline::progress::Step;
-use lithify_pipeline::runner::{BuildLogWrite, StepTaker, Tables};
+use lithify_pipeline::runner::{StepTaker, Tables};
 use lithify_pipeline::schedule::Schedule;
 use lithify_pipeline::stepping::{SeriesLog, Stepping};
 
 use crate::journal::Journal;
-use crate::pipeline::{CaptureConfig, WarehouseConfig};
+use crate::pipeline::WarehouseConfig;
 use crate::report::Report;
 use crate::unrunnable::Unrunnable;
 
@@ -59,13 +55,13 @@ impl ArtifactConfig {
             }
             Self::Instant(config) => {
                 let (instant, namespace) = Declared::artifact::<Instant>(sink, name, config)?;
-                let base = DeclaredSnapshot::named(sink, name, config.base())?;
-                Declared::Instant(instant.based_on(&base.snapshot), namespace)
+                let base = Self::base(sink, name, config.base())?;
+                Declared::Instant(instant.based_on(&base), namespace)
             }
             Self::Scd1(config) => {
                 let (scd1, namespace) = Declared::artifact::<Scd1>(sink, name, config)?;
-                let base = DeclaredSnapshot::named(sink, name, config.base())?;
-                Declared::Scd1(scd1.based_on(&base.snapshot), namespace)
+                let base = Self::base(sink, name, config.base())?;
+                Declared::Scd1(scd1.based_on(&base), namespace)
             }
             Self::Scd2(config) => {
                 let (scd2, namespace) = Declared::artifact(sink, name, config)?;
@@ -74,9 +70,29 @@ impl ArtifactConfig {
             Self::SnapshotProvide(config) => {
                 let (provide, namespace) =
                     Declared::artifact::<SnapshotProvide>(sink, name, config)?;
-                let base = DeclaredSnapshot::named(sink, name, config.base())?;
-                Declared::SnapshotProvide(provide.based_on(&base.snapshot), namespace)
+                let base = Self::base(sink, name, config.base())?;
+                Declared::SnapshotProvide(provide.based_on(&base), namespace)
             }
+        })
+    }
+
+    pub fn snapshot(
+        sink: &Sink<WarehouseConfig, ArtifactConfig>,
+        name: &ArtifactName,
+    ) -> Option<Snapshot> {
+        let config = sink.artifact(name)?.as_snapshot()?;
+
+        Some(Snapshot::declared(name, config, sink.time_zone()))
+    }
+
+    fn base(
+        sink: &Sink<WarehouseConfig, ArtifactConfig>,
+        artifact: &ArtifactName,
+        base: &ArtifactName,
+    ) -> Result<Snapshot, Unrunnable> {
+        Self::snapshot(sink, base).ok_or_else(|| Unrunnable::Unbased {
+            artifact: artifact.clone(),
+            base: base.clone(),
         })
     }
 }
@@ -119,100 +135,6 @@ impl Declaration for ArtifactConfig {
     }
 }
 
-pub struct DeclaredSnapshot {
-    snapshot: Snapshot,
-    namespace: Namespace,
-}
-
-impl DeclaredSnapshot {
-    pub fn of(sink: &Sink<WarehouseConfig, ArtifactConfig>) -> Result<Self, Unrunnable> {
-        let mut snapshots = sink
-            .artifacts()
-            .filter_map(|(name, declared)| Some((name, declared.as_snapshot()?)));
-        let (name, config) = snapshots.next().ok_or_else(|| Unrunnable::Undeclared {
-            sink: sink.name().to_owned(),
-            artifact: ArtifactName::from(Snapshot::KIND),
-        })?;
-
-        match snapshots.next() {
-            Some(_) => Err(Unrunnable::SnapshotPlacedTwice(sink.name().to_owned())),
-            None => {
-                let (snapshot, namespace) = Declared::artifact(sink, name, config)?;
-
-                Ok(Self {
-                    snapshot,
-                    namespace,
-                })
-            }
-        }
-    }
-
-    fn named(
-        sink: &Sink<WarehouseConfig, ArtifactConfig>,
-        artifact: &ArtifactName,
-        base: &ArtifactName,
-    ) -> Result<Self, Unrunnable> {
-        let config = sink
-            .artifact(base)
-            .and_then(ArtifactConfig::as_snapshot)
-            .ok_or_else(|| Unrunnable::Unbased {
-                artifact: artifact.clone(),
-                base: base.clone(),
-            })?;
-
-        let (snapshot, namespace) = Declared::artifact(sink, base, config)?;
-
-        Ok(Self {
-            snapshot,
-            namespace,
-        })
-    }
-
-    pub fn namespace(&self) -> &Namespace {
-        &self.namespace
-    }
-
-    pub fn target(&self, table: &TableId, window: &Window) -> TablePath {
-        TablePath::new(
-            self.namespace.clone(),
-            &self.snapshot.table_name(table, window),
-        )
-    }
-
-    pub fn schedule(&self) -> Schedule {
-        self.snapshot.schedule()
-    }
-
-    pub fn series(&self) -> Series {
-        self.snapshot.series()
-    }
-
-    pub fn artifact(&self) -> Snapshot {
-        self.snapshot.clone()
-    }
-
-    pub fn build(
-        &self,
-        source: &Source<CaptureConfig>,
-        now: Ts<Replay>,
-    ) -> Result<BuildLogWrite, Unrunnable> {
-        let series = self.series();
-
-        Ok(BuildLogWrite::new(
-            self.namespace().clone(),
-            Run::new(
-                Ulid::from_datetime(DateTime::<Utc>::from(now).into()),
-                now,
-                series.artifact(),
-                series.schedule(),
-                source.name(),
-                &source.written_capture()?,
-                env!("CARGO_PKG_VERSION"),
-            ),
-        ))
-    }
-}
-
 pub enum Declared {
     Snapshot(Snapshot, Namespace),
     Instant(Instant, Namespace),
@@ -237,8 +159,7 @@ impl Declared {
         sink: &Sink<WarehouseConfig, ArtifactConfig>,
         artifact: &ArtifactName,
     ) -> Result<Namespace, Unrunnable> {
-        sink.place(artifact)
-            .map(|place| Namespace::from(place.clone()))
+        sink.namespace(artifact)
             .ok_or_else(|| Unrunnable::Undeclared {
                 sink: sink.name().to_owned(),
                 artifact: artifact.clone(),
@@ -343,10 +264,8 @@ pub struct Lineup {
 
 impl Lineup {
     pub fn of(sink: &Sink<WarehouseConfig, ArtifactConfig>) -> Result<Self, Unrunnable> {
-        let snapshot = DeclaredSnapshot::of(sink)?;
-
         Ok(Self {
-            snapshot: SeriesLog::of(&snapshot.snapshot, &snapshot.namespace),
+            snapshot: sink.scheduled().clone(),
             declared: sink
                 .artifacts()
                 .map(|(name, declared)| declared.declared(sink, name))
@@ -422,7 +341,11 @@ mod tests {
     use crate::pipeline::CaptureConfig;
     use lithify_pipeline::build_log::{Status, TableBuilt};
 
+    use lithify_core::ts::Ts;
+    use lithify_pipeline::build_log::Run;
+    use lithify_pipeline::infra::Miswiring;
     use lithify_pipeline::{Cause, Misdeclaring};
+    use ulid::Ulid;
 
     use crate::step::tests::{ARTIFACTS, INFRA, opened, opening};
 
@@ -438,10 +361,19 @@ mod tests {
             Ts::try_from(1789948800000).unwrap(),
         );
 
+        let Ok(Declared::Snapshot(snapshot, namespace)) = sink
+            .artifact(&"snapshot".into())
+            .unwrap()
+            .declared(sink, &"snapshot".into())
+        else {
+            panic!("snapshot is a snapshot");
+        };
+
         assert_eq!(
-            DeclaredSnapshot::of(sink)
-                .unwrap()
-                .target(&TableId::new("shop", "customers"), &window),
+            TablePath::new(
+                namespace,
+                &snapshot.table_name(&TableId::new("shop", "customers"), &window)
+            ),
             TablePath::new("mysql_shop", "customers_20260920")
         );
     }
@@ -559,18 +491,19 @@ mod tests {
 
     #[test]
     fn a_sink_placing_two_snapshots_is_refused() {
-        let pipeline = opened(
+        let unreadable = opening(
             "two-snapshots",
             &format!(
                 "{ARTIFACTS}[[artifact]]\nname = \"weekly\"\nkind = \"snapshot\"\nshard = \"%Y%m%d\"\n"
             ),
             &format!("{INFRA}place.weekly = {{ prefix = \"mysql_shop_weekly\" }}\n"),
             "",
-        );
+        )
+        .unwrap_err();
 
         assert!(matches!(
-            DeclaredSnapshot::of(pipeline.sinks().nth(1).unwrap()),
-            Err(Unrunnable::SnapshotPlacedTwice(sink)) if sink == "duckdb_s3"
+            unreadable.cause(),
+            Cause::Miswiring(Miswiring::ScheduledTwice(sink)) if sink == "duckdb_s3"
         ));
     }
 
@@ -603,9 +536,7 @@ mod tests {
         );
 
         assert_eq!(
-            DeclaredSnapshot::of(pipeline.sinks().next().unwrap())
-                .unwrap()
-                .schedule(),
+            pipeline.sinks().next().unwrap().schedule(),
             Schedule::daily(
                 chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
                 chrono_tz::Asia::Tokyo

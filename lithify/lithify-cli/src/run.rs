@@ -4,6 +4,7 @@ use lithify_core::sink::OpenWarehouse;
 use lithify_core::ts::{Replay, Ts};
 use lithify_pipeline::Pipeline;
 use lithify_pipeline::infra::{Sink, Source};
+use lithify_pipeline::runner::BuildLogWrite;
 use lithify_pipeline::table;
 use lithify_protocol::sink::bigquery::client::BigQueryClient;
 use lithify_protocol::sink::duckdb::client::DuckDbClient;
@@ -11,7 +12,7 @@ use lithify_protocol::sink::duckdb::config::Config;
 use lithify_protocol::sink::{bigquery, duckdb};
 use lithify_protocol::{BigQueryWarehouse, DuckDbWarehouse};
 
-use crate::artifacts::{ArtifactConfig, DeclaredSnapshot};
+use crate::artifacts::ArtifactConfig;
 use crate::command::RunCommand;
 use crate::credential::Credentials;
 use crate::journal::Journal;
@@ -46,7 +47,7 @@ impl Run {
 
     pub async fn dry_run(&self, command: &RunCommand, into: &Path) -> Result<Journal, Unrunnable> {
         self.each_sink(async |sink, source, listing, journal| {
-            let build = DeclaredSnapshot::of(sink)?.build(source, self.now)?;
+            let build = BuildLogWrite::of(sink, source, self.now, env!("CARGO_PKG_VERSION"))?;
 
             self.settle(
                 command,
@@ -68,7 +69,7 @@ impl Run {
                 sink,
                 source,
                 listing,
-                &DeclaredSnapshot::of(sink)?.build(source, self.now)?,
+                &BuildLogWrite::of(sink, source, self.now, env!("CARGO_PKG_VERSION"))?,
                 journal,
             )
             .await

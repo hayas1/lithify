@@ -3,16 +3,15 @@ use std::fmt::{self, Display, Formatter};
 
 use serde::Serialize;
 
-use lithify_core::artifact::ArtifactName;
 use lithify_core::model::TableId;
 use lithify_core::sink::{Namespace, TablePath};
 use lithify_core::ts::{Event, Replay, Ts};
 use lithify_core::window::Window;
 
-use crate::artifact::Declaration;
 use crate::build_log::{BuildLog, Latest, Series, UnreadableBuildLog};
 use crate::infra::{Sink, Source};
 use crate::schedule::Schedule;
+use crate::stepping::SeriesLog;
 use crate::warehouse::{SinkWarehouse, WarehouseControl, WarehouseFn};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,66 +96,34 @@ impl Inspection {
 
 pub struct Inspecting {
     expectation: Expectation,
-    namespace: Namespace,
-    series: Series,
+    log: SeriesLog,
 }
 
 impl Inspecting {
-    pub fn of<C, W, A>(
+    pub fn of<C: Serialize, W: SinkWarehouse, A>(
         sink: &Sink<W, A>,
         source: &Source<C>,
         now: Ts<Replay>,
-    ) -> Result<Self, Uninspectable>
-    where
-        C: Serialize,
-        W: SinkWarehouse,
-        A: Declaration,
-    {
-        let (artifact, schedule) = Self::scheduled(sink)?;
-        let namespace = sink
-            .place(artifact)
-            .map(|place| place.clone().into())
-            .ok_or_else(|| Uninspectable::Unplaced {
-                sink: sink.name().to_owned(),
-                artifact: artifact.clone(),
-            })?;
-
+    ) -> Result<Self, Uninspectable> {
         Ok(Self {
             expectation: Expectation::new(
-                schedule,
+                sink.schedule(),
                 source.since(),
                 &source
                     .written_capture()
                     .map_err(|unwritten| Uninspectable::Unwritten(unwritten.to_string()))?,
                 now,
             ),
-            namespace,
-            series: Series::new(artifact.clone(), &schedule.to_string()),
+            log: sink.scheduled().clone(),
         })
     }
 
-    fn scheduled<W: SinkWarehouse, A: Declaration>(
-        sink: &Sink<W, A>,
-    ) -> Result<(&ArtifactName, Schedule), Uninspectable> {
-        let mut scheduled = sink
-            .artifacts()
-            .filter_map(|(name, declared)| Some((name, declared.schedule(sink.time_zone())?)));
-        let found = scheduled
-            .next()
-            .ok_or_else(|| Uninspectable::Unscheduled(sink.name().to_owned()))?;
-
-        match scheduled.next() {
-            Some(_) => Err(Uninspectable::ScheduledTwice(sink.name().to_owned())),
-            None => Ok(found),
-        }
-    }
-
     pub fn namespace(&self) -> &Namespace {
-        &self.namespace
+        self.log.namespace()
     }
 
     pub fn series(&self) -> &Series {
-        &self.series
+        self.log.series()
     }
 
     pub async fn read<K, E>(&self, client: &K) -> Result<Inspection, E>
@@ -165,19 +132,13 @@ impl Inspecting {
         E: From<K::Error> + From<UnreadableBuildLog>,
     {
         self.expectation
-            .read(client, &self.namespace, &self.series)
+            .read(client, self.namespace(), self.series())
             .await
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Uninspectable {
-    Unscheduled(String),
-    ScheduledTwice(String),
-    Unplaced {
-        sink: String,
-        artifact: ArtifactName,
-    },
     Unwritten(String),
     Unread(String),
 }
@@ -185,16 +146,6 @@ pub enum Uninspectable {
 impl Display for Uninspectable {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unscheduled(sink) => {
-                write!(formatter, "{sink} declares no scheduled artifact to check")
-            }
-            Self::ScheduledTwice(sink) => write!(
-                formatter,
-                "{sink} declares more than one scheduled artifact, which a check does not tell apart yet"
-            ),
-            Self::Unplaced { sink, artifact } => {
-                write!(formatter, "{sink} places {artifact} nowhere")
-            }
             Self::Unwritten(cause) => {
                 write!(formatter, "the capture could not be written: {cause}")
             }
