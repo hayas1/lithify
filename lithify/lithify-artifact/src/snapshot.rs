@@ -90,14 +90,13 @@ impl Snapshot {
     }
 
     pub fn shard_closing<'b>(
-        series: &Series,
         built: &'b [BuildLog],
         table: &TableId,
         at: Ts<Event>,
     ) -> Option<&'b BuildLog> {
-        built.iter().find(|log| {
-            log.advances(series) && log.table_to() == Some(table) && *log.window().to() == at
-        })
+        built
+            .iter()
+            .find(|log| log.table_to() == Some(table) && *log.window().to() == at)
     }
 }
 
@@ -160,7 +159,7 @@ impl ArtifactControl for Snapshot {
         table: &TableId,
         window: &Window,
     ) -> Option<&'b BuildLog> {
-        Self::shard_closing(&self.series(), built, table, *window.from())
+        Self::shard_closing(built, table, *window.from())
     }
 }
 
@@ -201,7 +200,6 @@ mod tests {
         let built = [
             built("snapshot", "daily", "pets", (0, 10)),
             built("snapshot", "daily", "people", (0, 5)),
-            built("instant", "09:00", "people", (0, 10)),
             built("snapshot", "daily", "people", (0, 10)),
         ];
         assert_eq!(
@@ -210,7 +208,7 @@ mod tests {
                 &TableId::new("shop", "people"),
                 &Window::new(Ts::try_from(10).unwrap(), Ts::try_from(20).unwrap())
             ),
-            Some(&built[3])
+            Some(&built[2])
         );
     }
 

@@ -209,6 +209,23 @@ mod tests {
                 }
             }
         }
+
+        fn series(&self, name: &ArtifactName, _: chrono_tz::Tz) -> crate::build_log::Series {
+            crate::build_log::Series::new(name.clone(), self.kind())
+        }
+
+        fn schedule(&self, time_zone: chrono_tz::Tz) -> Option<crate::schedule::Schedule> {
+            match self {
+                Self::Snapshot { .. } => Some(crate::schedule::Schedule::daily(
+                    chrono::NaiveTime::MIN,
+                    time_zone,
+                )),
+                Self::Instant { .. }
+                | Self::Scd1 { .. }
+                | Self::Scd2 { .. }
+                | Self::Copy { .. } => None,
+            }
+        }
     }
 
     impl From<Lying> for lithify_core::sink::Namespace {

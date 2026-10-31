@@ -2,9 +2,13 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 
-use lithify_cli::artifacts::{ArtifactConfig, DeclaredSnapshot};
+use lithify_artifact::snapshot::Snapshot;
+use lithify_cli::artifacts::ArtifactConfig;
 use lithify_cli::pipeline::{CaptureConfig, WarehouseConfig};
+use lithify_cli::unrunnable::Unrunnable;
+use lithify_core::artifact::Artifact;
 use lithify_core::model::{TableId, TableModel};
+use lithify_core::sink::TablePath;
 use lithify_core::ts::{Event, Processing, Ts};
 use lithify_core::window::Window;
 use lithify_pipeline::{Pipeline, infra};
@@ -254,17 +258,25 @@ impl<'a> SinkEnd<'a> {
         model: &TableModel,
         watch: &Watch,
     ) -> Result<(), Unverifiable> {
-        let table = model.id();
-        let snapshot = DeclaredSnapshot::of(self.config)?;
-
         Ok(self.client.snapshot(
             source.capture(),
             Self::topic_prefix(source)?,
-            table,
-            &snapshot.artifact(),
-            snapshot.namespace(),
+            model.id(),
+            &self.snapshot()?,
+            self.config.scheduled().namespace(),
             &watch.changes(),
         )?)
+    }
+
+    fn snapshot(&self) -> Result<Snapshot, Unverifiable> {
+        let name = self.config.scheduled().series().artifact();
+
+        ArtifactConfig::snapshot(self.config, name).ok_or_else(|| {
+            Unverifiable::Unrunnable(Unrunnable::Undeclared {
+                sink: self.config.name().to_owned(),
+                artifact: name.clone(),
+            })
+        })
     }
 
     fn topic_prefix<'s>(source: &'s SourceEnd) -> Result<&'s str, Unverifiable> {
@@ -279,7 +291,10 @@ impl<'a> SinkEnd<'a> {
         model: &TableModel,
         watch: &Watch,
     ) -> Result<Rows, Unverifiable> {
-        let target = DeclaredSnapshot::of(self.config)?.target(model.id(), &watch.changes());
+        let target = TablePath::new(
+            self.config.scheduled().namespace().clone(),
+            &self.snapshot()?.table_name(model.id(), &watch.changes()),
+        );
 
         Ok(self.client.rows(&target, model)?)
     }

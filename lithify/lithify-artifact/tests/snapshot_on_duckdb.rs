@@ -5,7 +5,7 @@ use duckdb::Connection;
 use lithify_artifact::shard::Shard;
 use lithify_artifact::snapshot::Snapshot;
 use lithify_core::artifact::{Artifact, UnbuildableArtifact};
-use lithify_core::build::Base;
+use lithify_core::build::{Base, BuildContext};
 use lithify_core::listener::OutOfOrder;
 use lithify_core::listener::ReplayEnd;
 use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
@@ -92,8 +92,8 @@ async fn build_snapshots(client: &DuckDbClient, window: &Window) {
     let artifact = Snapshot::new(Shard::new("%Y%m%d", chrono_tz::Tz::UTC));
     let namespace = Namespace::from("shop_snapshot");
     let history = client.history::<Unbuilt>(&log, window).await.unwrap();
-    let builds = Replayer::new(client.warehouse(), &log)
-        .planned::<_, Unbuilt>(&history, &artifact, &namespace, window, |_| None, |_| true)
+    let builds = Replayer::new(BuildContext::new(client.warehouse(), &namespace), &log)
+        .planned::<_, Unbuilt>(&history, &artifact, window, |_| None, |_| true)
         .unwrap();
     for build in builds {
         for statement in build.statements().unwrap() {

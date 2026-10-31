@@ -170,6 +170,10 @@ impl Timeline {
             .take_while(move |day| *day.from() < until)
     }
 
+    pub fn delay(&self, at: NaiveTime) -> TimeDelta {
+        self.schedule.delay(at)
+    }
+
     pub fn rest(&self, from: Ts<Event>) -> Option<Window> {
         (from < self.range.end).then(|| Window::new(from, self.range.end))
     }
@@ -362,6 +366,16 @@ mod tests {
         assert_eq!(
             tokyo("09:00:00").delay("09:00:00".parse().unwrap()),
             TimeDelta::days(1)
+        );
+    }
+
+    #[test]
+    fn a_timeline_delays_a_time_of_day_from_the_instant_each_of_its_days_opens() {
+        let timeline = Timeline::new(tokyo("09:00:00"), timeline().range().clone());
+
+        assert_eq!(
+            timeline.delay("15:30:00".parse().unwrap()),
+            TimeDelta::minutes(6 * 60 + 30)
         );
     }
 

@@ -2,20 +2,24 @@ use std::collections::BTreeSet;
 use std::convert::Infallible;
 use std::fmt::{self, Display, Formatter};
 
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, Utc};
+use serde::Serialize;
+use ulid::Ulid;
 
 use lithify_core::artifact::UnbuildableArtifact;
+use lithify_core::build::BuildContext;
 use lithify_core::listener::OutOfOrder;
 use lithify_core::model::TableId;
 use lithify_core::runner::Replayer;
 use lithify_core::sink::{Namespace, WarehouseClient};
 use lithify_core::source::{ChangeLogs, SchemaChangeStream};
-use lithify_core::ts::{Event, Ts};
+use lithify_core::ts::{Event, Replay, Ts};
 use lithify_core::window::Window;
 
 use crate::artifact::ArtifactControl;
 use crate::build_log::{BuildLog, Run, Series, TableBuilt, UnreadableBuildLog};
-use crate::warehouse::WarehouseControl;
+use crate::infra::{Sink, Source};
+use crate::warehouse::{SinkWarehouse, WarehouseControl};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Unsteppable {
@@ -89,6 +93,28 @@ impl BuildLogWrite {
     pub fn new(namespace: Namespace, run: Run) -> Self {
         Self { namespace, run }
     }
+
+    pub fn of<W: SinkWarehouse, A, C: Serialize>(
+        sink: &Sink<W, A>,
+        source: &Source<C>,
+        now: Ts<Replay>,
+        version: &str,
+    ) -> Result<Self, serde_json::Error> {
+        let log = sink.scheduled();
+
+        Ok(Self::new(
+            log.namespace().clone(),
+            Run::new(
+                Ulid::from_datetime(DateTime::<Utc>::from(now).into()),
+                now,
+                log.series().artifact(),
+                log.series().schedule(),
+                source.name(),
+                &source.written_capture()?,
+                version,
+            ),
+        ))
+    }
 }
 
 impl BuildLogWriter for BuildLogWrite {
@@ -149,21 +175,20 @@ where
             .await?;
         let mut built = Vec::new();
 
-        for build in Replayer::new(self.client.warehouse(), self.logs.row_changes())
-            .planned::<A, E>(
-                &history,
-                artifact,
-                namespace,
-                window,
-                |table| {
-                    artifact
-                        .base(previous, table, window)
-                        .and_then(BuildLog::target)
-                        .cloned()
-                },
-                finishes,
-            )?
-        {
+        let context = BuildContext::new(self.client.warehouse(), namespace);
+
+        for build in Replayer::new(context, self.logs.row_changes()).planned::<A, E>(
+            &history,
+            artifact,
+            window,
+            |table| {
+                artifact
+                    .base(previous, table, window)
+                    .and_then(BuildLog::target)
+                    .cloned()
+            },
+            finishes,
+        )? {
             built.push(self.client.build(build).await);
         }
 

@@ -126,7 +126,7 @@ What kind of artifact another is built from is the artifact's to know, as `Artif
 - an `scd2` appends each window onto what the window before it left, and names no base.
 
 A base declared nowhere, or one of another kind than the artifact is built from, is refused as `artifact.toml` is read, and so are a sink placing an artifact without its base and a table naming an artifact without its base.
-A sink places one `snapshot`, which the build log of the sink advances by, so what an artifact is built from is never in doubt.
+A sink places one `snapshot`, which the build log of the sink advances by, and a sink placing none or more than one is refused as `infra.toml` is read, so what an artifact is built from is never in doubt.
 
 ### The set of artifacts is open
 
