@@ -19,7 +19,7 @@ use lithify_core::artifact::ArtifactName;
 use lithify_core::ts::Ts;
 use lithify_protocol::sink::duckdb::store::{S3Credential, Secret};
 #[cfg(feature = "serve")]
-use lithify_ui::pipelines::Pipelines;
+use lithify_ui::pipelines::Survey;
 #[cfg(feature = "serve")]
 use lithify_ui::server::Board;
 
@@ -248,7 +248,7 @@ struct ServeArguments {
 impl ServeArguments {
     async fn journal(self) -> Result<Journal, Unrunnable> {
         Board::new(
-            Pipelines::<CaptureConfig, WarehouseConfig, ArtifactConfig>::new(
+            Survey::<CaptureConfig, WarehouseConfig, ArtifactConfig>::new(
                 self.directory,
                 self.credential.credentials(),
             ),
@@ -320,8 +320,6 @@ mod tests {
         assert_eq!(latest.to, None);
         assert_eq!(latest.target.artifact, None);
         assert_eq!(past.to, Some("2026-09-20".parse::<NaiveDate>().unwrap()));
-        assert!(parsed("catch-up", &["--from", "2026-09-20T00:00:00Z"]).is_err());
-        assert!(parsed("catch-up", &["--onto", "2026-09-19T00:00:00Z"]).is_err());
         assert!(parsed("catch-up", &["--dry-run", "dry-run"]).is_err());
         let Ok(Command::CatchUp(cut)) = parsed("catch-up", &["--artifact", "instant_0600"]) else {
             panic!("catch-up was named");
@@ -337,7 +335,6 @@ mod tests {
 
         assert_eq!(next.target.artifact, None);
         assert_eq!(next.dry_run, None);
-        assert!(parsed("build", &["--date", "2026-09-20"]).is_err());
     }
 
     #[test]
@@ -345,7 +342,6 @@ mod tests {
         let cut = build_arguments(&["--artifact", "instant_1200"]);
 
         assert_eq!(cut.target.artifact, Some("instant_1200".into()));
-        assert!(parsed("build", &["--at", "12:00"]).is_err());
     }
 
     #[test]

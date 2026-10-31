@@ -218,8 +218,8 @@ mod tests {
             change.hints().next(),
             Some(&Hint::ColumnRename {
                 table: TableId::new("shop", "customers"),
-                from: "name".to_owned(),
-                to: "full_name".to_owned(),
+                from: "name".into(),
+                to: "full_name".into(),
             })
         );
     }

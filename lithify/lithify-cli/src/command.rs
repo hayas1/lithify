@@ -1,11 +1,11 @@
 use chrono::NaiveDate;
 
-use lithify_config::infra::{Sink, Source};
 use lithify_core::artifact::ArtifactName;
-use lithify_core::runner::StepTaker;
-use lithify_core::schedule::Timeline;
-use lithify_core::stepping::Stepping;
 use lithify_core::ts::{Replay, Ts};
+use lithify_pipeline::infra::{Sink, Source};
+use lithify_pipeline::runner::StepTaker;
+use lithify_pipeline::schedule::Timeline;
+use lithify_pipeline::stepping::Stepping;
 
 use crate::artifacts::{ArtifactConfig, Declared, DeclaredSnapshot, Lineup};
 use crate::journal::Journal;
@@ -42,7 +42,7 @@ impl RunCommand {
                 DeclaredSnapshot::of(sink)?.schedule(),
                 source.since()..now.as_event(),
             ),
-            source.capture().to_json()?,
+            source.written_capture()?,
         );
 
         match self {
@@ -111,9 +111,9 @@ impl Target {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use lithify_config::Pipeline;
     use lithify_core::sink::Namespace;
     use lithify_core::sql::SqlString;
+    use lithify_pipeline::Pipeline;
     use lithify_protocol::sink::duckdb::client::DuckDbClient;
 
     use super::*;
@@ -122,9 +122,9 @@ pub(crate) mod tests {
     use crate::step::Taking;
     use crate::step::tests::{CAPTURE, PEOPLE, at, built_before, logged, pipeline, rows};
     use lithify_artifact::snapshot::Snapshot;
-    use lithify_core::check::Expectation;
-    use lithify_core::schedule::Schedule;
     use lithify_core::sink::WarehouseClient;
+    use lithify_pipeline::check::Expectation;
+    use lithify_pipeline::schedule::Schedule;
 
     const NOW: &str = "2026-09-22T05:00:00Z";
 
@@ -420,38 +420,12 @@ pub(crate) mod tests {
         );
     }
 
-    const PERSON_PROCESSED_PAST_THE_MIDNIGHT_ITS_EVENT_TIME_FALLS_BEFORE: &str = "CREATE SCHEMA mysql_shop_cdc;
-        CREATE TABLE mysql_shop_cdc.mysql AS SELECT * FROM (VALUES
-          ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
-            'ddl': 'CREATE TABLE people (id BIGINT)',
-            'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
-              'table': {'primaryKeyColumnNames': ['id'], 'columns': [
-                {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
-                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]})
-        ) AS t(value);
-        CREATE TABLE mysql_shop_cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
-          ({'op': 'c', 'ts_ms': 1789948800001::BIGINT,
-            'source': {'file': 'binlog.000001', 'pos': 3::BIGINT, 'gtid': NULL, 'ts_ms': 1789948799999::BIGINT},
-            'before': NULL::STRUCT(id BIGINT), 'after': {'id': 8::BIGINT}})
-        ) AS t(value)";
+    const PERSON_PROCESSED_PAST_THE_MIDNIGHT_ITS_EVENT_TIME_FALLS_BEFORE: &str = include_str!(
+        "../testdata/command/person_processed_past_the_midnight_its_event_time_falls_before.sql"
+    );
 
-    const PERSON_DELETED_AT_AN_EVENT_TIME_BEFORE_ITS_CREATION: &str = "CREATE SCHEMA mysql_shop_cdc;
-        CREATE TABLE mysql_shop_cdc.mysql AS SELECT * FROM (VALUES
-          ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
-            'ddl': 'CREATE TABLE people (id BIGINT)',
-            'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
-              'table': {'primaryKeyColumnNames': ['id'], 'columns': [
-                {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
-                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]})
-        ) AS t(value);
-        CREATE TABLE mysql_shop_cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
-          ({'op': 'c', 'ts_ms': 1789948799100::BIGINT,
-            'source': {'file': 'binlog.000001', 'pos': 3::BIGINT, 'gtid': NULL, 'ts_ms': 1789948799000::BIGINT},
-            'before': NULL::STRUCT(id BIGINT), 'after': {'id': 8::BIGINT}}),
-          ({'op': 'd', 'ts_ms': 1789948799200::BIGINT,
-            'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL, 'ts_ms': 1789948798000::BIGINT},
-            'before': {'id': 8::BIGINT}, 'after': NULL::STRUCT(id BIGINT)})
-        ) AS t(value)";
+    const PERSON_DELETED_AT_AN_EVENT_TIME_BEFORE_ITS_CREATION: &str =
+        include_str!("../testdata/command/person_deleted_at_an_event_time_before_its_creation.sql");
 
     #[tokio::test]
     async fn a_change_is_built_into_the_shard_of_the_day_its_event_time_falls_on() {
@@ -555,7 +529,7 @@ pub(crate) mod tests {
                 crate::step::tests::ARTIFACTS
             ),
             &format!(
-                "{}place.scd2 = [{{ prefix = \"mysql_shop_scd2\" }}]\n",
+                "{}place.scd2 = {{ prefix = \"mysql_shop_scd2\" }}\n",
                 crate::step::tests::INFRA
             ),
             "[default]\nartifacts = [\"snapshot\", \"scd2\"]\n",
@@ -578,31 +552,8 @@ pub(crate) mod tests {
         );
     }
 
-    const PETS_STANDING_BEFORE_THEY_WERE_BUILT: &str = "CREATE SCHEMA mysql_shop_cdc;
-        CREATE TABLE mysql_shop_cdc.mysql AS SELECT * FROM (VALUES
-          ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
-            'ddl': 'CREATE TABLE people (id BIGINT)',
-            'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
-              'table': {'primaryKeyColumnNames': ['id'], 'columns': [
-                {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
-                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]}),
-          ({'source': {'file': 'binlog.000001', 'pos': 2::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
-            'ddl': 'CREATE TABLE pets (id BIGINT)',
-            'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"pets\"',
-              'table': {'primaryKeyColumnNames': ['id'], 'columns': [
-                {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
-                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]})
-        ) AS t(value);
-        CREATE TABLE mysql_shop_cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
-          ({'op': 'c', 'ts_ms': 1789862400001::BIGINT,
-            'source': {'file': 'binlog.000001', 'pos': 3::BIGINT, 'gtid': NULL, 'ts_ms': 1789862400001::BIGINT},
-            'before': NULL::STRUCT(id BIGINT), 'after': {'id': 8::BIGINT}})
-        ) AS t(value);
-        CREATE TABLE mysql_shop_cdc.\"mysql.shop.pets\" AS SELECT * FROM (VALUES
-          ({'op': 'c', 'ts_ms': 1000::BIGINT,
-            'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL, 'ts_ms': 1000::BIGINT},
-            'before': NULL::STRUCT(id BIGINT), 'after': {'id': 9::BIGINT}})
-        ) AS t(value)";
+    const PETS_STANDING_BEFORE_THEY_WERE_BUILT: &str =
+        include_str!("../testdata/command/pets_standing_before_they_were_built.sql");
 
     #[tokio::test]
     async fn a_catch_up_builds_a_table_with_nothing_to_fold_onto_again_from_the_start_of_its_source()
@@ -897,7 +848,7 @@ pub(crate) mod tests {
 
 #[cfg(test)]
 mod catch_up {
-    use lithify_core::runner::Unsteppable;
+    use lithify_pipeline::runner::Unsteppable;
     use lithify_protocol::sink::duckdb::client::DuckDbClient;
 
     use crate::command::tests::settle;
@@ -1287,7 +1238,7 @@ mod catch_up {
 
 #[cfg(test)]
 mod derived {
-    use lithify_config::Pipeline;
+    use lithify_pipeline::Pipeline;
 
     use crate::command::tests::settle;
     use crate::command::{RunCommand, Target};
@@ -1316,8 +1267,17 @@ mod derived {
         derived(
             name,
             "[[artifact]]\nname = \"instant_0600\"\nkind = \"instant\"\nbase = \"snapshot\"\nat = \"06:00\"\nshard = \"%Y%m%d%H\"\n",
-            "place.instant_0600 = [{ prefix = \"mysql_shop_instant\" }]\n",
+            "place.instant_0600 = { prefix = \"mysql_shop_instant\" }\n",
             "[default]\nartifacts = [\"snapshot\", \"instant_0600\"]\n",
+        )
+    }
+
+    fn provided(name: &str) -> Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig> {
+        derived(
+            name,
+            "[[artifact]]\nname = \"provided\"\nkind = \"snapshot_provide\"\nbase = \"snapshot\"\nshard = \"%Y%m%d\"\n",
+            "place.provided = { prefix = \"mysql_shop_provided\" }\n",
+            "[default]\nartifacts = [\"snapshot\", \"provided\"]\n",
         )
     }
 
@@ -1328,7 +1288,7 @@ mod derived {
         let pipeline = derived(
             "scd1",
             "[[artifact]]\nname = \"scd1\"\nkind = \"scd1\"\nbase = \"snapshot\"\n",
-            "place.scd1 = [{ prefix = \"mysql_shop_scd1\" }]\n",
+            "place.scd1 = { prefix = \"mysql_shop_scd1\" }\n",
             "[default]\nartifacts = [\"snapshot\", \"scd1\"]\n",
         );
 
@@ -1372,7 +1332,7 @@ mod derived {
         let pipeline = derived(
             "scd1-once",
             "[[artifact]]\nname = \"scd1\"\nkind = \"scd1\"\nbase = \"snapshot\"\n",
-            "place.scd1 = [{ prefix = \"mysql_shop_scd1\" }]\n",
+            "place.scd1 = { prefix = \"mysql_shop_scd1\" }\n",
             "[default]\nartifacts = [\"snapshot\", \"scd1\"]\n",
         );
 
@@ -1412,7 +1372,7 @@ mod derived {
         let pipeline = derived(
             "scd2",
             "[[artifact]]\nname = \"scd2\"\nkind = \"scd2\"\nshard = \"%Y%m%d\"\n",
-            "place.scd2 = [{ prefix = \"mysql_shop_scd2\" }]\n",
+            "place.scd2 = { prefix = \"mysql_shop_scd2\" }\n",
             "[default]\nartifacts = [\"snapshot\", \"scd2\"]\n",
         );
 
@@ -1453,7 +1413,7 @@ mod derived {
         let pipeline = derived(
             "scd2-unnamed",
             "[[artifact]]\nname = \"scd2\"\nkind = \"scd2\"\nshard = \"%Y%m%d\"\n",
-            "place.scd2 = [{ prefix = \"mysql_shop_scd2\" }]\n",
+            "place.scd2 = { prefix = \"mysql_shop_scd2\" }\n",
             "[default]\nartifacts = [\"snapshot\"]\n",
         );
 
@@ -1541,6 +1501,180 @@ mod derived {
     }
 
     #[tokio::test]
+    async fn a_catch_up_provides_each_shard_its_snapshot_built_in_turn_from_the_last_built_before_it_was_first_provided()
+     {
+        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]).await;
+        let pipeline = provided("provide-each-shard");
+        let shard = |target: &str, base: &str| (target.to_owned(), base.to_owned());
+
+        for now in ["2026-09-21T05:00:00Z", "2026-09-23T05:00:00Z"] {
+            settle(
+                &pipeline,
+                &client,
+                &RunCommand::CatchUp {
+                    target: Target::default(),
+                    to: None,
+                },
+                now,
+            )
+            .await
+            .unwrap();
+        }
+
+        assert_eq!(
+            rows(
+                &client,
+                "SELECT target, base FROM mysql_shop_provided._lithify_log WHERE status = 'succeeded' ORDER BY id"
+            ),
+            [
+                shard(
+                    "mysql_shop_provided.people_20260920",
+                    "mysql_shop.people_20260920"
+                ),
+                shard(
+                    "mysql_shop_provided.people_20260921",
+                    "mysql_shop.people_20260921"
+                ),
+                shard(
+                    "mysql_shop_provided.people_20260922",
+                    "mysql_shop.people_20260922"
+                ),
+            ]
+        );
+        assert_eq!(
+            rows(
+                &client,
+                "SELECT id::VARCHAR, 'people' FROM mysql_shop_provided.people_20260920 ORDER BY id"
+            ),
+            rows(
+                &client,
+                "SELECT id::VARCHAR, 'people' FROM mysql_shop.people_20260920 ORDER BY id"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn a_catch_up_provides_first_the_last_shard_its_snapshot_built_before_it() {
+        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]).await;
+        let pipeline = provided("provide-from-the-last");
+
+        settle(
+            &pipeline,
+            &client,
+            &RunCommand::CatchUp {
+                target: Target::new(Some("snapshot".into())),
+                to: None,
+            },
+            "2026-09-22T05:00:00Z",
+        )
+        .await
+        .unwrap();
+        settle(
+            &pipeline,
+            &client,
+            &RunCommand::CatchUp {
+                target: Target::default(),
+                to: None,
+            },
+            "2026-09-22T06:00:00Z",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            rows(
+                &client,
+                "SELECT target, base FROM mysql_shop_provided._lithify_log ORDER BY id"
+            ),
+            [(
+                "mysql_shop_provided.people_20260921".to_owned(),
+                "mysql_shop.people_20260921".to_owned()
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_catch_up_provides_no_shard_its_snapshot_has_not_built_yet() {
+        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]).await;
+        let pipeline = provided("provide-what-is-built");
+
+        settle(
+            &pipeline,
+            &client,
+            &RunCommand::CatchUp {
+                target: Target::default(),
+                to: None,
+            },
+            "2026-09-21T05:00:00Z",
+        )
+        .await
+        .unwrap();
+        settle(
+            &pipeline,
+            &client,
+            &RunCommand::CatchUp {
+                target: Target::new(Some("provided".into())),
+                to: None,
+            },
+            "2026-09-23T05:00:00Z",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            rows(
+                &client,
+                "SELECT target, status FROM mysql_shop_provided._lithify_log ORDER BY id"
+            ),
+            [(
+                "mysql_shop_provided.people_20260920".to_owned(),
+                "succeeded".to_owned()
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_catch_up_cuts_an_instant_never_cut_on_the_last_shard_its_snapshot_built_while_it_lags()
+     {
+        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]).await;
+        let pipeline = cut_at_six("cut-behind");
+
+        settle(
+            &pipeline,
+            &client,
+            &RunCommand::CatchUp {
+                target: Target::new(Some("snapshot".into())),
+                to: None,
+            },
+            "2026-09-21T05:00:00Z",
+        )
+        .await
+        .unwrap();
+        settle(
+            &pipeline,
+            &client,
+            &RunCommand::CatchUp {
+                target: Target::new(Some("instant_0600".into())),
+                to: None,
+            },
+            "2026-09-23T07:00:00Z",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            rows(
+                &client,
+                "SELECT target, base FROM mysql_shop_instant._lithify_log ORDER BY id"
+            ),
+            [(
+                "mysql_shop_instant.people_2026092106".to_owned(),
+                "mysql_shop.people_20260920".to_owned()
+            )]
+        );
+    }
+
+    #[tokio::test]
     async fn a_catch_up_named_an_artifact_advances_that_one_alone() {
         let client = logged(PEOPLE, &[built_before("people", CAPTURE)]).await;
         let pipeline = cut_at_six("one-at-a-time");
@@ -1607,7 +1741,7 @@ mod derived {
         assert!(
             !lithify_core::sink::WarehouseClient::exists(
                 &client,
-                &lithify_core::build_log::BuildLog::path(&lithify_core::sink::Namespace::from(
+                &lithify_pipeline::build_log::BuildLog::path(&lithify_core::sink::Namespace::from(
                     "mysql_shop_instant"
                 )),
             )

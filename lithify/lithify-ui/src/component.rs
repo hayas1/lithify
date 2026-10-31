@@ -2,164 +2,18 @@ use chrono::DateTime;
 use chrono_tz::Tz;
 use leptos::prelude::*;
 
-use lithify_core::build_log::{BuildLog, Status};
 use lithify_core::model::TableId;
-use lithify_core::schedule::Schedule;
+use lithify_pipeline::build_log::{BuildLog, Status};
+use lithify_pipeline::schedule::Schedule;
+
+use lithify_pipeline::pipelines::PipelineLocation;
 
 use crate::pipelines::{
-    BuildLogView, PipelineLocation, PipelineOverview, SinkInspection, SinkOverview, SourceOverview,
+    BuildLogView, PipelineOverview, SinkInspection, SinkOverview, SourceOverview,
 };
 use crate::route::{AppRoute, Section};
 
-const STYLE: &str = r#"
-        :root {
-            --bg: #f5f6f8; --surface: #ffffff; --surface-muted: #f9fafb;
-            --border: #e2e5ea; --text: #1f2430; --muted: #6b7280;
-            --accent: #3b5bdb; --accent-soft: #edf1fd;
-            --ok: #1f8a4c; --ok-soft: #e6f4ec;
-            --bad: #c92a2a; --bad-soft: #fdecec;
-            --warn: #b7791f; --warn-soft: #fdf6e7;
-            --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-        }
-        @media (prefers-color-scheme: dark) {
-            :root {
-                --bg: #12141a; --surface: #1b1e26; --surface-muted: #20242e;
-                --border: #2e333f; --text: #e6e8ee; --muted: #9aa1ad;
-                --accent: #7c9cff; --accent-soft: #232b45;
-                --ok: #5cc98a; --ok-soft: #173326;
-                --bad: #ff7b7b; --bad-soft: #3a1c1f;
-                --warn: #e6b35a; --warn-soft: #3a2f17;
-            }
-        }
-        * { box-sizing: border-box; }
-        body {
-            margin: 0; background: var(--bg); color: var(--text);
-            font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
-        }
-        a { color: var(--accent); text-decoration: none; }
-        a:hover { text-decoration: underline; }
-        code, .mono { font-family: var(--mono); font-size: 12.5px; }
-
-        .topbar {
-            display: flex; align-items: center; gap: 24px; height: 52px; padding: 0 24px;
-            background: var(--surface); border-bottom: 1px solid var(--border);
-        }
-        .brand { font-weight: 700; font-size: 16px; color: var(--text); letter-spacing: 0.02em; }
-        .topbar nav { display: flex; gap: 4px; }
-        .topbar nav a { padding: 6px 12px; border-radius: 6px; color: var(--muted); }
-        .topbar nav a.current { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
-        .topbar nav a:hover { text-decoration: none; color: var(--text); }
-
-        .layout { display: flex; min-height: calc(100vh - 52px); }
-        .sidebar {
-            width: 220px; flex-shrink: 0; padding: 20px 12px;
-            background: var(--surface); border-right: 1px solid var(--border);
-        }
-        .sidebar h4 {
-            margin: 0 8px 8px; font-size: 11px; text-transform: uppercase;
-            letter-spacing: 0.08em; color: var(--muted);
-        }
-        .sidebar a { display: block; padding: 6px 10px; border-radius: 6px; color: var(--text); }
-        .sidebar a.current { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
-        .sidebar a:hover { text-decoration: none; background: var(--surface-muted); }
-        main { flex: 1; min-width: 0; padding: 24px 32px 48px; }
-
-        .crumbs { color: var(--muted); font-size: 13px; margin-bottom: 4px; }
-        .crumbs span + span::before { content: "/"; margin: 0 8px; color: var(--border); }
-        h1 { margin: 0 0 4px; font-size: 22px; }
-        .subtitle { color: var(--muted); margin: 0 0 24px; }
-
-        .card {
-            background: var(--surface); border: 1px solid var(--border);
-            border-radius: 10px; margin-bottom: 20px; overflow: hidden;
-        }
-        .card-head {
-            display: flex; align-items: baseline; gap: 10px; padding: 14px 20px;
-            border-bottom: 1px solid var(--border);
-        }
-        .card-head h2 { margin: 0; font-size: 16px; }
-        .kind {
-            font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
-            color: var(--muted); font-weight: 600;
-        }
-        .card-body { padding: 16px 20px; }
-
-        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
-        .grid .card { margin: 0; }
-        .grid a.card { display: block; padding: 18px 20px; color: var(--text); }
-        .grid a.card:hover { text-decoration: none; border-color: var(--accent); }
-        .grid a.card h2 { margin: 0 0 4px; font-size: 16px; }
-
-        .tabs { display: flex; flex-wrap: wrap; padding: 0 12px; border-bottom: 1px solid var(--border); }
-        .tabs > a {
-            display: flex; align-items: center; gap: 8px; padding: 10px 12px;
-            color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px;
-        }
-        .tabs > a:hover { color: var(--text); text-decoration: none; }
-        .tabs > a.current { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
-        .card > .panel { padding: 16px 20px; }
-        .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
-        .dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); } .dot.warn { background: var(--warn); }
-
-        .toggle { display: inline-flex; margin: 0 0 16px; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
-        .toggle a { padding: 4px 14px; color: var(--muted); background: var(--surface); }
-        .toggle a + a { border-left: 1px solid var(--border); }
-        .toggle a.current { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
-        .toggle a:hover { text-decoration: none; color: var(--text); }
-        .summary { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
-        a.chip:hover { text-decoration: none; border-color: var(--accent); color: var(--accent); }
-        .chip {
-            padding: 2px 10px; border-radius: 999px; font-size: 12px;
-            background: var(--surface-muted); border: 1px solid var(--border); color: var(--muted);
-        }
-
-        .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; }
-        table { width: 100%; border-collapse: collapse; }
-        th, td {
-            padding: 8px 12px; text-align: left; vertical-align: top; white-space: nowrap;
-            border-bottom: 1px solid var(--border);
-        }
-        td.null, dd.null { color: var(--muted); font-style: italic; }
-        th.number, td.number { position: sticky; left: 0; background: var(--surface-muted); text-align: right; }
-        td.number a { display: block; font-weight: 600; }
-
-        .pane {
-            display: none; position: fixed; top: 52px; right: 0; bottom: 0; width: min(480px, 100vw);
-            overflow-y: auto; padding: 0 20px 24px; z-index: 10;
-            background: var(--surface); border-left: 1px solid var(--border);
-            box-shadow: -8px 0 24px rgba(0, 0, 0, 0.12);
-        }
-        .pane:target { display: block; }
-        .backdrop { display: none; position: fixed; inset: 52px 0 0 0; z-index: 9; background: rgba(0, 0, 0, 0.08); }
-        .pane:target + .backdrop { display: block; }
-        .pane-head {
-            position: sticky; top: 0; display: flex; align-items: baseline; gap: 10px;
-            padding: 16px 0 12px; background: var(--surface); border-bottom: 1px solid var(--border);
-        }
-        .pane-head h2 { margin: 0; font-size: 15px; flex: 1; }
-        .pane-head .close { color: var(--muted); font-size: 16px; }
-        dl.fields { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; margin: 0; }
-        dl.fields dt { color: var(--muted); font-size: 12px; }
-        dl.fields dd { margin: 0; overflow-wrap: anywhere; }
-        th + th, td + td { border-left: 1px solid var(--border); }
-        th {
-            background: var(--surface-muted); font-size: 12px; font-weight: 600;
-            color: var(--muted); white-space: nowrap;
-        }
-        tr:last-child td { border-bottom: none; }
-        tbody tr:hover td { background: var(--surface-muted); }
-
-        .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
-        .badge.succeeded { background: var(--ok-soft); color: var(--ok); }
-        .badge.failed { background: var(--bad-soft); color: var(--bad); }
-
-        .callout { padding: 10px 14px; border-radius: 8px; border: 1px solid; margin: 0 0 8px; }
-        .callout.error { background: var(--bad-soft); border-color: var(--bad); color: var(--bad); }
-        .callout.warn { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); }
-        .callout.empty { background: var(--surface-muted); border-color: var(--border); color: var(--muted); }
-        h3 { font-size: 13px; margin: 18px 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
-
-    "#;
+const STYLE: &str = include_str!("../css/style.css");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableRow {
@@ -606,13 +460,13 @@ mod tests {
     use chrono::DateTime;
     use ulid::Ulid;
 
-    use lithify_core::build_log::{Run, TableBuilt};
     use lithify_core::sink::TablePath;
     use lithify_core::ts::Ts;
     use lithify_core::window::Window;
+    use lithify_pipeline::build_log::{Run, TableBuilt};
 
     use super::*;
-    use crate::testing::Kept;
+    use lithify_testing::pipeline::Kept;
 
     fn listed(logs: Vec<BuildLog>) -> Vec<TableRow> {
         TableRow::listed(&SinkInspection::new(Schedule::default(), logs, vec![]))

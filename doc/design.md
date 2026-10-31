@@ -17,9 +17,9 @@ A pipeline moves to another warehouse by rewriting `infra.toml` alone, and a tab
 
 ### Artifacts are declared by name, placed by sink and chosen by table
 
-An artifact is declared in `artifact.toml` under a `name`, with its `kind`, one of `snapshot`, `instant`, `scd1` and `scd2`, and what that kind needs to know; the name may be the kind itself as long as no other artifact takes it.
+An artifact is declared in `artifact.toml` under a `name`, with its `kind`, one of `snapshot`, `instant`, `scd1`, `scd2` and `snapshot_provide`, and what that kind needs to know; the name may be the kind itself as long as no other artifact takes it.
 The name is what the rest of the configuration and the build log know the artifact by: each sink places it by its name, each table chooses it by its name, and the build log records its series under it, so renaming an artifact starts its series afresh.
-Each kind names its tables its own way: a `snapshot` and an `instant` name a table for each shard by formatting with `shard` an instant read in the time zone, a `snapshot` the last instant its window holds, as the data of a day is the day as it ended, and an `instant` the instant it is cut at, an `scd2` names by `shard`, as a `snapshot` is named, the versions each window closed and those it left open, and an `scd1` names one view after the table it is built from, as `<table>_scd_type_1`.
+Each kind names its tables its own way: a `snapshot` and an `instant` name a table for each shard by formatting with `shard` an instant read in the time zone, a `snapshot` the last instant its window holds, as the data of a day is the day as it ended, and an `instant` the instant it is cut at, an `scd2` names by `shard`, as a `snapshot` is named, the versions each window closed and those it left open, an `scd1` names one view after the table it is built from, as `<table>_scd_type_1`, and a `snapshot_provide` names each shard it provides by `shard`, after the last instant of the day that shard holds, as the `snapshot` is named.
 
 ```toml
 # artifact.toml
@@ -45,6 +45,12 @@ base = "snapshot"
 name = "scd2"
 kind = "scd2"
 shard = "%Y%m%d"
+
+[[artifact]]
+name = "snapshot_for_analysts"
+kind = "snapshot_provide"
+base = "snapshot"
+shard = "%Y%m%d"
 ```
 
 ```toml
@@ -58,12 +64,9 @@ name = "bigquery"
 project = "local-project"
 endpoint = "http://bigquery-emulator:9050"
 change_log = { project = "raw-project", dataset = "mysql_shop_cdc" }
-place.snapshot = [{ dataset = "mysql_shop" }]
-place.instant_0900 = [
-  { dataset = "mysql_shop_instant_0900" },
-  { project = "analytics-project", dataset = "shop_instant_0900" },
-]
-place.scd1 = [{ dataset = "mysql_shop_scd1" }]
+place.snapshot = { dataset = "mysql_shop" }
+place.instant_0900 = { project = "analytics-project", dataset = "shop_instant_0900" }
+place.scd1 = { dataset = "mysql_shop_scd1" }
 
 [[sink]]
 name = "duckdb_s3"
@@ -71,8 +74,8 @@ name = "duckdb_s3"
 [sink.warehouse.duckdb]
 s3 = { endpoint = "http://rustfs:9000", region = "us-east-1", bucket = "lithify", format = "parquet" }
 change_log = { prefix = "mysql_shop_cdc" }
-place.snapshot = [{ prefix = "mysql_shop" }]
-place.scd2 = [{ prefix = "mysql_shop_scd2" }]
+place.snapshot = { prefix = "mysql_shop" }
+place.scd2 = { prefix = "mysql_shop_scd2" }
 ```
 
 ```toml
@@ -102,7 +105,7 @@ A placement cannot be written for a warehouse other than the one of its sink, si
 An artifact is placed by its name; a placement of an artifact `artifact.toml` does not declare is refused.
 The change log and each artifact are placed on their own, so the artifacts of one sink may lie in projects or datasets apart from the change log and from one another.
 
-An artifact may be placed more than once, each placement holding the whole of it: it is built into the first placement and copied into the others, so every placement holds the same rows.
+An artifact lies in one place, and a list of places is refused as `infra.toml` is read; the same rows in another place are an artifact of their own, built from the one they hold, with a build log of its own, as a `snapshot_provide` is built from a `snapshot`.
 
 ### The build log advances daily
 
@@ -119,6 +122,7 @@ What kind of artifact another is built from is the artifact's to know, as `Artif
 
 - an `instant` folds the change log up to the instant it is cut at onto the `snapshot` before it;
 - an `scd1` folds the change log after the latest `snapshot` onto it;
+- a `snapshot_provide` copies each shard of the `snapshot` as it stands;
 - an `scd2` appends each window onto what the window before it left, and names no base.
 
 A base declared nowhere, or one of another kind than the artifact is built from, is refused as `artifact.toml` is read, and so are a sink placing an artifact without its base and a table naming an artifact without its base.
@@ -127,7 +131,7 @@ A sink places one `snapshot`, which the build log of the sink advances by, so wh
 ### The set of artifacts is open
 
 No crate but the command line enumerates the kinds of artifact there are.
-As a capture is configured by `CdcFormat::Config` and a warehouse by `OpenWarehouse::Config`, each kind of artifact is configured by `Artifact::Config`, and is made by `Artifact::declared` from its name, its configuration, the `Placement` it is written into and the time zone; the command line gathers the configurations into one enum tagged by `kind`, the way it gathers `CaptureConfig` and `WarehouseConfig`, so another kind is added without touching the configuration crate.
+As a capture is configured by `CdcFormat::Config` and a warehouse by `OpenWarehouse::Config`, each kind of artifact is configured by `Artifact::Config`, and is made by `Artifact::declared` from its name, its configuration and the time zone; the command line gathers the configurations into one enum tagged by `kind`, the way it gathers `CaptureConfig` and `WarehouseConfig`, so another kind is added without touching the configuration crate.
 The build log records each series under the name of its artifact and by what makes it advance, such as the instant of the day it is cut at, so the `artifact` and `schedule` columns read whatever the artifact writes into them.
 
 ## Running
@@ -149,12 +153,13 @@ A step takes the earliest next window of the series and builds every table it is
 A table is never built into a window after one it was not built into, since each window folds onto the one before.
 
 Every series advances day by day: a day closes at the instant the `snapshot` of the sink is cut at, and the first day of a series never built spans every day closed since `since`.
-Each series steps into the day after the one its last window opened in; one built from the `snapshot` steps no further than the day the `snapshot` stands at, and, never built, starts there.
-Each artifact maps the day onto its own window, the closed range of the change log it updates for, which always opens as the day does, and the build log records that window for each table.
+Each series steps into the first day opening at or after where its last window closed; one built from the `snapshot` takes no window opening past the last shard the `snapshot` built, and, never built, starts with the window opening at that shard.
+Each artifact maps the day onto its own window, the closed range of the change log it updates for, which opens as the day does but for a `snapshot_provide`, and the build log records that window for each table.
 
 - a `snapshot` and an `scd2` take the day itself;
 - an `instant` takes the day up to the instant it is cut at, once that instant has passed, so it may be built by a batch running more often than daily;
 - an `scd1` takes only the day still open, from where it opens up to when it is built, and stays open past it, reading every row change since the window opened, so it is built once each time its `snapshot` stands at a new day;
+- a `snapshot_provide` takes the instant the day closes, holding no change, so it provides each shard the `snapshot` builds, in turn;
 - one built from the `snapshot` folds onto the shard closing as its window opens.
 
 The schema changes of a build are replayed over its window, which is always closed, and split it into eras.

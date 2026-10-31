@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
 
-use lithify_config::{Placed, Places, Placing};
-use lithify_core::sink::{Namespace, OpenWarehouse, SinkWarehouse, WarehouseFn};
+use lithify_core::sink::{Namespace, OpenWarehouse};
+
 use lithify_core::source::CdcFormat;
+use lithify_pipeline::warehouse::{SinkWarehouse, WarehouseFn};
+use lithify_pipeline::{Placed, Places, Placing};
 use lithify_protocol::sink::bigquery::client::{BigQueryCapture, BigQueryChangeLogsFn};
 use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbChangeLogsFn};
 use lithify_protocol::{BigQueryWarehouse, DebeziumFormat, DuckDbWarehouse};
@@ -14,12 +16,6 @@ use crate::unrunnable::Unrunnable;
 #[serde(deny_unknown_fields, rename_all = "lowercase")]
 pub enum CaptureConfig {
     Debezium(<DebeziumFormat as CdcFormat>::Config),
-}
-
-impl CaptureConfig {
-    pub fn to_json(&self) -> Result<String, serde_json::Error> {
-        serde_json::to_string(self)
-    }
 }
 
 impl DuckDbCapture for CaptureConfig {
@@ -192,7 +188,7 @@ mod tests {
         assert!(unknown.is_err());
     }
 
-    const BIGQUERY: &str = "[bigquery]\nproject = \"local-project\"\nchange_log = { dataset = \"mysql_shop_cdc\" }\nplace.snapshot = [{ dataset = \"mysql_shop\" }]";
+    const BIGQUERY: &str = include_str!("../testdata/pipeline/bigquery.toml");
 
     #[test]
     fn a_pipeline_is_sunk_into_a_warehouse_this_program_reads() {
@@ -211,9 +207,9 @@ mod tests {
         let snapshot = places.get(&"snapshot".into()).unwrap();
 
         assert!(bigquery.reaches(&bigquery.change_log()));
-        assert!(snapshot.iter().all(|place| bigquery.reaches(place)));
+        assert!(bigquery.reaches(snapshot));
         assert_eq!(
-            Namespace::from(snapshot[0].clone()),
+            Namespace::from(snapshot.clone()),
             Namespace::from("mysql_shop")
         );
     }

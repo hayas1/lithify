@@ -3,17 +3,21 @@ use chrono_tz::Tz;
 use serde::Deserialize;
 use serde::de::{self, Deserializer};
 
-use lithify_core::artifact::{Artifact, ArtifactName, Placement, UnbuildableArtifact};
-use lithify_core::build_log::{BuildLog, Series};
+use lithify_core::artifact::{Artifact, ArtifactBuilder, ArtifactName, UnbuildableArtifact};
+use lithify_core::build::Base;
+use lithify_core::listener::ReplayEnd;
 use lithify_core::model::TableId;
-use lithify_core::schedule::{Schedule, Timeline};
-use lithify_core::sink::{Namespace, TablePath, Warehouse};
+use lithify_core::sink::{TablePath, Warehouse};
 use lithify_core::source::RowChangeLog;
 use lithify_core::sql::SqlString;
 use lithify_core::ts::{Event, Ts};
 use lithify_core::window::Window;
+use lithify_pipeline::schedule::{Schedule, Timeline};
 
-use crate::scd1::{Overwrite, Scd1Builder};
+use lithify_pipeline::artifact::ArtifactControl;
+use lithify_pipeline::build_log::{BuildLog, Series};
+
+use crate::scd1::Scd1SelectBuilder;
 use crate::shard::Shard;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -56,18 +60,14 @@ impl SnapshotConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     name: ArtifactName,
-    namespace: Namespace,
-    copies: Vec<Namespace>,
     shard: Shard,
     schedule: Schedule,
 }
 
 impl Snapshot {
-    pub fn new(namespace: impl Into<Namespace>, shard: Shard) -> Self {
+    pub fn new(shard: Shard) -> Self {
         Self {
             name: ArtifactName::from(Self::KIND),
-            namespace: namespace.into(),
-            copies: Vec::new(),
             shard,
             schedule: Schedule::default(),
         }
@@ -83,10 +83,6 @@ impl Snapshot {
 
     pub fn named(self, name: ArtifactName) -> Self {
         Self { name, ..self }
-    }
-
-    pub fn copied_into(self, copies: Vec<Namespace>) -> Self {
-        Self { copies, ..self }
     }
 
     pub fn days(name: &ArtifactName) -> Series {
@@ -110,27 +106,44 @@ impl Artifact for Snapshot {
 
     type From = Self;
 
-    type Config = SnapshotConfig;
+    type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = Scd1SelectBuilder<'a, L, W>;
 
-    type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = Scd1Builder<'a, Self, L, W>;
-
-    fn declared(
-        name: &ArtifactName,
-        config: &SnapshotConfig,
-        placement: &Placement,
-        zone: Tz,
-    ) -> Self {
-        Self::new(
-            placement.namespace().clone(),
-            Shard::new(config.shard(), zone),
-        )
-        .named(name.clone())
-        .scheduled(config.schedule(zone))
-        .copied_into(placement.copies().to_vec())
+    // A snapshot is read as the data of a day, which means the day as it ended, so its shard is
+    // named after the last instant its window holds rather than the instant it closes, which falls
+    // on the next day; each artifact chooses the instant it is named after for what it is read as.
+    fn table_name(&self, table: &TableId, window: &Window) -> String {
+        self.shard.name(table, window.last())
     }
 
-    fn namespace(&self) -> &Namespace {
-        &self.namespace
+    fn builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>(
+        &'a self,
+        log: &'a L,
+        window: &'a Window,
+        base: Base,
+    ) -> Self::Builder<'a, L, W> {
+        Scd1SelectBuilder::new(log, window, base, Some(*window.to()))
+    }
+
+    fn create<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>(
+        &'a self,
+        builder: &Self::Builder<'a, L, W>,
+        warehouse: &W,
+        end: &ReplayEnd<UnbuildableArtifact>,
+        target: &TablePath,
+    ) -> Result<Vec<SqlString>, UnbuildableArtifact> {
+        Ok(vec![
+            warehouse.create_table_as(target, &builder.select(warehouse, end)?),
+        ])
+    }
+}
+
+impl ArtifactControl for Snapshot {
+    type Config = SnapshotConfig;
+
+    fn declared(name: &ArtifactName, config: &SnapshotConfig, zone: Tz) -> Self {
+        Self::new(Shard::new(config.shard(), zone))
+            .named(name.clone())
+            .scheduled(config.schedule(zone))
     }
 
     fn series(&self) -> Series {
@@ -149,58 +162,14 @@ impl Artifact for Snapshot {
     ) -> Option<&'b BuildLog> {
         Self::shard_closing(&self.series(), built, table, *window.from())
     }
-
-    // A snapshot is read as the data of a day, which means the day as it ended, so its shard is
-    // named after the last instant its window holds rather than the instant it closes, which falls
-    // on the next day; each artifact chooses the instant it is named after for what it is read as.
-    fn target(&self, table: &TableId, window: &Window) -> Result<TablePath, UnbuildableArtifact> {
-        Ok(TablePath::new(
-            self.namespace.clone(),
-            &self.shard.name(table, window.last()),
-        ))
-    }
-
-    fn builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>(
-        &'a self,
-        log: &'a L,
-        table: TableId,
-        window: &'a Window,
-        previous: Option<&BuildLog>,
-    ) -> Self::Builder<'a, L, W> {
-        Scd1Builder::new(
-            self,
-            log,
-            table,
-            window.clone(),
-            previous.and_then(BuildLog::target).cloned(),
-        )
-    }
-}
-
-impl Overwrite for Snapshot {
-    fn until(&self, window: &Window) -> Option<Ts<Event>> {
-        Some(*window.to())
-    }
-
-    fn copies(&self) -> &[Namespace] {
-        &self.copies
-    }
-
-    fn materialize<W: Warehouse>(
-        &self,
-        warehouse: &W,
-        target: &TablePath,
-        select: &SqlString,
-    ) -> SqlString {
-        warehouse.create_table_as(target, select)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use chrono::DateTime;
 
-    use lithify_core::build_log::{Run, Status, TableBuilt};
+    use lithify_core::sink::TablePath;
+    use lithify_pipeline::build_log::{Run, Status, TableBuilt};
 
     use super::*;
 
@@ -236,7 +205,7 @@ mod tests {
             built("snapshot", "daily", "people", (0, 10)),
         ];
         assert_eq!(
-            Snapshot::new("mysql_shop", Shard::new("%Y%m%d", Tz::UTC)).base(
+            Snapshot::new(Shard::new("%Y%m%d", Tz::UTC)).base(
                 &built,
                 &TableId::new("shop", "people"),
                 &Window::new(Ts::try_from(10).unwrap(), Ts::try_from(20).unwrap())
@@ -254,7 +223,7 @@ mod tests {
         let day = Window::new(Ts::try_from(0).unwrap(), Ts::try_from(DAY * 3).unwrap());
 
         assert_eq!(
-            Snapshot::new("mysql_shop", Shard::new("%Y%m%d", Tz::UTC)).window(&day, &timeline),
+            Snapshot::new(Shard::new("%Y%m%d", Tz::UTC)).window(&day, &timeline),
             Some(day)
         );
     }
@@ -300,7 +269,7 @@ mod tests {
 
     #[test]
     fn a_snapshot_is_named_after_its_table_and_the_last_day_its_window_holds() {
-        let snapshot = Snapshot::new("mysql_shop", Shard::new("%Y%m%d", Tz::UTC));
+        let snapshot = Snapshot::new(Shard::new("%Y%m%d", Tz::UTC));
 
         for opened in [0, 1789862400000] {
             let window = Window::new(
@@ -309,10 +278,8 @@ mod tests {
             );
 
             assert_eq!(
-                snapshot
-                    .target(&TableId::new("shop", "customers"), &window)
-                    .unwrap(),
-                TablePath::new("mysql_shop", "customers_20260920")
+                snapshot.table_name(&TableId::new("shop", "customers"), &window),
+                "customers_20260920"
             );
         }
     }

@@ -63,8 +63,8 @@ impl<S: sqlparser::dialect::Dialect> RenameReader<S> {
 
         (from != to).then(|| Hint::ColumnRename {
             table: table.clone(),
-            from: from.value.clone(),
-            to: to.value.clone(),
+            from: from.value.clone().into(),
+            to: to.value.clone().into(),
         })
     }
 

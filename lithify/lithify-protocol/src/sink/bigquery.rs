@@ -155,11 +155,11 @@ mod tests {
     use crate::source::debezium::mysql::MySql;
 
     use chrono::DateTime;
-    use lithify_core::build_log::{BuildLog, BuildLogQuery, Latest, Run, Status, TableBuilt};
     use lithify_core::model::{ColumnType, TableId};
     use lithify_core::sink::{ChangeLogSql, TablePath, UnsupportedColumn};
     use lithify_core::ts::Ts;
     use lithify_core::window::Window;
+    use lithify_pipeline::build_log::{BuildLog, BuildLogQuery, Latest, Run, Status, TableBuilt};
     use ulid::Ulid;
 
     fn bigquery() -> BigQueryWarehouse {

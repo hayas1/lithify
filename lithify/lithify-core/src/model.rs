@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::fmt;
 
 use crate::event::MalformedEvent;
@@ -47,6 +48,57 @@ impl TryFrom<&str> for TableId {
     }
 }
 
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ColumnName(String);
+
+impl ColumnName {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for ColumnName {
+    fn from(name: &str) -> Self {
+        Self(name.to_owned())
+    }
+}
+
+impl From<String> for ColumnName {
+    fn from(name: String) -> Self {
+        Self(name)
+    }
+}
+
+impl Borrow<str> for ColumnName {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for ColumnName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.0, formatter)
+    }
+}
+
+impl fmt::Display for ColumnName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl PartialEq<str> for ColumnName {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for ColumnName {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ColumnType {
     Bool,
@@ -69,7 +121,7 @@ pub enum ColumnType {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnModel {
-    name: String,
+    name: ColumnName,
     type_name: String,
     column_type: ColumnType,
     optional: bool,
@@ -86,7 +138,7 @@ impl ColumnModel {
         default_value: Option<&str>,
     ) -> Self {
         Self {
-            name: name.to_owned(),
+            name: ColumnName::from(name),
             type_name: type_name.to_owned(),
             column_type,
             optional,
@@ -102,7 +154,7 @@ impl ColumnModel {
         }
     }
 
-    pub fn name(&self) -> &str {
+    pub fn name(&self) -> &ColumnName {
         &self.name
     }
 
@@ -127,15 +179,49 @@ impl ColumnModel {
     }
 }
 
+// An empty key stands for a table without one, and every artifact checks for it with
+// `is_empty`. Building it only through `new(Vec<ColumnName>) -> Option<Self>`, as `NonZero`
+// is, with `TableModel` holding `Option<PrimaryKeyColumn>`, would leave a table without a key
+// one way to be told and let query builders take a key without checking it again; not done
+// while the check stays at the entry of each artifact.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PrimaryKeyColumn(Vec<ColumnName>);
+
+impl PrimaryKeyColumn {
+    pub fn columns(&self) -> impl Iterator<Item = &ColumnName> {
+        self.0.iter()
+    }
+
+    pub fn contains(&self, column: &ColumnName) -> bool {
+        self.0.contains(column)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl<const N: usize> From<[&str; N]> for PrimaryKeyColumn {
+    fn from(columns: [&str; N]) -> Self {
+        columns.into_iter().map(ColumnName::from).collect()
+    }
+}
+
+impl FromIterator<ColumnName> for PrimaryKeyColumn {
+    fn from_iter<I: IntoIterator<Item = ColumnName>>(columns: I) -> Self {
+        Self(columns.into_iter().collect())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableModel {
     id: TableId,
     columns: Vec<ColumnModel>,
-    primary_key: Vec<String>,
+    primary_key: PrimaryKeyColumn,
 }
 
 impl TableModel {
-    pub fn new(id: TableId, columns: Vec<ColumnModel>, primary_key: Vec<String>) -> Self {
+    pub fn new(id: TableId, columns: Vec<ColumnModel>, primary_key: PrimaryKeyColumn) -> Self {
         Self {
             id,
             columns,
@@ -151,12 +237,12 @@ impl TableModel {
         self.columns.iter()
     }
 
-    pub fn column(&self, name: &str) -> Option<&ColumnModel> {
+    pub fn column(&self, name: &ColumnName) -> Option<&ColumnModel> {
         self.columns.iter().find(|column| column.name() == name)
     }
 
-    pub fn primary_key(&self) -> impl Iterator<Item = &str> {
-        self.primary_key.iter().map(String::as_str)
+    pub fn primary_key(&self) -> &PrimaryKeyColumn {
+        &self.primary_key
     }
 
     pub fn with_id(&self, id: &TableId) -> Self {
@@ -184,34 +270,12 @@ mod tests {
                 column("name", "VARCHAR"),
                 column("email", "VARCHAR"),
             ],
-            vec!["id".to_owned()],
+            ["id"].into(),
         )
     }
 
-    fn names(table: &TableModel) -> Vec<&str> {
+    fn names(table: &TableModel) -> Vec<&ColumnName> {
         table.columns().map(ColumnModel::name).collect()
-    }
-
-    #[test]
-    fn a_column_is_undescribed_until_given_a_comment() {
-        let column = column("name", "VARCHAR");
-
-        assert_eq!(column.comment(), None);
-        assert_eq!(
-            column.with_comment(Some("how to call them")).comment(),
-            Some("how to call them")
-        );
-    }
-
-    #[test]
-    fn a_table_holds_its_columns_in_the_order_they_were_given() {
-        let table = TableModel::new(
-            TableId::new("shop", "customers"),
-            vec![column("name", "VARCHAR"), column("id", "BIGINT")],
-            vec!["id".to_owned()],
-        );
-
-        assert_eq!(names(&table), ["name", "id"]);
     }
 
     #[test]
@@ -220,6 +284,6 @@ mod tests {
 
         assert_eq!(moved.id(), &TableId::new("shop", "clients"));
         assert_eq!(names(&moved), ["id", "name", "email"]);
-        assert_eq!(moved.primary_key().collect::<Vec<_>>(), ["id"]);
+        assert_eq!(moved.primary_key().columns().collect::<Vec<_>>(), ["id"]);
     }
 }

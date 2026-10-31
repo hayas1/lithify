@@ -245,7 +245,7 @@ mod tests {
             panic!("expected a created table");
         };
         assert_eq!(
-            table.column("amount").unwrap().column_type(),
+            table.column(&"amount".into()).unwrap().column_type(),
             &ColumnType::Decimal {
                 precision: 12,
                 scale: 2

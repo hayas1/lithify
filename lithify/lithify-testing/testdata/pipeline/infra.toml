@@ -1,0 +1,20 @@
+[default]
+source.capture.debezium.dialect = "mysql"
+
+[[source]]
+name = "primary"
+
+[[sink]]
+name = "rustfs"
+
+[sink.warehouse.memory]
+change_log = { prefix = "mysql_shop_cdc" }
+place.snapshot = { prefix = "mysql_shop" }
+
+[[sink]]
+name = "warehouse"
+
+[sink.warehouse.unreachable]
+cause = "JobCreationMode"
+change_log = { prefix = "mysql_shop_cdc" }
+place.snapshot = { prefix = "mysql_shop" }

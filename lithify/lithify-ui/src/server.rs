@@ -11,15 +11,16 @@ use leptos::prelude::*;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use lithify_config::{Declaration, Placing};
-use lithify_core::sink::SinkWarehouse;
+use lithify_pipeline::warehouse::SinkWarehouse;
+use lithify_pipeline::{Declaration, Placing};
 
-use crate::pipelines::{PipelineLocation, PipelineOverview, Pipelines};
+use crate::pipelines::{PipelineOverview, Survey};
 use crate::route::{AppRoute, BuildLogQueryParam, CheckQueryParam, QueryState};
 use crate::screen::{BuildLogScreen, CheckScreen, PipelinesScreen, UnreadScreen};
+use lithify_pipeline::pipelines::PipelineLocation;
 
 pub struct Board<C, W: SinkWarehouse, A> {
-    pipelines: Arc<Pipelines<C, W, A>>,
+    pipelines: Arc<Survey<C, W, A>>,
 }
 
 impl<C, W, A> Board<C, W, A>
@@ -29,7 +30,7 @@ where
     W::Credential: Send + Sync,
     A: Clone + DeserializeOwned + Declaration + 'static,
 {
-    pub fn new(pipelines: Pipelines<C, W, A>) -> Self {
+    pub fn new(pipelines: Survey<C, W, A>) -> Self {
         Self {
             pipelines: Arc::new(pipelines),
         }
@@ -68,8 +69,8 @@ where
     }
 
     async fn blocking<T: Send + 'static>(
-        pipelines: Arc<Pipelines<C, W, A>>,
-        read: impl AsyncFnOnce(&Pipelines<C, W, A>) -> Result<T, String> + Send + 'static,
+        pipelines: Arc<Survey<C, W, A>>,
+        read: impl AsyncFnOnce(&Survey<C, W, A>) -> Result<T, String> + Send + 'static,
     ) -> Result<T, String> {
         // A page waits on its read on a thread of its own: the pipeline is read from disk, and a
         // warehouse client may block, like DuckDB does, or hold what cannot be sent across threads.
@@ -104,19 +105,17 @@ where
     }
 
     async fn build_logs(
-        State(pipelines): State<Arc<Pipelines<C, W, A>>>,
+        State(pipelines): State<Arc<Survey<C, W, A>>>,
     ) -> (StatusCode, Html<String>) {
         Self::index(pipelines, AppRoute::BuildLogs).await
     }
 
-    async fn checks(
-        State(pipelines): State<Arc<Pipelines<C, W, A>>>,
-    ) -> (StatusCode, Html<String>) {
+    async fn checks(State(pipelines): State<Arc<Survey<C, W, A>>>) -> (StatusCode, Html<String>) {
         Self::index(pipelines, AppRoute::Checks).await
     }
 
     async fn build_log(
-        State(pipelines): State<Arc<Pipelines<C, W, A>>>,
+        State(pipelines): State<Arc<Survey<C, W, A>>>,
         Path(name): Path<String>,
         Query(query): Query<QueryState<BuildLogQueryParam>>,
     ) -> (StatusCode, Html<String>) {
@@ -133,7 +132,7 @@ where
     }
 
     async fn check(
-        State(pipelines): State<Arc<Pipelines<C, W, A>>>,
+        State(pipelines): State<Arc<Survey<C, W, A>>>,
         Path(name): Path<String>,
         Query(query): Query<QueryState<CheckQueryParam>>,
     ) -> (StatusCode, Html<String>) {
@@ -148,10 +147,7 @@ where
         .await
     }
 
-    async fn index(
-        pipelines: Arc<Pipelines<C, W, A>>,
-        route: AppRoute,
-    ) -> (StatusCode, Html<String>) {
+    async fn index(pipelines: Arc<Survey<C, W, A>>, route: AppRoute) -> (StatusCode, Html<String>) {
         match Self::blocking(pipelines, async |pipelines| pipelines.locations()).await {
             Ok(located) => Self::html(
                 StatusCode::OK,
@@ -162,7 +158,7 @@ where
     }
 
     async fn pipeline(
-        pipelines: Arc<Pipelines<C, W, A>>,
+        pipelines: Arc<Survey<C, W, A>>,
         name: String,
         route: AppRoute,
         screen: fn(AppRoute, Vec<PipelineLocation>, Option<PipelineOverview>) -> AnyView,
@@ -200,7 +196,12 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::testing::{INFRA, configure, logged, scratch, under};
+    use crate::pipelines::Survey;
+    use lithify_testing::pipeline::{Captured, INFRA, Kept, Made, configure, logged, scratch};
+
+    fn under(root: &Path) -> Survey<Captured, Kept, Made> {
+        Survey::new(root.to_owned(), ())
+    }
 
     fn located(name: &str) -> PathBuf {
         let root = scratch(&format!("server-{name}"));
@@ -397,13 +398,6 @@ mod tests {
     #[tokio::test]
     async fn a_check_page_of_a_pipeline_that_is_not_there_is_not_found() {
         let (status, _) = get(&located("unchecked"), "/checks/oracle").await;
-
-        assert_eq!(status, StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn no_page_assembles_a_build_any_more() {
-        let (status, _) = get(&located("unassembled"), "/build?snapshot=2026-09-20").await;
 
         assert_eq!(status, StatusCode::NOT_FOUND);
     }

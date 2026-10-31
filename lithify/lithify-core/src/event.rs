@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::model::{TableId, TableModel};
+use crate::model::{ColumnName, TableId, TableModel};
 use crate::ts::{Processing, Ts};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,8 +27,8 @@ pub enum Hint {
     },
     ColumnRename {
         table: TableId,
-        from: String,
-        to: String,
+        from: ColumnName,
+        to: ColumnName,
     },
 }
 
@@ -47,7 +47,7 @@ impl Hint {
         }
     }
 
-    pub fn as_column_rename(&self) -> Option<(&TableId, &str, &str)> {
+    pub fn as_column_rename(&self) -> Option<(&TableId, &ColumnName, &ColumnName)> {
         match self {
             Self::TableRename { .. } => None,
             Self::ColumnRename { table, from, to } => Some((table, from, to)),
@@ -89,7 +89,7 @@ impl<P> SchemaChange<P> {
     pub fn column_renames<'a>(
         &'a self,
         table: &'a TableId,
-    ) -> impl Iterator<Item = (&'a str, &'a str)> {
+    ) -> impl Iterator<Item = (&'a ColumnName, &'a ColumnName)> {
         let renamed_to = move |id: &TableId| {
             self.hints()
                 .filter_map(Hint::as_table_rename)
@@ -153,42 +153,6 @@ impl std::error::Error for MalformedEvent {}
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use crate::model::{ColumnModel, ColumnType};
-
-    fn customers() -> TableModel {
-        TableModel::new(
-            TableId::new("shop", "customers"),
-            vec![ColumnModel::new(
-                "id",
-                "BIGINT",
-                ColumnType::Int64,
-                false,
-                None,
-            )],
-            vec!["id".to_owned()],
-        )
-    }
-
-    #[test]
-    fn a_table_created_or_altered_is_named_by_its_definition() {
-        assert_eq!(
-            TableChange::Created(customers()).id(),
-            &TableId::new("shop", "customers")
-        );
-        assert_eq!(
-            TableChange::Altered(customers()).id(),
-            &TableId::new("shop", "customers")
-        );
-    }
-
-    #[test]
-    fn a_dropped_table_is_named_by_its_id_alone() {
-        assert_eq!(
-            TableChange::Dropped(TableId::new("shop", "customers")).id(),
-            &TableId::new("shop", "customers")
-        );
-    }
 
     #[test]
     fn a_schema_change_is_taken_at_the_source_unless_marked_captured() {

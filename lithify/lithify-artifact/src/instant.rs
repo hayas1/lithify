@@ -2,17 +2,21 @@ use chrono::{DateTime, NaiveTime, TimeDelta, Utc};
 use chrono_tz::Tz;
 use serde::Deserialize;
 
-use lithify_core::artifact::{Artifact, ArtifactName, Placement, UnbuildableArtifact};
-use lithify_core::build_log::{BuildLog, Series};
+use lithify_core::artifact::{Artifact, ArtifactBuilder, ArtifactName, UnbuildableArtifact};
+use lithify_core::build::Base;
+use lithify_core::listener::ReplayEnd;
 use lithify_core::model::TableId;
-use lithify_core::schedule::{Schedule, Timeline};
-use lithify_core::sink::{Namespace, TablePath, Warehouse};
+use lithify_core::sink::{TablePath, Warehouse};
 use lithify_core::source::RowChangeLog;
 use lithify_core::sql::SqlString;
-use lithify_core::ts::{Event, Ts};
+use lithify_core::ts::Ts;
 use lithify_core::window::Window;
+use lithify_pipeline::schedule::{Schedule, Timeline};
 
-use crate::scd1::{Overwrite, Scd1Builder};
+use lithify_pipeline::artifact::ArtifactControl;
+use lithify_pipeline::build_log::{BuildLog, Series};
+
+use crate::scd1::Scd1SelectBuilder;
 use crate::shard::Shard;
 use crate::snapshot::Snapshot;
 
@@ -45,25 +49,16 @@ pub struct Instant {
     base: Series,
     at: NaiveTime,
     delay: TimeDelta,
-    namespace: Namespace,
-    copies: Vec<Namespace>,
     shard: Shard,
 }
 
 impl Instant {
-    pub fn new(
-        at: NaiveTime,
-        days: Schedule,
-        namespace: impl Into<Namespace>,
-        shard: Shard,
-    ) -> Self {
+    pub fn new(at: NaiveTime, days: Schedule, shard: Shard) -> Self {
         Self {
             name: ArtifactName::from(Self::KIND),
             base: Snapshot::days(&ArtifactName::from(Snapshot::KIND)),
             at,
             delay: days.delay(at),
-            namespace: namespace.into(),
-            copies: Vec::new(),
             shard,
         }
     }
@@ -80,10 +75,6 @@ impl Instant {
         }
     }
 
-    pub fn copied_into(self, copies: Vec<Namespace>) -> Self {
-        Self { copies, ..self }
-    }
-
     pub fn cut(at: NaiveTime) -> String {
         at.format("%H:%M").to_string()
     }
@@ -94,28 +85,46 @@ impl Artifact for Instant {
 
     type From = Snapshot;
 
+    type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = Scd1SelectBuilder<'a, L, W>;
+
+    // An instant is read as the data at the instant it is cut, unlike a snapshot read as a day, so
+    // it is named after the instant its window closes.
+    fn table_name(&self, table: &TableId, window: &Window) -> String {
+        self.shard.name(table, *window.to())
+    }
+
+    fn builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>(
+        &'a self,
+        log: &'a L,
+        window: &'a Window,
+        base: Base,
+    ) -> Self::Builder<'a, L, W> {
+        Scd1SelectBuilder::new(log, window, base, Some(*window.to()))
+    }
+
+    fn create<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>(
+        &'a self,
+        builder: &Self::Builder<'a, L, W>,
+        warehouse: &W,
+        end: &ReplayEnd<UnbuildableArtifact>,
+        target: &TablePath,
+    ) -> Result<Vec<SqlString>, UnbuildableArtifact> {
+        Ok(vec![
+            warehouse.create_table_as(target, &builder.select(warehouse, end)?),
+        ])
+    }
+}
+
+impl ArtifactControl for Instant {
     type Config = InstantConfig;
 
-    type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = Scd1Builder<'a, Self, L, W>;
-
-    fn declared(
-        name: &ArtifactName,
-        config: &InstantConfig,
-        placement: &Placement,
-        zone: Tz,
-    ) -> Self {
+    fn declared(name: &ArtifactName, config: &InstantConfig, zone: Tz) -> Self {
         Self::new(
             config.at(),
             Schedule::default(),
-            placement.namespace().clone(),
             Shard::new(config.shard(), zone),
         )
         .named(name.clone())
-        .copied_into(placement.copies().to_vec())
-    }
-
-    fn namespace(&self) -> &Namespace {
-        &self.namespace
     }
 
     fn series(&self) -> Series {
@@ -139,58 +148,16 @@ impl Artifact for Instant {
     ) -> Option<&'b BuildLog> {
         Snapshot::shard_closing(&self.base, built, table, *window.from())
     }
-
-    // An instant is read as the data at the instant it is cut, unlike a snapshot read as a day, so
-    // it is named after the instant its window closes.
-    fn target(&self, table: &TableId, window: &Window) -> Result<TablePath, UnbuildableArtifact> {
-        Ok(TablePath::new(
-            self.namespace.clone(),
-            &self.shard.name(table, *window.to()),
-        ))
-    }
-
-    fn builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>(
-        &'a self,
-        log: &'a L,
-        table: TableId,
-        window: &'a Window,
-        previous: Option<&BuildLog>,
-    ) -> Self::Builder<'a, L, W> {
-        Scd1Builder::new(
-            self,
-            log,
-            table,
-            window.clone(),
-            previous.and_then(BuildLog::target).cloned(),
-        )
-    }
-}
-
-impl Overwrite for Instant {
-    fn until(&self, window: &Window) -> Option<Ts<Event>> {
-        Some(*window.to())
-    }
-
-    fn copies(&self) -> &[Namespace] {
-        &self.copies
-    }
-
-    fn materialize<W: Warehouse>(
-        &self,
-        warehouse: &W,
-        target: &TablePath,
-        select: &SqlString,
-    ) -> SqlString {
-        warehouse.create_table_as(target, select)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use ulid::Ulid;
 
-    use lithify_core::build_log::{Run, Status, TableBuilt};
-    use lithify_core::schedule::Timeline;
+    use lithify_core::sink::TablePath;
+    use lithify_core::ts::Event;
+    use lithify_pipeline::build_log::{Run, Status, TableBuilt};
+    use lithify_pipeline::schedule::Timeline;
 
     use super::*;
 
@@ -202,7 +169,6 @@ mod tests {
         Instant::new(
             NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
             Schedule::daily(NaiveTime::MIN, chrono_tz::Asia::Tokyo),
-            "mysql_shop_0900",
             Shard::new("%Y%m%d%H", chrono_tz::Asia::Tokyo),
         )
     }
@@ -259,7 +225,6 @@ mod tests {
         let midnight = Instant::new(
             NaiveTime::MIN,
             Schedule::daily(NaiveTime::MIN, chrono_tz::Asia::Tokyo),
-            "mysql_shop_0000",
             Shard::new("%Y%m%d%H", chrono_tz::Asia::Tokyo),
         );
         let day = Window::new(at("2026-09-20T15:00:00Z"), at("2026-09-21T15:00:00Z"));
@@ -321,7 +286,7 @@ mod tests {
         assert_eq!(
             nine_in_tokyo()
                 .based_on(
-                    &Snapshot::new("mysql_shop", Shard::new("%Y%m%d", chrono_tz::Asia::Tokyo))
+                    &Snapshot::new(Shard::new("%Y%m%d", chrono_tz::Asia::Tokyo))
                         .named("daily".into())
                 )
                 .base(&built, &TableId::new("shop", "people"), &cut()),
@@ -332,10 +297,8 @@ mod tests {
     #[test]
     fn an_instant_is_named_after_the_instant_it_is_cut_at() {
         assert_eq!(
-            nine_in_tokyo()
-                .target(&TableId::new("shop", "people"), &cut())
-                .unwrap(),
-            TablePath::new("mysql_shop_0900", "people_2026092109")
+            nine_in_tokyo().table_name(&TableId::new("shop", "people"), &cut()),
+            "people_2026092109"
         );
     }
 }

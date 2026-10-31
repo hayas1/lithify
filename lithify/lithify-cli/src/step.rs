@@ -2,12 +2,14 @@ use duckdb::types::FromSql;
 use google_cloud_bigquery::error::RowError;
 use google_cloud_bigquery::query::Row;
 
-use lithify_config::table;
-use lithify_core::artifact::Artifact;
-use lithify_core::build_log::BuildLog;
-use lithify_core::runner::{BuildLogWriter, Replayer, StepTaker, Tables};
+use lithify_core::model::TableId;
+use lithify_core::sink::Namespace;
 use lithify_core::source::{ChangeLogs, SchemaChangeLog};
 use lithify_core::window::Window;
+use lithify_pipeline::artifact::ArtifactControl;
+use lithify_pipeline::build_log::BuildLog;
+use lithify_pipeline::runner::{BuildLogWriter, Runner, StepTaker, Tables};
+use lithify_pipeline::table;
 use lithify_protocol::sink::bigquery::client::{
     BigQueryCapture, BigQueryChangeLogsFn, BigQueryClient, BigQueryExecution,
 };
@@ -18,33 +20,35 @@ use lithify_protocol::sink::duckdb::client::{
 use crate::pipeline::CaptureConfig;
 use crate::unrunnable::Unrunnable;
 
-pub struct Replaying<'a, K, B, A> {
+pub struct Replaying<'a, K, B, A, F> {
     client: &'a K,
     artifact: &'a A,
+    namespace: &'a Namespace,
     window: &'a Window,
     previous: &'a [BuildLog],
-    tables: &'a Tables,
-    listing: &'a table::Tables,
+    finishes: F,
     writer: &'a B,
 }
 
-impl<'a, K, B: BuildLogWriter, A: Artifact> Replaying<'a, K, B, A> {
+impl<'a, K, B: BuildLogWriter, A: ArtifactControl, F: Fn(&TableId) -> bool>
+    Replaying<'a, K, B, A, F>
+{
     pub fn new(
         client: &'a K,
         artifact: &'a A,
+        namespace: &'a Namespace,
         window: &'a Window,
         previous: &'a [BuildLog],
-        tables: &'a Tables,
-        listing: &'a table::Tables,
+        finishes: F,
         writer: &'a B,
     ) -> Self {
         Self {
             client,
             artifact,
+            namespace,
             window,
             previous,
-            tables,
-            listing,
+            finishes,
             writer,
         }
     }
@@ -73,6 +77,22 @@ impl<'a, K> Taking<'a, K> {
     }
 }
 
+impl<K> Taking<'_, K> {
+    fn finishes<'f, A: ArtifactControl>(
+        &'f self,
+        artifact: &'f A,
+        tables: &'f Tables,
+    ) -> impl Fn(&TableId) -> bool + 'f {
+        move |table| {
+            tables.includes(table)
+                && self
+                    .listing
+                    .table(table)
+                    .builds(artifact.series().artifact())
+        }
+    }
+}
+
 impl<X: DuckDbExecution> StepTaker for Taking<'_, DuckDbClient<X>> {
     type Client = DuckDbClient<X>;
     type Error = Unrunnable;
@@ -81,9 +101,10 @@ impl<X: DuckDbExecution> StepTaker for Taking<'_, DuckDbClient<X>> {
         self.client
     }
 
-    async fn take<A: Artifact, B: BuildLogWriter>(
+    async fn take<A: ArtifactControl, B: BuildLogWriter>(
         &self,
         artifact: &A,
+        namespace: &Namespace,
         window: &Window,
         previous: &[BuildLog],
         tables: &Tables,
@@ -95,10 +116,10 @@ impl<X: DuckDbExecution> StepTaker for Taking<'_, DuckDbClient<X>> {
                 Replaying::new(
                     self.client,
                     artifact,
+                    namespace,
                     window,
                     previous,
-                    tables,
-                    self.listing,
+                    self.finishes(artifact, tables),
                     writer,
                 ),
             )
@@ -114,9 +135,10 @@ impl<X: BigQueryExecution> StepTaker for Taking<'_, BigQueryClient<X>> {
         self.client
     }
 
-    async fn take<A: Artifact, B: BuildLogWriter>(
+    async fn take<A: ArtifactControl, B: BuildLogWriter>(
         &self,
         artifact: &A,
+        namespace: &Namespace,
         window: &Window,
         previous: &[BuildLog],
         tables: &Tables,
@@ -128,10 +150,10 @@ impl<X: BigQueryExecution> StepTaker for Taking<'_, BigQueryClient<X>> {
                 Replaying::new(
                     self.client,
                     artifact,
+                    namespace,
                     window,
                     previous,
-                    tables,
-                    self.listing,
+                    self.finishes(artifact, tables),
                     writer,
                 ),
             )
@@ -139,8 +161,12 @@ impl<X: BigQueryExecution> StepTaker for Taking<'_, BigQueryClient<X>> {
     }
 }
 
-impl<X: DuckDbExecution, B: BuildLogWriter, A: Artifact> DuckDbChangeLogsFn
-    for Replaying<'_, DuckDbClient<X>, B, A>
+impl<X, B, A, F> DuckDbChangeLogsFn for Replaying<'_, DuckDbClient<X>, B, A, F>
+where
+    X: DuckDbExecution,
+    B: BuildLogWriter,
+    A: ArtifactControl,
+    F: Fn(&TableId) -> bool,
 {
     type Output = Result<B::Output, Unrunnable>;
 
@@ -149,25 +175,25 @@ impl<X: DuckDbExecution, B: BuildLogWriter, A: Artifact> DuckDbChangeLogsFn
         C: ChangeLogs,
         <C::Schema as SchemaChangeLog>::Record: FromSql,
     {
-        Replayer::new(self.client, &logs)
+        Runner::new(self.client, &logs)
             .run(
                 self.artifact,
+                self.namespace,
                 self.window,
                 self.previous,
-                self.tables,
-                |table| {
-                    self.listing
-                        .table(table)
-                        .builds(self.artifact.series().artifact())
-                },
+                self.finishes,
                 self.writer,
             )
             .await
     }
 }
 
-impl<X: BigQueryExecution, B: BuildLogWriter, A: Artifact> BigQueryChangeLogsFn
-    for Replaying<'_, BigQueryClient<X>, B, A>
+impl<X, B, A, F> BigQueryChangeLogsFn for Replaying<'_, BigQueryClient<X>, B, A, F>
+where
+    X: BigQueryExecution,
+    B: BuildLogWriter,
+    A: ArtifactControl,
+    F: Fn(&TableId) -> bool,
 {
     type Output = Result<B::Output, Unrunnable>;
 
@@ -176,17 +202,13 @@ impl<X: BigQueryExecution, B: BuildLogWriter, A: Artifact> BigQueryChangeLogsFn
         C: ChangeLogs,
         <C::Schema as SchemaChangeLog>::Record: TryFrom<Row, Error = RowError>,
     {
-        Replayer::new(self.client, &logs)
+        Runner::new(self.client, &logs)
             .run(
                 self.artifact,
+                self.namespace,
                 self.window,
                 self.previous,
-                self.tables,
-                |table| {
-                    self.listing
-                        .table(table)
-                        .builds(self.artifact.series().artifact())
-                },
+                self.finishes,
                 self.writer,
             )
             .await
@@ -197,9 +219,10 @@ impl<X: BigQueryExecution, B: BuildLogWriter, A: Artifact> BigQueryChangeLogsFn
 pub(crate) mod tests {
     use duckdb::Connection;
 
-    use lithify_config::Pipeline;
     use lithify_core::sink::{Namespace, TablePath, WarehouseClient};
     use lithify_core::ts::Ts;
+    use lithify_pipeline::Pipeline;
+    use lithify_pipeline::warehouse::WarehouseControl;
     use lithify_protocol::DuckDbWarehouse;
     use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbClient};
 
@@ -212,67 +235,45 @@ pub(crate) mod tests {
     use crate::artifacts::{ArtifactConfig, DeclaredSnapshot};
     use crate::pipeline::{CaptureConfig, WarehouseConfig};
     use lithify_artifact::snapshot::Snapshot;
-    use lithify_config::infra::Sink;
     use lithify_core::artifact::UnbuildableArtifact;
-    use lithify_core::build_log::{BuildLog, Latest, Run, Status, TableBuilt};
     use lithify_core::model::TableId;
-    use lithify_core::runner::{BuildLogWrite, Tables};
+    use lithify_pipeline::build_log::{BuildLog, Latest, Run, Status, TableBuilt};
+    use lithify_pipeline::infra::Sink;
+    use lithify_pipeline::runner::BuildLogWrite;
     use lithify_protocol::sink::execution::DryRun;
 
-    const CHANGE_LOGS: &str = "CREATE SCHEMA mysql_shop_cdc;
-        CREATE TABLE mysql_shop_cdc.mysql AS SELECT * FROM (VALUES
-          ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
-            'ddl': 'CREATE TABLE people (id BIGINT)',
-            'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
-              'table': {'primaryKeyColumnNames': ['id'], 'columns': [
-                {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
-                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]})
-        ) AS t(value)";
+    const CHANGE_LOGS: &str = include_str!("../testdata/step/change_logs.sql");
 
     fn snapshot(sink: &Sink<WarehouseConfig, ArtifactConfig>) -> Snapshot {
         DeclaredSnapshot::of(sink).unwrap().artifact()
     }
 
-    pub(crate) const ARTIFACTS: &str = r#"
-[[artifact]]
-name = "snapshot"
-kind = "snapshot"
-shard = "%Y%m%d"
-"#;
+    fn namespace(sink: &Sink<WarehouseConfig, ArtifactConfig>) -> Namespace {
+        DeclaredSnapshot::of(sink).unwrap().namespace().clone()
+    }
 
-    pub(crate) const INFRA: &str = r#"
-[default]
-source.capture.debezium.dialect = "mysql"
+    fn listed<'t>(
+        listing: &'t table::Tables,
+        sink: &Sink<WarehouseConfig, ArtifactConfig>,
+    ) -> impl Fn(&TableId) -> bool + 't {
+        let artifact = snapshot(sink).series().artifact().clone();
 
-[[source]]
-name = "primary"
-since = "1970-01-01T00:00:00Z"
-topic_prefix = "mysql"
+        move |table| listing.table(table).builds(&artifact)
+    }
 
-[[sink]]
-name = "bigquery"
+    pub(crate) const ARTIFACTS: &str = include_str!("../testdata/step/artifacts.toml");
 
-[sink.warehouse.bigquery]
-project = "local-project"
-change_log = { dataset = "mysql_shop_cdc" }
-place.snapshot = [{ dataset = "mysql_shop" }]
-
-[[sink]]
-name = "duckdb_s3"
-
-[sink.warehouse.duckdb]
-s3 = { endpoint = "http://rustfs:9000", region = "us-east-1", bucket = "lithify", format = "parquet" }
-change_log = { prefix = "mysql_shop_cdc" }
-place.snapshot = [{ prefix = "mysql_shop" }]
-"#;
+    pub(crate) const INFRA: &str = include_str!("../testdata/step/infra.toml");
 
     pub(crate) fn opening(
         name: &str,
         artifacts: &str,
         infra: &str,
         listed: &str,
-    ) -> Result<Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig>, lithify_config::Unreadable>
-    {
+    ) -> Result<
+        Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig>,
+        lithify_pipeline::Unreadable,
+    > {
         let directory =
             std::env::temp_dir().join(format!("lithify-cli-{name}-{}", Ulid::generate()));
         std::fs::create_dir_all(&directory).unwrap();
@@ -359,10 +360,10 @@ place.snapshot = [{ prefix = "mysql_shop" }]
                 Replaying::new(
                     &client,
                     &snapshot(sink),
+                    &namespace(sink),
                     &window,
                     &[],
-                    &Tables::Every,
-                    pipeline.tables(),
+                    listed(pipeline.tables(), sink),
                     &snapshot_build(),
                 ),
             )
@@ -404,10 +405,10 @@ place.snapshot = [{ prefix = "mysql_shop" }]
                 Replaying::new(
                     &client,
                     &snapshot(sink),
+                    &namespace(sink),
                     &window,
                     &[],
-                    &Tables::Every,
-                    pipeline.tables(),
+                    listed(pipeline.tables(), sink),
                     &snapshot_build(),
                 ),
             )
@@ -447,10 +448,10 @@ place.snapshot = [{ prefix = "mysql_shop" }]
                 Replaying::new(
                     &client,
                     &snapshot(sink),
+                    &namespace(sink),
                     &window,
                     &[],
-                    &Tables::Every,
-                    pipeline.tables(),
+                    listed(pipeline.tables(), sink),
                     &snapshot_build(),
                 ),
             )
@@ -487,10 +488,10 @@ place.snapshot = [{ prefix = "mysql_shop" }]
                 Replaying::new(
                     &client,
                     &snapshot(sink),
+                    &namespace(sink),
                     &window,
                     &previous,
-                    &Tables::Every,
-                    pipeline.tables(),
+                    listed(pipeline.tables(), sink),
                     &snapshot_build(),
                 ),
             )
@@ -559,44 +560,10 @@ place.snapshot = [{ prefix = "mysql_shop" }]
         client
     }
 
-    pub(crate) const PEOPLE: &str = "CREATE SCHEMA mysql_shop_cdc;
-        CREATE TABLE mysql_shop_cdc.mysql AS SELECT * FROM (VALUES
-          ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
-            'ddl': 'CREATE TABLE people (id BIGINT)',
-            'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
-              'table': {'primaryKeyColumnNames': ['id'], 'columns': [
-                {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
-                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]})
-        ) AS t(value);
-        CREATE TABLE mysql_shop_cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
-          ({'op': 'c', 'ts_ms': 1789948800001::BIGINT,
-            'source': {'file': 'binlog.000001', 'pos': 3::BIGINT, 'gtid': NULL, 'ts_ms': 1789948800001::BIGINT},
-            'before': NULL::STRUCT(id BIGINT), 'after': {'id': 8::BIGINT}})
-        ) AS t(value)";
+    pub(crate) const PEOPLE: &str = include_str!("../testdata/step/people.sql");
 
-    pub(crate) const BUILT_CHANGE_LOGS: &str = "CREATE SCHEMA mysql_shop_cdc;
-        CREATE TABLE mysql_shop_cdc.mysql AS SELECT * FROM (VALUES
-          ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
-            'ddl': 'CREATE TABLE people (id BIGINT)',
-            'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"people\"',
-              'table': {'primaryKeyColumnNames': ['id'], 'columns': [
-                {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
-                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]}),
-          ({'source': {'file': 'binlog.000001', 'pos': 2::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
-            'ddl': 'CREATE TABLE pets (id BIGINT)',
-            'tableChanges': [{'type': 'CREATE', 'id': '\"shop\".\"pets\"',
-              'table': {'primaryKeyColumnNames': ['id'], 'columns': [
-                {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
-                 'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]})
-        ) AS t(value);
-        CREATE TABLE mysql_shop_cdc.\"mysql.shop.people\" AS SELECT * FROM (VALUES
-          ({'op': 'r', 'ts_ms': 1789862400001::BIGINT,
-            'source': {'file': 'binlog.000001', 'pos': 3::BIGINT, 'gtid': NULL, 'ts_ms': 1789862400001::BIGINT},
-            'before': NULL::STRUCT(id BIGINT), 'after': {'id': 1::BIGINT}}),
-          ({'op': 'r', 'ts_ms': 1789862400001::BIGINT,
-            'source': {'file': 'binlog.000001', 'pos': 4::BIGINT, 'gtid': NULL, 'ts_ms': 1789862400001::BIGINT},
-            'before': NULL::STRUCT(id BIGINT), 'after': {'id': 2::BIGINT}})
-        ) AS t(value)";
+    pub(crate) const BUILT_CHANGE_LOGS: &str =
+        include_str!("../testdata/step/built_change_logs.sql");
 
     pub(crate) fn rows(client: &DuckDbClient, query: &str) -> Vec<(String, String)> {
         client
@@ -651,10 +618,10 @@ place.snapshot = [{ prefix = "mysql_shop" }]
                 Replaying::new(
                     client,
                     &snapshot(sink),
+                    &namespace(sink),
                     &window,
                     &[],
-                    &Tables::Every,
-                    pipeline.tables(),
+                    listed(pipeline.tables(), sink),
                     &DeclaredSnapshot::of(sink)
                         .unwrap()
                         .build(source, Ts::from(at("2026-09-22T05:00:00Z")))

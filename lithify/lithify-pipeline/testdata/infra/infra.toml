@@ -1,0 +1,31 @@
+[default]
+source.capture.debezium.dialect = "mysql"
+
+[[source]]
+name = "primary"
+since = "1970-01-01T00:00:00Z"
+topic_prefix = "mysql"
+
+[[source]]
+name = "replica"
+since = "2026-09-21T00:00:00Z"
+
+capture.debezium.dialect = "postgres"
+
+[[sink]]
+name = "rustfs"
+
+[sink.warehouse.files]
+bucket = "lithify"
+change_log = { prefix = "mysql_shop_cdc" }
+place.snapshot = { prefix = "mysql_shop" }
+place.nine = { prefix = "mysql_shop_0900" }
+
+[[sink]]
+name = "warehouse"
+
+[sink.warehouse.warehouse]
+project = "local-project"
+change_log = { dataset = "mysql_shop_archive" }
+place.snapshot = { dataset = "mysql_shop" }
+place.copy = { dataset = "mysql_shop_copy" }

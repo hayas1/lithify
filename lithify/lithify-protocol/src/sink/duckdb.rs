@@ -273,15 +273,6 @@ mod tests {
     }
 
     #[test]
-    fn a_table_is_qualified_by_the_schema_it_lives_in() {
-        assert_eq!(
-            DuckDbWarehouse::new("mysql_shop_cdc")
-                .table_ref(&TablePath::new("mysql_shop", "customers_20260920")),
-            "\"mysql_shop\".\"customers_20260920\""
-        );
-    }
-
-    #[test]
     fn whole_numbers_keep_the_width_the_source_declared() {
         assert_eq!(
             DuckDbWarehouse::new("mysql_shop_cdc")

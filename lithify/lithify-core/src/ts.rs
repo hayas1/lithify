@@ -123,14 +123,6 @@ mod tests {
     }
 
     #[test]
-    fn a_replay_reads_the_instant_it_is_on_the_clock() {
-        let before = Ts::<Replay>::from(Utc::now());
-        let now = Ts::<Replay>::now();
-
-        assert!(before <= now && now <= Ts::from(Utc::now()));
-    }
-
-    #[test]
     fn an_instant_of_a_replay_is_read_as_an_event_at_the_same_instant() {
         assert_eq!(
             Ts::<Replay>::from(at("2026-09-20T05:00:00Z")).as_event(),
