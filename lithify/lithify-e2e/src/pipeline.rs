@@ -4,7 +4,6 @@ use chrono::Utc;
 
 use lithify_cli::artifacts::{ArtifactConfig, DeclaredSnapshot};
 use lithify_cli::pipeline::{CaptureConfig, WarehouseConfig};
-use lithify_core::artifact::Artifact;
 use lithify_core::model::{TableId, TableModel};
 use lithify_core::ts::{Event, Processing, Ts};
 use lithify_core::window::Window;
@@ -256,12 +255,14 @@ impl<'a> SinkEnd<'a> {
         watch: &Watch,
     ) -> Result<(), Unverifiable> {
         let table = model.id();
+        let snapshot = DeclaredSnapshot::of(self.config)?;
 
         Ok(self.client.snapshot(
             source.capture(),
             Self::topic_prefix(source)?,
             table,
-            &DeclaredSnapshot::of(self.config)?.artifact(),
+            &snapshot.artifact(),
+            snapshot.namespace(),
             &watch.changes(),
         )?)
     }
@@ -278,10 +279,7 @@ impl<'a> SinkEnd<'a> {
         model: &TableModel,
         watch: &Watch,
     ) -> Result<Rows, Unverifiable> {
-        let artifact = DeclaredSnapshot::of(self.config)?.artifact();
-        let target = artifact
-            .target(model.id(), &watch.changes())
-            .map_err(Unbuildable::from)?;
+        let target = DeclaredSnapshot::of(self.config)?.target(model.id(), &watch.changes());
 
         Ok(self.client.rows(&target, model)?)
     }

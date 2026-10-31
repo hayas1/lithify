@@ -60,7 +60,11 @@ fn statements<W: Warehouse>(warehouse: W) -> String {
         Ts::try_from(1789862400000).unwrap(),
         Ts::try_from(1789948800000).unwrap(),
     );
-    let artifact = Snapshot::new("mysql_shop", Shard::new("%Y%m%d", chrono_tz::Tz::UTC));
+    let artifact = Snapshot::new(Shard::new("%Y%m%d", chrono_tz::Tz::UTC));
+    let target = TablePath::new(
+        "mysql_shop",
+        &artifact.table_name(customers().id(), &window),
+    );
     let previous = std::env::args()
         .nth(2)
         .map(|shard| previous(&window, &shard));
@@ -70,12 +74,12 @@ fn statements<W: Warehouse>(warehouse: W) -> String {
         Base::from(previous.as_ref().and_then(BuildLog::target).cloned()),
     );
     let statements = snapshot
-        .create(&warehouse, &ReplayEnd::standing(customers(), None))
+        .create(&warehouse, &ReplayEnd::standing(customers(), None), &target)
         .unwrap();
 
-    statements
-        .iter()
-        .map(ToString::to_string)
+    std::iter::once(warehouse.create_namespace(target.namespace()))
+        .chain(statements)
+        .map(|statement| statement.to_string())
         .collect::<Vec<_>>()
         .join(";\n")
 }

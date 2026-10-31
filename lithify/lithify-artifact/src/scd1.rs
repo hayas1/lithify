@@ -42,20 +42,20 @@ impl Scd1Config {
 pub struct Scd1 {
     name: ArtifactName,
     base: Series,
-    namespace: Namespace,
     copies: Vec<Namespace>,
 }
 
-impl Scd1 {
-    pub fn new(namespace: impl Into<Namespace>) -> Self {
+impl Default for Scd1 {
+    fn default() -> Self {
         Self {
             name: ArtifactName::from(Self::KIND),
             base: Snapshot::days(&ArtifactName::from(Snapshot::KIND)),
-            namespace: namespace.into(),
             copies: Vec::new(),
         }
     }
+}
 
+impl Scd1 {
     pub fn named(self, name: ArtifactName) -> Self {
         Self { name, ..self }
     }
@@ -79,15 +79,8 @@ impl Artifact for Scd1 {
 
     type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = Scd1Builder<'a, Self, L, W>;
 
-    fn namespace(&self) -> &Namespace {
-        &self.namespace
-    }
-
-    fn target(&self, table: &TableId, _: &Window) -> Result<TablePath, UnbuildableArtifact> {
-        Ok(TablePath::new(
-            self.namespace.clone(),
-            &format!("{}_scd_type_1", table.table()),
-        ))
+    fn table_name(&self, table: &TableId, _: &Window) -> String {
+        format!("{}_scd_type_1", table.table())
     }
 
     fn builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>(
@@ -109,7 +102,7 @@ impl ArtifactControl for Scd1 {
         placement: &Placement,
         _: chrono_tz::Tz,
     ) -> Self {
-        Self::new(placement.namespace().clone())
+        Self::default()
             .named(name.clone())
             .copied_into(placement.copies().to_vec())
     }
@@ -292,11 +285,6 @@ impl<'a, A: Overwrite, L: RowChangeLog, W: Warehouse> Scd1Builder<'a, A, L, W> {
         }
     }
 
-    fn target(&self, end: &ReplayEnd<UnbuildableArtifact>) -> Option<TablePath> {
-        end.model()
-            .and_then(|table| self.artifact.target(table.id(), &self.window).ok())
-    }
-
     fn closed(
         &self,
         warehouse: &W,
@@ -441,33 +429,24 @@ impl<A: Overwrite, L: RowChangeLog, W: Warehouse> ArtifactBuilder<L::Position>
         &self,
         warehouse: &W,
         end: &ReplayEnd<UnbuildableArtifact>,
+        target: &TablePath,
     ) -> Result<Vec<SqlString>, UnbuildableArtifact> {
-        let Some(target) = self.target(end) else {
-            if let Some(refused) = end.refusal() {
-                return Err(refused.clone());
-            }
-
-            return Ok(Vec::new());
-        };
         let select = self.select(warehouse, end)?;
-        let copied = SqlString::from(format!("SELECT * FROM {}", warehouse.table_ref(&target)));
+        let copied = SqlString::from(format!("SELECT * FROM {}", warehouse.table_ref(target)));
 
-        Ok([
-            warehouse.create_namespace(target.namespace()),
-            self.artifact.materialize(warehouse, &target, &select),
-        ]
-        .into_iter()
-        .chain(self.artifact.copies().iter().flat_map(|copy| {
-            [
-                warehouse.create_namespace(copy),
-                self.artifact.materialize(
-                    warehouse,
-                    &TablePath::new(copy.clone(), target.name()),
-                    &copied,
-                ),
-            ]
-        }))
-        .collect())
+        Ok([self.artifact.materialize(warehouse, target, &select)]
+            .into_iter()
+            .chain(self.artifact.copies().iter().flat_map(|copy| {
+                [
+                    warehouse.create_namespace(copy),
+                    self.artifact.materialize(
+                        warehouse,
+                        &TablePath::new(copy.clone(), target.name()),
+                        &copied,
+                    ),
+                ]
+            }))
+            .collect())
     }
 }
 
@@ -483,13 +462,11 @@ mod tests {
     #[test]
     fn an_scd1_is_one_table_named_after_the_table_it_holds_the_current_state_of() {
         assert_eq!(
-            Scd1::new("mysql_shop_scd1")
-                .target(
-                    &TableId::new("shop", "people"),
-                    &Window::new(Ts::try_from(10).unwrap(), Ts::try_from(20).unwrap())
-                )
-                .unwrap(),
-            TablePath::new("mysql_shop_scd1", "people_scd_type_1")
+            Scd1::default().table_name(
+                &TableId::new("shop", "people"),
+                &Window::new(Ts::try_from(10).unwrap(), Ts::try_from(20).unwrap())
+            ),
+            "people_scd_type_1"
         );
     }
 
@@ -503,7 +480,7 @@ mod tests {
     const DAY: i64 = 86_400_000;
 
     fn scd1() -> Scd1 {
-        Scd1::new("mysql_shop_scd1")
+        Scd1::default()
     }
 
     fn ts(at: i64) -> Ts<Event> {
@@ -601,10 +578,11 @@ mod tests {
     }
 
     fn shop() -> &'static Snapshot {
-        Box::leak(Box::new(Snapshot::new(
-            "mysql_shop",
-            Shard::new("20260920", Tz::UTC),
-        )))
+        Box::leak(Box::new(Snapshot::new(Shard::new("20260920", Tz::UTC))))
+    }
+
+    fn target(table: &TableId) -> TablePath {
+        TablePath::new("mysql_shop", &shop().table_name(table, &window()))
     }
 
     fn window() -> Window {
@@ -678,7 +656,7 @@ mod tests {
         }
 
         fn create(&self) -> Result<Vec<SqlString>, UnbuildableArtifact> {
-            self.0.create(&self.2, &self.1)
+            self.0.create(&self.2, &self.1, &target(self.table()))
         }
     }
 
@@ -720,7 +698,7 @@ mod tests {
         snapshots.unwrap()[0]
             .create()
             .unwrap()
-            .remove(1)
+            .remove(0)
             .to_string()
     }
 
@@ -733,15 +711,6 @@ mod tests {
             ],
             &["id"],
         )
-    }
-
-    #[test]
-    fn a_snapshot_is_built_into_a_namespace_made_for_it() {
-        let statements = snapshots(customers(), vec![], || None).unwrap()[0]
-            .create()
-            .unwrap();
-
-        assert_eq!(statements[0], "CREATE SCHEMA IF NOT EXISTS \"mysql_shop\"");
     }
 
     #[test]
@@ -841,7 +810,7 @@ mod tests {
             .unwrap()
             .create()
             .unwrap()
-            .remove(1)
+            .remove(0)
             .to_string();
 
         assert!(orders.contains("  FROM \"mysql_shop\".\"orders_20260919\"\n"));
@@ -878,7 +847,7 @@ mod tests {
                 .unwrap()
                 .create()
                 .unwrap()
-                .remove(1)
+                .remove(0)
                 .to_string()
         };
 
@@ -1448,7 +1417,7 @@ mod tests {
 
         assert_eq!(snapshots[0].table(), &TableId::new("shop", "clients"));
         assert!(
-            statements[1]
+            statements[0]
                 .as_str()
                 .starts_with("CREATE OR REPLACE TABLE \"mysql_shop\".\"clients_20260920\" AS\n")
         );
@@ -1533,18 +1502,14 @@ mod tests {
     }
 
     #[test]
-    fn a_snapshot_of_a_table_gone_by_the_end_of_its_window_selects_nothing_and_creates_nothing() {
-        let snapshot: Scd1Builder<'_, Snapshot, Log, Engine> =
-            Scd1Builder::new(shop(), &Log, window(), Base::Missing);
+    fn a_snapshot_of_a_table_gone_by_the_end_of_its_window_selects_nothing() {
+        let window = window();
+        let snapshot = shop().builder::<Log, Engine>(&Log, &window, Base::Missing);
         let end = ReplayEnd::dropped(TableId::new("shop", "customers"), None);
 
         assert_eq!(
             snapshot.select(&Engine::default(), &end).unwrap_err(),
             UnbuildableArtifact::WithoutEra(TableId::new("shop", "customers"))
-        );
-        assert_eq!(
-            snapshot.create(&Engine::default(), &end).unwrap(),
-            Vec::<SqlString>::new()
         );
     }
 
@@ -1554,8 +1519,12 @@ mod tests {
         let fold = shop().builder::<Log, Engine>(&Log, &window, Base::Missing);
 
         assert!(
-            fold.create(&Engine::default(), &ReplayEnd::standing(customers(), None))
-                .unwrap()[1]
+            fold.create(
+                &Engine::default(),
+                &ReplayEnd::standing(customers(), None),
+                &target(customers().id())
+            )
+            .unwrap()[0]
                 .as_str()
                 .starts_with("CREATE OR REPLACE TABLE \"mysql_shop\".\"customers_20260920\" AS\n")
         );
@@ -1568,7 +1537,7 @@ mod tests {
 
         assert!(select.as_str().starts_with("WITH \"base\" AS (\n"));
         assert_eq!(
-            snapshot.create().unwrap()[1],
+            snapshot.create().unwrap()[0],
             format!("CREATE OR REPLACE TABLE \"mysql_shop\".\"customers_20260920\" AS\n{select}")
                 .as_str()
         );
@@ -1576,17 +1545,22 @@ mod tests {
 
     #[test]
     fn a_snapshot_placed_more_than_once_is_copied_from_its_first_placement_into_the_others() {
-        let artifact = Snapshot::new("mysql_shop", Shard::new("20260920", Tz::UTC))
+        let artifact = shop()
+            .clone()
             .copied_into(vec![lithify_core::sink::Namespace::from("analytics.shop")]);
         let window = window();
         let snapshot = artifact.builder::<Log, Engine>(&Log, &window, Base::Missing);
 
         let statements = snapshot
-            .create(&Engine::default(), &ReplayEnd::standing(customers(), None))
+            .create(
+                &Engine::default(),
+                &ReplayEnd::standing(customers(), None),
+                &target(customers().id()),
+            )
             .unwrap();
 
         assert_eq!(
-            statements[2..],
+            statements[1..],
             [
                 "CREATE SCHEMA IF NOT EXISTS \"analytics\".\"shop\"",
                 "CREATE OR REPLACE TABLE \"analytics\".\"shop\".\"customers_20260920\" AS\nSELECT * FROM \"mysql_shop\".\"customers_20260920\""

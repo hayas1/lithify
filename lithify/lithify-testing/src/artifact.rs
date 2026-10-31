@@ -4,24 +4,14 @@ use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
 use lithify_core::build::Base;
 use lithify_core::listener::{ReplayEnd, SchemaChangeListener};
 use lithify_core::model::TableId;
-use lithify_core::sink::{Namespace, TablePath, Warehouse};
+use lithify_core::sink::{TablePath, Warehouse};
 use lithify_core::source::RowChangeLog;
 use lithify_core::sql::SqlString;
 use lithify_core::window::Window;
 
-// Builds each table it is told of into its namespace under the table's own name, with one
-// statement saying what it was built onto, so a test reads what the core planned rather than SQL.
-pub struct Mirror {
-    namespace: Namespace,
-}
-
-impl Mirror {
-    pub fn new(namespace: &str) -> Self {
-        Self {
-            namespace: Namespace::from(namespace),
-        }
-    }
-}
+// Builds each table it is told of under the table's own name, with one statement saying what it
+// was built onto and into, so a test reads what the core planned rather than SQL.
+pub struct Mirror;
 
 impl Artifact for Mirror {
     const KIND: &'static str = "mirror";
@@ -30,12 +20,8 @@ impl Artifact for Mirror {
 
     type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = Mirroring<W>;
 
-    fn namespace(&self) -> &Namespace {
-        &self.namespace
-    }
-
-    fn target(&self, table: &TableId, _: &Window) -> Result<TablePath, UnbuildableArtifact> {
-        Ok(TablePath::new(self.namespace.clone(), table.table()))
+    fn table_name(&self, table: &TableId, _: &Window) -> String {
+        table.table().to_owned()
     }
 
     fn builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>(
@@ -80,16 +66,13 @@ impl<P, W> ArtifactBuilder<P> for Mirroring<W> {
         &self,
         warehouse: &W,
         end: &ReplayEnd<UnbuildableArtifact>,
+        target: &TablePath,
     ) -> Result<Vec<SqlString>, UnbuildableArtifact> {
         if let Some(refused) = end.refusal() {
             return Err(refused.clone());
         }
+        let select = <Self as ArtifactBuilder<P>>::select(self, warehouse, end)?;
 
-        match end.model() {
-            Some(_) => Ok(vec![<Self as ArtifactBuilder<P>>::select(
-                self, warehouse, end,
-            )?]),
-            None => Ok(Vec::new()),
-        }
+        Ok(vec![SqlString::from(format!("{select} into {target}"))])
     }
 }

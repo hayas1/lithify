@@ -10,7 +10,7 @@ use lithify_core::listener::OutOfOrder;
 use lithify_core::listener::ReplayEnd;
 use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
 use lithify_core::runner::Replayer;
-use lithify_core::sink::WarehouseClient;
+use lithify_core::sink::{Namespace, TablePath, WarehouseClient, WarehouseSql};
 use lithify_core::source::SchemaChangeStream;
 use lithify_core::sql::SqlString;
 use lithify_core::ts::Ts;
@@ -40,10 +40,22 @@ async fn a_snapshot_holds_each_key_as_the_change_log_last_left_it() {
     client.execute(&SqlString::from(CHANGE_LOG)).await.unwrap();
     let log = Debezium::under("value", "mysql", MySql);
     let window = Window::new(Ts::try_from(0).unwrap(), Ts::try_from(10).unwrap());
-    let artifact = Snapshot::new("shop_snapshot", Shard::new("%Y%m%d", chrono_tz::Tz::UTC));
+    let artifact = Snapshot::new(Shard::new("%Y%m%d", chrono_tz::Tz::UTC));
+    let target = TablePath::new(
+        "shop_snapshot",
+        &artifact.table_name(people().id(), &window),
+    );
+    client
+        .execute(&client.warehouse().create_namespace(target.namespace()))
+        .await
+        .unwrap();
     let statements = artifact
         .builder::<_, DuckDbWarehouse>(&log, &window, Base::Missing)
-        .create(client.warehouse(), &ReplayEnd::standing(people(), None))
+        .create(
+            client.warehouse(),
+            &ReplayEnd::standing(people(), None),
+            &target,
+        )
         .unwrap();
     for statement in &statements {
         client.execute(statement).await.unwrap();
@@ -76,10 +88,11 @@ fn rows(client: &DuckDbClient, query: &str) -> Vec<String> {
 
 async fn build_snapshots(client: &DuckDbClient, window: &Window) {
     let log = Debezium::under("value", "mysql", MySql);
-    let artifact = Snapshot::new("shop_snapshot", Shard::new("%Y%m%d", chrono_tz::Tz::UTC));
+    let artifact = Snapshot::new(Shard::new("%Y%m%d", chrono_tz::Tz::UTC));
+    let namespace = Namespace::from("shop_snapshot");
     let history = client.history::<Unbuilt>(&log, window).await.unwrap();
     let builds = Replayer::new(client.warehouse(), &log)
-        .planned::<_, Unbuilt>(&history, &artifact, window, |_| None, |_| true)
+        .planned::<_, Unbuilt>(&history, &artifact, &namespace, window, |_| None, |_| true)
         .unwrap();
     for build in builds {
         for statement in build.statements().unwrap() {

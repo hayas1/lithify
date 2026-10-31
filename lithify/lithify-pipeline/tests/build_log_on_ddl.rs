@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use lithify_artifact::shard::Shard;
 use lithify_artifact::snapshot::Snapshot;
 use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
+use lithify_core::sink::Namespace;
 use lithify_core::ts::{Event, Ts};
 use lithify_core::window::Window;
 use lithify_pipeline::build_log::{BuildLog, Status};
@@ -34,7 +35,11 @@ fn keyed(name: &str) -> TableModel {
 }
 
 fn snapshot() -> Snapshot {
-    Snapshot::new("shop_snapshot", Shard::new("%Y%m%d", chrono_tz::Tz::UTC))
+    Snapshot::new(Shard::new("%Y%m%d", chrono_tz::Tz::UTC))
+}
+
+fn namespace() -> Namespace {
+    Namespace::from("shop_snapshot")
 }
 
 fn opened() -> Replica {
@@ -62,8 +67,10 @@ fn passed(built: &[BuildLog]) -> BTreeSet<(Option<TableId>, Option<TableId>)> {
 
 async fn two_days(replica: &Replica) -> (Vec<BuildLog>, Vec<BuildLog>) {
     let shards = Shards::over(replica).await;
-    let first = shards.settle(&snapshot(), &day(0), &[]).await;
-    let second = shards.settle(&snapshot(), &day(1), &first).await;
+    let first = shards.settle(&snapshot(), &namespace(), &day(0), &[]).await;
+    let second = shards
+        .settle(&snapshot(), &namespace(), &day(1), &first)
+        .await;
 
     (first, second)
 }

@@ -10,7 +10,7 @@ use lithify_cli::pipeline::{self, CaptureConfig};
 use lithify_core::artifact::UnbuildableArtifact;
 use lithify_core::listener::OutOfOrder;
 use lithify_core::model::{TableId, TableModel};
-use lithify_core::sink::{ChangeLogSql, TablePath, WarehouseClient, WarehouseSql};
+use lithify_core::sink::{ChangeLogSql, Namespace, TablePath, WarehouseClient, WarehouseSql};
 use lithify_core::source::{
     ChangeLog, ChangeLogs, ColumnPath, RowChangeLog, SchemaChangeLog, SchemaChangeStream,
 };
@@ -50,6 +50,7 @@ pub trait Sink {
         topic_prefix: &str,
         table: &TableId,
         artifact: &Snapshot,
+        namespace: &Namespace,
         window: &Window,
     ) -> Result<(), Unbuildable>;
 
@@ -194,6 +195,7 @@ impl Sink for DuckDb {
         topic_prefix: &str,
         table: &TableId,
         artifact: &Snapshot,
+        namespace: &Namespace,
         window: &Window,
     ) -> Result<(), Unbuildable> {
         self.runtime.block_on(capture.with_duckdb_change_logs(
@@ -202,6 +204,7 @@ impl Sink for DuckDb {
                 client: &self.client,
                 table,
                 artifact,
+                namespace,
                 window,
             },
         ))
@@ -289,6 +292,7 @@ struct SnapshotBuild<'a> {
     client: &'a DuckDbClient,
     table: &'a TableId,
     artifact: &'a Snapshot,
+    namespace: &'a Namespace,
     window: &'a Window,
 }
 
@@ -301,7 +305,9 @@ impl DuckDbChangeLogsFn for SnapshotBuild<'_> {
         <C::Schema as SchemaChangeLog>::Record: FromSql,
     {
         let built = Runner::new(self.client, &logs)
-            .built::<_, Unbuildable>(self.artifact, self.window, &[], |table| table == self.table)
+            .built::<_, Unbuildable>(self.artifact, self.namespace, self.window, &[], |table| {
+                table == self.table
+            })
             .await?
             .into_iter()
             .find(|built| built.table() == Some(self.table))

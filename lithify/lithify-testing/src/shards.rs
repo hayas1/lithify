@@ -4,7 +4,7 @@ use duckdb::types::Value;
 use ulid::Ulid;
 
 use lithify_core::model::ColumnName;
-use lithify_core::sink::WarehouseClient;
+use lithify_core::sink::{Namespace, WarehouseClient};
 use lithify_core::ts::Ts;
 use lithify_core::window::Window;
 use lithify_pipeline::artifact::ArtifactControl;
@@ -33,10 +33,11 @@ impl Shards {
     pub async fn build<A: ArtifactControl>(
         &self,
         artifact: &A,
+        namespace: &Namespace,
         window: &Window,
         previous: &[BuildLog],
     ) -> BuildLog {
-        let mut built = self.settle(artifact, window, previous).await;
+        let mut built = self.settle(artifact, namespace, window, previous).await;
         assert_eq!(built.len(), 1);
         let built = built.remove(0);
         assert_eq!(built.status(), &Status::Succeeded);
@@ -47,6 +48,7 @@ impl Shards {
     pub async fn settle<A: ArtifactControl>(
         &self,
         artifact: &A,
+        namespace: &Namespace,
         window: &Window,
         previous: &[BuildLog],
     ) -> Vec<BuildLog> {
@@ -62,7 +64,7 @@ impl Shards {
         );
 
         Runner::new(&self.client, &log)
-            .built::<_, Box<dyn std::error::Error>>(artifact, window, previous, |_| true)
+            .built::<_, Box<dyn std::error::Error>>(artifact, namespace, window, previous, |_| true)
             .await
             .unwrap()
             .into_iter()

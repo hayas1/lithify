@@ -4,7 +4,7 @@ use crate::artifact::Artifact;
 use crate::build::{TableBuild, TableBuilder};
 use crate::listener::{Finish, OutOfOrder};
 use crate::model::TableId;
-use crate::sink::{TablePath, Warehouse};
+use crate::sink::{Namespace, TablePath, Warehouse};
 use crate::source::{RowChangeLog, SchemaHistory};
 use crate::table_listeners::TableListeners;
 use crate::window::Window;
@@ -27,6 +27,7 @@ where
         &self,
         history: &SchemaHistory<L::Position>,
         artifact: &'a A,
+        namespace: &'a Namespace,
         window: &'a Window,
         base: impl Fn(&TableId) -> Option<TablePath>,
         finishes: impl Fn(&TableId) -> bool,
@@ -39,6 +40,7 @@ where
                 TableBuilder::opening::<L, W>(
                     artifact,
                     self.log,
+                    namespace,
                     window,
                     table,
                     encounter,

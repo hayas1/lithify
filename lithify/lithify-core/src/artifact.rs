@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::build::Base;
 use crate::listener::{ReplayEnd, SchemaChangeListener};
 use crate::model::TableId;
-use crate::sink::{Namespace, TablePath, UnsupportedColumn, Warehouse};
+use crate::sink::{TablePath, UnsupportedColumn, Warehouse};
 use crate::source::RowChangeLog;
 use crate::sql::SqlString;
 use crate::window::Window;
@@ -107,9 +107,7 @@ pub trait Artifact {
     where
         Self: 'a;
 
-    fn namespace(&self) -> &Namespace;
-
-    fn target(&self, table: &TableId, window: &Window) -> Result<TablePath, UnbuildableArtifact>;
+    fn table_name(&self, table: &TableId, window: &Window) -> String;
 
     fn builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>(
         &'a self,
@@ -130,5 +128,6 @@ pub trait ArtifactBuilder<P>: SchemaChangeListener<P, Error = UnbuildableArtifac
         &self,
         warehouse: &Self::Context,
         end: &ReplayEnd<UnbuildableArtifact>,
+        target: &TablePath,
     ) -> Result<Vec<SqlString>, UnbuildableArtifact>;
 }

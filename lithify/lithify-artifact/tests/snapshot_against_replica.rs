@@ -28,7 +28,11 @@ fn people() -> TableModel {
 }
 
 fn snapshot() -> Snapshot {
-    Snapshot::new("shop_snapshot", Shard::new("%Y%m%d", chrono_tz::Tz::UTC))
+    Snapshot::new(Shard::new("%Y%m%d", chrono_tz::Tz::UTC))
+}
+
+fn into(namespace: &str) -> Namespace {
+    Namespace::from(namespace)
 }
 
 fn as_of(shards: &Shards, tables: &[TablePath], at: i64) -> Vec<Row> {
@@ -102,7 +106,9 @@ async fn a_snapshot_holds_what_the_source_held_as_its_window_closed() {
     let replica = replica();
     let shards = Shards::over(&replica).await;
 
-    let built = shards.build(&snapshot(), &day(0), &[]).await;
+    let built = shards
+        .build(&snapshot(), &into("shop_snapshot"), &day(0), &[])
+        .await;
 
     assert_eq!(
         shards.rows(&built),
@@ -126,8 +132,12 @@ async fn a_snapshot_holds_a_column_added_within_its_window_as_the_source_held_it
         );
     let shards = Shards::over(&replica).await;
 
-    let first = shards.build(&snapshot(), &day(0), &[]).await;
-    let second = shards.build(&snapshot(), &day(1), &[first]).await;
+    let first = shards
+        .build(&snapshot(), &into("shop_snapshot"), &day(0), &[])
+        .await;
+    let second = shards
+        .build(&snapshot(), &into("shop_snapshot"), &day(1), &[first])
+        .await;
 
     assert_eq!(
         shards.rows(&second),
@@ -144,8 +154,12 @@ async fn a_snapshot_leaves_out_a_column_dropped_within_its_window_as_the_source_
     );
     let shards = Shards::over(&replica).await;
 
-    let first = shards.build(&snapshot(), &day(0), &[]).await;
-    let second = shards.build(&snapshot(), &day(1), &[first]).await;
+    let first = shards
+        .build(&snapshot(), &into("shop_snapshot"), &day(0), &[])
+        .await;
+    let second = shards
+        .build(&snapshot(), &into("shop_snapshot"), &day(1), &[first])
+        .await;
 
     assert_eq!(
         shards.rows(&second),
@@ -168,8 +182,12 @@ async fn a_snapshot_carries_a_column_renamed_within_its_window_under_its_new_nam
         );
     let shards = Shards::over(&replica).await;
 
-    let first = shards.build(&snapshot(), &day(0), &[]).await;
-    let second = shards.build(&snapshot(), &day(1), &[first]).await;
+    let first = shards
+        .build(&snapshot(), &into("shop_snapshot"), &day(0), &[])
+        .await;
+    let second = shards
+        .build(&snapshot(), &into("shop_snapshot"), &day(1), &[first])
+        .await;
 
     assert_eq!(
         shards.rows(&second),
@@ -182,8 +200,12 @@ async fn a_snapshot_folded_onto_the_one_before_holds_what_the_source_held_as_its
     let replica = replica();
     let shards = Shards::over(&replica).await;
 
-    let first = shards.build(&snapshot(), &day(0), &[]).await;
-    let second = shards.build(&snapshot(), &day(1), &[first]).await;
+    let first = shards
+        .build(&snapshot(), &into("shop_snapshot"), &day(0), &[])
+        .await;
+    let second = shards
+        .build(&snapshot(), &into("shop_snapshot"), &day(1), &[first])
+        .await;
 
     assert_eq!(
         shards.rows(&second),
@@ -198,14 +220,22 @@ async fn an_instant_holds_what_the_source_held_as_it_was_cut() {
     let six = Instant::new(
         NaiveTime::from_hms_opt(6, 0, 0).unwrap(),
         Schedule::default(),
-        "shop_instant",
         Shard::new("%Y%m%d%H", chrono_tz::Tz::UTC),
     );
-    let first = shards.build(&snapshot(), &day(0), &[]).await;
+    let first = shards
+        .build(&snapshot(), &into("shop_snapshot"), &day(0), &[])
+        .await;
     let timeline = Timeline::new(Schedule::default(), *day(0).from()..*day(2).to());
     let cut = six.window(&day(1), &timeline).unwrap();
 
-    let instant = shards.build(&six, &cut, std::slice::from_ref(&first)).await;
+    let instant = shards
+        .build(
+            &six,
+            &into("shop_instant"),
+            &cut,
+            std::slice::from_ref(&first),
+        )
+        .await;
 
     assert_eq!(
         shards.rows(&instant),
@@ -217,22 +247,29 @@ async fn an_instant_holds_what_the_source_held_as_it_was_cut() {
 async fn an_scd1_holds_what_the_source_holds_now_onto_the_last_daily_snapshot() {
     let replica = replica();
     let shards = Shards::over(&replica).await;
-    let scd1 = Scd1::new("shop_scd1");
-    let first = shards.build(&snapshot(), &day(0), &[]).await;
+    let scd1 = Scd1::default();
+    let first = shards
+        .build(&snapshot(), &into("shop_snapshot"), &day(0), &[])
+        .await;
     let built = at(DAY + 1_500);
     let now = at(i64::from(i32::MAX));
     let timeline = Timeline::new(Schedule::default(), *day(0).from()..built);
     let window = scd1.window(&day(1), &timeline).unwrap();
 
     let current = shards
-        .build(&scd1, &window, std::slice::from_ref(&first))
+        .build(
+            &scd1,
+            &into("shop_scd1"),
+            &window,
+            std::slice::from_ref(&first),
+        )
         .await;
 
     assert_eq!(shards.rows(&current), held(&replica, now, people().id()));
 }
 
 fn scd2() -> Scd2 {
-    Scd2::new(Namespace::from("shop_scd2"), "%Y%m%d", chrono_tz::Tz::UTC)
+    Scd2::new("%Y%m%d", chrono_tz::Tz::UTC)
 }
 
 #[tokio::test]
@@ -240,13 +277,18 @@ async fn an_scd2_holds_at_every_instant_the_version_the_source_held_then() {
     let replica = replica();
     let shards = Shards::over(&replica).await;
     let scd2 = scd2();
-    let first = shards.build(&scd2, &day(0), &[]).await;
+    let first = shards.build(&scd2, &into("shop_scd2"), &day(0), &[]).await;
     let second = shards
-        .build(&scd2, &day(1), std::slice::from_ref(&first))
+        .build(
+            &scd2,
+            &into("shop_scd2"),
+            &day(1),
+            std::slice::from_ref(&first),
+        )
         .await;
     let versions = [
-        scd2.closed(people().id(), &day(0)),
-        scd2.closed(people().id(), &day(1)),
+        scd2.closed(&Namespace::from("shop_scd2"), people().id(), &day(0)),
+        scd2.closed(&Namespace::from("shop_scd2"), people().id(), &day(1)),
         second.target().unwrap().clone(),
     ];
 
@@ -274,18 +316,28 @@ async fn an_scd2_built_again_for_a_window_holds_the_same_versions() {
     let replica = replica();
     let shards = Shards::over(&replica).await;
     let scd2 = scd2();
-    let first = shards.build(&scd2, &day(0), &[]).await;
+    let first = shards.build(&scd2, &into("shop_scd2"), &day(0), &[]).await;
     let second = shards
-        .build(&scd2, &day(1), std::slice::from_ref(&first))
+        .build(
+            &scd2,
+            &into("shop_scd2"),
+            &day(1),
+            std::slice::from_ref(&first),
+        )
         .await;
     let versions = [
-        scd2.closed(people().id(), &day(1)),
+        scd2.closed(&Namespace::from("shop_scd2"), people().id(), &day(1)),
         second.target().unwrap().clone(),
     ];
     let built = as_of(&shards, &versions, DAY + 2_500);
 
     shards
-        .build(&scd2, &day(1), std::slice::from_ref(&first))
+        .build(
+            &scd2,
+            &into("shop_scd2"),
+            &day(1),
+            std::slice::from_ref(&first),
+        )
         .await;
 
     assert_eq!(as_of(&shards, &versions, DAY + 2_500), built);
@@ -319,8 +371,12 @@ fn of<'a>(built: &'a [BuildLog], table: &TableId) -> &'a BuildLog {
 
 async fn two_days(replica: &Replica) -> (Shards, Vec<BuildLog>) {
     let shards = Shards::over(replica).await;
-    let first = shards.settle(&snapshot(), &day(0), &[]).await;
-    let second = shards.settle(&snapshot(), &day(1), &first).await;
+    let first = shards
+        .settle(&snapshot(), &into("shop_snapshot"), &day(0), &[])
+        .await;
+    let second = shards
+        .settle(&snapshot(), &into("shop_snapshot"), &day(1), &first)
+        .await;
 
     (shards, second)
 }

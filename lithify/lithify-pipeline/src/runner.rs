@@ -134,6 +134,7 @@ where
     pub async fn built<A: ArtifactControl, E>(
         &self,
         artifact: &'a A,
+        namespace: &'a Namespace,
         window: &'a Window,
         previous: &[BuildLog],
         finishes: impl Fn(&TableId) -> bool,
@@ -152,6 +153,7 @@ where
             .planned::<A, E>(
                 &history,
                 artifact,
+                namespace,
                 window,
                 |table| {
                     artifact
@@ -171,10 +173,10 @@ where
     pub async fn run<A: ArtifactControl, B: BuildLogWriter, E>(
         &self,
         artifact: &'a A,
+        namespace: &'a Namespace,
         window: &'a Window,
         previous: &[BuildLog],
-        tables: &Tables,
-        builds: impl Fn(&TableId) -> bool,
+        finishes: impl Fn(&TableId) -> bool,
         writer: &B,
     ) -> Result<B::Output, E>
     where
@@ -185,9 +187,7 @@ where
         <K as SchemaChangeStream<C::Schema>>::Error: Into<E>,
     {
         let built = self
-            .built::<A, E>(artifact, window, previous, |table| {
-                tables.includes(table) && builds(table)
-            })
+            .built::<A, E>(artifact, namespace, window, previous, finishes)
             .await?;
 
         writer.write(self.client, built).await
@@ -206,6 +206,7 @@ pub trait StepTaker {
     async fn take<A: ArtifactControl, B: BuildLogWriter>(
         &self,
         artifact: &A,
+        namespace: &Namespace,
         window: &Window,
         previous: &[BuildLog],
         tables: &Tables,

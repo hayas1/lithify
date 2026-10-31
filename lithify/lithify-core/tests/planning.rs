@@ -7,7 +7,7 @@ use lithify_core::build::{Base, TableBuild};
 use lithify_core::event::{SchemaChange, TableChange};
 use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
 use lithify_core::runner::Replayer;
-use lithify_core::sink::TablePath;
+use lithify_core::sink::{Namespace, TablePath};
 use lithify_core::source::SchemaHistory;
 use lithify_core::ts::{Event, Ts};
 use lithify_core::window::Window;
@@ -52,7 +52,14 @@ fn planned_with(
     let window = window();
 
     Replayer::new(&Engine::default(), &Log)
-        .planned::<_, Untold>(history, &Mirror::new("shelf"), &window, base, finishes)
+        .planned::<_, Untold>(
+            history,
+            &Mirror,
+            &Namespace::from("shelf"),
+            &window,
+            base,
+            finishes,
+        )
         .unwrap()
 }
 
@@ -93,7 +100,10 @@ fn a_table_the_window_opened_with_is_planned_onto_what_its_name_was_built_into()
             Base::Built(built_before(&table("people"))),
             Some(TablePath::new("shelf", "people")),
             window(),
-            Ok(vec!["shop.people onto shelf.people_before".into()]),
+            Ok(vec![
+                "CREATE SCHEMA IF NOT EXISTS \"shelf\"".into(),
+                "shop.people onto shelf.people_before into shelf.people".into()
+            ]),
         )]
     );
 }

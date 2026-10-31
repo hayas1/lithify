@@ -37,7 +37,6 @@ impl Scd2Config {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scd2 {
     name: ArtifactName,
-    namespace: Namespace,
     open: Shard,
     closed: Shard,
 }
@@ -46,10 +45,9 @@ impl Scd2 {
     pub const VALID_FROM: &'static str = "_valid_from";
     pub const VALID_TO: &'static str = "_valid_to";
 
-    pub fn new(namespace: Namespace, shard: &str, zone: Tz) -> Self {
+    pub fn new(shard: &str, zone: Tz) -> Self {
         Self {
             name: ArtifactName::from(Self::KIND),
-            namespace,
             open: Shard::new(&format!("open_{shard}"), zone),
             closed: Shard::new(&format!("closed_{shard}"), zone),
         }
@@ -61,11 +59,8 @@ impl Scd2 {
 
     // The versions of a day are those it closed and those it left open as it ended, so both are
     // named after the last instant the window holds, as a snapshot of that day is.
-    pub fn closed(&self, table: &TableId, window: &Window) -> TablePath {
-        TablePath::new(
-            self.namespace.clone(),
-            &self.closed.name(table, window.last()),
-        )
+    pub fn closed(&self, namespace: &Namespace, table: &TableId, window: &Window) -> TablePath {
+        TablePath::new(namespace.clone(), &self.closed.name(table, window.last()))
     }
 }
 
@@ -76,15 +71,8 @@ impl Artifact for Scd2 {
 
     type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = Scd2Builder<'a, L, W>;
 
-    fn namespace(&self) -> &Namespace {
-        &self.namespace
-    }
-
-    fn target(&self, table: &TableId, window: &Window) -> Result<TablePath, UnbuildableArtifact> {
-        Ok(TablePath::new(
-            self.namespace.clone(),
-            &self.open.name(table, window.last()),
-        ))
+    fn table_name(&self, table: &TableId, window: &Window) -> String {
+        self.open.name(table, window.last())
     }
 
     fn builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>(
@@ -109,8 +97,8 @@ impl ArtifactControl for Scd2 {
 
     // An scd2 is built into its first placement alone, as its versions are appended rather than
     // created whole and so cannot be copied as they are built.
-    fn declared(name: &ArtifactName, config: &Scd2Config, placement: &Placement, zone: Tz) -> Self {
-        Self::new(placement.namespace().clone(), config.shard(), zone).named(name.clone())
+    fn declared(name: &ArtifactName, config: &Scd2Config, _: &Placement, zone: Tz) -> Self {
+        Self::new(config.shard(), zone).named(name.clone())
     }
 
     fn series(&self) -> Series {
@@ -152,11 +140,6 @@ struct Versions {
 }
 
 impl<L: RowChangeLog, W: Warehouse> Scd2Builder<'_, L, W> {
-    fn target(&self, end: &ReplayEnd<UnbuildableArtifact>) -> Option<TablePath> {
-        end.model()
-            .and_then(|table| self.scd2.target(table.id(), &self.window).ok())
-    }
-
     fn versions_at(
         &self,
         warehouse: &W,
@@ -361,17 +344,18 @@ impl<L: RowChangeLog, W: Warehouse> ArtifactBuilder<L::Position> for Scd2Builder
         &self,
         warehouse: &W,
         end: &ReplayEnd<UnbuildableArtifact>,
+        target: &TablePath,
     ) -> Result<Vec<SqlString>, UnbuildableArtifact> {
-        let versions = self.versions_at(warehouse, end)?;
-        let (Some(target), Some(versions)) = (self.target(end), versions) else {
+        let Some(versions) = self.versions_at(warehouse, end)? else {
             return Ok(Vec::new());
         };
-        let closed = self.scd2.closed(end.table(), &self.window);
+        let closed = self
+            .scd2
+            .closed(target.namespace(), end.table(), &self.window);
 
         Ok(vec![
-            warehouse.create_namespace(target.namespace()),
             warehouse.create_table_as(&closed, &versions.closed),
-            warehouse.create_table_as(&target, &versions.open),
+            warehouse.create_table_as(target, &versions.open),
         ])
     }
 }
@@ -392,7 +376,7 @@ mod tests {
 
     #[test]
     fn an_scd2_appends_the_day_it_is_built_for() {
-        let scd2 = Scd2::new(Namespace::from("mysql_shop_scd2"), "%Y%m%d", Tz::UTC);
+        let scd2 = Scd2::new("%Y%m%d", Tz::UTC);
         let timeline = Timeline::new(
             Schedule::default(),
             Ts::try_from(0).unwrap()..Ts::try_from(DAY * 3 + 5).unwrap(),
@@ -425,7 +409,7 @@ mod tests {
 
     #[test]
     fn an_scd2_whose_table_changed_its_schema_within_the_window_is_refused() {
-        let scd2 = Scd2::new(Namespace::from("mysql_shop_scd2"), "%Y%m%d", Tz::UTC);
+        let scd2 = Scd2::new("%Y%m%d", Tz::UTC);
         let window = Window::new(Ts::try_from(10).unwrap(), Ts::try_from(20).unwrap());
         let mut versions = scd2.builder::<Log, Engine>(&Log, &window, Base::Missing);
         let mut catalog = CatalogModel::default();

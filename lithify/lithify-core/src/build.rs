@@ -6,7 +6,7 @@ use crate::listener::{
     Finish, ReplayEnd, SchemaChangeListener, TableAltered, TableCreated, TableDropped, TableRenamed,
 };
 use crate::model::TableId;
-use crate::sink::{TablePath, Warehouse};
+use crate::sink::{Namespace, TablePath, Warehouse, WarehouseSql};
 use crate::source::RowChangeLog;
 use crate::sql::SqlString;
 use crate::table_listeners::Encounter;
@@ -102,6 +102,7 @@ impl TableBuild {
 // opened the window under and what it is built onto, around the fold the artifact keeps of it.
 pub struct TableBuilder<'a, A, B> {
     artifact: &'a A,
+    namespace: &'a Namespace,
     window: &'a Window,
     table_from: Option<TableId>,
     base: Base,
@@ -112,6 +113,7 @@ impl<'a, A, B> TableBuilder<'a, A, B> {
     pub fn opening<L, W>(
         artifact: &'a A,
         log: &'a L,
+        namespace: &'a Namespace,
         window: &'a Window,
         table: &TableId,
         encounter: Encounter,
@@ -126,6 +128,7 @@ impl<'a, A, B> TableBuilder<'a, A, B> {
 
         Self {
             artifact,
+            namespace,
             window,
             table_from: encounter.table_from(table),
             builder: artifact.builder::<L, W>(log, window, base.clone()),
@@ -190,10 +193,29 @@ where
     }
 }
 
+impl<A: Artifact, B> TableBuilder<'_, A, B> {
+    fn made<P>(
+        &self,
+        warehouse: &B::Context,
+        end: &ReplayEnd<UnbuildableArtifact>,
+        target: &TablePath,
+    ) -> Result<Vec<SqlString>, UnbuildableArtifact>
+    where
+        B: ArtifactBuilder<P>,
+        B::Context: Warehouse,
+    {
+        Ok([warehouse.create_namespace(target.namespace())]
+            .into_iter()
+            .chain(self.builder.create(warehouse, end, target)?)
+            .collect())
+    }
+}
+
 impl<P, A, B> Finish<P> for TableBuilder<'_, A, B>
 where
     A: Artifact,
     B: ArtifactBuilder<P>,
+    B::Context: Warehouse,
 {
     type Input = ReplayEnd<UnbuildableArtifact>;
     type Output = TableBuild;
@@ -204,9 +226,16 @@ where
         context: &B::Context,
         end: ReplayEnd<UnbuildableArtifact>,
     ) -> Result<TableBuild, Infallible> {
-        let target = end
-            .model()
-            .and_then(|table| self.artifact.target(table.id(), self.window).ok());
+        let target = end.model().map(|table| {
+            TablePath::new(
+                self.namespace.clone(),
+                &self.artifact.table_name(table.id(), self.window),
+            )
+        });
+        let making = match &target {
+            Some(target) => self.made(context, &end, target),
+            None => end.refusal().cloned().map_or(Ok(Vec::new()), Err),
+        };
 
         Ok(TableBuild::new(
             self.table_from,
@@ -214,7 +243,7 @@ where
             self.base,
             target,
             self.window.clone(),
-            self.builder.create(context, &end),
+            making,
         ))
     }
 }
