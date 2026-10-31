@@ -9,6 +9,7 @@ use lithify_artifact::instant::Instant;
 use lithify_artifact::scd1::Scd1;
 use lithify_artifact::scd2::Scd2;
 use lithify_artifact::snapshot::Snapshot;
+use lithify_artifact::snapshot_provide::SnapshotProvide;
 use lithify_core::artifact::{Artifact, ArtifactName};
 use lithify_core::model::TableId;
 use lithify_core::sink::{Namespace, TablePath};
@@ -29,19 +30,20 @@ use crate::report::Report;
 use crate::unrunnable::Unrunnable;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(tag = "kind", rename_all = "lowercase")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ArtifactConfig {
     Snapshot(<Snapshot as ArtifactControl>::Config),
     Instant(<Instant as ArtifactControl>::Config),
     Scd1(<Scd1 as ArtifactControl>::Config),
     Scd2(<Scd2 as ArtifactControl>::Config),
+    SnapshotProvide(<SnapshotProvide as ArtifactControl>::Config),
 }
 
 impl ArtifactConfig {
     pub fn as_snapshot(&self) -> Option<&<Snapshot as ArtifactControl>::Config> {
         match self {
             Self::Snapshot(config) => Some(config),
-            Self::Instant(_) | Self::Scd1(_) | Self::Scd2(_) => None,
+            Self::Instant(_) | Self::Scd1(_) | Self::Scd2(_) | Self::SnapshotProvide(_) => None,
         }
     }
 
@@ -69,6 +71,12 @@ impl ArtifactConfig {
                 let (scd2, namespace) = Declared::artifact(sink, name, config)?;
                 Declared::Scd2(scd2, namespace)
             }
+            Self::SnapshotProvide(config) => {
+                let (provide, namespace) =
+                    Declared::artifact::<SnapshotProvide>(sink, name, config)?;
+                let base = DeclaredSnapshot::named(sink, name, config.base())?;
+                Declared::SnapshotProvide(provide.based_on(&base.snapshot), namespace)
+            }
         })
     }
 }
@@ -80,6 +88,7 @@ impl Declaration for ArtifactConfig {
             Self::Instant(_) => Instant::KIND,
             Self::Scd1(_) => Scd1::KIND,
             Self::Scd2(_) => Scd2::KIND,
+            Self::SnapshotProvide(_) => SnapshotProvide::KIND,
         }
     }
 
@@ -89,6 +98,7 @@ impl Declaration for ArtifactConfig {
             Self::Instant(_) => <Instant as Artifact>::From::KIND,
             Self::Scd1(_) => <Scd1 as Artifact>::From::KIND,
             Self::Scd2(_) => <Scd2 as Artifact>::From::KIND,
+            Self::SnapshotProvide(_) => <SnapshotProvide as Artifact>::From::KIND,
         }
     }
 
@@ -97,13 +107,14 @@ impl Declaration for ArtifactConfig {
             Self::Snapshot(_) | Self::Scd2(_) => None,
             Self::Instant(config) => Some(config.base()),
             Self::Scd1(config) => Some(config.base()),
+            Self::SnapshotProvide(config) => Some(config.base()),
         }
     }
 
     fn schedule(&self, time_zone: Tz) -> Option<Schedule> {
         match self {
             Self::Snapshot(config) => Some(config.schedule(time_zone)),
-            Self::Instant(_) | Self::Scd1(_) | Self::Scd2(_) => None,
+            Self::Instant(_) | Self::Scd1(_) | Self::Scd2(_) | Self::SnapshotProvide(_) => None,
         }
     }
 }
@@ -207,6 +218,7 @@ pub enum Declared {
     Instant(Instant, Namespace),
     Scd2(Scd2, Namespace),
     Scd1(Scd1, Namespace),
+    SnapshotProvide(SnapshotProvide, Namespace),
 }
 
 impl Declared {
@@ -239,6 +251,7 @@ impl Declared {
             Self::Instant(artifact, _) => artifact.series(),
             Self::Scd2(artifact, _) => artifact.series(),
             Self::Scd1(artifact, _) => artifact.series(),
+            Self::SnapshotProvide(artifact, _) => artifact.series(),
         }
     }
 
@@ -249,7 +262,7 @@ impl Declared {
     fn base<'s>(&self, snapshot: &'s SeriesLog) -> Option<&'s SeriesLog> {
         match self {
             Self::Snapshot(..) | Self::Scd2(..) => None,
-            Self::Instant(..) | Self::Scd1(..) => Some(snapshot),
+            Self::Instant(..) | Self::Scd1(..) | Self::SnapshotProvide(..) => Some(snapshot),
         }
     }
 
@@ -272,6 +285,9 @@ impl Declared {
                 stepping.next(artifact, namespace, base, taken).await
             }
             Self::Scd1(artifact, namespace) => {
+                stepping.next(artifact, namespace, base, taken).await
+            }
+            Self::SnapshotProvide(artifact, namespace) => {
                 stepping.next(artifact, namespace, base, taken).await
             }
         }
@@ -305,6 +321,11 @@ impl Declared {
                     .await
             }
             Self::Scd1(artifact, namespace) => {
+                stepping
+                    .take(artifact, namespace, base, window, tables, writer)
+                    .await
+            }
+            Self::SnapshotProvide(artifact, namespace) => {
                 stepping
                     .take(artifact, namespace, base, window, tables, writer)
                     .await

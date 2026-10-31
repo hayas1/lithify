@@ -92,18 +92,24 @@ impl<'a, P: StepTaker> Stepping<'a, P> {
         &self,
         artifact: &A,
         built: Option<&Window>,
-        base: Option<Ts<Event>>,
+        base: Option<&Window>,
         derived: bool,
     ) -> Option<Window> {
-        let from = built.map_or(self.timeline.range().start, |built| *built.to());
-        // An artifact built from another starts from the last its base built, not from all before.
+        let from = match (built, derived) {
+            (Some(built), _) => *built.to(),
+            (None, false) => self.timeline.range().start,
+            (None, true) => *base?.from(),
+        };
+        let shard = base.map(|base| *base.to());
+        // An artifact built from another and never built yet starts from the last shard its base
+        // built, whichever side of the day its window opens on.
         let fresh = derived && built.is_none();
         let window = self
             .timeline
             .days(from)
             .filter_map(|day| artifact.window(&day, &self.timeline))
-            .skip_while(|window| fresh && base.is_some_and(|base| *window.from() < base))
-            .take_while(|window| !derived || base.is_some_and(|base| *window.from() <= base))
+            .skip_while(|window| fresh && shard.is_some_and(|shard| *window.from() < shard))
+            .take_while(|window| !derived || shard.is_some_and(|shard| *window.from() <= shard))
             .next()?;
 
         self.timeline.reached(&window).then_some(window)

@@ -46,15 +46,15 @@ impl Progress {
             .flatten()
     }
 
-    fn frontier(&self, table: &TableId) -> Option<Ts<Event>> {
-        self.built.get(table)?.as_ref().map(|built| *built.to())
+    fn last_built(&self, table: &TableId) -> Option<&Window> {
+        self.built.get(table)?.as_ref()
     }
 
     pub fn step(
         &self,
         base: Option<&Progress>,
         taken: &[Window],
-        next: impl Fn(Option<&Window>, Option<Ts<Event>>) -> Option<Window>,
+        next: impl Fn(Option<&Window>, Option<&Window>) -> Option<Window>,
     ) -> Option<Step> {
         let untaken = |next: &Window| !taken.contains(next);
         let tables: BTreeSet<_> = self
@@ -65,8 +65,8 @@ impl Progress {
         let nexts: BTreeMap<_, _> = tables
             .into_iter()
             .map(|table| {
-                let built = self.built.get(table).and_then(Option::as_ref);
-                let base = base.and_then(|base| base.frontier(table));
+                let built = self.last_built(table);
+                let base = base.and_then(|base| base.last_built(table));
 
                 (table, next(built, base).filter(untaken))
             })
@@ -176,7 +176,7 @@ mod tests {
         Progress::read(logs, &succeeded)
     }
 
-    fn following(built: Option<&Window>, _: Option<Ts<Event>>) -> Option<Window> {
+    fn following(built: Option<&Window>, _: Option<&Window>) -> Option<Window> {
         Some(match built {
             Some(built) => day(built.to().milliseconds_since_epoch() / DAY),
             None => Window::new(Ts::try_from(0).unwrap(), Ts::try_from(3 * DAY).unwrap()),
@@ -284,9 +284,9 @@ mod tests {
             day(3),
             Status::Succeeded,
         )]);
-        let cut = |built: Option<&Window>, base: Option<Ts<Event>>| match built {
+        let cut = |built: Option<&Window>, base: Option<&Window>| match built {
             Some(_) => None,
-            None => base.map(Window::until),
+            None => base.map(|base| Window::until(*base.to())),
         };
 
         assert_eq!(

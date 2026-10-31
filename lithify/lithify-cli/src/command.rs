@@ -1272,6 +1272,15 @@ mod derived {
         )
     }
 
+    fn provided(name: &str) -> Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig> {
+        derived(
+            name,
+            "[[artifact]]\nname = \"provided\"\nkind = \"snapshot_provide\"\nbase = \"snapshot\"\nshard = \"%Y%m%d\"\n",
+            "place.provided = { prefix = \"mysql_shop_provided\" }\n",
+            "[default]\nartifacts = [\"snapshot\", \"provided\"]\n",
+        )
+    }
+
     #[tokio::test]
     async fn a_catch_up_folds_the_change_log_after_the_last_daily_snapshot_into_the_current_state()
     {
@@ -1488,6 +1497,180 @@ mod derived {
                 ("7".to_owned(), "people".to_owned()),
                 ("8".to_owned(), "people".to_owned())
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_catch_up_provides_each_shard_its_snapshot_built_in_turn_from_the_last_built_before_it_was_first_provided()
+     {
+        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]).await;
+        let pipeline = provided("provide-each-shard");
+        let shard = |target: &str, base: &str| (target.to_owned(), base.to_owned());
+
+        for now in ["2026-09-21T05:00:00Z", "2026-09-23T05:00:00Z"] {
+            settle(
+                &pipeline,
+                &client,
+                &RunCommand::CatchUp {
+                    target: Target::default(),
+                    to: None,
+                },
+                now,
+            )
+            .await
+            .unwrap();
+        }
+
+        assert_eq!(
+            rows(
+                &client,
+                "SELECT target, base FROM mysql_shop_provided._lithify_log WHERE status = 'succeeded' ORDER BY id"
+            ),
+            [
+                shard(
+                    "mysql_shop_provided.people_20260920",
+                    "mysql_shop.people_20260920"
+                ),
+                shard(
+                    "mysql_shop_provided.people_20260921",
+                    "mysql_shop.people_20260921"
+                ),
+                shard(
+                    "mysql_shop_provided.people_20260922",
+                    "mysql_shop.people_20260922"
+                ),
+            ]
+        );
+        assert_eq!(
+            rows(
+                &client,
+                "SELECT id::VARCHAR, 'people' FROM mysql_shop_provided.people_20260920 ORDER BY id"
+            ),
+            rows(
+                &client,
+                "SELECT id::VARCHAR, 'people' FROM mysql_shop.people_20260920 ORDER BY id"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn a_catch_up_provides_first_the_last_shard_its_snapshot_built_before_it() {
+        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]).await;
+        let pipeline = provided("provide-from-the-last");
+
+        settle(
+            &pipeline,
+            &client,
+            &RunCommand::CatchUp {
+                target: Target::new(Some("snapshot".into())),
+                to: None,
+            },
+            "2026-09-22T05:00:00Z",
+        )
+        .await
+        .unwrap();
+        settle(
+            &pipeline,
+            &client,
+            &RunCommand::CatchUp {
+                target: Target::default(),
+                to: None,
+            },
+            "2026-09-22T06:00:00Z",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            rows(
+                &client,
+                "SELECT target, base FROM mysql_shop_provided._lithify_log ORDER BY id"
+            ),
+            [(
+                "mysql_shop_provided.people_20260921".to_owned(),
+                "mysql_shop.people_20260921".to_owned()
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_catch_up_provides_no_shard_its_snapshot_has_not_built_yet() {
+        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]).await;
+        let pipeline = provided("provide-what-is-built");
+
+        settle(
+            &pipeline,
+            &client,
+            &RunCommand::CatchUp {
+                target: Target::default(),
+                to: None,
+            },
+            "2026-09-21T05:00:00Z",
+        )
+        .await
+        .unwrap();
+        settle(
+            &pipeline,
+            &client,
+            &RunCommand::CatchUp {
+                target: Target::new(Some("provided".into())),
+                to: None,
+            },
+            "2026-09-23T05:00:00Z",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            rows(
+                &client,
+                "SELECT target, status FROM mysql_shop_provided._lithify_log ORDER BY id"
+            ),
+            [(
+                "mysql_shop_provided.people_20260920".to_owned(),
+                "succeeded".to_owned()
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_catch_up_cuts_an_instant_never_cut_on_the_last_shard_its_snapshot_built_while_it_lags()
+     {
+        let client = logged(PEOPLE, &[built_before("people", CAPTURE)]).await;
+        let pipeline = cut_at_six("cut-behind");
+
+        settle(
+            &pipeline,
+            &client,
+            &RunCommand::CatchUp {
+                target: Target::new(Some("snapshot".into())),
+                to: None,
+            },
+            "2026-09-21T05:00:00Z",
+        )
+        .await
+        .unwrap();
+        settle(
+            &pipeline,
+            &client,
+            &RunCommand::CatchUp {
+                target: Target::new(Some("instant_0600".into())),
+                to: None,
+            },
+            "2026-09-23T07:00:00Z",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            rows(
+                &client,
+                "SELECT target, base FROM mysql_shop_instant._lithify_log ORDER BY id"
+            ),
+            [(
+                "mysql_shop_instant.people_2026092106".to_owned(),
+                "mysql_shop.people_20260920".to_owned()
+            )]
         );
     }
 

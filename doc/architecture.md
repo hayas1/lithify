@@ -92,10 +92,11 @@ No schema change ends the last era, so the builder closes it as it is finished, 
 
 ### An artifact names its tables and says how they are created
 
-`Artifact::target` names a table, and the builder of the artifact assembles the statements creating it, so no other module knows how an artifact names or creates its tables.
-An `ArtifactBuilder` selects and creates from what it was told and the `ReplayEnd` it is handed, adding the last era to a copy of what it folded, so it reads the same however often it is asked and finishing it changes nothing in it.
+`Artifact::table_name` names a table and `Artifact::create` makes the statements creating it from what its builder selects, so no other module knows how an artifact names or creates its tables.
+An `ArtifactBuilder` selects from what it was told and the `ReplayEnd` it is handed, adding the last era to a copy of what it folded, so it reads the same however often it is asked and finishing it changes nothing in it.
 Which instant a shard is named after is the artifact's own, as what its data is read as differs: a `snapshot` of a day is named after the last instant the day holds, an `instant` after the instant it is cut at.
-A `snapshot`, an `instant` and an `scd1` are all built by `Scd1Builder`, as each is the state of a table overwritten up to an instant: they differ only in what they fold onto, where they stop reading the change log and whether they are created as a table or a view, which each says through `Overwrite`.
+A `snapshot`, an `instant` and an `scd1` all select through `Scd1SelectBuilder`, as each is the state of a table overwritten up to an instant: they differ only in what they fold onto and where they stop reading the change log, which each hands the builder as it makes it, and in whether they are created as a table or a view, which each says in its `create`.
+A `snapshot_provide` folds nothing and selects the shard it is built onto as it stands.
 
 ### Every series steps a day at a time
 
