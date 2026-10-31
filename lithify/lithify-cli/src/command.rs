@@ -40,7 +40,7 @@ impl RunCommand {
         P: StepTaker<Error = Unrunnable>,
         B: Report,
     {
-        let lineup = Lineup::of(sink, |name, config| config.declared(sink, name))?;
+        let lineup = Lineup::of(sink, |name, config| config.declared(name, sink.time_zone()));
         let stepping = Stepping::new(
             taker,
             Timeline::new(sink.schedule(), source.since()..now.as_event()),

@@ -130,11 +130,9 @@ impl ArtifactControl for Scd2 {
         table: &TableId,
         window: &Window,
     ) -> Option<&'b BuildLog> {
-        built.iter().find(|log| {
-            log.advances(&self.series())
-                && log.table_to() == Some(table)
-                && log.window().to() == window.from()
-        })
+        built
+            .iter()
+            .find(|log| log.table_to() == Some(table) && log.window().to() == window.from())
     }
 }
 

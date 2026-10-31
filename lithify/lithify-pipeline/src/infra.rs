@@ -961,10 +961,7 @@ mod tests {
 
     #[test]
     fn a_sink_lines_up_each_artifact_it_places_in_order_with_its_log_and_its_base() {
-        let lineup = crate::lineup::Lineup::of(&sinks()[1], |name, _| {
-            Ok::<_, std::convert::Infallible>(name.clone())
-        })
-        .unwrap();
+        let lineup = crate::lineup::Lineup::of(&sinks()[1], |name, _| name.clone());
 
         assert_eq!(
             lineup

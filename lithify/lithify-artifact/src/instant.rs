@@ -1,4 +1,4 @@
-use chrono::{DateTime, NaiveTime, TimeDelta, Utc};
+use chrono::{DateTime, NaiveTime, Utc};
 use chrono_tz::Tz;
 use serde::Deserialize;
 
@@ -11,7 +11,7 @@ use lithify_core::source::RowChangeLog;
 use lithify_core::sql::SqlString;
 use lithify_core::ts::Ts;
 use lithify_core::window::Window;
-use lithify_pipeline::schedule::{Schedule, Timeline};
+use lithify_pipeline::schedule::Timeline;
 
 use lithify_pipeline::artifact::ArtifactControl;
 use lithify_pipeline::build_log::{BuildLog, Series};
@@ -46,33 +46,21 @@ impl InstantConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Instant {
     name: ArtifactName,
-    base: Series,
     at: NaiveTime,
-    delay: TimeDelta,
     shard: Shard,
 }
 
 impl Instant {
-    pub fn new(at: NaiveTime, days: Schedule, shard: Shard) -> Self {
+    pub fn new(at: NaiveTime, shard: Shard) -> Self {
         Self {
             name: ArtifactName::from(Self::KIND),
-            base: Snapshot::days(&ArtifactName::from(Snapshot::KIND)),
             at,
-            delay: days.delay(at),
             shard,
         }
     }
 
     pub fn named(self, name: ArtifactName) -> Self {
         Self { name, ..self }
-    }
-
-    pub fn based_on(self, base: &Snapshot) -> Self {
-        Self {
-            base: base.series(),
-            delay: base.schedule().delay(self.at),
-            ..self
-        }
     }
 
     pub fn cut(at: NaiveTime) -> String {
@@ -119,12 +107,7 @@ impl ArtifactControl for Instant {
     type Config = InstantConfig;
 
     fn declared(name: &ArtifactName, config: &InstantConfig, zone: Tz) -> Self {
-        Self::new(
-            config.at(),
-            Schedule::default(),
-            Shard::new(config.shard(), zone),
-        )
-        .named(name.clone())
+        Self::new(config.at(), Shard::new(config.shard(), zone)).named(name.clone())
     }
 
     fn series(&self) -> Series {
@@ -133,8 +116,8 @@ impl ArtifactControl for Instant {
 
     // TODO: a day that daylight saving time shortens or lengthens moves the cut off the time of
     // day it is declared at, since the delay is counted in elapsed time.
-    fn window(&self, day: &Window, _: &Timeline) -> Option<Window> {
-        let cut = DateTime::<Utc>::from(*day.from()).checked_add_signed(self.delay)?;
+    fn window(&self, day: &Window, timeline: &Timeline) -> Option<Window> {
+        let cut = DateTime::<Utc>::from(*day.from()).checked_add_signed(timeline.delay(self.at))?;
         let window = Window::new(*day.from(), Ts::from(cut));
 
         (window.to() <= day.to()).then_some(window)
@@ -146,7 +129,7 @@ impl ArtifactControl for Instant {
         table: &TableId,
         window: &Window,
     ) -> Option<&'b BuildLog> {
-        Snapshot::shard_closing(&self.base, built, table, *window.from())
+        Snapshot::shard_closing(built, table, *window.from())
     }
 }
 
@@ -157,7 +140,7 @@ mod tests {
     use lithify_core::sink::TablePath;
     use lithify_core::ts::Event;
     use lithify_pipeline::build_log::{Run, Status, TableBuilt};
-    use lithify_pipeline::schedule::Timeline;
+    use lithify_pipeline::schedule::{Schedule, Timeline};
 
     use super::*;
 
@@ -168,7 +151,6 @@ mod tests {
     fn nine_in_tokyo() -> Instant {
         Instant::new(
             NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
-            Schedule::daily(NaiveTime::MIN, chrono_tz::Asia::Tokyo),
             Shard::new("%Y%m%d%H", chrono_tz::Asia::Tokyo),
         )
     }
@@ -224,7 +206,6 @@ mod tests {
     fn an_instant_cut_as_its_day_closes_holds_the_whole_day() {
         let midnight = Instant::new(
             NaiveTime::MIN,
-            Schedule::daily(NaiveTime::MIN, chrono_tz::Asia::Tokyo),
             Shard::new("%Y%m%d%H", chrono_tz::Asia::Tokyo),
         );
         let day = Window::new(at("2026-09-20T15:00:00Z"), at("2026-09-21T15:00:00Z"));
@@ -243,9 +224,9 @@ mod tests {
     fn an_instant_folds_onto_the_daily_snapshot_closing_as_its_day_opened() {
         let built = [
             built(
-                "instant",
-                "09:00",
-                ("2026-09-19T15:00:00Z", "2026-09-20T15:00:00Z"),
+                "snapshot",
+                "daily",
+                ("2026-09-18T15:00:00Z", "2026-09-19T15:00:00Z"),
             ),
             built(
                 "snapshot",
@@ -265,32 +246,6 @@ mod tests {
         assert_eq!(
             nine_in_tokyo().named("morning".into()).series(),
             Series::new("morning".into(), "09:00")
-        );
-    }
-
-    #[test]
-    fn an_instant_folds_onto_the_daily_snapshot_it_is_based_on_alone() {
-        let built = [
-            built(
-                "snapshot",
-                "daily",
-                ("2026-09-19T15:00:00Z", "2026-09-20T15:00:00Z"),
-            ),
-            built(
-                "daily",
-                "daily",
-                ("2026-09-19T15:00:00Z", "2026-09-20T15:00:00Z"),
-            ),
-        ];
-
-        assert_eq!(
-            nine_in_tokyo()
-                .based_on(
-                    &Snapshot::new(Shard::new("%Y%m%d", chrono_tz::Asia::Tokyo))
-                        .named("daily".into())
-                )
-                .base(&built, &TableId::new("shop", "people"), &cut()),
-            Some(&built[1])
         );
     }
 

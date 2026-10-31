@@ -24,10 +24,6 @@ pub enum Unrunnable {
         sink: String,
         artifact: ArtifactName,
     },
-    Unbased {
-        artifact: ArtifactName,
-        base: ArtifactName,
-    },
     WithoutSource,
     Unsteppable(Unsteppable),
     Unlogged(UnreadableBuildLog),
@@ -51,12 +47,6 @@ impl Display for Unrunnable {
             Self::WithoutSource => write!(formatter, "this pipeline captures no server"),
             Self::Undeclared { sink, artifact } => {
                 write!(formatter, "{sink} places no {artifact}")
-            }
-            Self::Unbased { artifact, base } => {
-                write!(
-                    formatter,
-                    "{artifact} is built from {base}, which is no snapshot"
-                )
             }
             Self::Unreached => write!(
                 formatter,
@@ -89,7 +79,6 @@ impl std::error::Error for Unrunnable {
             Self::UnknownSink(_)
             | Self::Unreached
             | Self::Undeclared { .. }
-            | Self::Unbased { .. }
             | Self::WithoutSource
             | Self::Uncredentialed(_) => None,
         }

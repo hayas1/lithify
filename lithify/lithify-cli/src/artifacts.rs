@@ -38,38 +38,16 @@ impl ArtifactConfig {
         }
     }
 
-    pub fn declared(
-        &self,
-        sink: &Sink<WarehouseConfig, ArtifactConfig>,
-        name: &ArtifactName,
-    ) -> Result<Declared, Unrunnable> {
-        let zone = sink.time_zone();
-
-        Ok(match self {
+    pub fn declared(&self, name: &ArtifactName, zone: Tz) -> Declared {
+        match self {
             Self::Snapshot(config) => Declared::Snapshot(Snapshot::declared(name, config, zone)),
-            Self::Instant(config) => {
-                Declared::Instant(Instant::declared(name, config, zone).based_on(&Self::base(
-                    sink,
-                    name,
-                    config.base(),
-                )?))
-            }
-            Self::Scd1(config) => {
-                Declared::Scd1(Scd1::declared(name, config, zone).based_on(&Self::base(
-                    sink,
-                    name,
-                    config.base(),
-                )?))
-            }
+            Self::Instant(config) => Declared::Instant(Instant::declared(name, config, zone)),
+            Self::Scd1(config) => Declared::Scd1(Scd1::declared(name, config, zone)),
             Self::Scd2(config) => Declared::Scd2(Scd2::declared(name, config, zone)),
-            Self::SnapshotProvide(config) => Declared::SnapshotProvide(
-                SnapshotProvide::declared(name, config, zone).based_on(&Self::base(
-                    sink,
-                    name,
-                    config.base(),
-                )?),
-            ),
-        })
+            Self::SnapshotProvide(config) => {
+                Declared::SnapshotProvide(SnapshotProvide::declared(name, config, zone))
+            }
+        }
     }
 
     pub fn snapshot(
@@ -79,17 +57,6 @@ impl ArtifactConfig {
         let config = sink.artifact(name)?.as_snapshot()?;
 
         Some(Snapshot::declared(name, config, sink.time_zone()))
-    }
-
-    fn base(
-        sink: &Sink<WarehouseConfig, ArtifactConfig>,
-        artifact: &ArtifactName,
-        base: &ArtifactName,
-    ) -> Result<Snapshot, Unrunnable> {
-        Self::snapshot(sink, base).ok_or_else(|| Unrunnable::Unbased {
-            artifact: artifact.clone(),
-            base: base.clone(),
-        })
     }
 }
 
@@ -218,13 +185,10 @@ mod tests {
 
     use super::*;
     use crate::pipeline::CaptureConfig;
-    use lithify_pipeline::build_log::{Status, TableBuilt};
 
     use lithify_core::ts::Ts;
-    use lithify_pipeline::build_log::Run;
     use lithify_pipeline::infra::Miswiring;
     use lithify_pipeline::{Cause, Misdeclaring};
-    use ulid::Ulid;
 
     use crate::step::tests::{ARTIFACTS, INFRA, opened, opening};
 
@@ -299,66 +263,6 @@ mod tests {
                     Series::new("six".into(), "06:00")
                 ]
             ]
-        );
-    }
-
-    #[test]
-    fn an_instant_cut_off_a_snapshot_is_built_onto_that_snapshot() {
-        let pipeline = opened(
-            "based-instant",
-            &format!("{ARTIFACTS}{INSTANTS}"),
-            &format!("{INFRA}place.six = {{ prefix = \"mysql_shop_0600\" }}\n"),
-            "",
-        );
-        let sink = pipeline.sinks().nth(1).unwrap();
-        let built = |series: Series| {
-            TableBuilt::new(
-                Some(TableId::new("shop", "people")),
-                Some(TableId::new("shop", "people")),
-                None,
-                Some(TablePath::new("mysql_shop", "people_20260919")),
-                Window::new(
-                    Ts::try_from(1789776000000).unwrap(),
-                    Ts::try_from(1789862400000).unwrap(),
-                ),
-                Status::Succeeded,
-                Ts::try_from(1789862400000).unwrap(),
-            )
-            .logged(&Run::new(
-                Ulid::nil(),
-                Ts::try_from(0).unwrap(),
-                series.artifact(),
-                series.schedule(),
-                "primary",
-                "{}",
-                "0.1.0",
-            ))
-        };
-        let Ok(Declared::Instant(six)) = sink
-            .artifact(&"six".into())
-            .unwrap()
-            .declared(sink, &"six".into())
-        else {
-            panic!("six is an instant");
-        };
-        let window = Window::new(
-            Ts::try_from(1789862400000).unwrap(),
-            Ts::try_from(1789884000000).unwrap(),
-        );
-        let onto = built(Series::new("snapshot".into(), "daily"));
-        let elsewhere = built(Series::new("weekly".into(), "daily"));
-
-        assert_eq!(
-            six.base(
-                &[elsewhere.clone(), onto.clone()],
-                &TableId::new("shop", "people"),
-                &window
-            ),
-            Some(&onto)
-        );
-        assert_eq!(
-            six.base(&[elsewhere], &TableId::new("shop", "people"), &window),
-            None
         );
     }
 
