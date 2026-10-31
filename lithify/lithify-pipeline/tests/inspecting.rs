@@ -47,8 +47,8 @@ fn a_sink_scheduling_two_artifacts_is_not_told_apart_by_a_check() {
     let pipeline = opened(
         "inspected-twice",
         &INFRA.replace(
-            "place.snapshot = [{ prefix = \"mysql_shop\" }]",
-            "place.snapshot = [{ prefix = \"mysql_shop\" }]\n    place.copy = [{ prefix = \"mysql_copy\" }]",
+            "place.snapshot = { prefix = \"mysql_shop\" }",
+            "place.snapshot = { prefix = \"mysql_shop\" }\n    place.copy = { prefix = \"mysql_copy\" }",
         ),
         &format!("{SNAPSHOT}[[artifact]]\nname = \"copy\"\nkind = \"snapshot\"\n"),
     );

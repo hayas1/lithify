@@ -37,7 +37,7 @@ where
     {
         let mut listeners = TableListeners::new(
             |table: &TableId, encounter| {
-                TableBuilder::opening::<L, W>(
+                TableBuilder::opening::<W>(
                     artifact,
                     self.log,
                     namespace,

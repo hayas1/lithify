@@ -3,7 +3,7 @@ use ulid::Ulid;
 
 use lithify_artifact::shard::Shard;
 use lithify_artifact::snapshot::Snapshot;
-use lithify_core::artifact::{Artifact, ArtifactBuilder};
+use lithify_core::artifact::Artifact;
 use lithify_core::build::Base;
 use lithify_core::listener::ReplayEnd;
 use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
@@ -73,8 +73,13 @@ fn statements<W: Warehouse>(warehouse: W) -> String {
         &window,
         Base::from(previous.as_ref().and_then(BuildLog::target).cloned()),
     );
-    let statements = snapshot
-        .create(&warehouse, &ReplayEnd::standing(customers(), None), &target)
+    let statements = artifact
+        .create(
+            &snapshot,
+            &warehouse,
+            &ReplayEnd::standing(customers(), None),
+            &target,
+        )
         .unwrap();
 
     std::iter::once(warehouse.create_namespace(target.namespace()))

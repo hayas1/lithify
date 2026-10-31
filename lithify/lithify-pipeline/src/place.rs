@@ -59,7 +59,7 @@ impl<'de, W: DeserializeOwned, L: DeserializeOwned> Deserialize<'de> for Placed<
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(bound(deserialize = "L: DeserializeOwned"))]
-pub struct Places<L>(BTreeMap<ArtifactName, Vec<L>>);
+pub struct Places<L>(BTreeMap<ArtifactName, L>);
 
 impl<L> Default for Places<L> {
     fn default() -> Self {
@@ -68,14 +68,12 @@ impl<L> Default for Places<L> {
 }
 
 impl<L> Places<L> {
-    pub fn get(&self, artifact: &ArtifactName) -> Option<&[L]> {
-        self.0.get(artifact).map(Vec::as_slice)
+    pub fn get(&self, artifact: &ArtifactName) -> Option<&L> {
+        self.0.get(artifact)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&ArtifactName, &[L])> {
-        self.0
-            .iter()
-            .map(|(artifact, places)| (artifact, places.as_slice()))
+    pub fn iter(&self) -> impl Iterator<Item = (&ArtifactName, &L)> {
+        self.0.iter()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -86,7 +84,7 @@ impl<L> Places<L> {
         Places(
             self.0
                 .into_iter()
-                .map(|(artifact, places)| (artifact, places.into_iter().map(&located).collect()))
+                .map(|(artifact, place)| (artifact, located(place)))
                 .collect(),
         )
     }
@@ -134,11 +132,21 @@ mod tests {
     }
 
     #[test]
-    fn an_artifact_is_placed_whole_in_each_place_it_lists() {
+    fn an_artifact_is_placed_in_the_one_place_it_names() {
         assert_eq!(
             placed(PLACED).places().get(&"snapshot".into()),
-            Some([prefix("mysql_shop"), prefix("shop")].as_slice())
+            Some(&prefix("mysql_shop"))
         );
+    }
+
+    #[test]
+    fn an_artifact_placed_in_more_than_one_place_is_rejected() {
+        let twice = PLACED.replace(
+            "place.snapshot = { prefix = \"mysql_shop\" }",
+            "place.snapshot = { prefix = \"mysql_shop\" }, { prefix = \"shop\" }",
+        );
+
+        assert!(toml::from_str::<Placed<Bucket, Prefix>>(&twice).is_err());
     }
 
     #[test]
@@ -155,7 +163,7 @@ mod tests {
 
     #[test]
     fn a_place_written_the_way_of_another_warehouse_is_rejected() {
-        let elsewhere = PLACED.replace("{ prefix = \"shop\" }", "{ dataset = \"shop\" }");
+        let elsewhere = PLACED.replace("{ prefix = \"mysql_shop\" }", "{ dataset = \"shop\" }");
 
         assert!(toml::from_str::<Placed<Bucket, Prefix>>(&elsewhere).is_err());
     }
@@ -170,7 +178,7 @@ mod tests {
     #[test]
     fn a_place_not_listed_is_rejected() {
         let unlisted = PLACED.replace(
-            "place.snapshot = [{ prefix = \"mysql_shop\" }, { prefix = \"shop\" }]",
+            "place.snapshot = { prefix = \"mysql_shop\" }",
             "place.snapshot = \"mysql_shop\"",
         );
 
@@ -183,7 +191,7 @@ mod tests {
 
         assert_eq!(
             places.get(&"instant_0900".into()),
-            Some(["mysql_shop_0900".into()].as_slice())
+            Some(&"mysql_shop_0900".to_owned())
         );
     }
 }

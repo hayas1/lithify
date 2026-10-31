@@ -14,12 +14,12 @@ project = "local-project"
 endpoint = "http://bigquery-emulator:9050"
 credentials = "anonymous"
 change_log = { dataset = "postgres_shop_cdc" }
-place.snapshot = [{ dataset = "postgres_shop" }]
-place.instant_0900 = [{ dataset = "postgres_shop_0900" }]
-place.instant_1200 = [{ dataset = "postgres_shop_1200" }]
-place.instant_1800 = [{ dataset = "postgres_shop_1800" }]
-place.scd1 = [{ dataset = "postgres_shop_scd1" }]
-place.scd2 = [{ dataset = "postgres_shop_scd2" }]
+place.snapshot = { dataset = "postgres_shop" }
+place.instant_0900 = { dataset = "postgres_shop_0900" }
+place.instant_1200 = { dataset = "postgres_shop_1200" }
+place.instant_1800 = { dataset = "postgres_shop_1800" }
+place.scd1 = { dataset = "postgres_shop_scd1" }
+place.scd2 = { dataset = "postgres_shop_scd2" }
 
 [[sink]]
 name = "duckdb_s3"
@@ -27,9 +27,9 @@ name = "duckdb_s3"
 [sink.warehouse.duckdb]
 s3 = { endpoint = "http://rustfs:9000", region = "us-east-1", bucket = "lithify", format = "parquet" }
 change_log = { prefix = "postgres_shop_cdc" }
-place.snapshot = [{ prefix = "postgres_shop" }]
-place.instant_0900 = [{ prefix = "postgres_shop_0900" }]
-place.instant_1200 = [{ prefix = "postgres_shop_1200" }]
-place.instant_1800 = [{ prefix = "postgres_shop_1800" }]
-place.scd1 = [{ prefix = "postgres_shop_scd1" }]
-place.scd2 = [{ prefix = "postgres_shop_scd2" }]
+place.snapshot = { prefix = "postgres_shop" }
+place.instant_0900 = { prefix = "postgres_shop_0900" }
+place.instant_1200 = { prefix = "postgres_shop_1200" }
+place.instant_1800 = { prefix = "postgres_shop_1800" }
+place.scd1 = { prefix = "postgres_shop_scd1" }
+place.scd2 = { prefix = "postgres_shop_scd2" }

@@ -7,7 +7,6 @@ use serde::de::DeserializeOwned;
 
 use lithify_core::artifact::{Artifact, ArtifactName};
 use lithify_core::model::TableId;
-use lithify_core::sink::Namespace;
 use lithify_core::window::Window;
 
 use crate::build_log::{BuildLog, Series};
@@ -15,41 +14,10 @@ use crate::schedule::{Schedule, Timeline};
 
 use crate::place::Places;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Placement {
-    namespace: Namespace,
-    copies: Vec<Namespace>,
-}
-
-impl Placement {
-    pub fn new(namespace: Namespace, copies: Vec<Namespace>) -> Self {
-        Self { namespace, copies }
-    }
-
-    pub fn namespace(&self) -> &Namespace {
-        &self.namespace
-    }
-
-    pub fn copies(&self) -> &[Namespace] {
-        &self.copies
-    }
-}
-
-impl From<Namespace> for Placement {
-    fn from(namespace: Namespace) -> Self {
-        Self::new(namespace, Vec::new())
-    }
-}
-
 pub trait ArtifactControl: Artifact {
     type Config;
 
-    fn declared(
-        name: &ArtifactName,
-        config: &Self::Config,
-        placement: &Placement,
-        zone: Tz,
-    ) -> Self;
+    fn declared(name: &ArtifactName, config: &Self::Config, zone: Tz) -> Self;
 
     fn series(&self) -> Series;
 

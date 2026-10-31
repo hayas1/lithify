@@ -1,4 +1,5 @@
 use std::convert::Infallible;
+use std::marker::PhantomData;
 
 use crate::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
 use crate::event::SchemaChange;
@@ -6,7 +7,7 @@ use crate::listener::{
     Finish, ReplayEnd, SchemaChangeListener, TableAltered, TableCreated, TableDropped, TableRenamed,
 };
 use crate::model::TableId;
-use crate::sink::{Namespace, TablePath, Warehouse, WarehouseSql};
+use crate::sink::{Namespace, TablePath, Warehouse};
 use crate::source::RowChangeLog;
 use crate::sql::SqlString;
 use crate::table_listeners::Encounter;
@@ -100,8 +101,9 @@ impl TableBuild {
 
 // One table as an artifact builds it: what every artifact records of the table alike, the name it
 // opened the window under and what it is built onto, around the fold the artifact keeps of it.
-pub struct TableBuilder<'a, A, B> {
+pub struct TableBuilder<'a, A, L, B> {
     artifact: &'a A,
+    log: PhantomData<&'a L>,
     namespace: &'a Namespace,
     window: &'a Window,
     table_from: Option<TableId>,
@@ -109,8 +111,8 @@ pub struct TableBuilder<'a, A, B> {
     builder: B,
 }
 
-impl<'a, A, B> TableBuilder<'a, A, B> {
-    pub fn opening<L, W>(
+impl<'a, A, L, B> TableBuilder<'a, A, L, B> {
+    pub fn opening<W>(
         artifact: &'a A,
         log: &'a L,
         namespace: &'a Namespace,
@@ -128,6 +130,7 @@ impl<'a, A, B> TableBuilder<'a, A, B> {
 
         Self {
             artifact,
+            log: PhantomData,
             namespace,
             window,
             table_from: encounter.table_from(table),
@@ -137,7 +140,7 @@ impl<'a, A, B> TableBuilder<'a, A, B> {
     }
 }
 
-impl<P, A, B> SchemaChangeListener<P> for TableBuilder<'_, A, B>
+impl<P, A, L, B> SchemaChangeListener<P> for TableBuilder<'_, A, L, B>
 where
     B: SchemaChangeListener<P, Error = UnbuildableArtifact>,
 {
@@ -193,29 +196,35 @@ where
     }
 }
 
-impl<A: Artifact, B> TableBuilder<'_, A, B> {
-    fn made<P>(
+impl<'a, A, L, W, B> TableBuilder<'a, A, L, B>
+where
+    A: Artifact<Builder<'a, L, W> = B>,
+    L: RowChangeLog + 'a,
+    W: Warehouse + 'a,
+    B: ArtifactBuilder<L::Position, Context = W>,
+{
+    fn made(
         &self,
-        warehouse: &B::Context,
+        warehouse: &W,
         end: &ReplayEnd<UnbuildableArtifact>,
         target: &TablePath,
-    ) -> Result<Vec<SqlString>, UnbuildableArtifact>
-    where
-        B: ArtifactBuilder<P>,
-        B::Context: Warehouse,
-    {
+    ) -> Result<Vec<SqlString>, UnbuildableArtifact> {
         Ok([warehouse.create_namespace(target.namespace())]
             .into_iter()
-            .chain(self.builder.create(warehouse, end, target)?)
+            .chain(
+                self.artifact
+                    .create::<L, W>(&self.builder, warehouse, end, target)?,
+            )
             .collect())
     }
 }
 
-impl<P, A, B> Finish<P> for TableBuilder<'_, A, B>
+impl<'a, A, L, W, B> Finish<L::Position> for TableBuilder<'a, A, L, B>
 where
-    A: Artifact,
-    B: ArtifactBuilder<P>,
-    B::Context: Warehouse,
+    A: Artifact<Builder<'a, L, W> = B>,
+    L: RowChangeLog + 'a,
+    W: Warehouse + 'a,
+    B: ArtifactBuilder<L::Position, Context = W>,
 {
     type Input = ReplayEnd<UnbuildableArtifact>;
     type Output = TableBuild;

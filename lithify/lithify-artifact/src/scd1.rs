@@ -9,14 +9,14 @@ use lithify_core::listener::{
     Alteration, ReplayEnd, SchemaChangeListener, TableAltered, TableCreated, TableRenamed,
 };
 use lithify_core::model::{ColumnModel, TableId, TableModel};
-use lithify_core::sink::{Namespace, TablePath, Warehouse};
+use lithify_core::sink::{TablePath, Warehouse};
 use lithify_core::source::RowChangeLog;
 use lithify_core::sql::SqlString;
 use lithify_core::ts::{Event, Ts};
 use lithify_core::window::Window;
 use lithify_pipeline::schedule::Timeline;
 
-use lithify_pipeline::artifact::{ArtifactControl, Placement};
+use lithify_pipeline::artifact::ArtifactControl;
 use lithify_pipeline::build_log::{BuildLog, Series};
 
 use crate::snapshot::Snapshot;
@@ -42,7 +42,6 @@ impl Scd1Config {
 pub struct Scd1 {
     name: ArtifactName,
     base: Series,
-    copies: Vec<Namespace>,
 }
 
 impl Default for Scd1 {
@@ -50,7 +49,6 @@ impl Default for Scd1 {
         Self {
             name: ArtifactName::from(Self::KIND),
             base: Snapshot::days(&ArtifactName::from(Snapshot::KIND)),
-            copies: Vec::new(),
         }
     }
 }
@@ -66,10 +64,6 @@ impl Scd1 {
             ..self
         }
     }
-
-    pub fn copied_into(self, copies: Vec<Namespace>) -> Self {
-        Self { copies, ..self }
-    }
 }
 
 impl Artifact for Scd1 {
@@ -77,7 +71,7 @@ impl Artifact for Scd1 {
 
     type From = Snapshot;
 
-    type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = Scd1Builder<'a, Self, L, W>;
+    type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = Scd1SelectBuilder<'a, L, W>;
 
     fn table_name(&self, table: &TableId, _: &Window) -> String {
         format!("{}_scd_type_1", table.table())
@@ -89,22 +83,27 @@ impl Artifact for Scd1 {
         window: &'a Window,
         base: Base,
     ) -> Self::Builder<'a, L, W> {
-        Scd1Builder::new(self, log, window.clone(), base)
+        Scd1SelectBuilder::new(log, window, base, None)
+    }
+
+    fn create<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>(
+        &'a self,
+        builder: &Self::Builder<'a, L, W>,
+        warehouse: &W,
+        end: &ReplayEnd<UnbuildableArtifact>,
+        target: &TablePath,
+    ) -> Result<Vec<SqlString>, UnbuildableArtifact> {
+        Ok(vec![
+            warehouse.create_view(target, &builder.select(warehouse, end)?),
+        ])
     }
 }
 
 impl ArtifactControl for Scd1 {
     type Config = Scd1Config;
 
-    fn declared(
-        name: &ArtifactName,
-        _: &Scd1Config,
-        placement: &Placement,
-        _: chrono_tz::Tz,
-    ) -> Self {
-        Self::default()
-            .named(name.clone())
-            .copied_into(placement.copies().to_vec())
+    fn declared(name: &ArtifactName, _: &Scd1Config, _: chrono_tz::Tz) -> Self {
+        Self::default().named(name.clone())
     }
 
     fn series(&self) -> Series {
@@ -128,45 +127,12 @@ impl ArtifactControl for Scd1 {
     }
 }
 
-impl Overwrite for Scd1 {
-    fn until(&self, _: &Window) -> Option<Ts<Event>> {
-        None
-    }
-
-    fn copies(&self) -> &[Namespace] {
-        &self.copies
-    }
-
-    fn materialize<W: Warehouse>(
-        &self,
-        warehouse: &W,
-        target: &TablePath,
-        select: &SqlString,
-    ) -> SqlString {
-        warehouse.create_view(target, select)
-    }
-}
-
-pub trait Overwrite: Artifact {
-    fn until(&self, window: &Window) -> Option<Ts<Event>>;
-
-    fn copies(&self) -> &[Namespace];
-
-    fn materialize<W: Warehouse>(
-        &self,
-        warehouse: &W,
-        target: &TablePath,
-        select: &SqlString,
-    ) -> SqlString;
-}
-
 // A builder keeps what the listener tells it in the fold as it is told, and nothing else, so what
 // it holds besides the fold is what it was handed when made and where the era running now began.
-pub struct Scd1Builder<'a, A, L: RowChangeLog, W> {
-    artifact: &'a A,
+pub struct Scd1SelectBuilder<'a, L: RowChangeLog, W> {
     query: ChangeLogQuery<'a, L>,
-    window: Window,
     base: Base,
+    until: Option<Ts<Event>>,
     eras: EraTracker<L::Position>,
     fold: Fold,
     warehouse: PhantomData<fn(&W)>,
@@ -264,14 +230,13 @@ impl<L: RowChangeLog> Folding<'_, '_, L> {
     }
 }
 
-impl<'a, A: Overwrite, L: RowChangeLog, W: Warehouse> Scd1Builder<'a, A, L, W> {
-    pub(crate) fn new(artifact: &'a A, log: &'a L, window: Window, base: Base) -> Self {
+impl<'a, L: RowChangeLog, W: Warehouse> Scd1SelectBuilder<'a, L, W> {
+    pub(crate) fn new(log: &'a L, window: &Window, base: Base, until: Option<Ts<Event>>) -> Self {
         Self {
-            artifact,
             query: ChangeLogQuery::new(log),
             eras: EraTracker::since(Bound::EventTime(*window.from())),
-            window,
             base,
+            until,
             fold: Fold::default(),
             warehouse: PhantomData,
         }
@@ -296,10 +261,7 @@ impl<'a, A: Overwrite, L: RowChangeLog, W: Warehouse> Scd1Builder<'a, A, L, W> {
         let Some(table) = end.model() else {
             return Ok(None);
         };
-        let until = self
-            .artifact
-            .until(&self.window)
-            .map_or(Bound::Open, Bound::EventTime);
+        let until = self.until.map_or(Bound::Open, Bound::EventTime);
         let mut fold = self.fold.clone();
         Folding {
             fold: &mut fold,
@@ -354,8 +316,8 @@ impl<'a, A: Overwrite, L: RowChangeLog, W: Warehouse> Scd1Builder<'a, A, L, W> {
     }
 }
 
-impl<A: Overwrite, L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Position>
-    for Scd1Builder<'_, A, L, W>
+impl<L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Position>
+    for Scd1SelectBuilder<'_, L, W>
 {
     type Context = W;
     type Error = UnbuildableArtifact;
@@ -411,9 +373,7 @@ impl<A: Overwrite, L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Positi
     }
 }
 
-impl<A: Overwrite, L: RowChangeLog, W: Warehouse> ArtifactBuilder<L::Position>
-    for Scd1Builder<'_, A, L, W>
-{
+impl<L: RowChangeLog, W: Warehouse> ArtifactBuilder<L::Position> for Scd1SelectBuilder<'_, L, W> {
     fn select(
         &self,
         warehouse: &W,
@@ -423,30 +383,6 @@ impl<A: Overwrite, L: RowChangeLog, W: Warehouse> ArtifactBuilder<L::Position>
             Some(fold) => Ok(fold.select()),
             None => Err(UnbuildableArtifact::WithoutEra(end.table().clone())),
         }
-    }
-
-    fn create(
-        &self,
-        warehouse: &W,
-        end: &ReplayEnd<UnbuildableArtifact>,
-        target: &TablePath,
-    ) -> Result<Vec<SqlString>, UnbuildableArtifact> {
-        let select = self.select(warehouse, end)?;
-        let copied = SqlString::from(format!("SELECT * FROM {}", warehouse.table_ref(target)));
-
-        Ok([self.artifact.materialize(warehouse, target, &select)]
-            .into_iter()
-            .chain(self.artifact.copies().iter().flat_map(|copy| {
-                [
-                    warehouse.create_namespace(copy),
-                    self.artifact.materialize(
-                        warehouse,
-                        &TablePath::new(copy.clone(), target.name()),
-                        &copied,
-                    ),
-                ]
-            }))
-            .collect())
     }
 }
 
@@ -496,11 +432,6 @@ mod tests {
             Some(Window::new(ts(DAY), ts(DAY + 5)))
         );
         assert_eq!(scd1().window(&today, &until(2 * DAY)), None);
-    }
-
-    #[test]
-    fn an_scd1_reads_the_change_log_past_where_its_window_closes() {
-        assert_eq!(scd1().until(&Window::new(ts(DAY), ts(DAY + 5))), None);
     }
 
     use lithify_core::artifact::{Artifact, UnbuildableArtifact};
@@ -589,7 +520,7 @@ mod tests {
         Window::new(Ts::try_from(100).unwrap(), Ts::try_from(200).unwrap())
     }
 
-    struct Kept<'a, W>(Scd1Builder<'a, Snapshot, Log, W>);
+    struct Kept<'a, W>(Scd1SelectBuilder<'a, Log, W>);
 
     impl<W: Warehouse> SchemaChangeListener<Offset> for Kept<'_, W> {
         type Context = W;
@@ -641,7 +572,7 @@ mod tests {
     }
 
     struct Ended<'a, W>(
-        Scd1Builder<'a, Snapshot, Log, W>,
+        Scd1SelectBuilder<'a, Log, W>,
         ReplayEnd<UnbuildableArtifact>,
         W,
     );
@@ -656,7 +587,7 @@ mod tests {
         }
 
         fn create(&self) -> Result<Vec<SqlString>, UnbuildableArtifact> {
-            self.0.create(&self.2, &self.1, &target(self.table()))
+            shop().create(&self.0, &self.2, &self.1, &target(self.table()))
         }
     }
 
@@ -670,11 +601,11 @@ mod tests {
         catalog.accept::<OutOfOrder, _>(&(), &change(1, TableChange::Created(created)), &mut ())?;
         let mut listeners = TableListeners::new(
             |_: &TableId, encounter: Encounter| {
-                Kept(Scd1Builder::new(
-                    shop(),
+                Kept(Scd1SelectBuilder::new(
                     &Log,
-                    window(),
+                    &window(),
                     encounter.base(base()),
+                    Some(*window().to()),
                 ))
             },
             |_: &TableId| true,
@@ -1514,19 +1445,40 @@ mod tests {
     }
 
     #[test]
-    fn a_snapshot_hands_a_builder_that_builds_it_from_the_table_it_is_told_of() {
+    fn a_snapshot_is_created_as_a_table_from_the_table_its_builder_is_told_of() {
         let window = window();
         let fold = shop().builder::<Log, Engine>(&Log, &window, Base::Missing);
 
         assert!(
-            fold.create(
+            shop()
+                .create(
+                    &fold,
+                    &Engine::default(),
+                    &ReplayEnd::standing(customers(), None),
+                    &target(customers().id())
+                )
+                .unwrap()[0]
+                .as_str()
+                .starts_with("CREATE OR REPLACE TABLE \"mysql_shop\".\"customers_20260920\" AS\n")
+        );
+    }
+
+    #[test]
+    fn an_scd1_is_created_as_a_view_from_the_table_its_builder_is_told_of() {
+        let window = window();
+        let scd1 = Scd1::default();
+        let fold = scd1.builder::<Log, Engine>(&Log, &window, Base::Missing);
+
+        assert!(
+            scd1.create(
+                &fold,
                 &Engine::default(),
                 &ReplayEnd::standing(customers(), None),
-                &target(customers().id())
+                &TablePath::new("mysql_shop", "customers_scd_type_1")
             )
             .unwrap()[0]
                 .as_str()
-                .starts_with("CREATE OR REPLACE TABLE \"mysql_shop\".\"customers_20260920\" AS\n")
+                .starts_with("CREATE OR REPLACE VIEW \"mysql_shop\".\"customers_scd_type_1\" AS\n")
         );
     }
 
@@ -1540,31 +1492,6 @@ mod tests {
             snapshot.create().unwrap()[0],
             format!("CREATE OR REPLACE TABLE \"mysql_shop\".\"customers_20260920\" AS\n{select}")
                 .as_str()
-        );
-    }
-
-    #[test]
-    fn a_snapshot_placed_more_than_once_is_copied_from_its_first_placement_into_the_others() {
-        let artifact = shop()
-            .clone()
-            .copied_into(vec![lithify_core::sink::Namespace::from("analytics.shop")]);
-        let window = window();
-        let snapshot = artifact.builder::<Log, Engine>(&Log, &window, Base::Missing);
-
-        let statements = snapshot
-            .create(
-                &Engine::default(),
-                &ReplayEnd::standing(customers(), None),
-                &target(customers().id()),
-            )
-            .unwrap();
-
-        assert_eq!(
-            statements[1..],
-            [
-                "CREATE SCHEMA IF NOT EXISTS \"analytics\".\"shop\"",
-                "CREATE OR REPLACE TABLE \"analytics\".\"shop\".\"customers_20260920\" AS\nSELECT * FROM \"mysql_shop\".\"customers_20260920\""
-            ]
         );
     }
 }

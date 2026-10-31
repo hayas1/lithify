@@ -35,6 +35,22 @@ impl Artifact for Mirror {
             warehouse: PhantomData,
         }
     }
+
+    fn create<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>(
+        &'a self,
+        builder: &Mirroring<W>,
+        warehouse: &W,
+        end: &ReplayEnd<UnbuildableArtifact>,
+        target: &TablePath,
+    ) -> Result<Vec<SqlString>, UnbuildableArtifact> {
+        if let Some(refused) = end.refusal() {
+            return Err(refused.clone());
+        }
+        let select =
+            <Mirroring<W> as ArtifactBuilder<L::Position>>::select(builder, warehouse, end)?;
+
+        Ok(vec![SqlString::from(format!("{select} into {target}"))])
+    }
 }
 
 pub struct Mirroring<W> {
@@ -60,19 +76,5 @@ impl<P, W> ArtifactBuilder<P> for Mirroring<W> {
         };
 
         Ok(SqlString::from(format!("{} onto {onto}", end.table())))
-    }
-
-    fn create(
-        &self,
-        warehouse: &W,
-        end: &ReplayEnd<UnbuildableArtifact>,
-        target: &TablePath,
-    ) -> Result<Vec<SqlString>, UnbuildableArtifact> {
-        if let Some(refused) = end.refusal() {
-            return Err(refused.clone());
-        }
-        let select = <Self as ArtifactBuilder<P>>::select(self, warehouse, end)?;
-
-        Ok(vec![SqlString::from(format!("{select} into {target}"))])
     }
 }

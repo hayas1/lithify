@@ -529,7 +529,7 @@ pub(crate) mod tests {
                 crate::step::tests::ARTIFACTS
             ),
             &format!(
-                "{}place.scd2 = [{{ prefix = \"mysql_shop_scd2\" }}]\n",
+                "{}place.scd2 = {{ prefix = \"mysql_shop_scd2\" }}\n",
                 crate::step::tests::INFRA
             ),
             "[default]\nartifacts = [\"snapshot\", \"scd2\"]\n",
@@ -1267,7 +1267,7 @@ mod derived {
         derived(
             name,
             "[[artifact]]\nname = \"instant_0600\"\nkind = \"instant\"\nbase = \"snapshot\"\nat = \"06:00\"\nshard = \"%Y%m%d%H\"\n",
-            "place.instant_0600 = [{ prefix = \"mysql_shop_instant\" }]\n",
+            "place.instant_0600 = { prefix = \"mysql_shop_instant\" }\n",
             "[default]\nartifacts = [\"snapshot\", \"instant_0600\"]\n",
         )
     }
@@ -1279,7 +1279,7 @@ mod derived {
         let pipeline = derived(
             "scd1",
             "[[artifact]]\nname = \"scd1\"\nkind = \"scd1\"\nbase = \"snapshot\"\n",
-            "place.scd1 = [{ prefix = \"mysql_shop_scd1\" }]\n",
+            "place.scd1 = { prefix = \"mysql_shop_scd1\" }\n",
             "[default]\nartifacts = [\"snapshot\", \"scd1\"]\n",
         );
 
@@ -1323,7 +1323,7 @@ mod derived {
         let pipeline = derived(
             "scd1-once",
             "[[artifact]]\nname = \"scd1\"\nkind = \"scd1\"\nbase = \"snapshot\"\n",
-            "place.scd1 = [{ prefix = \"mysql_shop_scd1\" }]\n",
+            "place.scd1 = { prefix = \"mysql_shop_scd1\" }\n",
             "[default]\nartifacts = [\"snapshot\", \"scd1\"]\n",
         );
 
@@ -1363,7 +1363,7 @@ mod derived {
         let pipeline = derived(
             "scd2",
             "[[artifact]]\nname = \"scd2\"\nkind = \"scd2\"\nshard = \"%Y%m%d\"\n",
-            "place.scd2 = [{ prefix = \"mysql_shop_scd2\" }]\n",
+            "place.scd2 = { prefix = \"mysql_shop_scd2\" }\n",
             "[default]\nartifacts = [\"snapshot\", \"scd2\"]\n",
         );
 
@@ -1404,7 +1404,7 @@ mod derived {
         let pipeline = derived(
             "scd2-unnamed",
             "[[artifact]]\nname = \"scd2\"\nkind = \"scd2\"\nshard = \"%Y%m%d\"\n",
-            "place.scd2 = [{ prefix = \"mysql_shop_scd2\" }]\n",
+            "place.scd2 = { prefix = \"mysql_shop_scd2\" }\n",
             "[default]\nartifacts = [\"snapshot\"]\n",
         );
 

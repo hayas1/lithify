@@ -115,7 +115,6 @@ impl Inspecting {
         let (artifact, schedule) = Self::scheduled(sink)?;
         let namespace = sink
             .place(artifact)
-            .and_then(<[_]>::first)
             .map(|place| place.clone().into())
             .ok_or_else(|| Uninspectable::Unplaced {
                 sink: sink.name().to_owned(),

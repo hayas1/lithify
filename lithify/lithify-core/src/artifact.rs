@@ -115,6 +115,14 @@ pub trait Artifact {
         window: &'a Window,
         base: Base,
     ) -> Self::Builder<'a, L, W>;
+
+    fn create<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>(
+        &'a self,
+        builder: &Self::Builder<'a, L, W>,
+        warehouse: &W,
+        end: &ReplayEnd<UnbuildableArtifact>,
+        target: &TablePath,
+    ) -> Result<Vec<SqlString>, UnbuildableArtifact>;
 }
 
 pub trait ArtifactBuilder<P>: SchemaChangeListener<P, Error = UnbuildableArtifact> {
@@ -123,11 +131,4 @@ pub trait ArtifactBuilder<P>: SchemaChangeListener<P, Error = UnbuildableArtifac
         warehouse: &Self::Context,
         end: &ReplayEnd<UnbuildableArtifact>,
     ) -> Result<SqlString, UnbuildableArtifact>;
-
-    fn create(
-        &self,
-        warehouse: &Self::Context,
-        end: &ReplayEnd<UnbuildableArtifact>,
-        target: &TablePath,
-    ) -> Result<Vec<SqlString>, UnbuildableArtifact>;
 }

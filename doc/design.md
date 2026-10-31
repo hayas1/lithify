@@ -58,12 +58,9 @@ name = "bigquery"
 project = "local-project"
 endpoint = "http://bigquery-emulator:9050"
 change_log = { project = "raw-project", dataset = "mysql_shop_cdc" }
-place.snapshot = [{ dataset = "mysql_shop" }]
-place.instant_0900 = [
-  { dataset = "mysql_shop_instant_0900" },
-  { project = "analytics-project", dataset = "shop_instant_0900" },
-]
-place.scd1 = [{ dataset = "mysql_shop_scd1" }]
+place.snapshot = { dataset = "mysql_shop" }
+place.instant_0900 = { project = "analytics-project", dataset = "shop_instant_0900" }
+place.scd1 = { dataset = "mysql_shop_scd1" }
 
 [[sink]]
 name = "duckdb_s3"
@@ -71,8 +68,8 @@ name = "duckdb_s3"
 [sink.warehouse.duckdb]
 s3 = { endpoint = "http://rustfs:9000", region = "us-east-1", bucket = "lithify", format = "parquet" }
 change_log = { prefix = "mysql_shop_cdc" }
-place.snapshot = [{ prefix = "mysql_shop" }]
-place.scd2 = [{ prefix = "mysql_shop_scd2" }]
+place.snapshot = { prefix = "mysql_shop" }
+place.scd2 = { prefix = "mysql_shop_scd2" }
 ```
 
 ```toml
@@ -102,7 +99,7 @@ A placement cannot be written for a warehouse other than the one of its sink, si
 An artifact is placed by its name; a placement of an artifact `artifact.toml` does not declare is refused.
 The change log and each artifact are placed on their own, so the artifacts of one sink may lie in projects or datasets apart from the change log and from one another.
 
-An artifact may be placed more than once, each placement holding the whole of it: it is built into the first placement and copied into the others, so every placement holds the same rows.
+An artifact lies in one place, and a list of places is refused as `infra.toml` is read; the same rows in another place are an artifact of their own, built from the one they hold, with a build log of its own.
 
 ### The build log advances daily
 

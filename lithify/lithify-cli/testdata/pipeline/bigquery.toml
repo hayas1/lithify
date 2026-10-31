@@ -1,4 +1,4 @@
 [bigquery]
 project = "local-project"
 change_log = { dataset = "mysql_shop_cdc" }
-place.snapshot = [{ dataset = "mysql_shop" }]
+place.snapshot = { dataset = "mysql_shop" }

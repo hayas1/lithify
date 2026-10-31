@@ -207,9 +207,9 @@ mod tests {
         let snapshot = places.get(&"snapshot".into()).unwrap();
 
         assert!(bigquery.reaches(&bigquery.change_log()));
-        assert!(snapshot.iter().all(|place| bigquery.reaches(place)));
+        assert!(bigquery.reaches(snapshot));
         assert_eq!(
-            Namespace::from(snapshot[0].clone()),
+            Namespace::from(snapshot.clone()),
             Namespace::from("mysql_shop")
         );
     }

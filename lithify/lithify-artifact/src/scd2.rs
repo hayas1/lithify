@@ -16,7 +16,7 @@ use lithify_core::sql::SqlString;
 use lithify_core::window::Window;
 use lithify_pipeline::schedule::{Schedule, Timeline};
 
-use lithify_pipeline::artifact::{ArtifactControl, Placement};
+use lithify_pipeline::artifact::ArtifactControl;
 use lithify_pipeline::build_log::{BuildLog, Series};
 
 use crate::scd1::query::ChangeLogQuery;
@@ -82,7 +82,6 @@ impl Artifact for Scd2 {
         base: Base,
     ) -> Self::Builder<'a, L, W> {
         Scd2Builder {
-            scd2: self,
             query: ChangeLogQuery::new(log),
             window: window.clone(),
             base,
@@ -90,14 +89,30 @@ impl Artifact for Scd2 {
             warehouse: PhantomData,
         }
     }
+
+    fn create<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>(
+        &'a self,
+        builder: &Self::Builder<'a, L, W>,
+        warehouse: &W,
+        end: &ReplayEnd<UnbuildableArtifact>,
+        target: &TablePath,
+    ) -> Result<Vec<SqlString>, UnbuildableArtifact> {
+        let Some(versions) = builder.versions_at(warehouse, end)? else {
+            return Ok(Vec::new());
+        };
+        let closed = self.closed(target.namespace(), end.table(), &builder.window);
+
+        Ok(vec![
+            warehouse.create_table_as(&closed, &versions.closed),
+            warehouse.create_table_as(target, &versions.open),
+        ])
+    }
 }
 
 impl ArtifactControl for Scd2 {
     type Config = Scd2Config;
 
-    // An scd2 is built into its first placement alone, as its versions are appended rather than
-    // created whole and so cannot be copied as they are built.
-    fn declared(name: &ArtifactName, config: &Scd2Config, _: &Placement, zone: Tz) -> Self {
+    fn declared(name: &ArtifactName, config: &Scd2Config, zone: Tz) -> Self {
         Self::new(config.shard(), zone).named(name.clone())
     }
 
@@ -123,10 +138,9 @@ impl ArtifactControl for Scd2 {
     }
 }
 
-// Holds what Scd1Builder holds but its fold, as an scd2 refuses a window its table changed its
+// Holds what Scd1SelectBuilder holds but its fold, as an scd2 refuses a window its table changed its
 // schema within, and so folds the versions of that table from its one era as it is finished.
 pub struct Scd2Builder<'a, L: RowChangeLog, W> {
-    scd2: &'a Scd2,
     query: ChangeLogQuery<'a, L>,
     window: Window,
     base: Base,
@@ -338,25 +352,6 @@ impl<L: RowChangeLog, W: Warehouse> ArtifactBuilder<L::Position> for Scd2Builder
         self.versions_at(warehouse, end)?
             .map(|versions| versions.open)
             .ok_or_else(|| UnbuildableArtifact::WithoutEra(end.table().clone()))
-    }
-
-    fn create(
-        &self,
-        warehouse: &W,
-        end: &ReplayEnd<UnbuildableArtifact>,
-        target: &TablePath,
-    ) -> Result<Vec<SqlString>, UnbuildableArtifact> {
-        let Some(versions) = self.versions_at(warehouse, end)? else {
-            return Ok(Vec::new());
-        };
-        let closed = self
-            .scd2
-            .closed(target.namespace(), end.table(), &self.window);
-
-        Ok(vec![
-            warehouse.create_table_as(&closed, &versions.closed),
-            warehouse.create_table_as(target, &versions.open),
-        ])
     }
 }
 

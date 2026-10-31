@@ -4,7 +4,7 @@ use duckdb::Connection;
 
 use lithify_artifact::shard::Shard;
 use lithify_artifact::snapshot::Snapshot;
-use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
+use lithify_core::artifact::{Artifact, UnbuildableArtifact};
 use lithify_core::build::Base;
 use lithify_core::listener::OutOfOrder;
 use lithify_core::listener::ReplayEnd;
@@ -49,9 +49,10 @@ async fn a_snapshot_holds_each_key_as_the_change_log_last_left_it() {
         .execute(&client.warehouse().create_namespace(target.namespace()))
         .await
         .unwrap();
+    let snapshot = artifact.builder::<_, DuckDbWarehouse>(&log, &window, Base::Missing);
     let statements = artifact
-        .builder::<_, DuckDbWarehouse>(&log, &window, Base::Missing)
         .create(
+            &snapshot,
             client.warehouse(),
             &ReplayEnd::standing(people(), None),
             &target,

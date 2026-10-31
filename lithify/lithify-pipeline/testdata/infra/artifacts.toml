@@ -1,1 +1,1 @@
-place.snapshot = [{ prefix = "mysql_shop" }]
+place.snapshot = { prefix = "mysql_shop" }

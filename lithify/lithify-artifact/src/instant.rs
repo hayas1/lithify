@@ -2,20 +2,21 @@ use chrono::{DateTime, NaiveTime, TimeDelta, Utc};
 use chrono_tz::Tz;
 use serde::Deserialize;
 
-use lithify_core::artifact::{Artifact, ArtifactName};
+use lithify_core::artifact::{Artifact, ArtifactBuilder, ArtifactName, UnbuildableArtifact};
 use lithify_core::build::Base;
+use lithify_core::listener::ReplayEnd;
 use lithify_core::model::TableId;
-use lithify_core::sink::{Namespace, TablePath, Warehouse};
+use lithify_core::sink::{TablePath, Warehouse};
 use lithify_core::source::RowChangeLog;
 use lithify_core::sql::SqlString;
-use lithify_core::ts::{Event, Ts};
+use lithify_core::ts::Ts;
 use lithify_core::window::Window;
 use lithify_pipeline::schedule::{Schedule, Timeline};
 
-use lithify_pipeline::artifact::{ArtifactControl, Placement};
+use lithify_pipeline::artifact::ArtifactControl;
 use lithify_pipeline::build_log::{BuildLog, Series};
 
-use crate::scd1::{Overwrite, Scd1Builder};
+use crate::scd1::Scd1SelectBuilder;
 use crate::shard::Shard;
 use crate::snapshot::Snapshot;
 
@@ -48,7 +49,6 @@ pub struct Instant {
     base: Series,
     at: NaiveTime,
     delay: TimeDelta,
-    copies: Vec<Namespace>,
     shard: Shard,
 }
 
@@ -59,7 +59,6 @@ impl Instant {
             base: Snapshot::days(&ArtifactName::from(Snapshot::KIND)),
             at,
             delay: days.delay(at),
-            copies: Vec::new(),
             shard,
         }
     }
@@ -76,10 +75,6 @@ impl Instant {
         }
     }
 
-    pub fn copied_into(self, copies: Vec<Namespace>) -> Self {
-        Self { copies, ..self }
-    }
-
     pub fn cut(at: NaiveTime) -> String {
         at.format("%H:%M").to_string()
     }
@@ -90,7 +85,7 @@ impl Artifact for Instant {
 
     type From = Snapshot;
 
-    type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = Scd1Builder<'a, Self, L, W>;
+    type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = Scd1SelectBuilder<'a, L, W>;
 
     // An instant is read as the data at the instant it is cut, unlike a snapshot read as a day, so
     // it is named after the instant its window closes.
@@ -104,26 +99,32 @@ impl Artifact for Instant {
         window: &'a Window,
         base: Base,
     ) -> Self::Builder<'a, L, W> {
-        Scd1Builder::new(self, log, window.clone(), base)
+        Scd1SelectBuilder::new(log, window, base, Some(*window.to()))
+    }
+
+    fn create<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>(
+        &'a self,
+        builder: &Self::Builder<'a, L, W>,
+        warehouse: &W,
+        end: &ReplayEnd<UnbuildableArtifact>,
+        target: &TablePath,
+    ) -> Result<Vec<SqlString>, UnbuildableArtifact> {
+        Ok(vec![
+            warehouse.create_table_as(target, &builder.select(warehouse, end)?),
+        ])
     }
 }
 
 impl ArtifactControl for Instant {
     type Config = InstantConfig;
 
-    fn declared(
-        name: &ArtifactName,
-        config: &InstantConfig,
-        placement: &Placement,
-        zone: Tz,
-    ) -> Self {
+    fn declared(name: &ArtifactName, config: &InstantConfig, zone: Tz) -> Self {
         Self::new(
             config.at(),
             Schedule::default(),
             Shard::new(config.shard(), zone),
         )
         .named(name.clone())
-        .copied_into(placement.copies().to_vec())
     }
 
     fn series(&self) -> Series {
@@ -146,25 +147,6 @@ impl ArtifactControl for Instant {
         window: &Window,
     ) -> Option<&'b BuildLog> {
         Snapshot::shard_closing(&self.base, built, table, *window.from())
-    }
-}
-
-impl Overwrite for Instant {
-    fn until(&self, window: &Window) -> Option<Ts<Event>> {
-        Some(*window.to())
-    }
-
-    fn copies(&self) -> &[Namespace] {
-        &self.copies
-    }
-
-    fn materialize<W: Warehouse>(
-        &self,
-        warehouse: &W,
-        target: &TablePath,
-        select: &SqlString,
-    ) -> SqlString {
-        warehouse.create_table_as(target, select)
     }
 }
 

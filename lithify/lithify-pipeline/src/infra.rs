@@ -197,8 +197,8 @@ impl<W: Clone + Placing> WiredSink<W> {
         if places.is_empty() {
             return Err(Miswiring::SinkWithoutArtifacts(name));
         }
-        for (artifact, placed) in places.iter() {
-            Self::placed(&name, artifact, placed, declarations, &places)?;
+        for (artifact, _) in places.iter() {
+            Self::placed(&name, artifact, declarations, &places)?;
         }
 
         Ok(Sink {
@@ -214,16 +214,12 @@ impl<W: Clone + Placing> WiredSink<W> {
     fn placed<A: Declaration>(
         sink: &str,
         artifact: &ArtifactName,
-        placed: &[W::Location],
         declarations: &Declarations<A>,
         places: &Places<W::Location>,
     ) -> Result<(), Miswiring> {
         let declared = declarations
             .get(artifact)
             .ok_or_else(|| Miswiring::Undeclared(sink.to_owned(), artifact.clone()))?;
-        if placed.is_empty() {
-            return Err(Miswiring::Unplaced(sink.to_owned(), artifact.clone()));
-        }
         match declared.base() {
             Some(base) if places.get(base).is_none() => Err(Miswiring::BaseUnplaced {
                 sink: sink.to_owned(),
@@ -247,7 +243,6 @@ pub enum Miswiring {
     SinkWithoutWarehouse(String),
     SinkWithoutArtifacts(String),
     Undeclared(String, ArtifactName),
-    Unplaced(String, ArtifactName),
     BaseUnplaced {
         sink: String,
         artifact: ArtifactName,
@@ -279,9 +274,6 @@ impl Display for Miswiring {
                 formatter,
                 "{sink} places {artifact}, which artifact.toml declares nowhere"
             ),
-            Self::Unplaced(sink, artifact) => {
-                write!(formatter, "{sink} places {artifact} nowhere")
-            }
             Self::BaseUnplaced {
                 sink,
                 artifact,
@@ -358,7 +350,7 @@ impl<W: SinkWarehouse, A> Sink<W, A> {
         self.artifacts.iter()
     }
 
-    pub fn place(&self, artifact: &ArtifactName) -> Option<&[W::Location]> {
+    pub fn place(&self, artifact: &ArtifactName) -> Option<&W::Location> {
         self.places.get(artifact)
     }
 
@@ -666,11 +658,11 @@ mod tests {
         );
         assert_eq!(
             sinks[0].place(&"snapshot".into()),
-            Some([prefix("mysql_shop")].as_slice())
+            Some(&prefix("mysql_shop"))
         );
         assert_eq!(
             sinks[1].place(&"snapshot".into()),
-            Some([dataset("mysql_shop")].as_slice())
+            Some(&dataset("mysql_shop"))
         );
     }
 
@@ -678,7 +670,7 @@ mod tests {
     fn a_sink_places_each_artifact_by_its_name() {
         assert_eq!(
             sinks()[0].place(&"nine".into()),
-            Some([prefix("mysql_shop_0900")].as_slice())
+            Some(&prefix("mysql_shop_0900"))
         );
     }
 
@@ -712,20 +704,10 @@ mod tests {
     }
 
     #[test]
-    fn an_artifact_placed_nowhere_is_rejected() {
-        let wiring = wired(SERVER, &format!("{WAREHOUSE}place.snapshot = []\n"));
-
-        assert_eq!(
-            wiring.sinks(&declarations()).unwrap_err(),
-            Miswiring::Unplaced("rustfs".into(), "snapshot".into())
-        );
-    }
-
-    #[test]
     fn an_artifact_placed_without_the_one_it_is_built_from_is_rejected() {
         let wiring = wired(
             SERVER,
-            &format!("{WAREHOUSE}place.copy = [{{ prefix = \"mysql_shop_copy\" }}]\n"),
+            &format!("{WAREHOUSE}place.copy = {{ prefix = \"mysql_shop_copy\" }}\n"),
         );
 
         assert_eq!(
@@ -741,8 +723,8 @@ mod tests {
     #[test]
     fn a_place_written_the_way_of_another_warehouse_is_rejected() {
         let elsewhere = INFRA.replace(
-            "place.copy = [{ dataset = \"mysql_shop_copy\" }]",
-            "place.copy = [{ prefix = \"mysql_shop_copy\" }]",
+            "place.copy = { dataset = \"mysql_shop_copy\" }",
+            "place.copy = { prefix = \"mysql_shop_copy\" }",
         );
 
         assert!(toml::from_str::<Wiring<Captured, Sunk>>(&elsewhere).is_err());
@@ -830,7 +812,7 @@ mod tests {
 
         assert_eq!(
             wiring.sinks(&declarations()).unwrap()[0].place(&"snapshot".into()),
-            Some([prefix("mysql_shop")].as_slice())
+            Some(&prefix("mysql_shop"))
         );
     }
 

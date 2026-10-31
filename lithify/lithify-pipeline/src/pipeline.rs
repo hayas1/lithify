@@ -449,7 +449,7 @@ mod tests {
         let directory = scratch(name);
         configure(
             &directory,
-            &format!("{SOURCE}{SINK}place.copy = [{{ prefix = \"mysql_shop_copy\" }}]\n"),
+            &format!("{SOURCE}{SINK}place.copy = {{ prefix = \"mysql_shop_copy\" }}\n"),
             listed,
         );
         let opened = Pipeline::<Capture, Sunk, Made>::open(&directory);
@@ -567,7 +567,7 @@ mod tests {
         let directory = scratch("pipeline-placing-an-undeclared-artifact");
         configure(
             &directory,
-            &format!("{SOURCE}{SINK}place.history = [{{ prefix = \"mysql_shop_scd2\" }}]\n"),
+            &format!("{SOURCE}{SINK}place.history = {{ prefix = \"mysql_shop_scd2\" }}\n"),
             "",
         );
 

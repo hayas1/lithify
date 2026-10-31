@@ -15,7 +15,7 @@ use lithify_core::sink::{Namespace, TablePath};
 use lithify_core::ts::{Replay, Ts};
 use lithify_core::window::Window;
 use lithify_pipeline::Declaration;
-use lithify_pipeline::artifact::{ArtifactControl, Placement};
+use lithify_pipeline::artifact::ArtifactControl;
 use lithify_pipeline::build_log::{Run, Series};
 use lithify_pipeline::infra::{Sink, Source};
 use lithify_pipeline::progress::Step;
@@ -215,27 +215,22 @@ impl Declared {
         name: &ArtifactName,
         config: &A::Config,
     ) -> Result<(A, Namespace), Unrunnable> {
-        let placement = Self::placement(sink, name)?;
-        let artifact = A::declared(name, config, &placement, sink.time_zone());
-
-        Ok((artifact, placement.namespace().clone()))
+        Ok((
+            A::declared(name, config, sink.time_zone()),
+            Self::namespace(sink, name)?,
+        ))
     }
 
-    fn placement(
+    fn namespace(
         sink: &Sink<WarehouseConfig, ArtifactConfig>,
         artifact: &ArtifactName,
-    ) -> Result<Placement, Unrunnable> {
-        let mut places = sink
-            .place(artifact)
-            .unwrap_or_default()
-            .iter()
-            .map(|place| Namespace::from(place.clone()));
-        let namespace = places.next().ok_or_else(|| Unrunnable::Undeclared {
-            sink: sink.name().to_owned(),
-            artifact: artifact.clone(),
-        })?;
-
-        Ok(Placement::new(namespace, places.collect()))
+    ) -> Result<Namespace, Unrunnable> {
+        sink.place(artifact)
+            .map(|place| Namespace::from(place.clone()))
+            .ok_or_else(|| Unrunnable::Undeclared {
+                sink: sink.name().to_owned(),
+                artifact: artifact.clone(),
+            })
     }
 
     pub fn series(&self) -> Series {
@@ -397,7 +392,6 @@ impl Lineup {
 mod tests {
     use std::path::Path;
 
-    use lithify_artifact::shard::Shard;
     use lithify_core::model::TableId;
     use lithify_core::sink::TablePath;
     use lithify_core::window::Window;
@@ -466,7 +460,7 @@ mod tests {
         let pipeline = opened(
             "partly-placed-instants",
             &format!("{ARTIFACTS}{INSTANTS}"),
-            &format!("{INFRA}place.six = [{{ prefix = \"mysql_shop_0600\" }}]\n"),
+            &format!("{INFRA}place.six = {{ prefix = \"mysql_shop_0600\" }}\n"),
             "",
         );
 
@@ -487,7 +481,7 @@ mod tests {
         let pipeline = opened(
             "based-instant",
             &format!("{ARTIFACTS}{INSTANTS}"),
-            &format!("{INFRA}place.six = [{{ prefix = \"mysql_shop_0600\" }}]\n"),
+            &format!("{INFRA}place.six = {{ prefix = \"mysql_shop_0600\" }}\n"),
             "",
         );
         let sink = pipeline.sinks().nth(1).unwrap();
@@ -549,7 +543,7 @@ mod tests {
             &format!(
                 "{ARTIFACTS}[[artifact]]\nname = \"weekly\"\nkind = \"snapshot\"\nshard = \"%Y%m%d\"\n"
             ),
-            &format!("{INFRA}place.weekly = [{{ prefix = \"mysql_shop_weekly\" }}]\n"),
+            &format!("{INFRA}place.weekly = {{ prefix = \"mysql_shop_weekly\" }}\n"),
             "",
         );
 
@@ -595,29 +589,6 @@ mod tests {
                 chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
                 chrono_tz::Asia::Tokyo
             )
-        );
-    }
-
-    #[test]
-    fn a_snapshot_placed_more_than_once_is_built_into_its_first_placement_and_copied_into_the_others()
-     {
-        let pipeline = opened(
-            "copied-snapshot",
-            ARTIFACTS,
-            &INFRA.replacen(
-                "place.snapshot = [{ dataset = \"mysql_shop\" }]",
-                "place.snapshot = [{ dataset = \"mysql_shop\" }, { project = \"analytics\", dataset = \"shop\" }]",
-                1,
-            ),
-            "",
-        );
-
-        assert_eq!(
-            DeclaredSnapshot::of(pipeline.sinks().next().unwrap())
-                .unwrap()
-                .snapshot,
-            Snapshot::new(Shard::new("%Y%m%d", Tz::UTC))
-                .copied_into(vec![Namespace::from("analytics.shop")])
         );
     }
 }
