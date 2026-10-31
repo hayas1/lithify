@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use chrono_tz::Tz;
 use serde::Deserialize;
 
@@ -9,20 +7,17 @@ use lithify_artifact::scd2::Scd2;
 use lithify_artifact::snapshot::Snapshot;
 use lithify_artifact::snapshot_provide::SnapshotProvide;
 use lithify_core::artifact::{Artifact, ArtifactName};
-use lithify_core::sink::Namespace;
 use lithify_core::window::Window;
 use lithify_pipeline::Declaration;
 use lithify_pipeline::artifact::ArtifactControl;
 use lithify_pipeline::build_log::Series;
 use lithify_pipeline::infra::Sink;
 use lithify_pipeline::progress::Step;
-use lithify_pipeline::runner::{StepTaker, Tables};
+use lithify_pipeline::runner::{BuildLogWriter, StepTaker, Tables};
 use lithify_pipeline::schedule::Schedule;
 use lithify_pipeline::stepping::{SeriesLog, Stepping};
 
-use crate::journal::Journal;
 use crate::pipeline::WarehouseConfig;
-use crate::report::Report;
 use crate::unrunnable::Unrunnable;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -43,36 +38,37 @@ impl ArtifactConfig {
         }
     }
 
-    fn declared(
+    pub fn declared(
         &self,
         sink: &Sink<WarehouseConfig, ArtifactConfig>,
         name: &ArtifactName,
     ) -> Result<Declared, Unrunnable> {
+        let zone = sink.time_zone();
+
         Ok(match self {
-            Self::Snapshot(config) => {
-                let (snapshot, namespace) = Declared::artifact(sink, name, config)?;
-                Declared::Snapshot(snapshot, namespace)
-            }
+            Self::Snapshot(config) => Declared::Snapshot(Snapshot::declared(name, config, zone)),
             Self::Instant(config) => {
-                let (instant, namespace) = Declared::artifact::<Instant>(sink, name, config)?;
-                let base = Self::base(sink, name, config.base())?;
-                Declared::Instant(instant.based_on(&base), namespace)
+                Declared::Instant(Instant::declared(name, config, zone).based_on(&Self::base(
+                    sink,
+                    name,
+                    config.base(),
+                )?))
             }
             Self::Scd1(config) => {
-                let (scd1, namespace) = Declared::artifact::<Scd1>(sink, name, config)?;
-                let base = Self::base(sink, name, config.base())?;
-                Declared::Scd1(scd1.based_on(&base), namespace)
+                Declared::Scd1(Scd1::declared(name, config, zone).based_on(&Self::base(
+                    sink,
+                    name,
+                    config.base(),
+                )?))
             }
-            Self::Scd2(config) => {
-                let (scd2, namespace) = Declared::artifact(sink, name, config)?;
-                Declared::Scd2(scd2, namespace)
-            }
-            Self::SnapshotProvide(config) => {
-                let (provide, namespace) =
-                    Declared::artifact::<SnapshotProvide>(sink, name, config)?;
-                let base = Self::base(sink, name, config.base())?;
-                Declared::SnapshotProvide(provide.based_on(&base), namespace)
-            }
+            Self::Scd2(config) => Declared::Scd2(Scd2::declared(name, config, zone)),
+            Self::SnapshotProvide(config) => Declared::SnapshotProvide(
+                SnapshotProvide::declared(name, config, zone).based_on(&Self::base(
+                    sink,
+                    name,
+                    config.base(),
+                )?),
+            ),
         })
     }
 
@@ -118,6 +114,18 @@ impl Declaration for ArtifactConfig {
         }
     }
 
+    fn series(&self, name: &ArtifactName, time_zone: Tz) -> Series {
+        match self {
+            Self::Snapshot(config) => Snapshot::declared(name, config, time_zone).series(),
+            Self::Instant(config) => Instant::declared(name, config, time_zone).series(),
+            Self::Scd1(config) => Scd1::declared(name, config, time_zone).series(),
+            Self::Scd2(config) => Scd2::declared(name, config, time_zone).series(),
+            Self::SnapshotProvide(config) => {
+                SnapshotProvide::declared(name, config, time_zone).series()
+            }
+        }
+    }
+
     fn base(&self) -> Option<&ArtifactName> {
         match self {
             Self::Snapshot(_) | Self::Scd2(_) => None,
@@ -136,195 +144,66 @@ impl Declaration for ArtifactConfig {
 }
 
 pub enum Declared {
-    Snapshot(Snapshot, Namespace),
-    Instant(Instant, Namespace),
-    Scd2(Scd2, Namespace),
-    Scd1(Scd1, Namespace),
-    SnapshotProvide(SnapshotProvide, Namespace),
+    Snapshot(Snapshot),
+    Instant(Instant),
+    Scd2(Scd2),
+    Scd1(Scd1),
+    SnapshotProvide(SnapshotProvide),
 }
 
 impl Declared {
-    fn artifact<A: ArtifactControl>(
-        sink: &Sink<WarehouseConfig, ArtifactConfig>,
-        name: &ArtifactName,
-        config: &A::Config,
-    ) -> Result<(A, Namespace), Unrunnable> {
-        Ok((
-            A::declared(name, config, sink.time_zone()),
-            Self::namespace(sink, name)?,
-        ))
-    }
-
-    fn namespace(
-        sink: &Sink<WarehouseConfig, ArtifactConfig>,
-        artifact: &ArtifactName,
-    ) -> Result<Namespace, Unrunnable> {
-        sink.namespace(artifact)
-            .ok_or_else(|| Unrunnable::Undeclared {
-                sink: sink.name().to_owned(),
-                artifact: artifact.clone(),
-            })
-    }
-
-    pub fn series(&self) -> Series {
-        match self {
-            Self::Snapshot(artifact, _) => artifact.series(),
-            Self::Instant(artifact, _) => artifact.series(),
-            Self::Scd2(artifact, _) => artifact.series(),
-            Self::Scd1(artifact, _) => artifact.series(),
-            Self::SnapshotProvide(artifact, _) => artifact.series(),
-        }
-    }
-
-    pub fn is(&self, artifact: &ArtifactName) -> bool {
-        self.series().artifact() == artifact
-    }
-
-    fn base<'s>(&self, snapshot: &'s SeriesLog) -> Option<&'s SeriesLog> {
-        match self {
-            Self::Snapshot(..) | Self::Scd2(..) => None,
-            Self::Instant(..) | Self::Scd1(..) | Self::SnapshotProvide(..) => Some(snapshot),
-        }
-    }
-
-    async fn next<P: StepTaker<Error = Unrunnable>>(
+    pub async fn next<P: StepTaker<Error = Unrunnable>>(
         &self,
         stepping: &Stepping<'_, P>,
-        snapshot: &SeriesLog,
+        log: &SeriesLog,
+        base: Option<&SeriesLog>,
         taken: &[Window],
     ) -> Result<Option<Step>, Unrunnable> {
-        let base = self.base(snapshot);
-
         match self {
-            Self::Snapshot(artifact, namespace) => {
-                stepping.next(artifact, namespace, base, taken).await
-            }
-            Self::Instant(artifact, namespace) => {
-                stepping.next(artifact, namespace, base, taken).await
-            }
-            Self::Scd2(artifact, namespace) => {
-                stepping.next(artifact, namespace, base, taken).await
-            }
-            Self::Scd1(artifact, namespace) => {
-                stepping.next(artifact, namespace, base, taken).await
-            }
-            Self::SnapshotProvide(artifact, namespace) => {
-                stepping.next(artifact, namespace, base, taken).await
-            }
+            Self::Snapshot(artifact) => stepping.next(artifact, log, base, taken).await,
+            Self::Instant(artifact) => stepping.next(artifact, log, base, taken).await,
+            Self::Scd2(artifact) => stepping.next(artifact, log, base, taken).await,
+            Self::Scd1(artifact) => stepping.next(artifact, log, base, taken).await,
+            Self::SnapshotProvide(artifact) => stepping.next(artifact, log, base, taken).await,
         }
     }
 
-    async fn take<P: StepTaker<Error = Unrunnable>, B: Report>(
+    pub async fn take<P: StepTaker<Error = Unrunnable>, B: BuildLogWriter>(
         &self,
         stepping: &Stepping<'_, P>,
-        snapshot: &SeriesLog,
+        log: &SeriesLog,
+        base: Option<&SeriesLog>,
         window: &Window,
         tables: &Tables,
         writer: &B,
-        journal: &mut Journal,
-    ) -> Result<(), Unrunnable> {
-        let base = self.base(snapshot);
-        journal.window(window);
-        let output = match self {
-            Self::Snapshot(artifact, namespace) => {
+    ) -> Result<B::Output, Unrunnable> {
+        match self {
+            Self::Snapshot(artifact) => {
                 stepping
-                    .take(artifact, namespace, base, window, tables, writer)
+                    .take(artifact, log, base, window, tables, writer)
                     .await
             }
-            Self::Instant(artifact, namespace) => {
+            Self::Instant(artifact) => {
                 stepping
-                    .take(artifact, namespace, base, window, tables, writer)
+                    .take(artifact, log, base, window, tables, writer)
                     .await
             }
-            Self::Scd2(artifact, namespace) => {
+            Self::Scd2(artifact) => {
                 stepping
-                    .take(artifact, namespace, base, window, tables, writer)
+                    .take(artifact, log, base, window, tables, writer)
                     .await
             }
-            Self::Scd1(artifact, namespace) => {
+            Self::Scd1(artifact) => {
                 stepping
-                    .take(artifact, namespace, base, window, tables, writer)
+                    .take(artifact, log, base, window, tables, writer)
                     .await
             }
-            Self::SnapshotProvide(artifact, namespace) => {
+            Self::SnapshotProvide(artifact) => {
                 stepping
-                    .take(artifact, namespace, base, window, tables, writer)
+                    .take(artifact, log, base, window, tables, writer)
                     .await
-            }
-        }?;
-
-        writer.report(&self.series(), window, output, journal)
-    }
-}
-
-pub struct Lineup {
-    snapshot: SeriesLog,
-    declared: Vec<Declared>,
-}
-
-impl Lineup {
-    pub fn of(sink: &Sink<WarehouseConfig, ArtifactConfig>) -> Result<Self, Unrunnable> {
-        Ok(Self {
-            snapshot: sink.scheduled().clone(),
-            declared: sink
-                .artifacts()
-                .map(|(name, declared)| declared.declared(sink, name))
-                .collect::<Result<_, _>>()?,
-        })
-    }
-
-    pub fn snapshot(&self) -> &SeriesLog {
-        &self.snapshot
-    }
-
-    pub async fn catch_up<P: StepTaker<Error = Unrunnable>, B: Report>(
-        &self,
-        stepping: &Stepping<'_, P>,
-        named: impl Fn(&Declared) -> bool,
-        writer: &B,
-        journal: &mut Journal,
-    ) -> Result<(), Unrunnable> {
-        let mut taken: BTreeMap<Series, Vec<Window>> = BTreeMap::new();
-
-        while let Some((series, window)) =
-            self.step(stepping, &named, &taken, writer, journal).await?
-        {
-            taken.entry(series).or_default().push(window);
-        }
-
-        Ok(())
-    }
-
-    pub async fn step<P: StepTaker<Error = Unrunnable>, B: Report>(
-        &self,
-        stepping: &Stepping<'_, P>,
-        named: impl Fn(&Declared) -> bool,
-        taken: &BTreeMap<Series, Vec<Window>>,
-        writer: &B,
-        journal: &mut Journal,
-    ) -> Result<Option<(Series, Window)>, Unrunnable> {
-        for declared in self.declared.iter().filter(|declared| named(declared)) {
-            let series = declared.series();
-            let taken = taken.get(&series).map(Vec::as_slice).unwrap_or_default();
-
-            if let Some(step) = declared.next(stepping, &self.snapshot, taken).await? {
-                let tables = Tables::Except(step.left_out().clone());
-                declared
-                    .take(
-                        stepping,
-                        &self.snapshot,
-                        step.window(),
-                        &tables,
-                        writer,
-                        journal,
-                    )
-                    .await?;
-
-                return Ok(Some((series, step.window().clone())));
             }
         }
-
-        Ok(None)
     }
 }
 
@@ -361,17 +240,11 @@ mod tests {
             Ts::try_from(1789948800000).unwrap(),
         );
 
-        let Ok(Declared::Snapshot(snapshot, namespace)) = sink
-            .artifact(&"snapshot".into())
-            .unwrap()
-            .declared(sink, &"snapshot".into())
-        else {
-            panic!("snapshot is a snapshot");
-        };
+        let snapshot = ArtifactConfig::snapshot(sink, &"snapshot".into()).unwrap();
 
         assert_eq!(
             TablePath::new(
-                namespace,
+                sink.log(&"snapshot".into()).unwrap().namespace().clone(),
                 &snapshot.table_name(&TableId::new("shop", "customers"), &window)
             ),
             TablePath::new("mysql_shop", "customers_20260920")
@@ -380,7 +253,7 @@ mod tests {
 
     fn declared(sink: &Sink<WarehouseConfig, ArtifactConfig>) -> Vec<Series> {
         sink.artifacts()
-            .map(|(name, declared)| declared.declared(sink, name).unwrap().series())
+            .map(|(name, _)| sink.log(name).unwrap().series().clone())
             .collect()
     }
 
@@ -461,7 +334,7 @@ mod tests {
                 "0.1.0",
             ))
         };
-        let Ok(Declared::Instant(six, _)) = sink
+        let Ok(Declared::Instant(six)) = sink
             .artifact(&"six".into())
             .unwrap()
             .declared(sink, &"six".into())

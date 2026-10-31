@@ -1,13 +1,18 @@
+use std::collections::BTreeMap;
+
 use chrono::NaiveDate;
 
 use lithify_core::artifact::ArtifactName;
 use lithify_core::ts::{Replay, Ts};
+use lithify_core::window::Window;
+use lithify_pipeline::build_log::Series;
 use lithify_pipeline::infra::{Sink, Source};
-use lithify_pipeline::runner::StepTaker;
+use lithify_pipeline::lineup::Lineup;
+use lithify_pipeline::runner::{StepTaker, Tables};
 use lithify_pipeline::schedule::Timeline;
-use lithify_pipeline::stepping::Stepping;
+use lithify_pipeline::stepping::{SeriesLog, Stepping};
 
-use crate::artifacts::{ArtifactConfig, Declared, Lineup};
+use crate::artifacts::{ArtifactConfig, Declared};
 use crate::journal::Journal;
 use crate::pipeline::{CaptureConfig, WarehouseConfig};
 use crate::report::Report;
@@ -35,7 +40,7 @@ impl RunCommand {
         P: StepTaker<Error = Unrunnable>,
         B: Report,
     {
-        let lineup = Lineup::of(sink)?;
+        let lineup = Lineup::of(sink, |name, config| config.declared(sink, name))?;
         let stepping = Stepping::new(
             taker,
             Timeline::new(sink.schedule(), source.since()..now.as_event()),
@@ -44,22 +49,15 @@ impl RunCommand {
 
         match self {
             Self::CatchUp { target, to: None } => {
-                lineup
-                    .catch_up(&stepping, target.named(), writer, journal)
-                    .await
+                target.catch_up(&lineup, &stepping, writer, journal).await
             }
             Self::CatchUp {
                 target,
                 to: Some(date),
             } => {
-                lineup
-                    .catch_up(
-                        &stepping.up_to(*date, lineup.snapshot()).await?,
-                        target.named(),
-                        writer,
-                        journal,
-                    )
-                    .await
+                let stepping = stepping.up_to(*date, sink.scheduled()).await?;
+
+                target.catch_up(&lineup, &stepping, writer, journal).await
             }
             Self::Build(target) => target.build(&lineup, &stepping, writer, journal).await,
         }
@@ -76,16 +74,16 @@ impl Target {
         Self { artifact }
     }
 
-    fn named(&self) -> impl Fn(&Declared) -> bool {
-        move |declared| match &self.artifact {
-            Some(artifact) => declared.is(artifact),
+    fn names(&self, log: &SeriesLog) -> bool {
+        match &self.artifact {
+            Some(artifact) => log.series().artifact() == artifact,
             None => true,
         }
     }
 
     async fn build<P, B>(
         &self,
-        lineup: &Lineup,
+        lineup: &Lineup<Declared>,
         stepping: &Stepping<'_, P>,
         writer: &B,
         journal: &mut Journal,
@@ -94,8 +92,8 @@ impl Target {
         P: StepTaker<Error = Unrunnable>,
         B: Report,
     {
-        if lineup
-            .step(stepping, self.named(), &Default::default(), writer, journal)
+        if self
+            .step(lineup, stepping, &Default::default(), writer, journal)
             .await?
             .is_none()
         {
@@ -103,6 +101,60 @@ impl Target {
         }
 
         Ok(())
+    }
+
+    async fn catch_up<P, B>(
+        &self,
+        lineup: &Lineup<Declared>,
+        stepping: &Stepping<'_, P>,
+        writer: &B,
+        journal: &mut Journal,
+    ) -> Result<(), Unrunnable>
+    where
+        P: StepTaker<Error = Unrunnable>,
+        B: Report,
+    {
+        let mut taken: BTreeMap<Series, Vec<Window>> = BTreeMap::new();
+
+        while let Some((series, window)) =
+            self.step(lineup, stepping, &taken, writer, journal).await?
+        {
+            taken.entry(series).or_default().push(window);
+        }
+
+        Ok(())
+    }
+
+    async fn step<P, B>(
+        &self,
+        lineup: &Lineup<Declared>,
+        stepping: &Stepping<'_, P>,
+        taken: &BTreeMap<Series, Vec<Window>>,
+        writer: &B,
+        journal: &mut Journal,
+    ) -> Result<Option<(Series, Window)>, Unrunnable>
+    where
+        P: StepTaker<Error = Unrunnable>,
+        B: Report,
+    {
+        for member in lineup.members().filter(|member| self.names(member.log())) {
+            let (declared, log, base) = (member.declared(), member.log(), member.base());
+            let series = log.series();
+            let taken = taken.get(series).map(Vec::as_slice).unwrap_or_default();
+
+            if let Some(step) = declared.next(stepping, log, base, taken).await? {
+                let tables = Tables::Except(step.left_out().clone());
+                journal.window(step.window());
+                let output = declared
+                    .take(stepping, log, base, step.window(), &tables, writer)
+                    .await?;
+                writer.report(series, step.window(), output, journal)?;
+
+                return Ok(Some((series.clone(), step.window().clone())));
+            }
+        }
+
+        Ok(None)
     }
 }
 

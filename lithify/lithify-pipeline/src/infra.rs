@@ -9,11 +9,9 @@ use chrono_tz::Tz;
 
 use crate::warehouse::SinkWarehouse;
 use lithify_core::artifact::ArtifactName;
-use lithify_core::sink::Namespace;
 use lithify_core::ts::{Event, Ts};
 
 use crate::artifact::{Declaration, Declarations};
-use crate::build_log::Series;
 use crate::place::{Places, Placing};
 use crate::schedule::Schedule;
 use crate::stepping::SeriesLog;
@@ -226,12 +224,9 @@ impl<W: Clone + Placing> WiredSink<W> {
         time_zone: Tz,
     ) -> Result<(SeriesLog, Schedule), Miswiring> {
         let mut scheduled = artifacts.iter().filter_map(|(name, declared)| {
-            let schedule = declared.schedule(time_zone)?;
-            let series = Series::new(name.clone(), &schedule.to_string());
-
             Some((
-                SeriesLog::new(places.get(name)?.clone().into(), series),
-                schedule,
+                Sink::<W, A>::logged(places, name, declared, time_zone)?,
+                declared.schedule(time_zone)?,
             ))
         });
         let found = scheduled
@@ -398,10 +393,6 @@ impl<W: SinkWarehouse, A> Sink<W, A> {
         self.places.get(artifact)
     }
 
-    pub fn namespace(&self, artifact: &ArtifactName) -> Option<Namespace> {
-        self.place(artifact).cloned().map(Into::into)
-    }
-
     pub fn scheduled(&self) -> &SeriesLog {
         &self.scheduled
     }
@@ -415,11 +406,40 @@ impl<W: SinkWarehouse, A> Sink<W, A> {
     }
 }
 
+impl<W: SinkWarehouse, A: Declaration> Sink<W, A> {
+    pub fn log(&self, artifact: &ArtifactName) -> Option<SeriesLog> {
+        Self::logged(
+            &self.places,
+            artifact,
+            self.artifact(artifact)?,
+            self.time_zone,
+        )
+    }
+
+    pub fn base(&self, artifact: &ArtifactName) -> Option<SeriesLog> {
+        self.log(self.artifact(artifact)?.base()?)
+    }
+
+    fn logged(
+        places: &Places<W::Location>,
+        artifact: &ArtifactName,
+        declared: &A,
+        time_zone: Tz,
+    ) -> Option<SeriesLog> {
+        Some(SeriesLog::new(
+            places.get(artifact)?.clone().into(),
+            declared.series(artifact, time_zone),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use crate::build_log::Series;
     use crate::place::Placed;
+    use lithify_core::sink::Namespace;
 
     #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
     #[serde(deny_unknown_fields, rename_all = "lowercase")]
@@ -539,6 +559,13 @@ mod tests {
             match self {
                 Self::Snapshot { .. } | Self::History { .. } => None,
                 Self::Copy { base } => Some(base),
+            }
+        }
+
+        fn series(&self, name: &ArtifactName, _: Tz) -> Series {
+            match self {
+                Self::Snapshot { .. } | Self::History { .. } => Series::new(name.clone(), "daily"),
+                Self::Copy { .. } => Series::new(name.clone(), "copied"),
             }
         }
 
@@ -906,10 +933,60 @@ mod tests {
     }
 
     #[test]
-    fn a_sink_finds_each_artifact_in_the_namespace_its_place_names() {
+    fn a_sink_logs_each_artifact_it_places_in_the_namespace_its_place_names() {
         assert_eq!(
-            sinks()[1].namespace(&"copy".into()),
-            Some(Namespace::from("mysql_shop_copy"))
+            sinks()[1].log(&"copy".into()),
+            Some(SeriesLog::new(
+                Namespace::from("mysql_shop_copy"),
+                Series::new("copy".into(), "copied")
+            ))
+        );
+    }
+
+    #[test]
+    fn a_sink_builds_an_artifact_onto_the_series_its_base_advances_where_the_base_lies() {
+        assert_eq!(
+            sinks()[1].base(&"copy".into()),
+            Some(SeriesLog::new(
+                Namespace::from("mysql_shop"),
+                Series::new("snapshot".into(), "daily")
+            ))
+        );
+    }
+
+    #[test]
+    fn a_sink_builds_an_artifact_named_no_base_onto_nothing_it_logs() {
+        assert_eq!(sinks()[1].base(&"snapshot".into()), None);
+    }
+
+    #[test]
+    fn a_sink_lines_up_each_artifact_it_places_in_order_with_its_log_and_its_base() {
+        let lineup = crate::lineup::Lineup::of(&sinks()[1], |name, _| {
+            Ok::<_, std::convert::Infallible>(name.clone())
+        })
+        .unwrap();
+
+        assert_eq!(
+            lineup
+                .members()
+                .map(|member| (
+                    member.declared().as_str(),
+                    member.log().clone(),
+                    member.base().cloned()
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    "snapshot",
+                    sinks()[1].log(&"snapshot".into()).unwrap(),
+                    None
+                ),
+                (
+                    "copy",
+                    sinks()[1].log(&"copy".into()).unwrap(),
+                    sinks()[1].log(&"snapshot".into())
+                ),
+            ]
         );
     }
 

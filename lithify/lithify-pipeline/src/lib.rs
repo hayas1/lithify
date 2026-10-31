@@ -6,6 +6,7 @@ pub mod artifact;
 pub mod build_log;
 pub mod check;
 pub mod infra;
+pub mod lineup;
 pub mod pipeline;
 pub mod pipelines;
 pub mod place;

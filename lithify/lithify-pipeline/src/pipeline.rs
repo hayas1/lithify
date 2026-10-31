@@ -210,6 +210,10 @@ mod tests {
             }
         }
 
+        fn series(&self, name: &ArtifactName, _: chrono_tz::Tz) -> crate::build_log::Series {
+            crate::build_log::Series::new(name.clone(), self.kind())
+        }
+
         fn schedule(&self, time_zone: chrono_tz::Tz) -> Option<crate::schedule::Schedule> {
             match self {
                 Self::Snapshot { .. } => Some(crate::schedule::Schedule::daily(

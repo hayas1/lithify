@@ -22,10 +22,6 @@ impl SeriesLog {
         Self { namespace, series }
     }
 
-    pub fn of<A: ArtifactControl>(artifact: &A, namespace: &Namespace) -> Self {
-        Self::new(namespace.clone(), artifact.series())
-    }
-
     pub fn namespace(&self) -> &Namespace {
         &self.namespace
     }
@@ -72,11 +68,11 @@ impl<'a, P: StepTaker> Stepping<'a, P> {
     pub async fn next<A: ArtifactControl>(
         &self,
         artifact: &A,
-        namespace: &Namespace,
+        log: &SeriesLog,
         base: Option<&SeriesLog>,
         taken: &[Window],
     ) -> Result<Option<Step>, P::Error> {
-        let progress = self.progress(&SeriesLog::of(artifact, namespace)).await?;
+        let progress = self.progress(log).await?;
         let derived = base.is_some();
         let base = match base {
             Some(base) => Some(self.progress(base).await?),
@@ -118,19 +114,18 @@ impl<'a, P: StepTaker> Stepping<'a, P> {
     pub async fn take<A: ArtifactControl, B: BuildLogWriter>(
         &self,
         artifact: &A,
-        namespace: &Namespace,
+        log: &SeriesLog,
         base: Option<&SeriesLog>,
         window: &Window,
         tables: &Tables,
         writer: &B,
     ) -> Result<B::Output, P::Error> {
-        let log = SeriesLog::of(artifact, namespace);
-        let previous = self.built(base.unwrap_or(&log), *window.from()).await?;
+        let previous = self.built(base.unwrap_or(log), *window.from()).await?;
 
         self.taker
             .take(
                 artifact,
-                namespace,
+                log.namespace(),
                 window,
                 &previous,
                 tables,
