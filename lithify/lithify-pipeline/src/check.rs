@@ -4,14 +4,14 @@ use std::fmt::{self, Display, Formatter};
 use serde::Serialize;
 
 use lithify_core::model::TableId;
-use lithify_core::sink::{Namespace, TablePath};
+use lithify_core::sink::TablePath;
 use lithify_core::ts::{Event, Replay, Ts};
 use lithify_core::window::Window;
 
-use crate::build_log::{BuildLog, Latest, Series, UnreadableBuildLog};
+use crate::build_log::{BuildLog, Latest, UnreadableBuildLog};
 use crate::infra::{Sink, Source};
+use crate::materialization::Materialization;
 use crate::schedule::Schedule;
-use crate::stepping::SeriesLog;
 use crate::warehouse::{SinkWarehouse, WarehouseControl, WarehouseFn};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,7 +96,7 @@ impl Inspection {
 
 pub struct Inspecting {
     expectation: Expectation,
-    log: SeriesLog,
+    scheduled: Materialization,
 }
 
 impl Inspecting {
@@ -114,16 +114,12 @@ impl Inspecting {
                     .map_err(|unwritten| Uninspectable::Unwritten(unwritten.to_string()))?,
                 now,
             ),
-            log: sink.scheduled().clone(),
+            scheduled: sink.scheduled().clone(),
         })
     }
 
-    pub fn namespace(&self) -> &Namespace {
-        self.log.namespace()
-    }
-
-    pub fn series(&self) -> &Series {
-        self.log.series()
+    pub fn scheduled(&self) -> &Materialization {
+        &self.scheduled
     }
 
     pub async fn read<K, E>(&self, client: &K) -> Result<Inspection, E>
@@ -131,9 +127,7 @@ impl Inspecting {
         K: WarehouseControl,
         E: From<K::Error> + From<UnreadableBuildLog>,
     {
-        self.expectation
-            .read(client, self.namespace(), self.series())
-            .await
+        self.expectation.read(client, &self.scheduled).await
     }
 }
 
@@ -194,13 +188,13 @@ impl Expectation {
     pub async fn read<K, E>(
         &self,
         client: &K,
-        namespace: &Namespace,
-        series: &Series,
+        materialization: &Materialization,
     ) -> Result<Inspection, E>
     where
         K: WarehouseControl,
         E: From<K::Error> + From<UnreadableBuildLog>,
     {
+        let (namespace, series) = (materialization.namespace(), materialization.series());
         if !client.exists(&BuildLog::path(namespace)).await? {
             return Ok(Inspection {
                 schedule: self.schedule,

@@ -1,35 +1,15 @@
 use chrono::NaiveDate;
 
 use crate::artifact::ArtifactControl;
-use crate::build_log::{BuildLog, Latest, Series};
+use crate::build_log::{BuildLog, Latest};
+use crate::materialization::Materialization;
 use crate::progress::{Progress, Step};
 use crate::runner::{BuildLogWriter, StepTaker, Tables, Unsteppable};
 use crate::schedule::Timeline;
-use lithify_core::sink::Namespace;
 
 use crate::warehouse::WarehouseControl;
 use lithify_core::ts::{Event, Ts};
 use lithify_core::window::Window;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SeriesLog {
-    namespace: Namespace,
-    series: Series,
-}
-
-impl SeriesLog {
-    pub fn new(namespace: Namespace, series: Series) -> Self {
-        Self { namespace, series }
-    }
-
-    pub fn namespace(&self) -> &Namespace {
-        &self.namespace
-    }
-
-    pub fn series(&self) -> &Series {
-        &self.series
-    }
-}
 
 pub struct Stepping<'a, P> {
     taker: &'a P,
@@ -46,7 +26,11 @@ impl<'a, P: StepTaker> Stepping<'a, P> {
         }
     }
 
-    pub async fn up_to(self, date: NaiveDate, snapshot: &SeriesLog) -> Result<Self, P::Error> {
+    pub async fn up_to(
+        self,
+        date: NaiveDate,
+        scheduled: &Materialization,
+    ) -> Result<Self, P::Error> {
         let until = self
             .timeline
             .through(date)
@@ -54,7 +38,7 @@ impl<'a, P: StepTaker> Stepping<'a, P> {
         if until > self.timeline.range().end {
             return Err(Unsteppable::Unclosed(date).into());
         }
-        let standing = self.progress(snapshot).await?.standing();
+        let standing = self.progress(scheduled).await?.standing();
 
         match standing.filter(|standing| *standing > until) {
             Some(built_until) => Err(Unsteppable::Overtaken { date, built_until }.into()),
@@ -68,13 +52,12 @@ impl<'a, P: StepTaker> Stepping<'a, P> {
     pub async fn next<A: ArtifactControl>(
         &self,
         artifact: &A,
-        log: &SeriesLog,
-        base: Option<&SeriesLog>,
+        materialization: &Materialization,
         taken: &[Window],
     ) -> Result<Option<Step>, P::Error> {
-        let progress = self.progress(log).await?;
-        let derived = base.is_some();
-        let base = match base {
+        let progress = self.progress(materialization).await?;
+        let derived = materialization.base().is_some();
+        let base = match materialization.base() {
             Some(base) => Some(self.progress(base).await?),
             None => None,
         };
@@ -114,41 +97,58 @@ impl<'a, P: StepTaker> Stepping<'a, P> {
     pub async fn take<A: ArtifactControl, B: BuildLogWriter>(
         &self,
         artifact: &A,
-        log: &SeriesLog,
-        base: Option<&SeriesLog>,
+        materialization: &Materialization,
         window: &Window,
         tables: &Tables,
         writer: &B,
     ) -> Result<B::Output, P::Error> {
-        let previous = self.built(base.unwrap_or(log), *window.from()).await?;
+        let previous = self
+            .built(
+                materialization.base().unwrap_or(materialization),
+                *window.from(),
+            )
+            .await?;
 
         self.taker
             .take(
                 artifact,
-                log.namespace(),
+                materialization.namespace(),
                 window,
                 &previous,
                 tables,
-                &writer.advancing(log.namespace(), log.series()),
+                &writer.advancing(materialization),
             )
             .await
     }
 
-    async fn built(&self, log: &SeriesLog, closing: Ts<Event>) -> Result<Vec<BuildLog>, P::Error> {
-        self.latest(log, Latest::SucceededUntil(closing)).await
-    }
-
-    async fn latest(&self, log: &SeriesLog, latest: Latest) -> Result<Vec<BuildLog>, P::Error> {
-        self.taker
-            .client()
-            .build_logs::<P::Error>(log.namespace(), log.series(), &latest.into())
+    async fn built(
+        &self,
+        materialization: &Materialization,
+        closing: Ts<Event>,
+    ) -> Result<Vec<BuildLog>, P::Error> {
+        self.latest(materialization, Latest::SucceededUntil(closing))
             .await
     }
 
-    async fn progress(&self, log: &SeriesLog) -> Result<Progress, P::Error> {
+    async fn latest(
+        &self,
+        materialization: &Materialization,
+        latest: Latest,
+    ) -> Result<Vec<BuildLog>, P::Error> {
+        self.taker
+            .client()
+            .build_logs::<P::Error>(
+                materialization.namespace(),
+                materialization.series(),
+                &latest.into(),
+            )
+            .await
+    }
+
+    async fn progress(&self, materialization: &Materialization) -> Result<Progress, P::Error> {
         let progress = Progress::read(
-            &self.latest(log, Latest::Attempted).await?,
-            &self.latest(log, Latest::Succeeded).await?,
+            &self.latest(materialization, Latest::Attempted).await?,
+            &self.latest(materialization, Latest::Succeeded).await?,
         );
         let changed = progress
             .captures()

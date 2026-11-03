@@ -17,8 +17,9 @@ use lithify_core::ts::{Event, Replay, Ts};
 use lithify_core::window::Window;
 
 use crate::artifact::ArtifactControl;
-use crate::build_log::{BuildLog, Run, Series, TableBuilt, UnreadableBuildLog};
+use crate::build_log::{BuildLog, Run, TableBuilt, UnreadableBuildLog};
 use crate::infra::{Sink, Source};
+use crate::materialization::Materialization;
 use crate::warehouse::{SinkWarehouse, WarehouseControl};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,7 +77,7 @@ impl Tables {
 pub trait BuildLogWriter {
     type Output;
 
-    fn advancing(&self, namespace: &Namespace, series: &Series) -> Self;
+    fn advancing(&self, materialization: &Materialization) -> Self;
 
     async fn write<K, E>(&self, client: &K, built: Vec<TableBuilt>) -> Result<Self::Output, E>
     where
@@ -100,15 +101,15 @@ impl BuildLogWrite {
         now: Ts<Replay>,
         version: &str,
     ) -> Result<Self, serde_json::Error> {
-        let log = sink.scheduled();
+        let scheduled = sink.scheduled();
 
         Ok(Self::new(
-            log.namespace().clone(),
+            scheduled.namespace().clone(),
             Run::new(
                 Ulid::from_datetime(DateTime::<Utc>::from(now).into()),
                 now,
-                log.series().artifact(),
-                log.series().schedule(),
+                scheduled.artifact(),
+                scheduled.series().schedule(),
                 source.name(),
                 &source.written_capture()?,
                 version,
@@ -120,10 +121,10 @@ impl BuildLogWrite {
 impl BuildLogWriter for BuildLogWrite {
     type Output = Vec<BuildLog>;
 
-    fn advancing(&self, namespace: &Namespace, series: &Series) -> Self {
+    fn advancing(&self, materialization: &Materialization) -> Self {
         Self {
-            namespace: namespace.clone(),
-            run: self.run.advancing(series),
+            namespace: materialization.namespace().clone(),
+            run: self.run.advancing(materialization.series()),
         }
     }
 

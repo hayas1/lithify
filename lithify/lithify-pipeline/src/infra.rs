@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Display, Formatter};
 
 use chrono::{DateTime, Utc};
@@ -12,9 +12,9 @@ use lithify_core::artifact::ArtifactName;
 use lithify_core::ts::{Event, Ts};
 
 use crate::artifact::{Declaration, Declarations};
+use crate::materialization::Materialization;
 use crate::place::{Places, Placing};
 use crate::schedule::Schedule;
-use crate::stepping::SeriesLog;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -203,12 +203,23 @@ impl<W: Clone + Placing> WiredSink<W> {
             Self::placed(&name, artifact, declarations, &places)?;
         }
         let artifacts = declarations.placed(&places);
-        let (scheduled, schedule) = Self::scheduled(&name, &artifacts, &places, time_zone)?;
+        let materializations: BTreeMap<_, _> = artifacts
+            .iter()
+            .filter_map(|(artifact, _)| {
+                Some((
+                    artifact.clone(),
+                    Self::materialized(artifact, &artifacts, &places, time_zone)?,
+                ))
+            })
+            .collect();
+        let (scheduled, schedule) =
+            Self::scheduled(&name, &artifacts, &materializations, time_zone)?;
 
         Ok(Sink {
             change_log: warehouse.change_log(),
             artifacts,
             places,
+            materializations,
             scheduled,
             schedule,
             warehouse,
@@ -217,15 +228,32 @@ impl<W: Clone + Placing> WiredSink<W> {
         })
     }
 
-    fn scheduled<A: Declaration>(
-        sink: &str,
+    fn materialized<A: Declaration>(
+        artifact: &ArtifactName,
         artifacts: &Declarations<A>,
         places: &Places<W::Location>,
         time_zone: Tz,
-    ) -> Result<(SeriesLog, Schedule), Miswiring> {
+    ) -> Option<Materialization> {
+        let declared = artifacts.get(artifact)?;
+
+        Some(Materialization::new(
+            places.get(artifact)?.clone().into(),
+            declared.series(artifact, time_zone),
+            declared
+                .base()
+                .and_then(|base| Self::materialized(base, artifacts, places, time_zone)),
+        ))
+    }
+
+    fn scheduled<A: Declaration>(
+        sink: &str,
+        artifacts: &Declarations<A>,
+        materializations: &BTreeMap<ArtifactName, Materialization>,
+        time_zone: Tz,
+    ) -> Result<(Materialization, Schedule), Miswiring> {
         let mut scheduled = artifacts.iter().filter_map(|(name, declared)| {
             Some((
-                Sink::<W, A>::logged(places, name, declared, time_zone)?,
+                materializations.get(name)?.clone(),
                 declared.schedule(time_zone)?,
             ))
         });
@@ -363,7 +391,8 @@ pub struct Sink<W: SinkWarehouse, A> {
     warehouse: W,
     artifacts: Declarations<A>,
     places: Places<W::Location>,
-    scheduled: SeriesLog,
+    materializations: BTreeMap<ArtifactName, Materialization>,
+    scheduled: Materialization,
     schedule: Schedule,
     time_zone: Tz,
 }
@@ -393,7 +422,16 @@ impl<W: SinkWarehouse, A> Sink<W, A> {
         self.places.get(artifact)
     }
 
-    pub fn scheduled(&self) -> &SeriesLog {
+    pub fn materialization(&self, artifact: &ArtifactName) -> Option<&Materialization> {
+        self.materializations.get(artifact)
+    }
+
+    pub fn materializations(&self) -> impl Iterator<Item = (&A, &Materialization)> {
+        self.artifacts()
+            .filter_map(|(artifact, declared)| Some((declared, self.materialization(artifact)?)))
+    }
+
+    pub fn scheduled(&self) -> &Materialization {
         &self.scheduled
     }
 
@@ -403,33 +441,6 @@ impl<W: SinkWarehouse, A> Sink<W, A> {
 
     pub fn time_zone(&self) -> Tz {
         self.time_zone
-    }
-}
-
-impl<W: SinkWarehouse, A: Declaration> Sink<W, A> {
-    pub fn log(&self, artifact: &ArtifactName) -> Option<SeriesLog> {
-        Self::logged(
-            &self.places,
-            artifact,
-            self.artifact(artifact)?,
-            self.time_zone,
-        )
-    }
-
-    pub fn base(&self, artifact: &ArtifactName) -> Option<SeriesLog> {
-        self.log(self.artifact(artifact)?.base()?)
-    }
-
-    fn logged(
-        places: &Places<W::Location>,
-        artifact: &ArtifactName,
-        declared: &A,
-        time_zone: Tz,
-    ) -> Option<SeriesLog> {
-        Some(SeriesLog::new(
-            places.get(artifact)?.clone().into(),
-            declared.series(artifact, time_zone),
-        ))
     }
 }
 
@@ -911,15 +922,17 @@ mod tests {
         );
     }
 
+    fn snapshot() -> Materialization {
+        Materialization::new(
+            Namespace::from("mysql_shop"),
+            Series::new("snapshot".into(), "daily"),
+            None,
+        )
+    }
+
     #[test]
-    fn a_sink_advances_by_the_series_of_the_one_artifact_it_places_on_a_schedule() {
-        assert_eq!(
-            sinks()[1].scheduled(),
-            &SeriesLog::new(
-                Namespace::from("mysql_shop"),
-                Series::new("snapshot".into(), "daily")
-            )
-        );
+    fn a_sink_advances_by_the_materialization_of_the_one_artifact_it_places_on_a_schedule() {
+        assert_eq!(sinks()[1].scheduled(), &snapshot());
     }
 
     #[test]
@@ -933,57 +946,25 @@ mod tests {
     }
 
     #[test]
-    fn a_sink_logs_each_artifact_it_places_in_the_namespace_its_place_names() {
+    fn a_sink_materializes_an_artifact_in_the_namespace_its_place_names_onto_its_base() {
         assert_eq!(
-            sinks()[1].log(&"copy".into()),
-            Some(SeriesLog::new(
+            sinks()[1].materialization(&"copy".into()),
+            Some(&Materialization::new(
                 Namespace::from("mysql_shop_copy"),
-                Series::new("copy".into(), "copied")
+                Series::new("copy".into(), "copied"),
+                Some(snapshot()),
             ))
         );
     }
 
     #[test]
-    fn a_sink_builds_an_artifact_onto_the_series_its_base_advances_where_the_base_lies() {
+    fn a_sink_materializes_each_artifact_it_places_in_the_order_it_is_declared() {
         assert_eq!(
-            sinks()[1].base(&"copy".into()),
-            Some(SeriesLog::new(
-                Namespace::from("mysql_shop"),
-                Series::new("snapshot".into(), "daily")
-            ))
-        );
-    }
-
-    #[test]
-    fn a_sink_builds_an_artifact_named_no_base_onto_nothing_it_logs() {
-        assert_eq!(sinks()[1].base(&"snapshot".into()), None);
-    }
-
-    #[test]
-    fn a_sink_lines_up_each_artifact_it_places_in_order_with_its_log_and_its_base() {
-        let lineup = crate::lineup::Lineup::of(&sinks()[1], |name, _| name.clone());
-
-        assert_eq!(
-            lineup
-                .members()
-                .map(|member| (
-                    member.declared().as_str(),
-                    member.log().clone(),
-                    member.base().cloned()
-                ))
+            sinks()[1]
+                .materializations()
+                .map(|(_, materialization)| materialization.artifact().as_str())
                 .collect::<Vec<_>>(),
-            [
-                (
-                    "snapshot",
-                    sinks()[1].log(&"snapshot".into()).unwrap(),
-                    None
-                ),
-                (
-                    "copy",
-                    sinks()[1].log(&"copy".into()).unwrap(),
-                    sinks()[1].log(&"snapshot".into())
-                ),
-            ]
+            ["snapshot", "copy"]
         );
     }
 

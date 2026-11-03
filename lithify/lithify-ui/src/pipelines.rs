@@ -282,8 +282,8 @@ impl Reading {
             (BuildLogView::All, false) => Ok(inspection.showing(
                 client
                     .build_logs::<Misread>(
-                        self.inspecting.namespace(),
-                        self.inspecting.series(),
+                        self.inspecting.scheduled().namespace(),
+                        self.inspecting.scheduled().series(),
                         &BuildLogQuery::from(self.view),
                     )
                     .await?,

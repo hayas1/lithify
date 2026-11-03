@@ -5,6 +5,7 @@ use lithify_core::ts::{Replay, Ts};
 use lithify_pipeline::Pipeline;
 use lithify_pipeline::build_log::Series;
 use lithify_pipeline::check::{Inspecting, Uninspectable};
+use lithify_pipeline::materialization::Materialization;
 use lithify_pipeline::warehouse::SinkWarehouse;
 use lithify_testing::pipeline::{Captured, INFRA, Kept, Made, configure, logged, scratch};
 
@@ -35,10 +36,13 @@ fn a_sink_is_inspected_under_the_first_place_of_the_artifact_it_schedules() {
 
     let inspecting = inspecting(&pipeline).unwrap();
 
-    assert_eq!(inspecting.namespace(), &Namespace::from("mysql_shop"));
     assert_eq!(
-        inspecting.series(),
-        &Series::new("snapshot".into(), "daily")
+        inspecting.scheduled(),
+        &Materialization::new(
+            Namespace::from("mysql_shop"),
+            Series::new("snapshot".into(), "daily"),
+            None,
+        )
     );
 }
 

@@ -12,10 +12,11 @@ use lithify_pipeline::Declaration;
 use lithify_pipeline::artifact::ArtifactControl;
 use lithify_pipeline::build_log::Series;
 use lithify_pipeline::infra::Sink;
+use lithify_pipeline::materialization::Materialization;
 use lithify_pipeline::progress::Step;
 use lithify_pipeline::runner::{BuildLogWriter, StepTaker, Tables};
 use lithify_pipeline::schedule::Schedule;
-use lithify_pipeline::stepping::{SeriesLog, Stepping};
+use lithify_pipeline::stepping::Stepping;
 
 use crate::pipeline::WarehouseConfig;
 use crate::unrunnable::Unrunnable;
@@ -122,24 +123,24 @@ impl Declared {
     pub async fn next<P: StepTaker<Error = Unrunnable>>(
         &self,
         stepping: &Stepping<'_, P>,
-        log: &SeriesLog,
-        base: Option<&SeriesLog>,
+        materialization: &Materialization,
         taken: &[Window],
     ) -> Result<Option<Step>, Unrunnable> {
         match self {
-            Self::Snapshot(artifact) => stepping.next(artifact, log, base, taken).await,
-            Self::Instant(artifact) => stepping.next(artifact, log, base, taken).await,
-            Self::Scd2(artifact) => stepping.next(artifact, log, base, taken).await,
-            Self::Scd1(artifact) => stepping.next(artifact, log, base, taken).await,
-            Self::SnapshotProvide(artifact) => stepping.next(artifact, log, base, taken).await,
+            Self::Snapshot(artifact) => stepping.next(artifact, materialization, taken).await,
+            Self::Instant(artifact) => stepping.next(artifact, materialization, taken).await,
+            Self::Scd2(artifact) => stepping.next(artifact, materialization, taken).await,
+            Self::Scd1(artifact) => stepping.next(artifact, materialization, taken).await,
+            Self::SnapshotProvide(artifact) => {
+                stepping.next(artifact, materialization, taken).await
+            }
         }
     }
 
     pub async fn take<P: StepTaker<Error = Unrunnable>, B: BuildLogWriter>(
         &self,
         stepping: &Stepping<'_, P>,
-        log: &SeriesLog,
-        base: Option<&SeriesLog>,
+        materialization: &Materialization,
         window: &Window,
         tables: &Tables,
         writer: &B,
@@ -147,27 +148,27 @@ impl Declared {
         match self {
             Self::Snapshot(artifact) => {
                 stepping
-                    .take(artifact, log, base, window, tables, writer)
+                    .take(artifact, materialization, window, tables, writer)
                     .await
             }
             Self::Instant(artifact) => {
                 stepping
-                    .take(artifact, log, base, window, tables, writer)
+                    .take(artifact, materialization, window, tables, writer)
                     .await
             }
             Self::Scd2(artifact) => {
                 stepping
-                    .take(artifact, log, base, window, tables, writer)
+                    .take(artifact, materialization, window, tables, writer)
                     .await
             }
             Self::Scd1(artifact) => {
                 stepping
-                    .take(artifact, log, base, window, tables, writer)
+                    .take(artifact, materialization, window, tables, writer)
                     .await
             }
             Self::SnapshotProvide(artifact) => {
                 stepping
-                    .take(artifact, log, base, window, tables, writer)
+                    .take(artifact, materialization, window, tables, writer)
                     .await
             }
         }
@@ -208,7 +209,10 @@ mod tests {
 
         assert_eq!(
             TablePath::new(
-                sink.log(&"snapshot".into()).unwrap().namespace().clone(),
+                sink.materialization(&"snapshot".into())
+                    .unwrap()
+                    .namespace()
+                    .clone(),
                 &snapshot.table_name(&TableId::new("shop", "customers"), &window)
             ),
             TablePath::new("mysql_shop", "customers_20260920")
@@ -216,8 +220,8 @@ mod tests {
     }
 
     fn declared(sink: &Sink<WarehouseConfig, ArtifactConfig>) -> Vec<Series> {
-        sink.artifacts()
-            .map(|(name, _)| sink.log(name).unwrap().series().clone())
+        sink.materializations()
+            .map(|(_, materialization)| materialization.series().clone())
             .collect()
     }
 

@@ -10,6 +10,7 @@ use lithify_core::ts::Ts;
 use lithify_core::window::Window;
 use lithify_pipeline::build_log::{BuildLog, Run, Series, Status, TableBuilt};
 use lithify_pipeline::check::*;
+use lithify_pipeline::materialization::Materialization;
 use lithify_pipeline::schedule::Schedule;
 use lithify_testing::{Engine, Recorder};
 
@@ -52,6 +53,10 @@ fn logged(run: u64, table: &str, window: Window, status: Status) -> BuildLog {
         "{}",
         "0.1.0",
     ))
+}
+
+fn snapshot() -> Materialization {
+    Materialization::new(Namespace::from("mysql_shop"), daily(), None)
 }
 
 fn expected(now: &str) -> Expectation {
@@ -207,11 +212,7 @@ async fn a_warehouse_is_checked_against_the_tables_it_holds() {
 
     assert_eq!(
         expected("2026-09-21T05:00:00Z")
-            .read::<_, Box<dyn std::error::Error>>(
-                &client,
-                &Namespace::from("mysql_shop"),
-                &daily()
-            )
+            .read::<_, Box<dyn std::error::Error>>(&client, &snapshot())
             .await
             .unwrap()
             .discrepancies(),
@@ -226,11 +227,7 @@ async fn a_warehouse_is_checked_against_the_tables_it_holds() {
 async fn a_warehouse_holding_no_build_log_was_never_built() {
     assert_eq!(
         expected("2026-09-21T05:00:00Z")
-            .read::<_, Box<dyn std::error::Error>>(
-                &Recorder::new(Engine::default()),
-                &Namespace::from("mysql_shop"),
-                &daily()
-            )
+            .read::<_, Box<dyn std::error::Error>>(&Recorder::new(Engine::default()), &snapshot())
             .await
             .unwrap()
             .discrepancies(),
@@ -256,8 +253,7 @@ async fn a_warehouse_is_inspected_for_the_latest_build_of_each_table() {
                     &Namespace::from("mysql_shop"),
                     std::slice::from_ref(&failed)
                 ),
-                &Namespace::from("mysql_shop"),
-                &daily()
+                &snapshot()
             )
             .await
             .unwrap()

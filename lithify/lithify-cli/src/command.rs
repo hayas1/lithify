@@ -7,12 +7,12 @@ use lithify_core::ts::{Replay, Ts};
 use lithify_core::window::Window;
 use lithify_pipeline::build_log::Series;
 use lithify_pipeline::infra::{Sink, Source};
-use lithify_pipeline::lineup::Lineup;
+use lithify_pipeline::materialization::Materialization;
 use lithify_pipeline::runner::{StepTaker, Tables};
 use lithify_pipeline::schedule::Timeline;
-use lithify_pipeline::stepping::{SeriesLog, Stepping};
+use lithify_pipeline::stepping::Stepping;
 
-use crate::artifacts::{ArtifactConfig, Declared};
+use crate::artifacts::ArtifactConfig;
 use crate::journal::Journal;
 use crate::pipeline::{CaptureConfig, WarehouseConfig};
 use crate::report::Report;
@@ -40,7 +40,6 @@ impl RunCommand {
         P: StepTaker<Error = Unrunnable>,
         B: Report,
     {
-        let lineup = Lineup::of(sink, |name, config| config.declared(name, sink.time_zone()));
         let stepping = Stepping::new(
             taker,
             Timeline::new(sink.schedule(), source.since()..now.as_event()),
@@ -49,7 +48,7 @@ impl RunCommand {
 
         match self {
             Self::CatchUp { target, to: None } => {
-                target.catch_up(&lineup, &stepping, writer, journal).await
+                target.catch_up(sink, &stepping, writer, journal).await
             }
             Self::CatchUp {
                 target,
@@ -57,9 +56,9 @@ impl RunCommand {
             } => {
                 let stepping = stepping.up_to(*date, sink.scheduled()).await?;
 
-                target.catch_up(&lineup, &stepping, writer, journal).await
+                target.catch_up(sink, &stepping, writer, journal).await
             }
-            Self::Build(target) => target.build(&lineup, &stepping, writer, journal).await,
+            Self::Build(target) => target.build(sink, &stepping, writer, journal).await,
         }
     }
 }
@@ -74,16 +73,16 @@ impl Target {
         Self { artifact }
     }
 
-    fn names(&self, log: &SeriesLog) -> bool {
+    fn names(&self, materialization: &Materialization) -> bool {
         match &self.artifact {
-            Some(artifact) => log.series().artifact() == artifact,
+            Some(artifact) => materialization.artifact() == artifact,
             None => true,
         }
     }
 
     async fn build<P, B>(
         &self,
-        lineup: &Lineup<Declared>,
+        sink: &Sink<WarehouseConfig, ArtifactConfig>,
         stepping: &Stepping<'_, P>,
         writer: &B,
         journal: &mut Journal,
@@ -93,7 +92,7 @@ impl Target {
         B: Report,
     {
         if self
-            .step(lineup, stepping, &Default::default(), writer, journal)
+            .step(sink, stepping, &Default::default(), writer, journal)
             .await?
             .is_none()
         {
@@ -105,7 +104,7 @@ impl Target {
 
     async fn catch_up<P, B>(
         &self,
-        lineup: &Lineup<Declared>,
+        sink: &Sink<WarehouseConfig, ArtifactConfig>,
         stepping: &Stepping<'_, P>,
         writer: &B,
         journal: &mut Journal,
@@ -117,7 +116,7 @@ impl Target {
         let mut taken: BTreeMap<Series, Vec<Window>> = BTreeMap::new();
 
         while let Some((series, window)) =
-            self.step(lineup, stepping, &taken, writer, journal).await?
+            self.step(sink, stepping, &taken, writer, journal).await?
         {
             taken.entry(series).or_default().push(window);
         }
@@ -127,7 +126,7 @@ impl Target {
 
     async fn step<P, B>(
         &self,
-        lineup: &Lineup<Declared>,
+        sink: &Sink<WarehouseConfig, ArtifactConfig>,
         stepping: &Stepping<'_, P>,
         taken: &BTreeMap<Series, Vec<Window>>,
         writer: &B,
@@ -137,16 +136,19 @@ impl Target {
         P: StepTaker<Error = Unrunnable>,
         B: Report,
     {
-        for member in lineup.members().filter(|member| self.names(member.log())) {
-            let (declared, log, base) = (member.declared(), member.log(), member.base());
-            let series = log.series();
+        for (config, materialization) in sink
+            .materializations()
+            .filter(|(_, materialization)| self.names(materialization))
+        {
+            let declared = config.declared(materialization.artifact(), sink.time_zone());
+            let series = materialization.series();
             let taken = taken.get(series).map(Vec::as_slice).unwrap_or_default();
 
-            if let Some(step) = declared.next(stepping, log, base, taken).await? {
+            if let Some(step) = declared.next(stepping, materialization, taken).await? {
                 let tables = Tables::Except(step.left_out().clone());
                 journal.window(step.window());
                 let output = declared
-                    .take(stepping, log, base, step.window(), &tables, writer)
+                    .take(stepping, materialization, step.window(), &tables, writer)
                     .await?;
                 writer.report(series, step.window(), output, journal)?;
 
@@ -160,7 +162,6 @@ impl Target {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use lithify_core::sink::Namespace;
     use lithify_core::sql::SqlString;
     use lithify_pipeline::Pipeline;
     use lithify_pipeline::runner::BuildLogWrite;
@@ -171,7 +172,6 @@ pub(crate) mod tests {
 
     use crate::step::Taking;
     use crate::step::tests::{CAPTURE, PEOPLE, at, built_before, logged, pipeline, rows};
-    use lithify_artifact::snapshot::Snapshot;
     use lithify_core::sink::WarehouseClient;
     use lithify_pipeline::check::Expectation;
     use lithify_pipeline::schedule::Schedule;
@@ -881,11 +881,7 @@ pub(crate) mod tests {
                 CAPTURE,
                 Ts::from(at(NOW)),
             )
-            .read::<_, Unrunnable>(
-                &client,
-                &Namespace::from("mysql_shop"),
-                &Snapshot::days(&"snapshot".into())
-            )
+            .read::<_, Unrunnable>(&client, pipeline.sinks().next().unwrap().scheduled())
             .await
             .unwrap()
             .discrepancies(),

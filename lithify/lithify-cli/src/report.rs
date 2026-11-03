@@ -1,9 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use lithify_core::artifact::UnbuildableArtifact;
-use lithify_core::sink::Namespace;
 use lithify_core::window::Window;
 use lithify_pipeline::build_log::{BuildLog, Series, TableBuilt};
+use lithify_pipeline::materialization::Materialization;
 use lithify_pipeline::runner::{BuildLogWrite, BuildLogWriter};
 use lithify_pipeline::warehouse::WarehouseControl;
 use lithify_protocol::sink::bigquery::client::BigQueryExecution;
@@ -80,9 +80,9 @@ impl DryRunBuildLogWrite {
 impl BuildLogWriter for DryRunBuildLogWrite {
     type Output = Vec<BuildLog>;
 
-    fn advancing(&self, namespace: &Namespace, series: &Series) -> Self {
+    fn advancing(&self, materialization: &Materialization) -> Self {
         Self {
-            build: self.build.advancing(namespace, series),
+            build: self.build.advancing(materialization),
             dry_run: self.dry_run.clone(),
             into: self.into.clone(),
             sink: self.sink.clone(),
@@ -140,7 +140,7 @@ mod tests {
     use ulid::Ulid;
 
     use lithify_core::model::TableId;
-    use lithify_core::sink::TablePath;
+    use lithify_core::sink::{Namespace, TablePath};
     use lithify_core::sql::SqlString;
     use lithify_core::ts::Ts;
     use lithify_pipeline::build_log::{Run, Status, TableBuilt};
