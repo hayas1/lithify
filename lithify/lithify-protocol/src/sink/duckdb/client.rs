@@ -371,15 +371,16 @@ mod tests {
             status,
             Ts::from(DateTime::from_timestamp_millis(finished_at as i64).unwrap()),
         )
-        .logged(&Run::new(
-            Ulid::from_parts(finished_at, 0),
-            Ts::from(DateTime::UNIX_EPOCH),
-            &"snapshot".into(),
-            "daily",
-            "primary",
-            r#"{"debezium":{"dialect":"mysql"}}"#,
-            "0.1.0",
-        ))
+        .logged(
+            &Run::new(
+                Ulid::from_parts(finished_at, 0),
+                Ts::from(DateTime::UNIX_EPOCH),
+                "primary",
+                r#"{"debezium":{"dialect":"mysql"}}"#,
+                "0.1.0",
+            ),
+            &Series::new("snapshot".into(), "daily"),
+        )
     }
 
     async fn logging(logs: &[BuildLog]) -> DuckDbClient {

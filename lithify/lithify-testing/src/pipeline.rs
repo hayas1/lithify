@@ -104,15 +104,16 @@ impl Kept {
                 status,
                 Ts::from(at(closed)),
             )
-            .logged(&Run::new(
-                Ulid::from_parts(1, 0),
-                Ts::from(DateTime::UNIX_EPOCH),
-                &"snapshot".into(),
-                "daily",
-                "primary",
-                "{}",
-                "0.1.0",
-            ))
+            .logged(
+                &Run::new(
+                    Ulid::from_parts(1, 0),
+                    Ts::from(DateTime::UNIX_EPOCH),
+                    "primary",
+                    "{}",
+                    "0.1.0",
+                ),
+                &Series::new("snapshot".into(), "daily"),
+            )
         };
 
         vec![

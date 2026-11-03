@@ -103,14 +103,7 @@ impl<'a, P: StepTaker> Stepping<'a, P> {
             .await?;
 
         self.taker
-            .take(
-                artifact,
-                materialization.namespace(),
-                window,
-                &previous,
-                tables,
-                &writer.advancing(materialization),
-            )
+            .take(artifact, materialization, window, &previous, tables, writer)
             .await
     }
 

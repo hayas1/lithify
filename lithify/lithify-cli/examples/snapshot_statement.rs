@@ -10,7 +10,7 @@ use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
 use lithify_core::sink::{TablePath, Warehouse};
 use lithify_core::ts::Ts;
 use lithify_core::window::Window;
-use lithify_pipeline::build_log::{BuildLog, Run, Status, TableBuilt};
+use lithify_pipeline::build_log::{BuildLog, Run, Series, Status, TableBuilt};
 use lithify_protocol::{BigQueryWarehouse, Debezium, DuckDbWarehouse, MySql};
 
 fn column(name: &str, type_name: &str, column_type: ColumnType) -> ColumnModel {
@@ -43,15 +43,16 @@ fn previous(window: &Window, shard: &str) -> BuildLog {
         Status::Succeeded,
         Ts::from(DateTime::UNIX_EPOCH),
     )
-    .logged(&Run::new(
-        Ulid::nil(),
-        Ts::from(DateTime::UNIX_EPOCH),
-        &"snapshot".into(),
-        "daily",
-        "primary",
-        "{}",
-        "0.1.0",
-    ))
+    .logged(
+        &Run::new(
+            Ulid::nil(),
+            Ts::from(DateTime::UNIX_EPOCH),
+            "primary",
+            "{}",
+            "0.1.0",
+        ),
+        &Series::new("snapshot".into(), "daily"),
+    )
 }
 
 fn statements<W: Warehouse>(warehouse: W) -> String {

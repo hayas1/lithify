@@ -159,7 +159,9 @@ mod tests {
     use lithify_core::sink::{ChangeLogSql, TablePath, UnsupportedColumn};
     use lithify_core::ts::Ts;
     use lithify_core::window::Window;
-    use lithify_pipeline::build_log::{BuildLog, BuildLogQuery, Latest, Run, Status, TableBuilt};
+    use lithify_pipeline::build_log::{
+        BuildLog, BuildLogQuery, Latest, Run, Series, Status, TableBuilt,
+    };
     use ulid::Ulid;
 
     fn bigquery() -> BigQueryWarehouse {
@@ -207,15 +209,16 @@ mod tests {
             Status::Succeeded,
             Ts::from(chrono::DateTime::from_timestamp_millis(1789949000000).unwrap()),
         )
-        .logged(&Run::new(
-            Ulid::nil(),
-            Ts::from(DateTime::UNIX_EPOCH),
-            &"snapshot".into(),
-            "daily",
-            "primary",
-            "{}",
-            "0.1.0",
-        ));
+        .logged(
+            &Run::new(
+                Ulid::nil(),
+                Ts::from(DateTime::UNIX_EPOCH),
+                "primary",
+                "{}",
+                "0.1.0",
+            ),
+            &Series::new("snapshot".into(), "daily"),
+        );
 
         assert_eq!(
             BuildLog::insert(

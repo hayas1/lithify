@@ -165,15 +165,16 @@ mod tests {
             Status::Succeeded,
             Ts::from(DateTime::UNIX_EPOCH),
         )
-        .logged(&Run::new(
-            Ulid::nil(),
-            Ts::from(DateTime::UNIX_EPOCH),
-            &artifact.into(),
-            schedule,
-            "primary",
-            "{}",
-            "0.1.0",
-        ))
+        .logged(
+            &Run::new(
+                Ulid::nil(),
+                Ts::from(DateTime::UNIX_EPOCH),
+                "primary",
+                "{}",
+                "0.1.0",
+            ),
+            &Series::new(artifact.into(), schedule),
+        )
     }
 
     #[test]

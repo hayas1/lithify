@@ -19,9 +19,9 @@ use lithify_core::window::Window;
 use crate::artifact::ArtifactControl;
 use crate::build_log::{BuildLog, Run, TableBuilt, UnreadableBuildLog};
 use crate::check::CaptureChanged;
-use crate::infra::{Sink, Source};
+use crate::infra::Source;
 use crate::materialization::Materialization;
-use crate::warehouse::{SinkWarehouse, WarehouseControl};
+use crate::warehouse::WarehouseControl;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Unsteppable {
@@ -72,68 +72,61 @@ impl Tables {
 pub trait BuildLogWriter {
     type Output;
 
-    fn advancing(&self, materialization: &Materialization) -> Self;
-
-    async fn write<K, E>(&self, client: &K, built: Vec<TableBuilt>) -> Result<Self::Output, E>
+    async fn write<K, E>(
+        &self,
+        client: &K,
+        materialization: &Materialization,
+        built: Vec<TableBuilt>,
+    ) -> Result<Self::Output, E>
     where
         K: WarehouseControl,
         E: From<K::Error> + From<UnbuildableArtifact>;
 }
 
 pub struct BuildLogWrite {
-    namespace: Namespace,
     run: Run,
 }
 
 impl BuildLogWrite {
-    pub fn new(namespace: Namespace, run: Run) -> Self {
-        Self { namespace, run }
+    pub fn new(run: Run) -> Self {
+        Self { run }
     }
 
-    pub fn of<W: SinkWarehouse, A, C: Serialize>(
-        sink: &Sink<W, A>,
+    pub fn of<C: Serialize>(
         source: &Source<C>,
         now: Ts<Replay>,
         version: &str,
     ) -> Result<Self, serde_json::Error> {
-        let scheduled = sink.scheduled();
-
-        Ok(Self::new(
-            scheduled.namespace().clone(),
-            Run::new(
-                Ulid::from_datetime(DateTime::<Utc>::from(now).into()),
-                now,
-                scheduled.artifact(),
-                scheduled.series().schedule(),
-                source.name(),
-                &source.written_capture()?,
-                version,
-            ),
-        ))
+        Ok(Self::new(Run::new(
+            Ulid::from_datetime(DateTime::<Utc>::from(now).into()),
+            now,
+            source.name(),
+            &source.written_capture()?,
+            version,
+        )))
     }
 }
 
 impl BuildLogWriter for BuildLogWrite {
     type Output = Vec<BuildLog>;
 
-    fn advancing(&self, materialization: &Materialization) -> Self {
-        Self {
-            namespace: materialization.namespace().clone(),
-            run: self.run.advancing(materialization.series()),
-        }
-    }
-
-    async fn write<K, E>(&self, client: &K, built: Vec<TableBuilt>) -> Result<Self::Output, E>
+    async fn write<K, E>(
+        &self,
+        client: &K,
+        materialization: &Materialization,
+        built: Vec<TableBuilt>,
+    ) -> Result<Self::Output, E>
     where
         K: WarehouseControl,
         E: From<K::Error> + From<UnbuildableArtifact>,
     {
+        let namespace = materialization.namespace();
         let logs: Vec<_> = built
             .into_iter()
-            .map(|built| built.logged(&self.run))
+            .map(|built| built.logged(&self.run, materialization.series()))
             .collect();
-        client.create_build_log::<E>(&self.namespace).await?;
-        client.append_build_logs(&self.namespace, &logs).await?;
+        client.create_build_log::<E>(namespace).await?;
+        client.append_build_logs(namespace, &logs).await?;
 
         Ok(logs)
     }
@@ -194,7 +187,7 @@ where
     pub async fn run<A: ArtifactControl, B: BuildLogWriter, E>(
         &self,
         artifact: &'a A,
-        namespace: &'a Namespace,
+        materialization: &'a Materialization,
         window: &'a Window,
         previous: &[BuildLog],
         finishes: impl Fn(&TableId) -> bool,
@@ -208,10 +201,16 @@ where
         <K as SchemaChangeStream<C::Schema>>::Error: Into<E>,
     {
         let built = self
-            .built::<A, E>(artifact, namespace, window, previous, finishes)
+            .built::<A, E>(
+                artifact,
+                materialization.namespace(),
+                window,
+                previous,
+                finishes,
+            )
             .await?;
 
-        writer.write(self.client, built).await
+        writer.write(self.client, materialization, built).await
     }
 }
 
@@ -227,7 +226,7 @@ pub trait StepTaker {
     async fn take<A: ArtifactControl, B: BuildLogWriter>(
         &self,
         artifact: &A,
-        namespace: &Namespace,
+        materialization: &Materialization,
         window: &Window,
         previous: &[BuildLog],
         tables: &Tables,

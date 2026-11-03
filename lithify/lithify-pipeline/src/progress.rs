@@ -131,15 +131,16 @@ mod tests {
             status,
             Ts::from(DateTime::UNIX_EPOCH),
         )
-        .logged(&Run::new(
-            Ulid::from_parts(run, 0),
-            Ts::from(DateTime::UNIX_EPOCH),
-            series.artifact(),
-            series.schedule(),
-            "primary",
-            CAPTURE,
-            "0.1.0",
-        ))
+        .logged(
+            &Run::new(
+                Ulid::from_parts(run, 0),
+                Ts::from(DateTime::UNIX_EPOCH),
+                "primary",
+                CAPTURE,
+                "0.1.0",
+            ),
+            series,
+        )
     }
 
     fn daily() -> Series {

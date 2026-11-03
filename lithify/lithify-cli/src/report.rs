@@ -80,21 +80,17 @@ impl DryRunBuildLogWrite {
 impl BuildLogWriter for DryRunBuildLogWrite {
     type Output = Vec<BuildLog>;
 
-    fn advancing(&self, materialization: &Materialization) -> Self {
-        Self {
-            build: self.build.advancing(materialization),
-            dry_run: self.dry_run.clone(),
-            into: self.into.clone(),
-            sink: self.sink.clone(),
-        }
-    }
-
-    async fn write<K, E>(&self, client: &K, built: Vec<TableBuilt>) -> Result<Self::Output, E>
+    async fn write<K, E>(
+        &self,
+        client: &K,
+        materialization: &Materialization,
+        built: Vec<TableBuilt>,
+    ) -> Result<Self::Output, E>
     where
         K: WarehouseControl,
         E: From<K::Error> + From<UnbuildableArtifact>,
     {
-        self.build.write(client, built).await
+        self.build.write(client, materialization, built).await
     }
 }
 
@@ -140,7 +136,7 @@ mod tests {
     use ulid::Ulid;
 
     use lithify_core::model::TableId;
-    use lithify_core::sink::{Namespace, TablePath};
+    use lithify_core::sink::TablePath;
     use lithify_core::sql::SqlString;
     use lithify_core::ts::Ts;
     use lithify_pipeline::build_log::{Run, Status, TableBuilt};
@@ -151,8 +147,6 @@ mod tests {
         Run::new(
             Ulid::nil(),
             Ts::from(DateTime::UNIX_EPOCH),
-            &"snapshot".into(),
-            "daily",
             "primary",
             "{}",
             "0.1.0",
@@ -176,17 +170,13 @@ mod tests {
             Status::Failed("no era".to_owned()),
             Ts::from(DateTime::UNIX_EPOCH),
         )
-        .logged(&run())
+        .logged(&run(), &Series::new("snapshot".into(), "daily"))
     }
 
     #[test]
     fn a_dry_run_writes_what_its_step_recorded_and_reports_a_table_that_failed_as_a_build_does() {
         let into = std::env::temp_dir().join(format!("lithify-dry-run-{}", Ulid::generate()));
-        let dry_run = DryRunBuildLogWrite::new(
-            BuildLogWrite::new(Namespace::from("mysql_shop"), run()),
-            &into,
-            "rustfs",
-        );
+        let dry_run = DryRunBuildLogWrite::new(BuildLogWrite::new(run()), &into, "rustfs");
         dry_run.execution().record(&SqlString::from("SELECT 1"));
         let mut journal = Journal::default();
 

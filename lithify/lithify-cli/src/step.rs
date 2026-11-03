@@ -3,11 +3,11 @@ use google_cloud_bigquery::error::RowError;
 use google_cloud_bigquery::query::Row;
 
 use lithify_core::model::TableId;
-use lithify_core::sink::Namespace;
 use lithify_core::source::{ChangeLogs, SchemaChangeLog};
 use lithify_core::window::Window;
 use lithify_pipeline::artifact::ArtifactControl;
 use lithify_pipeline::build_log::BuildLog;
+use lithify_pipeline::materialization::Materialization;
 use lithify_pipeline::runner::{BuildLogWriter, Runner, StepTaker, Tables};
 use lithify_pipeline::table;
 use lithify_protocol::sink::bigquery::client::{
@@ -23,7 +23,7 @@ use crate::unrunnable::Unrunnable;
 pub struct Replaying<'a, K, B, A, F> {
     client: &'a K,
     artifact: &'a A,
-    namespace: &'a Namespace,
+    materialization: &'a Materialization,
     window: &'a Window,
     previous: &'a [BuildLog],
     finishes: F,
@@ -36,7 +36,7 @@ impl<'a, K, B: BuildLogWriter, A: ArtifactControl, F: Fn(&TableId) -> bool>
     pub fn new(
         client: &'a K,
         artifact: &'a A,
-        namespace: &'a Namespace,
+        materialization: &'a Materialization,
         window: &'a Window,
         previous: &'a [BuildLog],
         finishes: F,
@@ -45,7 +45,7 @@ impl<'a, K, B: BuildLogWriter, A: ArtifactControl, F: Fn(&TableId) -> bool>
         Self {
             client,
             artifact,
-            namespace,
+            materialization,
             window,
             previous,
             finishes,
@@ -104,7 +104,7 @@ impl<X: DuckDbExecution> StepTaker for Taking<'_, DuckDbClient<X>> {
     async fn take<A: ArtifactControl, B: BuildLogWriter>(
         &self,
         artifact: &A,
-        namespace: &Namespace,
+        materialization: &Materialization,
         window: &Window,
         previous: &[BuildLog],
         tables: &Tables,
@@ -116,7 +116,7 @@ impl<X: DuckDbExecution> StepTaker for Taking<'_, DuckDbClient<X>> {
                 Replaying::new(
                     self.client,
                     artifact,
-                    namespace,
+                    materialization,
                     window,
                     previous,
                     self.finishes(artifact, tables),
@@ -138,7 +138,7 @@ impl<X: BigQueryExecution> StepTaker for Taking<'_, BigQueryClient<X>> {
     async fn take<A: ArtifactControl, B: BuildLogWriter>(
         &self,
         artifact: &A,
-        namespace: &Namespace,
+        materialization: &Materialization,
         window: &Window,
         previous: &[BuildLog],
         tables: &Tables,
@@ -150,7 +150,7 @@ impl<X: BigQueryExecution> StepTaker for Taking<'_, BigQueryClient<X>> {
                 Replaying::new(
                     self.client,
                     artifact,
-                    namespace,
+                    materialization,
                     window,
                     previous,
                     self.finishes(artifact, tables),
@@ -178,7 +178,7 @@ where
         Runner::new(self.client, &logs)
             .run(
                 self.artifact,
-                self.namespace,
+                self.materialization,
                 self.window,
                 self.previous,
                 self.finishes,
@@ -205,7 +205,7 @@ where
         Runner::new(self.client, &logs)
             .run(
                 self.artifact,
-                self.namespace,
+                self.materialization,
                 self.window,
                 self.previous,
                 self.finishes,
@@ -237,7 +237,7 @@ pub(crate) mod tests {
     use lithify_artifact::snapshot::Snapshot;
     use lithify_core::artifact::UnbuildableArtifact;
     use lithify_core::model::TableId;
-    use lithify_pipeline::build_log::{BuildLog, Latest, Run, Status, TableBuilt};
+    use lithify_pipeline::build_log::{BuildLog, Latest, Run, Series, Status, TableBuilt};
     use lithify_pipeline::infra::Sink;
     use lithify_pipeline::runner::BuildLogWrite;
     use lithify_protocol::sink::execution::DryRun;
@@ -246,10 +246,6 @@ pub(crate) mod tests {
 
     fn snapshot(sink: &Sink<WarehouseConfig, ArtifactConfig>) -> Snapshot {
         ArtifactConfig::snapshot(sink, sink.scheduled().series().artifact()).unwrap()
-    }
-
-    fn namespace(sink: &Sink<WarehouseConfig, ArtifactConfig>) -> Namespace {
-        sink.scheduled().namespace().clone()
     }
 
     fn listed<'t>(
@@ -315,18 +311,13 @@ pub(crate) mod tests {
     }
 
     fn snapshot_build() -> BuildLogWrite {
-        BuildLogWrite::new(
-            Namespace::from("mysql_shop"),
-            Run::new(
-                Ulid::nil(),
-                Ts::from(DateTime::UNIX_EPOCH),
-                &"snapshot".into(),
-                "daily",
-                "primary",
-                CAPTURE,
-                "0.1.0",
-            ),
-        )
+        BuildLogWrite::new(Run::new(
+            Ulid::nil(),
+            Ts::from(DateTime::UNIX_EPOCH),
+            "primary",
+            CAPTURE,
+            "0.1.0",
+        ))
     }
 
     fn statements(client: &DuckDbClient<DryRun>, starting: &str) -> Vec<String> {
@@ -360,7 +351,7 @@ pub(crate) mod tests {
                 Replaying::new(
                     &client,
                     &snapshot(sink),
-                    &namespace(sink),
+                    sink.scheduled(),
                     &window,
                     &[],
                     listed(pipeline.tables(), sink),
@@ -405,7 +396,7 @@ pub(crate) mod tests {
                 Replaying::new(
                     &client,
                     &snapshot(sink),
-                    &namespace(sink),
+                    sink.scheduled(),
                     &window,
                     &[],
                     listed(pipeline.tables(), sink),
@@ -448,7 +439,7 @@ pub(crate) mod tests {
                 Replaying::new(
                     &client,
                     &snapshot(sink),
-                    &namespace(sink),
+                    sink.scheduled(),
                     &window,
                     &[],
                     listed(pipeline.tables(), sink),
@@ -488,7 +479,7 @@ pub(crate) mod tests {
                 Replaying::new(
                     &client,
                     &snapshot(sink),
-                    &namespace(sink),
+                    sink.scheduled(),
                     &window,
                     &previous,
                     listed(pipeline.tables(), sink),
@@ -523,15 +514,16 @@ pub(crate) mod tests {
             Status::Succeeded,
             Ts::from(at("2026-09-20T00:10:00Z")),
         )
-        .logged(&Run::new(
-            Ulid::from_parts(1, 0),
-            Ts::from(DateTime::UNIX_EPOCH),
-            &"snapshot".into(),
-            "daily",
-            "primary",
-            capture,
-            "0.1.0",
-        ))
+        .logged(
+            &Run::new(
+                Ulid::from_parts(1, 0),
+                Ts::from(DateTime::UNIX_EPOCH),
+                "primary",
+                capture,
+                "0.1.0",
+            ),
+            &Series::new("snapshot".into(), "daily"),
+        )
     }
 
     pub(crate) async fn logged(change_logs: &str, before: &[BuildLog]) -> DuckDbClient {
@@ -618,12 +610,11 @@ pub(crate) mod tests {
                 Replaying::new(
                     client,
                     &snapshot(sink),
-                    &namespace(sink),
+                    sink.scheduled(),
                     &window,
                     &[],
                     listed(pipeline.tables(), sink),
                     &BuildLogWrite::of(
-                        sink,
                         source,
                         Ts::from(at("2026-09-22T05:00:00Z")),
                         env!("CARGO_PKG_VERSION"),

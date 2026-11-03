@@ -44,15 +44,16 @@ fn logged(run: u64, table: &str, window: Window, status: Status) -> BuildLog {
         status,
         Ts::from(DateTime::from_timestamp_millis(0).unwrap()),
     )
-    .logged(&Run::new(
-        Ulid::from_parts(run, 0),
-        Ts::from(DateTime::UNIX_EPOCH),
-        &"snapshot".into(),
-        "daily",
-        "primary",
-        "{}",
-        "0.1.0",
-    ))
+    .logged(
+        &Run::new(
+            Ulid::from_parts(run, 0),
+            Ts::from(DateTime::UNIX_EPOCH),
+            "primary",
+            "{}",
+            "0.1.0",
+        ),
+        &Series::new("snapshot".into(), "daily"),
+    )
 }
 
 fn snapshot() -> Materialization {

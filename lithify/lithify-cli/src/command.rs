@@ -381,7 +381,7 @@ pub(crate) mod tests {
             .find(|sink| sink.name() == "duckdb_s3")
             .unwrap();
         let writer =
-            BuildLogWrite::of(sink, source, Ts::from(at(now)), env!("CARGO_PKG_VERSION")).unwrap();
+            BuildLogWrite::of(source, Ts::from(at(now)), env!("CARGO_PKG_VERSION")).unwrap();
         let mut journal = Journal::default();
 
         command

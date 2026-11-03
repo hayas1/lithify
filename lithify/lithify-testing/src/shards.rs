@@ -56,8 +56,6 @@ impl Shards {
         let run = Run::new(
             Ulid::nil(),
             Ts::from(DateTime::UNIX_EPOCH),
-            artifact.series().artifact(),
-            artifact.series().schedule(),
             "primary",
             "{}",
             "0.1.0",
@@ -68,7 +66,7 @@ impl Shards {
             .await
             .unwrap()
             .into_iter()
-            .map(|built| built.logged(&run))
+            .map(|built| built.logged(&run, &artifact.series()))
             .collect()
     }
 

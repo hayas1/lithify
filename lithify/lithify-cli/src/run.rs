@@ -47,7 +47,7 @@ impl Run {
 
     pub async fn dry_run(&self, command: &RunCommand, into: &Path) -> Result<Journal, Unrunnable> {
         self.each_sink(async |sink, source, listing, journal| {
-            let build = BuildLogWrite::of(sink, source, self.now, env!("CARGO_PKG_VERSION"))?;
+            let build = BuildLogWrite::of(source, self.now, env!("CARGO_PKG_VERSION"))?;
 
             self.settle(
                 command,
@@ -69,7 +69,7 @@ impl Run {
                 sink,
                 source,
                 listing,
-                &BuildLogWrite::of(sink, source, self.now, env!("CARGO_PKG_VERSION"))?,
+                &BuildLogWrite::of(source, self.now, env!("CARGO_PKG_VERSION"))?,
                 journal,
             )
             .await
