@@ -1,5 +1,6 @@
 use std::convert::Infallible;
 use std::fmt::{self, Display, Formatter};
+use std::marker::PhantomData;
 
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::Serialize;
@@ -16,7 +17,8 @@ use lithify_core::ts::{Event, Replay, Ts};
 use lithify_core::window::Window;
 
 use crate::artifact::ArtifactControl;
-use crate::build_log::{BuildLog, Run, TableBuilt, UnreadableBuildLog};
+use crate::build_log::{BuildLog, Run, TableBuilt};
+use crate::capture::ChangeLogsFn;
 use crate::check::CaptureChanged;
 use crate::infra::Source;
 use crate::materialization::Materialization;
@@ -31,6 +33,7 @@ pub enum Unsteppable {
         date: NaiveDate,
         built_until: Ts<Event>,
     },
+    Unprefixed(String),
 }
 
 impl Display for Unsteppable {
@@ -45,6 +48,10 @@ impl Display for Unsteppable {
             Self::Overtaken { date, built_until } => write!(
                 formatter,
                 "the build log has built past {date}, up to {built_until}"
+            ),
+            Self::Unprefixed(source) => write!(
+                formatter,
+                "{source} names no topic prefix to read its change logs by"
             ),
         }
     }
@@ -197,22 +204,67 @@ where
     }
 }
 
-pub trait StepTaker {
-    type Client: WarehouseControl;
-    type Error: From<<Self::Client as WarehouseClient>::Error>
+pub struct Replaying<'a, K, A, B, F, E> {
+    client: &'a K,
+    artifact: &'a A,
+    materialization: &'a Materialization,
+    window: &'a Window,
+    previous: &'a [BuildLog],
+    finishes: F,
+    writer: &'a B,
+    failure: PhantomData<fn() -> E>,
+}
+
+impl<'a, K, A, B, F, E> Replaying<'a, K, A, B, F, E> {
+    pub fn new(
+        client: &'a K,
+        artifact: &'a A,
+        materialization: &'a Materialization,
+        window: &'a Window,
+        previous: &'a [BuildLog],
+        finishes: F,
+        writer: &'a B,
+    ) -> Self {
+        Self {
+            client,
+            artifact,
+            materialization,
+            window,
+            previous,
+            finishes,
+            writer,
+            failure: PhantomData,
+        }
+    }
+}
+
+impl<K, A, B, F, E> ChangeLogsFn<K> for Replaying<'_, K, A, B, F, E>
+where
+    K: WarehouseControl,
+    A: ArtifactControl,
+    B: BuildLogWriter,
+    F: Fn(&TableId) -> bool,
+    E: From<OutOfOrder>
+        + From<Infallible>
         + From<UnbuildableArtifact>
-        + From<UnreadableBuildLog>
-        + From<Unsteppable>;
+        + From<<K as WarehouseClient>::Error>,
+{
+    type Output = Result<B::Output, E>;
 
-    fn client(&self) -> &Self::Client;
-
-    async fn take<A: ArtifactControl, B: BuildLogWriter>(
-        &self,
-        artifact: &A,
-        materialization: &Materialization,
-        window: &Window,
-        previous: &[BuildLog],
-        finishes: impl Fn(&TableId) -> bool,
-        writer: &B,
-    ) -> Result<B::Output, Self::Error>;
+    async fn call<C>(self, logs: C) -> Self::Output
+    where
+        C: ChangeLogs,
+        K: SchemaChangeStream<C::Schema, Error = <K as WarehouseClient>::Error>,
+    {
+        Runner::new(self.client, &logs)
+            .run(
+                self.artifact,
+                self.materialization,
+                self.window,
+                self.previous,
+                self.finishes,
+                self.writer,
+            )
+            .await
+    }
 }

@@ -7,8 +7,10 @@ use serde::{Deserialize, Serialize};
 
 use chrono_tz::Tz;
 
+use crate::capture::{Capture, ChangeLogsFn};
 use crate::warehouse::SinkWarehouse;
 use lithify_core::artifact::ArtifactName;
+use lithify_core::sink::WarehouseClient;
 use lithify_core::ts::{Event, Ts};
 
 use crate::artifact::{Declaration, Declarations};
@@ -375,6 +377,15 @@ impl<C> Source<C> {
 
     pub fn topic_prefix(&self) -> Option<&str> {
         self.topic_prefix.as_deref()
+    }
+
+    pub async fn with_change_logs<K, F>(&self, f: F) -> Option<F::Output>
+    where
+        K: WarehouseClient,
+        C: Capture<K>,
+        F: ChangeLogsFn<K>,
+    {
+        Some(self.capture.with_change_logs(self.topic_prefix()?, f).await)
     }
 }
 

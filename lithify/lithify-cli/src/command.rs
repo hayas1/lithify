@@ -3,16 +3,18 @@ use std::collections::BTreeMap;
 use chrono::NaiveDate;
 
 use lithify_core::artifact::ArtifactName;
+use lithify_core::sink::WarehouseClient;
 use lithify_core::window::Window;
 use lithify_pipeline::build_log::Series;
+use lithify_pipeline::capture::Capture;
 use lithify_pipeline::infra::Sink;
 use lithify_pipeline::materialization::Materialization;
-use lithify_pipeline::runner::StepTaker;
 use lithify_pipeline::stepping::Stepping;
+use lithify_pipeline::warehouse::WarehouseControl;
 
 use crate::artifacts::ArtifactConfig;
 use crate::journal::Journal;
-use crate::pipeline::WarehouseConfig;
+use crate::pipeline::{CaptureConfig, WarehouseConfig};
 use crate::report::Report;
 use crate::unrunnable::Unrunnable;
 
@@ -25,15 +27,17 @@ pub enum RunCommand {
 }
 
 impl RunCommand {
-    pub async fn settle<P, B>(
+    pub async fn settle<K, B>(
         &self,
         sink: &Sink<WarehouseConfig, ArtifactConfig>,
-        stepping: Stepping<'_, P>,
+        stepping: Stepping<'_, K, CaptureConfig, Unrunnable>,
         writer: &B,
         journal: &mut Journal,
     ) -> Result<(), Unrunnable>
     where
-        P: StepTaker<Error = Unrunnable>,
+        K: WarehouseControl,
+        CaptureConfig: Capture<K>,
+        Unrunnable: From<<K as WarehouseClient>::Error>,
         B: Report,
     {
         match self {
@@ -70,15 +74,17 @@ impl Target {
         }
     }
 
-    async fn build<P, B>(
+    async fn build<K, B>(
         &self,
         sink: &Sink<WarehouseConfig, ArtifactConfig>,
-        stepping: &Stepping<'_, P>,
+        stepping: &Stepping<'_, K, CaptureConfig, Unrunnable>,
         writer: &B,
         journal: &mut Journal,
     ) -> Result<(), Unrunnable>
     where
-        P: StepTaker<Error = Unrunnable>,
+        K: WarehouseControl,
+        CaptureConfig: Capture<K>,
+        Unrunnable: From<<K as WarehouseClient>::Error>,
         B: Report,
     {
         if self
@@ -92,15 +98,17 @@ impl Target {
         Ok(())
     }
 
-    async fn catch_up<P, B>(
+    async fn catch_up<K, B>(
         &self,
         sink: &Sink<WarehouseConfig, ArtifactConfig>,
-        stepping: &Stepping<'_, P>,
+        stepping: &Stepping<'_, K, CaptureConfig, Unrunnable>,
         writer: &B,
         journal: &mut Journal,
     ) -> Result<(), Unrunnable>
     where
-        P: StepTaker<Error = Unrunnable>,
+        K: WarehouseControl,
+        CaptureConfig: Capture<K>,
+        Unrunnable: From<<K as WarehouseClient>::Error>,
         B: Report,
     {
         let mut taken: BTreeMap<Series, Vec<Window>> = BTreeMap::new();
@@ -114,16 +122,18 @@ impl Target {
         Ok(())
     }
 
-    async fn step<P, B>(
+    async fn step<K, B>(
         &self,
         sink: &Sink<WarehouseConfig, ArtifactConfig>,
-        stepping: &Stepping<'_, P>,
+        stepping: &Stepping<'_, K, CaptureConfig, Unrunnable>,
         taken: &BTreeMap<Series, Vec<Window>>,
         writer: &B,
         journal: &mut Journal,
     ) -> Result<Option<(Series, Window)>, Unrunnable>
     where
-        P: StepTaker<Error = Unrunnable>,
+        K: WarehouseControl,
+        CaptureConfig: Capture<K>,
+        Unrunnable: From<<K as WarehouseClient>::Error>,
         B: Report,
     {
         for (config, materialization) in sink
@@ -161,7 +171,6 @@ pub(crate) mod tests {
     use super::*;
     use lithify_core::ts::Ts;
 
-    use crate::step::Taking;
     use crate::step::tests::{CAPTURE, PEOPLE, at, built_before, logged, pipeline, rows};
     use lithify_core::sink::WarehouseClient;
     use lithify_pipeline::schedule::Schedule;
@@ -383,7 +392,8 @@ pub(crate) mod tests {
             .settle(
                 sink,
                 Stepping::new(
-                    &Taking::new(client, source.capture(), source.topic_prefix().unwrap()),
+                    client,
+                    source,
                     Expectation::of(sink, source, Ts::from(at(now))).unwrap(),
                     pipeline.tables(),
                 ),
@@ -887,7 +897,8 @@ mod catch_up {
     use crate::command::tests::settle;
     use crate::command::{RunCommand, Target};
     use crate::step::tests::{
-        BUILT_CHANGE_LOGS, CAPTURE, PEOPLE, built_before, logged, pipeline, rows,
+        ARTIFACTS, BUILT_CHANGE_LOGS, CAPTURE, INFRA, PEOPLE, built_before, logged, opened,
+        pipeline, rows,
     };
     use crate::unrunnable::Unrunnable;
 
@@ -1265,6 +1276,33 @@ mod catch_up {
         assert!(matches!(
             changed,
             Err(Unrunnable::Unsteppable(Unsteppable::CaptureChanged(_)))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_pipeline_whose_source_names_no_topic_prefix_is_not_caught_up() {
+        let pipeline = opened(
+            "unprefixed",
+            ARTIFACTS,
+            &INFRA.replace("topic_prefix = \"mysql\"\n", ""),
+            "[default]\nartifacts = [\"snapshot\"]\n",
+        );
+        let client = logged(PEOPLE, &[]).await;
+
+        let unprefixed = settle(
+            &pipeline,
+            &client,
+            &RunCommand::CatchUp {
+                target: Target::default(),
+                to: None,
+            },
+            "2026-09-22T05:00:00Z",
+        )
+        .await;
+
+        assert!(matches!(
+            unprefixed,
+            Err(Unrunnable::Unsteppable(Unsteppable::Unprefixed(_)))
         ));
     }
 }

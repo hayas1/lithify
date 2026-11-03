@@ -7,14 +7,19 @@ use lithify_artifact::scd2::Scd2;
 use lithify_artifact::snapshot::Snapshot;
 use lithify_artifact::snapshot_provide::SnapshotProvide;
 use lithify_core::artifact::{Artifact, ArtifactName};
+use lithify_core::sink::WarehouseClient;
 use lithify_core::window::Window;
 use lithify_pipeline::Declaration;
 use lithify_pipeline::artifact::ArtifactControl;
 use lithify_pipeline::build_log::Series;
+use lithify_pipeline::capture::Capture;
 use lithify_pipeline::infra::Sink;
 use lithify_pipeline::materialization::Materialization;
 use lithify_pipeline::progress::Step;
-use lithify_pipeline::runner::{BuildLogWriter, StepTaker};
+use lithify_pipeline::runner::BuildLogWriter;
+use lithify_pipeline::warehouse::WarehouseControl;
+
+use crate::pipeline::CaptureConfig;
 use lithify_pipeline::schedule::Schedule;
 use lithify_pipeline::stepping::Stepping;
 
@@ -120,12 +125,17 @@ pub enum Declared {
 }
 
 impl Declared {
-    pub async fn next<P: StepTaker<Error = Unrunnable>>(
+    pub async fn next<K>(
         &self,
-        stepping: &Stepping<'_, P>,
+        stepping: &Stepping<'_, K, CaptureConfig, Unrunnable>,
         materialization: &Materialization,
         taken: &[Window],
-    ) -> Result<Option<Step>, Unrunnable> {
+    ) -> Result<Option<Step>, Unrunnable>
+    where
+        K: WarehouseControl,
+        CaptureConfig: Capture<K>,
+        Unrunnable: From<<K as WarehouseClient>::Error>,
+    {
         match self {
             Self::Snapshot(artifact) => stepping.next(artifact, materialization, taken).await,
             Self::Instant(artifact) => stepping.next(artifact, materialization, taken).await,
@@ -137,13 +147,18 @@ impl Declared {
         }
     }
 
-    pub async fn take<P: StepTaker<Error = Unrunnable>, B: BuildLogWriter>(
+    pub async fn take<K, B: BuildLogWriter>(
         &self,
-        stepping: &Stepping<'_, P>,
+        stepping: &Stepping<'_, K, CaptureConfig, Unrunnable>,
         materialization: &Materialization,
         step: &Step,
         writer: &B,
-    ) -> Result<B::Output, Unrunnable> {
+    ) -> Result<B::Output, Unrunnable>
+    where
+        K: WarehouseControl,
+        CaptureConfig: Capture<K>,
+        Unrunnable: From<<K as WarehouseClient>::Error>,
+    {
         match self {
             Self::Snapshot(artifact) => {
                 stepping.take(artifact, materialization, step, writer).await

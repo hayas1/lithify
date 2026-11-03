@@ -1,9 +1,16 @@
 use serde::{Deserialize, Serialize};
 
+#[cfg(any(feature = "bigquery", feature = "duckdb"))]
+use lithify_core::sink::WarehouseClient;
+#[cfg(any(feature = "bigquery", feature = "duckdb"))]
+use lithify_core::source::SchemaChangeStream;
+#[cfg(any(feature = "bigquery", feature = "duckdb"))]
+use lithify_pipeline::capture::{Capture, ChangeLogsFn};
+
 #[cfg(feature = "bigquery")]
-use crate::sink::bigquery::client::{BigQueryCapture, BigQueryChangeLogsFn};
+use crate::sink::bigquery::client::{BigQueryClient, BigQueryExecution};
 #[cfg(feature = "duckdb")]
-use crate::sink::duckdb::client::{DuckDbCapture, DuckDbChangeLogsFn};
+use crate::sink::duckdb::client::{DuckDbClient, DuckDbExecution};
 #[cfg(any(feature = "bigquery", feature = "duckdb"))]
 use crate::source::debezium::Debezium;
 #[cfg(any(feature = "bigquery", feature = "duckdb"))]
@@ -60,67 +67,50 @@ pub enum Dialect {
 }
 
 #[cfg(feature = "duckdb")]
-impl DuckDbCapture for Config {
-    async fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(
+impl<X: DuckDbExecution> Capture<DuckDbClient<X>> for Config {
+    async fn with_change_logs<F: ChangeLogsFn<DuckDbClient<X>>>(
         &self,
         topic_prefix: &str,
         f: F,
     ) -> F::Output {
         self.dialect
-            .with_duckdb_change_logs(self, Self::DUCKDB_ENVELOPE, topic_prefix, f)
+            .with_change_logs(self, Self::DUCKDB_ENVELOPE, topic_prefix, f)
             .await
     }
 }
 
 #[cfg(feature = "bigquery")]
-impl BigQueryCapture for Config {
-    async fn with_bigquery_change_logs<F: BigQueryChangeLogsFn>(
+impl<X: BigQueryExecution> Capture<BigQueryClient<X>> for Config {
+    async fn with_change_logs<F: ChangeLogsFn<BigQueryClient<X>>>(
         &self,
         topic_prefix: &str,
         f: F,
     ) -> F::Output {
         self.dialect
-            .with_bigquery_change_logs(self, Self::BIGQUERY_ENVELOPE, topic_prefix, f)
+            .with_change_logs(self, Self::BIGQUERY_ENVELOPE, topic_prefix, f)
             .await
     }
 }
 
 impl Dialect {
-    #[cfg(feature = "duckdb")]
-    async fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(
+    #[cfg(any(feature = "bigquery", feature = "duckdb"))]
+    async fn with_change_logs<K, F>(
         self,
         config: &Config,
         envelope: Option<&str>,
         topic_prefix: &str,
         f: F,
-    ) -> F::Output {
+    ) -> F::Output
+    where
+        K: WarehouseClient
+            + SchemaChangeStream<Debezium<MySql>, Error = <K as WarehouseClient>::Error>
+            + SchemaChangeStream<Debezium<Postgres>, Error = <K as WarehouseClient>::Error>,
+        F: ChangeLogsFn<K>,
+    {
         match self {
-            Self::MySql => {
-                f.call_duckdb(config.debezium(envelope, topic_prefix, MySql))
-                    .await
-            }
+            Self::MySql => f.call(config.debezium(envelope, topic_prefix, MySql)).await,
             Self::Postgres => {
-                f.call_duckdb(config.debezium(envelope, topic_prefix, Postgres))
-                    .await
-            }
-        }
-    }
-
-    #[cfg(feature = "bigquery")]
-    async fn with_bigquery_change_logs<F: BigQueryChangeLogsFn>(
-        self,
-        config: &Config,
-        envelope: Option<&str>,
-        topic_prefix: &str,
-        f: F,
-    ) -> F::Output {
-        match self {
-            Self::MySql => {
-                f.call_bigquery(config.debezium(envelope, topic_prefix, MySql))
-                    .await
-            }
-            Self::Postgres => {
-                f.call_bigquery(config.debezium(envelope, topic_prefix, Postgres))
+                f.call(config.debezium(envelope, topic_prefix, Postgres))
                     .await
             }
         }
@@ -151,13 +141,13 @@ mod tests {
     async fn a_source_names_the_topic_its_schema_changes_land_on_apart_from_its_prefix() {
         struct DdlTopic;
 
-        impl DuckDbChangeLogsFn for DdlTopic {
+        impl<K: WarehouseClient> ChangeLogsFn<K> for DdlTopic {
             type Output = String;
 
-            async fn call_duckdb<C>(self, logs: C) -> Self::Output
+            async fn call<C>(self, logs: C) -> Self::Output
             where
                 C: ChangeLogs,
-                <C::Schema as SchemaChangeLog>::Record: duckdb::types::FromSql,
+                K: SchemaChangeStream<C::Schema, Error = <K as WarehouseClient>::Error>,
             {
                 logs.schema_changes().ddl_topic()
             }
@@ -170,7 +160,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            config.with_duckdb_change_logs("mysql", DdlTopic).await,
+            Capture::<DuckDbClient>::with_change_logs(&config, "mysql", DdlTopic).await,
             "mysql.schema-changes"
         );
     }
@@ -189,13 +179,13 @@ mod tests {
      {
         struct Probe;
 
-        impl DuckDbChangeLogsFn for Probe {
+        impl<K: WarehouseClient> ChangeLogsFn<K> for Probe {
             type Output = Probed;
 
-            async fn call_duckdb<C>(self, logs: C) -> Self::Output
+            async fn call<C>(self, logs: C) -> Self::Output
             where
                 C: ChangeLogs,
-                <C::Schema as SchemaChangeLog>::Record: duckdb::types::FromSql,
+                K: SchemaChangeStream<C::Schema, Error = <K as WarehouseClient>::Error>,
             {
                 probe(logs)
             }
@@ -204,8 +194,7 @@ mod tests {
         let value = Some(ColumnPath::from("value"));
 
         assert_eq!(
-            Config::of(Dialect::MySql)
-                .with_duckdb_change_logs("mysql", Probe)
+            Capture::<DuckDbClient>::with_change_logs(&Config::of(Dialect::MySql), "mysql", Probe)
                 .await,
             (
                 std::any::type_name::<Debezium<MySql>>(),
@@ -215,9 +204,12 @@ mod tests {
             )
         );
         assert_eq!(
-            Config::of(Dialect::Postgres)
-                .with_duckdb_change_logs("postgres", Probe)
-                .await,
+            Capture::<DuckDbClient>::with_change_logs(
+                &Config::of(Dialect::Postgres),
+                "postgres",
+                Probe
+            )
+            .await,
             (
                 std::any::type_name::<Debezium<Postgres>>(),
                 "postgres".to_owned(),
@@ -233,25 +225,25 @@ mod tests {
      {
         struct Probe;
 
-        impl BigQueryChangeLogsFn for Probe {
+        impl<K: WarehouseClient> ChangeLogsFn<K> for Probe {
             type Output = Probed;
 
-            async fn call_bigquery<C>(self, logs: C) -> Self::Output
+            async fn call<C>(self, logs: C) -> Self::Output
             where
                 C: ChangeLogs,
-                <C::Schema as SchemaChangeLog>::Record: TryFrom<
-                        google_cloud_bigquery::query::Row,
-                        Error = google_cloud_bigquery::error::RowError,
-                    >,
+                K: SchemaChangeStream<C::Schema, Error = <K as WarehouseClient>::Error>,
             {
                 probe(logs)
             }
         }
 
         assert_eq!(
-            Config::of(Dialect::MySql)
-                .with_bigquery_change_logs("mysql", Probe)
-                .await,
+            Capture::<BigQueryClient>::with_change_logs(
+                &Config::of(Dialect::MySql),
+                "mysql",
+                Probe
+            )
+            .await,
             (
                 std::any::type_name::<Debezium<MySql>>(),
                 "mysql".to_owned(),
@@ -260,9 +252,12 @@ mod tests {
             )
         );
         assert_eq!(
-            Config::of(Dialect::Postgres)
-                .with_bigquery_change_logs("postgres", Probe)
-                .await,
+            Capture::<BigQueryClient>::with_change_logs(
+                &Config::of(Dialect::Postgres),
+                "postgres",
+                Probe
+            )
+            .await,
             (
                 std::any::type_name::<Debezium<Postgres>>(),
                 "postgres".to_owned(),

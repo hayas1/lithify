@@ -11,9 +11,7 @@ use lithify_core::event::MalformedEvent;
 use lithify_core::sink::{
     ChangeLogSql, Namespace, OpenWarehouse, TablePath, WarehouseClient, WarehouseSql,
 };
-use lithify_core::source::{
-    ChangeLogs, SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed,
-};
+use lithify_core::source::{SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed};
 use lithify_core::sql::SqlString;
 use lithify_core::window::Window;
 use lithify_pipeline::build_log::{BuildLogQuery, BuildLogRow, UnreadableBuildLog};
@@ -22,23 +20,6 @@ use crate::sink::bigquery::BigQueryWarehouse;
 use crate::sink::bigquery::config::{Config, Credentials, Location};
 use crate::sink::bigquery::from_sql::{BigQueryBuildLogRow, BigQueryCount};
 use crate::sink::execution::{Apply, DryRun};
-
-pub trait BigQueryChangeLogsFn {
-    type Output;
-
-    async fn call_bigquery<C>(self, logs: C) -> Self::Output
-    where
-        C: ChangeLogs,
-        <C::Schema as SchemaChangeLog>::Record: TryFrom<Row, Error = RowError>;
-}
-
-pub trait BigQueryCapture {
-    async fn with_bigquery_change_logs<F: BigQueryChangeLogsFn>(
-        &self,
-        topic_prefix: &str,
-        f: F,
-    ) -> F::Output;
-}
 
 pub trait BigQueryExecution {
     async fn execute(&self, client: &BigQuery, statement: &SqlString) -> Result<(), Unqueryable>;

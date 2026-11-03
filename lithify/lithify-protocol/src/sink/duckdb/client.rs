@@ -3,32 +3,13 @@ use duckdb::{Connection, Error, Statement};
 use lithify_pipeline::warehouse::WarehouseControl;
 
 use lithify_core::sink::{ChangeLogSql, Namespace, TablePath, WarehouseClient, WarehouseSql};
-use lithify_core::source::{
-    ChangeLogs, SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed,
-};
+use lithify_core::source::{SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed};
 use lithify_core::sql::SqlString;
 use lithify_core::window::Window;
 use lithify_pipeline::build_log::{BuildLogQuery, BuildLogRow};
 
 use crate::sink::duckdb::DuckDbWarehouse;
 use crate::sink::execution::{Apply, DryRun};
-
-pub trait DuckDbChangeLogsFn {
-    type Output;
-
-    async fn call_duckdb<C>(self, logs: C) -> Self::Output
-    where
-        C: ChangeLogs,
-        <C::Schema as SchemaChangeLog>::Record: FromSql;
-}
-
-pub trait DuckDbCapture {
-    async fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(
-        &self,
-        topic_prefix: &str,
-        f: F,
-    ) -> F::Output;
-}
 
 // DuckDB answers on the calling thread, so executing a statement waits on nothing.
 pub trait DuckDbExecution {

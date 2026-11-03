@@ -18,7 +18,6 @@ use crate::credential::Credentials;
 use crate::journal::Journal;
 use crate::pipeline::{CaptureConfig, Reached, WarehouseConfig};
 use crate::report::{DryRunBuildLogWrite, Report};
-use crate::step::Taking;
 use crate::unrunnable::Unrunnable;
 use lithify_pipeline::check::{Expectation, Inspecting, Inspection};
 use lithify_pipeline::stepping::Stepping;
@@ -149,14 +148,6 @@ impl Run {
         writer: &B,
         journal: &mut Journal,
     ) -> Result<(), Unrunnable> {
-        let Some(topic_prefix) = source.topic_prefix() else {
-            journal.note(&format!(
-                "{} names no topic prefix to read its change logs by",
-                source.name()
-            ));
-
-            return Ok(());
-        };
         let expectation = Expectation::of(sink, source, self.now)?;
 
         match Self::reach(sink)? {
@@ -169,11 +160,7 @@ impl Run {
                 command
                     .settle(
                         sink,
-                        Stepping::new(
-                            &Taking::new(&client, source.capture(), topic_prefix),
-                            expectation,
-                            listing,
-                        ),
+                        Stepping::new(&client, source, expectation, listing),
                         writer,
                         journal,
                     )
@@ -188,11 +175,7 @@ impl Run {
                 command
                     .settle(
                         sink,
-                        Stepping::new(
-                            &Taking::new(&client, source.capture(), topic_prefix),
-                            expectation,
-                            listing,
-                        ),
+                        Stepping::new(&client, source, expectation, listing),
                         writer,
                         journal,
                     )

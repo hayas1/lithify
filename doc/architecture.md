@@ -39,8 +39,9 @@ The control plane reads what the core is handed and runs what it plans; the core
 flowchart TD
     subgraph pipeline[lithify-pipeline]
         stepping[Stepping] -->|reads where each series stands| log[(build log)]
-        stepping -->|hands the next window to| taker[StepTaker]
-        taker --> runner[Runner]
+        stepping -->|hands the next window to| source[Source]
+        source -->|Capture::with_change_logs| replaying[Replaying]
+        replaying --> runner[Runner]
         runner -->|ArtifactControl::base| base[the table each folds onto]
         runner -->|SchemaChangeStream::history| history[SchemaHistory]
         runner -->|runs the statements through WarehouseClient| built[TableBuilt]

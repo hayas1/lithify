@@ -1,37 +1,61 @@
+use std::convert::Infallible;
+use std::marker::PhantomData;
+
 use chrono::NaiveDate;
 
 use crate::artifact::ArtifactControl;
-use crate::build_log::{BuildLog, Latest};
+use crate::build_log::{BuildLog, Latest, UnreadableBuildLog};
+use crate::capture::Capture;
 use crate::check::Expectation;
+use crate::infra::Source;
 use crate::materialization::Materialization;
 use crate::progress::{Progress, Step};
-use crate::runner::{BuildLogWriter, StepTaker, Unsteppable};
+use crate::runner::{BuildLogWriter, Replaying, Unsteppable};
 use crate::table;
 
 use crate::warehouse::WarehouseControl;
+use lithify_core::artifact::UnbuildableArtifact;
+use lithify_core::listener::OutOfOrder;
+use lithify_core::model::TableId;
+use lithify_core::sink::WarehouseClient;
 use lithify_core::ts::{Event, Ts};
 use lithify_core::window::Window;
 
-pub struct Stepping<'a, P> {
-    taker: &'a P,
+pub struct Stepping<'a, K, C, E> {
+    client: &'a K,
+    source: &'a Source<C>,
     expectation: Expectation,
     listing: &'a table::Tables,
+    failure: PhantomData<fn() -> E>,
 }
 
-impl<'a, P: StepTaker> Stepping<'a, P> {
-    pub fn new(taker: &'a P, expectation: Expectation, listing: &'a table::Tables) -> Self {
+impl<'a, K, C, E> Stepping<'a, K, C, E>
+where
+    K: WarehouseControl,
+    C: Capture<K>,
+    E: From<<K as WarehouseClient>::Error>
+        + From<UnbuildableArtifact>
+        + From<UnreadableBuildLog>
+        + From<Unsteppable>
+        + From<OutOfOrder>
+        + From<Infallible>,
+{
+    pub fn new(
+        client: &'a K,
+        source: &'a Source<C>,
+        expectation: Expectation,
+        listing: &'a table::Tables,
+    ) -> Self {
         Self {
-            taker,
+            client,
+            source,
             expectation,
             listing,
+            failure: PhantomData,
         }
     }
 
-    pub async fn up_to(
-        self,
-        date: NaiveDate,
-        scheduled: &Materialization,
-    ) -> Result<Self, P::Error> {
+    pub async fn up_to(self, date: NaiveDate, scheduled: &Materialization) -> Result<Self, E> {
         let timeline = self.expectation.timeline();
         let until = timeline.through(date).ok_or(Unsteppable::Unopened(date))?;
         if until > timeline.range().end {
@@ -53,7 +77,7 @@ impl<'a, P: StepTaker> Stepping<'a, P> {
         artifact: &A,
         materialization: &Materialization,
         taken: &[Window],
-    ) -> Result<Option<Step>, P::Error> {
+    ) -> Result<Option<Step>, E> {
         let progress = self.progress(materialization).await?;
         let derived = materialization.base().is_some();
         let base = match materialization.base() {
@@ -99,7 +123,7 @@ impl<'a, P: StepTaker> Stepping<'a, P> {
         materialization: &Materialization,
         step: &Step,
         writer: &B,
-    ) -> Result<B::Output, P::Error> {
+    ) -> Result<B::Output, E> {
         let window = step.window();
         let previous = self
             .built(
@@ -108,26 +132,35 @@ impl<'a, P: StepTaker> Stepping<'a, P> {
             )
             .await?;
 
-        self.taker
-            .take(
+        self.source
+            .with_change_logs(Replaying::<_, _, _, _, E>::new(
+                self.client,
                 artifact,
                 materialization,
                 window,
                 &previous,
-                |table| {
-                    step.includes(table)
-                        && self.listing.table(table).builds(materialization.artifact())
-                },
+                self.finishes(materialization, step),
                 writer,
-            )
+            ))
             .await
+            .ok_or_else(|| Unsteppable::Unprefixed(self.source.name().to_owned()))?
+    }
+
+    fn finishes<'f>(
+        &'f self,
+        materialization: &'f Materialization,
+        step: &'f Step,
+    ) -> impl Fn(&TableId) -> bool + 'f {
+        move |table| {
+            step.includes(table) && self.listing.table(table).builds(materialization.artifact())
+        }
     }
 
     async fn built(
         &self,
         materialization: &Materialization,
         closing: Ts<Event>,
-    ) -> Result<Vec<BuildLog>, P::Error> {
+    ) -> Result<Vec<BuildLog>, E> {
         self.latest(materialization, Latest::SucceededUntil(closing))
             .await
     }
@@ -136,10 +169,9 @@ impl<'a, P: StepTaker> Stepping<'a, P> {
         &self,
         materialization: &Materialization,
         latest: Latest,
-    ) -> Result<Vec<BuildLog>, P::Error> {
-        self.taker
-            .client()
-            .build_logs::<P::Error>(
+    ) -> Result<Vec<BuildLog>, E> {
+        self.client
+            .build_logs::<E>(
                 materialization.namespace(),
                 materialization.series(),
                 &latest.into(),
@@ -147,7 +179,7 @@ impl<'a, P: StepTaker> Stepping<'a, P> {
             .await
     }
 
-    async fn progress(&self, materialization: &Materialization) -> Result<Progress, P::Error> {
+    async fn progress(&self, materialization: &Materialization) -> Result<Progress, E> {
         let latest = self.latest(materialization, Latest::Attempted).await?;
         if let Some(changed) = self.expectation.capture_changed(&latest) {
             return Err(Unsteppable::CaptureChanged(changed).into());

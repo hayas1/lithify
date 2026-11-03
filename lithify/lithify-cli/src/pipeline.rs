@@ -1,12 +1,11 @@
 use serde::{Deserialize, Serialize};
 
-use lithify_core::sink::{Namespace, OpenWarehouse};
+use lithify_core::sink::{Namespace, OpenWarehouse, WarehouseClient};
 
 use lithify_core::source::CdcFormat;
+use lithify_pipeline::capture::{Capture, ChangeLogsFn};
 use lithify_pipeline::warehouse::{SinkWarehouse, WarehouseFn};
 use lithify_pipeline::{Placed, Places, Placing};
-use lithify_protocol::sink::bigquery::client::{BigQueryCapture, BigQueryChangeLogsFn};
-use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbChangeLogsFn};
 use lithify_protocol::{BigQueryWarehouse, DebeziumFormat, DuckDbWarehouse};
 
 use crate::credential::Credentials;
@@ -18,26 +17,14 @@ pub enum CaptureConfig {
     Debezium(<DebeziumFormat as CdcFormat>::Config),
 }
 
-impl DuckDbCapture for CaptureConfig {
-    async fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(
-        &self,
-        topic_prefix: &str,
-        f: F,
-    ) -> F::Output {
+impl<K> Capture<K> for CaptureConfig
+where
+    K: WarehouseClient,
+    <DebeziumFormat as CdcFormat>::Config: Capture<K>,
+{
+    async fn with_change_logs<F: ChangeLogsFn<K>>(&self, topic_prefix: &str, f: F) -> F::Output {
         match self {
-            Self::Debezium(debezium) => debezium.with_duckdb_change_logs(topic_prefix, f).await,
-        }
-    }
-}
-
-impl BigQueryCapture for CaptureConfig {
-    async fn with_bigquery_change_logs<F: BigQueryChangeLogsFn>(
-        &self,
-        topic_prefix: &str,
-        f: F,
-    ) -> F::Output {
-        match self {
-            Self::Debezium(debezium) => debezium.with_bigquery_change_logs(topic_prefix, f).await,
+            Self::Debezium(debezium) => debezium.with_change_logs(topic_prefix, f).await,
         }
     }
 }
@@ -144,8 +131,9 @@ pub enum Reached<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lithify_core::source::{ChangeLogs, SchemaChangeLog};
+    use lithify_core::source::{ChangeLogs, SchemaChangeStream};
     use lithify_protocol::Postgres;
+    use lithify_protocol::sink::duckdb::client::DuckDbClient;
     use lithify_protocol::source::debezium::Debezium;
     use lithify_protocol::source::debezium::config;
 
@@ -161,13 +149,13 @@ mod tests {
     async fn a_capture_calls_a_fn_with_the_logs_of_the_dialect_it_captures_in() {
         struct Probe;
 
-        impl DuckDbChangeLogsFn for Probe {
+        impl<K: WarehouseClient> ChangeLogsFn<K> for Probe {
             type Output = &'static str;
 
-            async fn call_duckdb<C>(self, _: C) -> Self::Output
+            async fn call<C>(self, _: C) -> Self::Output
             where
                 C: ChangeLogs,
-                <C::Schema as SchemaChangeLog>::Record: duckdb::types::FromSql,
+                K: SchemaChangeStream<C::Schema, Error = <K as WarehouseClient>::Error>,
             {
                 std::any::type_name::<C>()
             }
@@ -176,7 +164,7 @@ mod tests {
         let capture: CaptureConfig = toml::from_str("[debezium]\ndialect = \"postgres\"").unwrap();
 
         assert_eq!(
-            capture.with_duckdb_change_logs("postgres", Probe).await,
+            Capture::<DuckDbClient>::with_change_logs(&capture, "postgres", Probe).await,
             std::any::type_name::<Debezium<Postgres>>()
         );
     }
