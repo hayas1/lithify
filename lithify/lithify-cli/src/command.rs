@@ -1272,7 +1272,7 @@ mod catch_up {
 
         assert!(matches!(
             changed,
-            Err(Unrunnable::Unsteppable(Unsteppable::CaptureChanged { .. }))
+            Err(Unrunnable::Unsteppable(Unsteppable::CaptureChanged(_)))
         ));
     }
 }

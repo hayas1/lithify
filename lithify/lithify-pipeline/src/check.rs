@@ -33,10 +33,7 @@ pub enum Discrepancy {
         table: TableId,
         target: TablePath,
     },
-    CaptureChanged {
-        logged: String,
-        configured: String,
-    },
+    CaptureChanged(CaptureChanged),
 }
 
 impl Display for Discrepancy {
@@ -65,11 +62,33 @@ impl Display for Discrepancy {
                 formatter,
                 "{table} is logged as built into {target} but {target} is not there"
             ),
-            Self::CaptureChanged { logged, configured } => write!(
-                formatter,
-                "the last run captured as {logged} but the pipeline is captured as {configured} now"
-            ),
+            Self::CaptureChanged(changed) => changed.fmt(formatter),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureChanged {
+    logged: String,
+    configured: String,
+}
+
+impl CaptureChanged {
+    pub fn new(logged: &str, configured: &str) -> Self {
+        Self {
+            logged: logged.to_owned(),
+            configured: configured.to_owned(),
+        }
+    }
+}
+
+impl Display for CaptureChanged {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "the last run captured as {} but the pipeline is captured as {} now",
+            self.logged, self.configured
+        )
     }
 }
 
@@ -247,18 +266,17 @@ impl Expectation {
         succeeded: &[BuildLog],
         present: &BTreeSet<TablePath>,
     ) -> Vec<Discrepancy> {
-        let Some(last_run) = latest.iter().map(BuildLog::run_id).max() else {
+        if latest.is_empty() {
             let since = self.timeline.range().start;
 
             return match self.due_until(since) {
                 Some(_) => vec![Discrepancy::NeverBuilt { since }],
                 None => vec![],
             };
-        };
+        }
 
-        let built_last = latest.iter().filter(|log| log.run_id() == last_run);
-
-        self.capture_changed(built_last)
+        self.capture_changed(latest)
+            .map(Discrepancy::CaptureChanged)
             .into_iter()
             .chain(
                 latest
@@ -283,16 +301,14 @@ impl Expectation {
             .map(|window| *window.to())
     }
 
-    fn capture_changed<'b>(
-        &self,
-        mut built_last: impl Iterator<Item = &'b BuildLog>,
-    ) -> Option<Discrepancy> {
-        built_last
+    pub fn capture_changed(&self, latest: &[BuildLog]) -> Option<CaptureChanged> {
+        let last_run = latest.iter().map(BuildLog::run_id).max()?;
+
+        latest
+            .iter()
+            .filter(|log| log.run_id() == last_run)
             .find(|log| log.capture() != self.capture)
-            .map(|log| Discrepancy::CaptureChanged {
-                logged: log.capture().to_owned(),
-                configured: self.capture.clone(),
-            })
+            .map(|log| CaptureChanged::new(log.capture(), &self.capture))
     }
 
     fn missing_from(

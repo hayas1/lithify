@@ -151,10 +151,23 @@ fn a_pipeline_whose_capture_changed_since_its_last_run_is_reported_as_such() {
             r#"{"debezium":{"dialect":"postgres"}}"#,
         )
         .discrepancies(&built, &built, &present(&built)),
-        [Discrepancy::CaptureChanged {
-            logged: "{}".to_owned(),
-            configured: r#"{"debezium":{"dialect":"postgres"}}"#.to_owned(),
-        }]
+        [Discrepancy::CaptureChanged(CaptureChanged::new(
+            "{}",
+            r#"{"debezium":{"dialect":"postgres"}}"#
+        ))]
+    );
+}
+
+#[test]
+fn a_build_log_whose_last_run_was_captured_as_the_pipeline_is_now_has_its_capture_unchanged() {
+    let built = [
+        logged(1, "people", day("2026-09-19"), Status::Succeeded),
+        logged(2, "people", day("2026-09-20"), Status::Succeeded),
+    ];
+
+    assert_eq!(
+        expected("2026-09-21T05:00:00Z").capture_changed(&built),
+        None
     );
 }
 

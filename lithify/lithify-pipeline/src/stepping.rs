@@ -139,22 +139,14 @@ impl<'a, P: StepTaker> Stepping<'a, P> {
     }
 
     async fn progress(&self, materialization: &Materialization) -> Result<Progress, P::Error> {
-        let progress = Progress::read(
-            &self.latest(materialization, Latest::Attempted).await?,
-            &self.latest(materialization, Latest::Succeeded).await?,
-        );
-        let changed = progress
-            .captures()
-            .find(|logged| *logged != self.expectation.capture())
-            .map(str::to_owned);
-
-        match changed {
-            Some(logged) => Err(Unsteppable::CaptureChanged {
-                logged,
-                configured: self.expectation.capture().to_owned(),
-            }
-            .into()),
-            None => Ok(progress),
+        let latest = self.latest(materialization, Latest::Attempted).await?;
+        if let Some(changed) = self.expectation.capture_changed(&latest) {
+            return Err(Unsteppable::CaptureChanged(changed).into());
         }
+
+        Ok(Progress::read(
+            &latest,
+            &self.latest(materialization, Latest::Succeeded).await?,
+        ))
     }
 }

@@ -18,16 +18,14 @@ use lithify_core::window::Window;
 
 use crate::artifact::ArtifactControl;
 use crate::build_log::{BuildLog, Run, TableBuilt, UnreadableBuildLog};
+use crate::check::CaptureChanged;
 use crate::infra::{Sink, Source};
 use crate::materialization::Materialization;
 use crate::warehouse::{SinkWarehouse, WarehouseControl};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Unsteppable {
-    CaptureChanged {
-        logged: String,
-        configured: String,
-    },
+    CaptureChanged(CaptureChanged),
     Unopened(NaiveDate),
     Unclosed(NaiveDate),
     Overtaken {
@@ -39,10 +37,7 @@ pub enum Unsteppable {
 impl Display for Unsteppable {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Self::CaptureChanged { logged, configured } => write!(
-                formatter,
-                "the build log was captured as {logged} but the pipeline is captured as {configured} now"
-            ),
+            Self::CaptureChanged(changed) => changed.fmt(formatter),
             Self::Unopened(date) => write!(
                 formatter,
                 "no window closes by the end of {date} since the change log opened"

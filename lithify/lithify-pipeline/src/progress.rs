@@ -8,13 +8,10 @@ use lithify_core::window::Window;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Progress {
     built: BTreeMap<TableId, Option<Window>>,
-    captures: BTreeSet<String>,
 }
 
 impl Progress {
     pub fn read(latest: &[BuildLog], succeeded: &[BuildLog]) -> Self {
-        let last_run = latest.iter().map(BuildLog::run_id).max();
-
         Self {
             built: latest
                 .iter()
@@ -26,16 +23,7 @@ impl Progress {
                     Some((log.table_to()?.clone(), built))
                 })
                 .collect(),
-            captures: latest
-                .iter()
-                .filter(|log| Some(log.run_id()) == last_run)
-                .map(|log| log.capture().to_owned())
-                .collect(),
         }
-    }
-
-    pub fn captures(&self) -> impl Iterator<Item = &str> {
-        self.captures.iter().map(String::as_str)
     }
 
     pub fn standing(&self) -> Option<Ts<Event>> {
@@ -306,6 +294,5 @@ mod tests {
         ]);
 
         assert_eq!(progress.standing(), Some(*day(1).to()));
-        assert_eq!(progress.captures().collect::<Vec<_>>(), [CAPTURE]);
     }
 }
