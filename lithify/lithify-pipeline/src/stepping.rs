@@ -5,7 +5,8 @@ use crate::build_log::{BuildLog, Latest};
 use crate::check::Expectation;
 use crate::materialization::Materialization;
 use crate::progress::{Progress, Step};
-use crate::runner::{BuildLogWriter, StepTaker, Tables, Unsteppable};
+use crate::runner::{BuildLogWriter, StepTaker, Unsteppable};
+use crate::table;
 
 use crate::warehouse::WarehouseControl;
 use lithify_core::ts::{Event, Ts};
@@ -14,11 +15,16 @@ use lithify_core::window::Window;
 pub struct Stepping<'a, P> {
     taker: &'a P,
     expectation: Expectation,
+    listing: &'a table::Tables,
 }
 
 impl<'a, P: StepTaker> Stepping<'a, P> {
-    pub fn new(taker: &'a P, expectation: Expectation) -> Self {
-        Self { taker, expectation }
+    pub fn new(taker: &'a P, expectation: Expectation, listing: &'a table::Tables) -> Self {
+        Self {
+            taker,
+            expectation,
+            listing,
+        }
     }
 
     pub async fn up_to(
@@ -91,10 +97,10 @@ impl<'a, P: StepTaker> Stepping<'a, P> {
         &self,
         artifact: &A,
         materialization: &Materialization,
-        window: &Window,
-        tables: &Tables,
+        step: &Step,
         writer: &B,
     ) -> Result<B::Output, P::Error> {
+        let window = step.window();
         let previous = self
             .built(
                 materialization.base().unwrap_or(materialization),
@@ -103,7 +109,17 @@ impl<'a, P: StepTaker> Stepping<'a, P> {
             .await?;
 
         self.taker
-            .take(artifact, materialization, window, &previous, tables, writer)
+            .take(
+                artifact,
+                materialization,
+                window,
+                &previous,
+                |table| {
+                    step.includes(table)
+                        && self.listing.table(table).builds(materialization.artifact())
+                },
+                writer,
+            )
             .await
     }
 

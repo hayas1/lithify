@@ -93,6 +93,10 @@ impl Step {
     pub fn left_out(&self) -> &BTreeSet<TableId> {
         &self.left_out
     }
+
+    pub fn includes(&self, table: &TableId) -> bool {
+        !self.left_out.contains(table)
+    }
 }
 
 #[cfg(test)]

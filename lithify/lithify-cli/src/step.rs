@@ -8,8 +8,7 @@ use lithify_core::window::Window;
 use lithify_pipeline::artifact::ArtifactControl;
 use lithify_pipeline::build_log::BuildLog;
 use lithify_pipeline::materialization::Materialization;
-use lithify_pipeline::runner::{BuildLogWriter, Runner, StepTaker, Tables};
-use lithify_pipeline::table;
+use lithify_pipeline::runner::{BuildLogWriter, Runner, StepTaker};
 use lithify_protocol::sink::bigquery::client::{
     BigQueryCapture, BigQueryChangeLogsFn, BigQueryClient, BigQueryExecution,
 };
@@ -58,37 +57,14 @@ pub struct Taking<'a, K> {
     client: &'a K,
     capture: &'a CaptureConfig,
     topic_prefix: &'a str,
-    listing: &'a table::Tables,
 }
 
 impl<'a, K> Taking<'a, K> {
-    pub fn new(
-        client: &'a K,
-        capture: &'a CaptureConfig,
-        topic_prefix: &'a str,
-        listing: &'a table::Tables,
-    ) -> Self {
+    pub fn new(client: &'a K, capture: &'a CaptureConfig, topic_prefix: &'a str) -> Self {
         Self {
             client,
             capture,
             topic_prefix,
-            listing,
-        }
-    }
-}
-
-impl<K> Taking<'_, K> {
-    fn finishes<'f, A: ArtifactControl>(
-        &'f self,
-        artifact: &'f A,
-        tables: &'f Tables,
-    ) -> impl Fn(&TableId) -> bool + 'f {
-        move |table| {
-            tables.includes(table)
-                && self
-                    .listing
-                    .table(table)
-                    .builds(artifact.series().artifact())
         }
     }
 }
@@ -107,7 +83,7 @@ impl<X: DuckDbExecution> StepTaker for Taking<'_, DuckDbClient<X>> {
         materialization: &Materialization,
         window: &Window,
         previous: &[BuildLog],
-        tables: &Tables,
+        finishes: impl Fn(&TableId) -> bool,
         writer: &B,
     ) -> Result<B::Output, Unrunnable> {
         self.capture
@@ -119,7 +95,7 @@ impl<X: DuckDbExecution> StepTaker for Taking<'_, DuckDbClient<X>> {
                     materialization,
                     window,
                     previous,
-                    self.finishes(artifact, tables),
+                    finishes,
                     writer,
                 ),
             )
@@ -141,7 +117,7 @@ impl<X: BigQueryExecution> StepTaker for Taking<'_, BigQueryClient<X>> {
         materialization: &Materialization,
         window: &Window,
         previous: &[BuildLog],
-        tables: &Tables,
+        finishes: impl Fn(&TableId) -> bool,
         writer: &B,
     ) -> Result<B::Output, Unrunnable> {
         self.capture
@@ -153,7 +129,7 @@ impl<X: BigQueryExecution> StepTaker for Taking<'_, BigQueryClient<X>> {
                     materialization,
                     window,
                     previous,
-                    self.finishes(artifact, tables),
+                    finishes,
                     writer,
                 ),
             )
@@ -240,6 +216,7 @@ pub(crate) mod tests {
     use lithify_pipeline::build_log::{BuildLog, Latest, Run, Series, Status, TableBuilt};
     use lithify_pipeline::infra::Sink;
     use lithify_pipeline::runner::BuildLogWrite;
+    use lithify_pipeline::table;
     use lithify_protocol::sink::execution::DryRun;
 
     const CHANGE_LOGS: &str = include_str!("../testdata/step/change_logs.sql");

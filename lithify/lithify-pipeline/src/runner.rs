@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::convert::Infallible;
 use std::fmt::{self, Display, Formatter};
 
@@ -52,22 +51,6 @@ impl Display for Unsteppable {
 }
 
 impl std::error::Error for Unsteppable {}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum Tables {
-    #[default]
-    Every,
-    Except(BTreeSet<TableId>),
-}
-
-impl Tables {
-    pub fn includes(&self, table: &TableId) -> bool {
-        match self {
-            Self::Every => true,
-            Self::Except(tables) => !tables.contains(table),
-        }
-    }
-}
 
 pub trait BuildLogWriter {
     type Output;
@@ -229,7 +212,7 @@ pub trait StepTaker {
         materialization: &Materialization,
         window: &Window,
         previous: &[BuildLog],
-        tables: &Tables,
+        finishes: impl Fn(&TableId) -> bool,
         writer: &B,
     ) -> Result<B::Output, Self::Error>;
 }

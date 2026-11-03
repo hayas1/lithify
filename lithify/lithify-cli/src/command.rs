@@ -3,18 +3,16 @@ use std::collections::BTreeMap;
 use chrono::NaiveDate;
 
 use lithify_core::artifact::ArtifactName;
-use lithify_core::ts::{Replay, Ts};
 use lithify_core::window::Window;
 use lithify_pipeline::build_log::Series;
-use lithify_pipeline::check::Expectation;
-use lithify_pipeline::infra::{Sink, Source};
+use lithify_pipeline::infra::Sink;
 use lithify_pipeline::materialization::Materialization;
-use lithify_pipeline::runner::{StepTaker, Tables};
+use lithify_pipeline::runner::StepTaker;
 use lithify_pipeline::stepping::Stepping;
 
 use crate::artifacts::ArtifactConfig;
 use crate::journal::Journal;
-use crate::pipeline::{CaptureConfig, WarehouseConfig};
+use crate::pipeline::WarehouseConfig;
 use crate::report::Report;
 use crate::unrunnable::Unrunnable;
 
@@ -30,9 +28,7 @@ impl RunCommand {
     pub async fn settle<P, B>(
         &self,
         sink: &Sink<WarehouseConfig, ArtifactConfig>,
-        source: &Source<CaptureConfig>,
-        now: Ts<Replay>,
-        taker: &P,
+        stepping: Stepping<'_, P>,
         writer: &B,
         journal: &mut Journal,
     ) -> Result<(), Unrunnable>
@@ -40,8 +36,6 @@ impl RunCommand {
         P: StepTaker<Error = Unrunnable>,
         B: Report,
     {
-        let stepping = Stepping::new(taker, Expectation::of(sink, source, now)?);
-
         match self {
             Self::CatchUp { target, to: None } => {
                 target.catch_up(sink, &stepping, writer, journal).await
@@ -141,10 +135,9 @@ impl Target {
             let taken = taken.get(series).map(Vec::as_slice).unwrap_or_default();
 
             if let Some(step) = declared.next(stepping, materialization, taken).await? {
-                let tables = Tables::Except(step.left_out().clone());
                 journal.window(step.window());
                 let output = declared
-                    .take(stepping, materialization, step.window(), &tables, writer)
+                    .take(stepping, materialization, &step, writer)
                     .await?;
                 writer.report(series, step.window(), output, journal)?;
 
@@ -158,8 +151,10 @@ impl Target {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use crate::pipeline::CaptureConfig;
     use lithify_core::sql::SqlString;
     use lithify_pipeline::Pipeline;
+    use lithify_pipeline::check::Expectation;
     use lithify_pipeline::runner::BuildLogWrite;
     use lithify_protocol::sink::duckdb::client::DuckDbClient;
 
@@ -387,12 +382,9 @@ pub(crate) mod tests {
         command
             .settle(
                 sink,
-                source,
-                Ts::from(at(now)),
-                &Taking::new(
-                    client,
-                    source.capture(),
-                    source.topic_prefix().unwrap(),
+                Stepping::new(
+                    &Taking::new(client, source.capture(), source.topic_prefix().unwrap()),
+                    Expectation::of(sink, source, Ts::from(at(now))).unwrap(),
                     pipeline.tables(),
                 ),
                 &writer,

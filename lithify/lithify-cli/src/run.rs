@@ -20,7 +20,8 @@ use crate::pipeline::{CaptureConfig, Reached, WarehouseConfig};
 use crate::report::{DryRunBuildLogWrite, Report};
 use crate::step::Taking;
 use crate::unrunnable::Unrunnable;
-use lithify_pipeline::check::{Inspecting, Inspection};
+use lithify_pipeline::check::{Expectation, Inspecting, Inspection};
+use lithify_pipeline::stepping::Stepping;
 use lithify_pipeline::warehouse::SinkWarehouse;
 
 pub struct Run {
@@ -156,6 +157,7 @@ impl Run {
 
             return Ok(());
         };
+        let expectation = Expectation::of(sink, source, self.now)?;
 
         match Self::reach(sink)? {
             Reached::DuckDb(config, change_log) => {
@@ -167,9 +169,11 @@ impl Run {
                 command
                     .settle(
                         sink,
-                        source,
-                        self.now,
-                        &Taking::new(&client, source.capture(), topic_prefix, listing),
+                        Stepping::new(
+                            &Taking::new(&client, source.capture(), topic_prefix),
+                            expectation,
+                            listing,
+                        ),
                         writer,
                         journal,
                     )
@@ -184,9 +188,11 @@ impl Run {
                 command
                     .settle(
                         sink,
-                        source,
-                        self.now,
-                        &Taking::new(&client, source.capture(), topic_prefix, listing),
+                        Stepping::new(
+                            &Taking::new(&client, source.capture(), topic_prefix),
+                            expectation,
+                            listing,
+                        ),
                         writer,
                         journal,
                     )

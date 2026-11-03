@@ -14,7 +14,7 @@ use lithify_pipeline::build_log::Series;
 use lithify_pipeline::infra::Sink;
 use lithify_pipeline::materialization::Materialization;
 use lithify_pipeline::progress::Step;
-use lithify_pipeline::runner::{BuildLogWriter, StepTaker, Tables};
+use lithify_pipeline::runner::{BuildLogWriter, StepTaker};
 use lithify_pipeline::schedule::Schedule;
 use lithify_pipeline::stepping::Stepping;
 
@@ -141,35 +141,18 @@ impl Declared {
         &self,
         stepping: &Stepping<'_, P>,
         materialization: &Materialization,
-        window: &Window,
-        tables: &Tables,
+        step: &Step,
         writer: &B,
     ) -> Result<B::Output, Unrunnable> {
         match self {
             Self::Snapshot(artifact) => {
-                stepping
-                    .take(artifact, materialization, window, tables, writer)
-                    .await
+                stepping.take(artifact, materialization, step, writer).await
             }
-            Self::Instant(artifact) => {
-                stepping
-                    .take(artifact, materialization, window, tables, writer)
-                    .await
-            }
-            Self::Scd2(artifact) => {
-                stepping
-                    .take(artifact, materialization, window, tables, writer)
-                    .await
-            }
-            Self::Scd1(artifact) => {
-                stepping
-                    .take(artifact, materialization, window, tables, writer)
-                    .await
-            }
+            Self::Instant(artifact) => stepping.take(artifact, materialization, step, writer).await,
+            Self::Scd2(artifact) => stepping.take(artifact, materialization, step, writer).await,
+            Self::Scd1(artifact) => stepping.take(artifact, materialization, step, writer).await,
             Self::SnapshotProvide(artifact) => {
-                stepping
-                    .take(artifact, materialization, window, tables, writer)
-                    .await
+                stepping.take(artifact, materialization, step, writer).await
             }
         }
     }
