@@ -133,26 +133,13 @@ impl ChangeLogSql for BigQueryWarehouse {
     fn change_log_namespace(&self) -> &Namespace {
         &self.change_log
     }
-
-    fn change_log(&self, topic: &str) -> TablePath {
-        TablePath::new(
-            self.change_log_namespace().clone(),
-            &topic
-                .chars()
-                .map(|character| match character.is_ascii_alphanumeric() {
-                    true => character,
-                    false => '_',
-                })
-                .collect::<String>(),
-        )
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::source::debezium::Debezium;
     use crate::source::debezium::mysql::MySql;
+    use crate::source::debezium::{Debezium, SinkConnector};
 
     use chrono::DateTime;
     use lithify_core::model::{ColumnType, TableId};
@@ -382,7 +369,7 @@ mod tests {
     #[test]
     fn the_schema_changes_of_a_window_are_read_whole_in_the_order_of_their_processing_time_then_position()
      {
-        let log = Debezium::new("mysql", MySql);
+        let log = Debezium::new(SinkConnector::BigQuery, "mysql_shop_cdc", "mysql", MySql);
         let window = Window::new(Ts::try_from(0).unwrap(), Ts::try_from(10).unwrap());
 
         assert_eq!(
@@ -394,22 +381,6 @@ mod tests {
                 "WHERE `source`.`ts_ms` >= 0 AND `source`.`ts_ms` < 10\n",
                 "ORDER BY `ts_ms`, `source`.`file`, `source`.`pos`",
             )
-        );
-    }
-
-    #[test]
-    fn a_change_log_is_read_from_the_table_its_topic_was_sanitized_into() {
-        assert_eq!(
-            bigquery().change_log_ref("mysql.shop.customers"),
-            "`local-project`.`mysql_shop_cdc`.`mysql_shop_customers`"
-        );
-    }
-
-    #[test]
-    fn a_change_log_is_read_from_a_table_named_only_with_what_bigquery_allows() {
-        assert_eq!(
-            bigquery().change_log_ref("mysql.shop.order-lines"),
-            "`local-project`.`mysql_shop_cdc`.`mysql_shop_order_lines`"
         );
     }
 

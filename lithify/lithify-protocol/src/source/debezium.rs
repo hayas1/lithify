@@ -10,6 +10,7 @@ use serde_json::Value;
 use lithify_core::event::{Hint, MalformedEvent, SchemaChange, TableChange};
 use lithify_core::model::{ColumnModel, ColumnName, ColumnType, TableId, TableModel};
 use lithify_core::position::{Coordinate, Position};
+use lithify_core::sink::{Namespace, TablePath};
 use lithify_core::source::{
     CdcFormat, ChangeLog, ChangeLogs, ColumnPath, RowChangeLog, SchemaChangeLog,
 };
@@ -91,27 +92,57 @@ pub struct DdlColumn {
     pub comment: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SinkConnector {
+    ObjectStore,
+    BigQuery,
+}
+
+impl SinkConnector {
+    fn envelope(self) -> Option<ColumnPath> {
+        match self {
+            Self::ObjectStore => Some(ColumnPath::from("value")),
+            Self::BigQuery => None,
+        }
+    }
+
+    fn table(self, change_log: &Namespace, topic: &str) -> TablePath {
+        match self {
+            Self::ObjectStore => TablePath::new(change_log.clone(), topic),
+            Self::BigQuery => TablePath::new(
+                change_log.clone(),
+                &topic
+                    .chars()
+                    .map(|character| match character.is_ascii_alphanumeric() {
+                        true => character,
+                        false => '_',
+                    })
+                    .collect::<String>(),
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Debezium<D> {
     dialect: D,
-    envelope: Option<ColumnPath>,
+    connector: SinkConnector,
+    change_log: Namespace,
     topic_prefix: String,
     ddl_topic: String,
 }
 
 impl<D: Dialect> Debezium<D> {
-    pub fn new(topic_prefix: &str, dialect: D) -> Self {
-        Self::within(None, topic_prefix, dialect)
-    }
-
-    pub fn under(column: &str, topic_prefix: &str, dialect: D) -> Self {
-        Self::within(Some(column), topic_prefix, dialect)
-    }
-
-    pub fn within(envelope: Option<&str>, topic_prefix: &str, dialect: D) -> Self {
+    pub fn new(
+        connector: SinkConnector,
+        change_log: impl Into<Namespace>,
+        topic_prefix: &str,
+        dialect: D,
+    ) -> Self {
         Self {
             dialect,
-            envelope: envelope.map(ColumnPath::from),
+            connector,
+            change_log: change_log.into(),
             topic_prefix: topic_prefix.to_owned(),
             ddl_topic: topic_prefix.to_owned(),
         }
@@ -125,7 +156,7 @@ impl<D: Dialect> Debezium<D> {
     }
 
     fn path(&self, name: &str) -> ColumnPath {
-        match &self.envelope {
+        match &self.connector.envelope() {
             Some(envelope) => ColumnPath::from(format!("{envelope}.{name}").as_str()),
             None => ColumnPath::from(name),
         }
@@ -222,7 +253,7 @@ impl<D: Dialect> ChangeLog for Debezium<D> {
     type Position = D::Position;
 
     fn envelope(&self) -> Option<ColumnPath> {
-        self.envelope.clone()
+        self.connector.envelope()
     }
 
     fn event_time(&self) -> ColumnPath {
@@ -259,8 +290,8 @@ impl<D: Dialect> ChangeLogs for Debezium<D> {
 impl<D: Dialect> SchemaChangeLog for Debezium<D> {
     type Record = DebeziumDdl<D::Source>;
 
-    fn ddl_topic(&self) -> String {
-        self.ddl_topic.clone()
+    fn schema_change_table(&self) -> TablePath {
+        self.connector.table(&self.change_log, &self.ddl_topic)
     }
 
     fn schema_change(
@@ -294,8 +325,11 @@ impl<D: Dialect> SchemaChangeLog for Debezium<D> {
 }
 
 impl<D: Dialect> RowChangeLog for Debezium<D> {
-    fn dml_topic(&self, table: &TableId) -> String {
-        format!("{}.{}.{}", self.topic_prefix, table.schema(), table.table())
+    fn row_change_table(&self, table: &TableId) -> TablePath {
+        self.connector.table(
+            &self.change_log,
+            &format!("{}.{}.{}", self.topic_prefix, table.schema(), table.table()),
+        )
     }
 
     fn operation(&self) -> ColumnPath {
@@ -351,7 +385,7 @@ pub(crate) mod tests {
     }
 
     fn comment_of(column: Value) -> Option<String> {
-        let statement = Debezium::new("mysql", MySql)
+        let statement = Debezium::new(SinkConnector::BigQuery, "mysql_shop_cdc", "mysql", MySql)
             .schema_change_json(json!({
                 "source": {"file": "binlog.000002", "pos": 448, "gtid": null},
                 "ts_ms": 1789800000000i64,
@@ -399,7 +433,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_table_holds_its_columns_in_the_order_the_source_positioned_them() {
-        let statement = Debezium::new("mysql", MySql)
+        let statement = Debezium::new(SinkConnector::BigQuery, "mysql_shop_cdc", "mysql", MySql)
             .schema_change_json(json!({
                 "source": {"file": "binlog.000002", "pos": 448, "gtid": null},
                 "ts_ms": 1789800000000i64,
@@ -441,27 +475,60 @@ pub(crate) mod tests {
         );
     }
 
+    fn landed(connector: SinkConnector) -> Debezium<MySql> {
+        Debezium::new(connector, "mysql_shop_cdc", "mysql", MySql)
+    }
+
     #[test]
-    fn the_row_changes_of_a_table_land_on_the_topic_named_after_the_prefix_and_the_table() {
+    fn the_row_changes_of_a_table_land_in_the_table_named_after_the_prefix_and_the_table() {
         assert_eq!(
-            Debezium::new("mysql", MySql).dml_topic(&TableId::new("shop", "customers")),
-            "mysql.shop.customers"
+            landed(SinkConnector::ObjectStore).row_change_table(&TableId::new("shop", "customers")),
+            TablePath::new("mysql_shop_cdc", "mysql.shop.customers")
         );
     }
 
     #[test]
-    fn the_schema_changes_land_on_the_topic_named_after_the_prefix_alone() {
-        assert_eq!(Debezium::new("mysql", MySql).ddl_topic(), "mysql");
+    fn the_schema_changes_land_in_the_table_named_after_the_prefix_alone() {
+        assert_eq!(
+            landed(SinkConnector::ObjectStore).schema_change_table(),
+            TablePath::new("mysql_shop_cdc", "mysql")
+        );
     }
 
     #[test]
-    fn the_schema_changes_land_on_a_topic_of_their_own_when_one_is_named() {
-        let log = Debezium::new("mysql", MySql).with_ddl_topic("mysql.schema-changes");
+    fn the_schema_changes_land_in_a_table_of_their_own_when_their_topic_is_named() {
+        let log = landed(SinkConnector::ObjectStore).with_ddl_topic("mysql.schema-changes");
 
-        assert_eq!(log.ddl_topic(), "mysql.schema-changes");
         assert_eq!(
-            log.dml_topic(&TableId::new("shop", "customers")),
-            "mysql.shop.customers"
+            log.schema_change_table(),
+            TablePath::new("mysql_shop_cdc", "mysql.schema-changes")
         );
+        assert_eq!(
+            log.row_change_table(&TableId::new("shop", "customers")),
+            TablePath::new("mysql_shop_cdc", "mysql.shop.customers")
+        );
+    }
+
+    #[test]
+    fn a_topic_lands_in_bigquery_in_a_table_named_only_with_what_bigquery_allows() {
+        let log = landed(SinkConnector::BigQuery).with_ddl_topic("mysql.schema-changes");
+
+        assert_eq!(
+            log.schema_change_table(),
+            TablePath::new("mysql_shop_cdc", "mysql_schema_changes")
+        );
+        assert_eq!(
+            log.row_change_table(&TableId::new("shop", "order-lines")),
+            TablePath::new("mysql_shop_cdc", "mysql_shop_order_lines")
+        );
+    }
+
+    #[test]
+    fn a_record_lands_in_object_storage_under_its_value_and_in_bigquery_as_it_is() {
+        assert_eq!(
+            landed(SinkConnector::ObjectStore).envelope(),
+            Some(ColumnPath::from("value"))
+        );
+        assert_eq!(landed(SinkConnector::BigQuery).envelope(), None);
     }
 }

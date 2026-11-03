@@ -11,7 +11,7 @@ use lithify_core::sink::{TablePath, Warehouse};
 use lithify_core::ts::Ts;
 use lithify_core::window::Window;
 use lithify_pipeline::build_log::{BuildLog, Run, Series, Status, TableBuilt};
-use lithify_protocol::{BigQueryWarehouse, Debezium, DuckDbWarehouse, MySql};
+use lithify_protocol::{BigQueryWarehouse, Debezium, DuckDbWarehouse, MySql, SinkConnector};
 
 fn column(name: &str, type_name: &str, column_type: ColumnType) -> ColumnModel {
     ColumnModel::new(name, type_name, column_type, false, None)
@@ -55,8 +55,13 @@ fn previous(window: &Window, shard: &str) -> BuildLog {
     )
 }
 
-fn statements<W: Warehouse>(warehouse: W) -> String {
-    let log = Debezium::new("mysql", MySql);
+fn statements<W: Warehouse>(warehouse: W, connector: SinkConnector) -> String {
+    let log = Debezium::new(
+        connector,
+        warehouse.change_log_namespace().clone(),
+        "mysql",
+        MySql,
+    );
     let window = Window::new(
         Ts::try_from(1789862400000).unwrap(),
         Ts::try_from(1789948800000).unwrap(),
@@ -94,8 +99,17 @@ fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("bigquery") => println!(
             "{}",
-            statements(BigQueryWarehouse::new("local-project", "mysql_shop_cdc"))
+            statements(
+                BigQueryWarehouse::new("local-project", "mysql_shop_cdc"),
+                SinkConnector::BigQuery
+            )
         ),
-        _ => println!("{}", statements(DuckDbWarehouse::new("mysql_shop_cdc"))),
+        _ => println!(
+            "{}",
+            statements(
+                DuckDbWarehouse::new("mysql_shop_cdc"),
+                SinkConnector::ObjectStore
+            )
+        ),
     }
 }

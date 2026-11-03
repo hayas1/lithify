@@ -17,7 +17,7 @@ use crate::warehouse::WarehouseControl;
 use lithify_core::artifact::UnbuildableArtifact;
 use lithify_core::listener::OutOfOrder;
 use lithify_core::model::TableId;
-use lithify_core::sink::WarehouseClient;
+use lithify_core::sink::{ChangeLogSql, WarehouseClient};
 use lithify_core::ts::{Event, Ts};
 use lithify_core::window::Window;
 
@@ -133,17 +133,20 @@ where
             .await?;
 
         self.source
-            .with_change_logs(Replaying::<_, _, _, _, E>::new(
-                self.client,
-                artifact,
-                materialization,
-                window,
-                &previous,
-                self.finishes(materialization, step),
-                writer,
-            ))
+            .capture()
+            .with_change_logs(
+                self.client.warehouse().change_log_namespace(),
+                Replaying::<_, _, _, _, E>::new(
+                    self.client,
+                    artifact,
+                    materialization,
+                    window,
+                    &previous,
+                    self.finishes(materialization, step),
+                    writer,
+                ),
+            )
             .await
-            .ok_or_else(|| Unsteppable::Unprefixed(self.source.name().to_owned()))?
     }
 
     fn finishes<'f>(

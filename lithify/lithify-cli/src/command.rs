@@ -897,8 +897,7 @@ mod catch_up {
     use crate::command::tests::settle;
     use crate::command::{RunCommand, Target};
     use crate::step::tests::{
-        ARTIFACTS, BUILT_CHANGE_LOGS, CAPTURE, INFRA, PEOPLE, built_before, logged, opened,
-        pipeline, rows,
+        BUILT_CHANGE_LOGS, CAPTURE, PEOPLE, built_before, logged, pipeline, rows,
     };
     use crate::unrunnable::Unrunnable;
 
@@ -1276,33 +1275,6 @@ mod catch_up {
         assert!(matches!(
             changed,
             Err(Unrunnable::Unsteppable(Unsteppable::CaptureChanged(_)))
-        ));
-    }
-
-    #[tokio::test]
-    async fn a_pipeline_whose_source_names_no_topic_prefix_is_not_caught_up() {
-        let pipeline = opened(
-            "unprefixed",
-            ARTIFACTS,
-            &INFRA.replace("topic_prefix = \"mysql\"\n", ""),
-            "[default]\nartifacts = [\"snapshot\"]\n",
-        );
-        let client = logged(PEOPLE, &[]).await;
-
-        let unprefixed = settle(
-            &pipeline,
-            &client,
-            &RunCommand::CatchUp {
-                target: Target::default(),
-                to: None,
-            },
-            "2026-09-22T05:00:00Z",
-        )
-        .await;
-
-        assert!(matches!(
-            unprefixed,
-            Err(Unrunnable::Unsteppable(Unsteppable::Unprefixed(_)))
         ));
     }
 }

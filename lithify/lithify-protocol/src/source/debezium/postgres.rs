@@ -94,7 +94,7 @@ impl Dialect for Postgres {
 
 #[cfg(test)]
 mod tests {
-    use super::super::Debezium;
+    use super::super::{Debezium, SinkConnector};
     use super::*;
     use lithify_core::event::{Hint, MalformedEvent};
     use lithify_core::model::{ColumnType, TableId};
@@ -111,7 +111,13 @@ mod tests {
 
     #[test]
     fn a_statement_whose_source_carries_no_log_sequence_number_is_rejected() {
-        let statement = Debezium::new("postgres", Postgres).schema_change_json(json!({
+        let statement = Debezium::new(
+            SinkConnector::BigQuery,
+            "postgres_shop_cdc",
+            "postgres",
+            Postgres,
+        )
+        .schema_change_json(json!({
             "source": {"file": "binlog.000002", "pos": 448},
             "ts_ms": 1789800000000i64,
             "ddl": "",
@@ -184,35 +190,45 @@ mod tests {
 
     #[test]
     fn a_schema_change_is_positioned_by_its_log_sequence_number() {
-        let change = Debezium::new("postgres", Postgres)
-            .schema_change_json(json!({
-                "source": {"lsn": 26738384i64, "txId": 770},
-                "ts_ms": 1789800000000i64,
-                "ddl": "",
-                "tableChanges": []
-            }))
-            .unwrap();
+        let change = Debezium::new(
+            SinkConnector::BigQuery,
+            "postgres_shop_cdc",
+            "postgres",
+            Postgres,
+        )
+        .schema_change_json(json!({
+            "source": {"lsn": 26738384i64, "txId": 770},
+            "ts_ms": 1789800000000i64,
+            "ddl": "",
+            "tableChanges": []
+        }))
+        .unwrap();
 
         assert_eq!(change.position(), &position(26738384));
     }
 
     #[test]
     fn a_rename_is_read_from_the_ddl_in_the_syntax_of_postgres() {
-        let change = Debezium::new("postgres", Postgres)
-            .schema_change_json(json!({
-                "source": {"lsn": 26738384i64},
-                "ts_ms": 1789800000000i64,
-                "ddl": "ALTER TABLE shop.customers RENAME COLUMN \"name\" TO full_name",
-                "tableChanges": [{
-                    "type": "ALTER",
-                    "id": "\"shop\".\"customers\"",
-                    "table": {"primaryKeyColumnNames": ["id"], "columns": [
-                        {"name": "id", "typeName": "int8", "position": 1, "optional": false,
-                         "length": null, "scale": null, "defaultValueExpression": null}
-                    ]}
-                }]
-            }))
-            .unwrap();
+        let change = Debezium::new(
+            SinkConnector::BigQuery,
+            "postgres_shop_cdc",
+            "postgres",
+            Postgres,
+        )
+        .schema_change_json(json!({
+            "source": {"lsn": 26738384i64},
+            "ts_ms": 1789800000000i64,
+            "ddl": "ALTER TABLE shop.customers RENAME COLUMN \"name\" TO full_name",
+            "tableChanges": [{
+                "type": "ALTER",
+                "id": "\"shop\".\"customers\"",
+                "table": {"primaryKeyColumnNames": ["id"], "columns": [
+                    {"name": "id", "typeName": "int8", "position": 1, "optional": false,
+                     "length": null, "scale": null, "defaultValueExpression": null}
+                ]}
+            }]
+        }))
+        .unwrap();
 
         assert_eq!(
             change.hints().next(),
@@ -225,15 +241,20 @@ mod tests {
     }
 
     fn captured(source: Value) -> bool {
-        Debezium::new("postgres", Postgres)
-            .schema_change_json(json!({
-                "source": source,
-                "ts_ms": 1789800000000i64,
-                "ddl": "",
-                "tableChanges": []
-            }))
-            .unwrap()
-            .is_captured()
+        Debezium::new(
+            SinkConnector::BigQuery,
+            "postgres_shop_cdc",
+            "postgres",
+            Postgres,
+        )
+        .schema_change_json(json!({
+            "source": source,
+            "ts_ms": 1789800000000i64,
+            "ddl": "",
+            "tableChanges": []
+        }))
+        .unwrap()
+        .is_captured()
     }
 
     #[test]

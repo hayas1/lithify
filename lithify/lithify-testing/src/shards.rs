@@ -10,8 +10,8 @@ use lithify_core::window::Window;
 use lithify_pipeline::artifact::ArtifactControl;
 use lithify_pipeline::build_log::{BuildLog, Run, Status};
 use lithify_pipeline::runner::Runner;
+use lithify_protocol::DuckDbWarehouse;
 use lithify_protocol::sink::duckdb::client::DuckDbClient;
-use lithify_protocol::{Debezium, DuckDbWarehouse, MySql};
 
 use crate::landing::Landing;
 use crate::replica::{CellValue, Replica, Row};
@@ -52,7 +52,7 @@ impl Shards {
         window: &Window,
         previous: &[BuildLog],
     ) -> Vec<BuildLog> {
-        let log = Debezium::under("value", Landing::TOPIC_PREFIX, MySql);
+        let log = Landing::log(self.client.warehouse());
         let run = Run::new(
             Ulid::nil(),
             Ts::from(DateTime::UNIX_EPOCH),

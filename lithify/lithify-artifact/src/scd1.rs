@@ -638,7 +638,10 @@ mod tests {
     #[test]
     fn a_snapshot_reads_the_change_log_where_the_warehouse_reads_change_logs() {
         let statement = statement(snapshots_in(
-            Engine::default().reading_change_log("mysql_shop_customers", "changes_of_customers"),
+            Engine::default().reading_change_log(
+                TablePath::new("mysql_shop_cdc", "mysql_shop_customers"),
+                "changes_of_customers",
+            ),
             customers(),
             vec![],
             || None,

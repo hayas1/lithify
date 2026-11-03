@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[cfg(any(feature = "bigquery", feature = "duckdb"))]
-use lithify_core::sink::WarehouseClient;
+use lithify_core::sink::{Namespace, WarehouseClient};
 #[cfg(any(feature = "bigquery", feature = "duckdb"))]
 use lithify_core::source::SchemaChangeStream;
 #[cfg(any(feature = "bigquery", feature = "duckdb"))]
@@ -12,29 +12,26 @@ use crate::sink::bigquery::client::{BigQueryClient, BigQueryExecution};
 #[cfg(feature = "duckdb")]
 use crate::sink::duckdb::client::{DuckDbClient, DuckDbExecution};
 #[cfg(any(feature = "bigquery", feature = "duckdb"))]
-use crate::source::debezium::Debezium;
-#[cfg(any(feature = "bigquery", feature = "duckdb"))]
 use crate::source::debezium::mysql::MySql;
 #[cfg(any(feature = "bigquery", feature = "duckdb"))]
 use crate::source::debezium::postgres::Postgres;
+#[cfg(any(feature = "bigquery", feature = "duckdb"))]
+use crate::source::debezium::{Debezium, SinkConnector};
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     dialect: Dialect,
+    topic_prefix: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ddl_topic: Option<String>,
 }
 
 impl Config {
-    #[cfg(feature = "duckdb")]
-    const DUCKDB_ENVELOPE: Option<&str> = Some("value");
-    #[cfg(feature = "bigquery")]
-    const BIGQUERY_ENVELOPE: Option<&str> = None;
-
-    pub fn of(dialect: Dialect) -> Self {
+    pub fn of(dialect: Dialect, topic_prefix: &str) -> Self {
         Self {
             dialect,
+            topic_prefix: topic_prefix.to_owned(),
             ddl_topic: None,
         }
     }
@@ -46,11 +43,11 @@ impl Config {
     #[cfg(any(feature = "bigquery", feature = "duckdb"))]
     fn debezium<D: super::Dialect>(
         &self,
-        envelope: Option<&str>,
-        topic_prefix: &str,
+        connector: SinkConnector,
+        change_log: &Namespace,
         dialect: D,
     ) -> Debezium<D> {
-        let log = Debezium::within(envelope, topic_prefix, dialect);
+        let log = Debezium::new(connector, change_log.clone(), &self.topic_prefix, dialect);
 
         match &self.ddl_topic {
             Some(ddl_topic) => log.with_ddl_topic(ddl_topic),
@@ -70,11 +67,11 @@ pub enum Dialect {
 impl<X: DuckDbExecution> Capture<DuckDbClient<X>> for Config {
     async fn with_change_logs<F: ChangeLogsFn<DuckDbClient<X>>>(
         &self,
-        topic_prefix: &str,
+        change_log: &Namespace,
         f: F,
     ) -> F::Output {
         self.dialect
-            .with_change_logs(self, Self::DUCKDB_ENVELOPE, topic_prefix, f)
+            .with_change_logs(self, SinkConnector::ObjectStore, change_log, f)
             .await
     }
 }
@@ -83,11 +80,11 @@ impl<X: DuckDbExecution> Capture<DuckDbClient<X>> for Config {
 impl<X: BigQueryExecution> Capture<BigQueryClient<X>> for Config {
     async fn with_change_logs<F: ChangeLogsFn<BigQueryClient<X>>>(
         &self,
-        topic_prefix: &str,
+        change_log: &Namespace,
         f: F,
     ) -> F::Output {
         self.dialect
-            .with_change_logs(self, Self::BIGQUERY_ENVELOPE, topic_prefix, f)
+            .with_change_logs(self, SinkConnector::BigQuery, change_log, f)
             .await
     }
 }
@@ -97,8 +94,8 @@ impl Dialect {
     async fn with_change_logs<K, F>(
         self,
         config: &Config,
-        envelope: Option<&str>,
-        topic_prefix: &str,
+        connector: SinkConnector,
+        change_log: &Namespace,
         f: F,
     ) -> F::Output
     where
@@ -108,9 +105,9 @@ impl Dialect {
         F: ChangeLogsFn<K>,
     {
         match self {
-            Self::MySql => f.call(config.debezium(envelope, topic_prefix, MySql)).await,
+            Self::MySql => f.call(config.debezium(connector, change_log, MySql)).await,
             Self::Postgres => {
-                f.call(config.debezium(envelope, topic_prefix, Postgres))
+                f.call(config.debezium(connector, change_log, Postgres))
                     .await
             }
         }
@@ -121,98 +118,109 @@ impl Dialect {
 mod tests {
     use super::*;
     #[cfg(any(feature = "bigquery", feature = "duckdb"))]
+    use lithify_core::sink::TablePath;
+    #[cfg(any(feature = "bigquery", feature = "duckdb"))]
     use lithify_core::source::{ChangeLog, ChangeLogs, ColumnPath, SchemaChangeLog};
 
     #[cfg(any(feature = "bigquery", feature = "duckdb"))]
-    type Probed = (&'static str, String, Option<ColumnPath>, Option<ColumnPath>);
+    type Probed = (
+        &'static str,
+        TablePath,
+        Option<ColumnPath>,
+        Option<ColumnPath>,
+    );
 
     #[cfg(any(feature = "bigquery", feature = "duckdb"))]
-    fn probe<C: ChangeLogs>(logs: C) -> Probed {
-        (
-            std::any::type_name::<C>(),
-            logs.schema_changes().ddl_topic(),
-            logs.schema_changes().envelope(),
-            logs.row_changes().envelope(),
-        )
+    struct Probe;
+
+    #[cfg(any(feature = "bigquery", feature = "duckdb"))]
+    impl<K: WarehouseClient> ChangeLogsFn<K> for Probe {
+        type Output = Probed;
+
+        async fn call<C>(self, logs: C) -> Self::Output
+        where
+            C: ChangeLogs,
+            K: SchemaChangeStream<C::Schema, Error = <K as WarehouseClient>::Error>,
+        {
+            (
+                std::any::type_name::<C>(),
+                logs.schema_changes().schema_change_table(),
+                logs.schema_changes().envelope(),
+                logs.row_changes().envelope(),
+            )
+        }
+    }
+
+    #[cfg(any(feature = "bigquery", feature = "duckdb"))]
+    fn cdc() -> Namespace {
+        Namespace::from("shop_cdc")
     }
 
     #[cfg(feature = "duckdb")]
     #[tokio::test]
     async fn a_source_names_the_topic_its_schema_changes_land_on_apart_from_its_prefix() {
-        struct DdlTopic;
-
-        impl<K: WarehouseClient> ChangeLogsFn<K> for DdlTopic {
-            type Output = String;
-
-            async fn call<C>(self, logs: C) -> Self::Output
-            where
-                C: ChangeLogs,
-                K: SchemaChangeStream<C::Schema, Error = <K as WarehouseClient>::Error>,
-            {
-                logs.schema_changes().ddl_topic()
-            }
-        }
-
         let config: Config = serde_json::from_value(serde_json::json!({
             "dialect": "mysql",
+            "topic_prefix": "mysql",
             "ddl_topic": "mysql.schema-changes"
         }))
         .unwrap();
 
         assert_eq!(
-            Capture::<DuckDbClient>::with_change_logs(&config, "mysql", DdlTopic).await,
-            "mysql.schema-changes"
+            Capture::<DuckDbClient>::with_change_logs(&config, &cdc(), Probe)
+                .await
+                .1,
+            TablePath::new(cdc(), "mysql.schema-changes")
         );
     }
 
     #[test]
-    fn a_source_says_which_dialect_debezium_reads_it_as() {
-        let config: Config =
-            serde_json::from_value(serde_json::json!({"dialect": "postgres"})).unwrap();
+    fn a_source_says_which_dialect_debezium_reads_it_as_under_the_topic_prefix_of_its_connector() {
+        let config: Config = serde_json::from_value(
+            serde_json::json!({"dialect": "postgres", "topic_prefix": "postgres"}),
+        )
+        .unwrap();
 
+        assert_eq!(config, Config::of(Dialect::Postgres, "postgres"));
         assert_eq!(config.dialect(), Dialect::Postgres);
+    }
+
+    #[test]
+    fn a_source_naming_no_topic_prefix_of_its_connector_is_rejected() {
+        let unprefixed = serde_json::from_value::<Config>(serde_json::json!({"dialect": "mysql"}));
+
+        assert!(unprefixed.is_err());
     }
 
     #[cfg(feature = "duckdb")]
     #[tokio::test]
-    async fn a_duckdb_fn_is_called_with_the_logs_of_the_dialect_on_the_prefix_under_the_value_of_each_record()
-     {
-        struct Probe;
-
-        impl<K: WarehouseClient> ChangeLogsFn<K> for Probe {
-            type Output = Probed;
-
-            async fn call<C>(self, logs: C) -> Self::Output
-            where
-                C: ChangeLogs,
-                K: SchemaChangeStream<C::Schema, Error = <K as WarehouseClient>::Error>,
-            {
-                probe(logs)
-            }
-        }
-
+    async fn a_duckdb_fn_is_called_with_the_logs_of_the_dialect_landed_in_object_storage() {
         let value = Some(ColumnPath::from("value"));
 
         assert_eq!(
-            Capture::<DuckDbClient>::with_change_logs(&Config::of(Dialect::MySql), "mysql", Probe)
-                .await,
+            Capture::<DuckDbClient>::with_change_logs(
+                &Config::of(Dialect::MySql, "mysql"),
+                &cdc(),
+                Probe
+            )
+            .await,
             (
                 std::any::type_name::<Debezium<MySql>>(),
-                "mysql".to_owned(),
+                TablePath::new(cdc(), "mysql"),
                 value.clone(),
                 value.clone()
             )
         );
         assert_eq!(
             Capture::<DuckDbClient>::with_change_logs(
-                &Config::of(Dialect::Postgres),
-                "postgres",
+                &Config::of(Dialect::Postgres, "postgres"),
+                &cdc(),
                 Probe
             )
             .await,
             (
                 std::any::type_name::<Debezium<Postgres>>(),
-                "postgres".to_owned(),
+                TablePath::new(cdc(), "postgres"),
                 value.clone(),
                 value
             )
@@ -221,46 +229,31 @@ mod tests {
 
     #[cfg(feature = "bigquery")]
     #[tokio::test]
-    async fn a_bigquery_fn_is_called_with_the_logs_of_the_dialect_on_the_prefix_at_the_top_of_each_row()
-     {
-        struct Probe;
-
-        impl<K: WarehouseClient> ChangeLogsFn<K> for Probe {
-            type Output = Probed;
-
-            async fn call<C>(self, logs: C) -> Self::Output
-            where
-                C: ChangeLogs,
-                K: SchemaChangeStream<C::Schema, Error = <K as WarehouseClient>::Error>,
-            {
-                probe(logs)
-            }
-        }
-
+    async fn a_bigquery_fn_is_called_with_the_logs_of_the_dialect_landed_in_bigquery() {
         assert_eq!(
             Capture::<BigQueryClient>::with_change_logs(
-                &Config::of(Dialect::MySql),
-                "mysql",
+                &Config::of(Dialect::MySql, "mysql"),
+                &cdc(),
                 Probe
             )
             .await,
             (
                 std::any::type_name::<Debezium<MySql>>(),
-                "mysql".to_owned(),
+                TablePath::new(cdc(), "mysql"),
                 None,
                 None
             )
         );
         assert_eq!(
             Capture::<BigQueryClient>::with_change_logs(
-                &Config::of(Dialect::Postgres),
-                "postgres",
+                &Config::of(Dialect::Postgres, "postgres"),
+                &cdc(),
                 Probe
             )
             .await,
             (
                 std::any::type_name::<Debezium<Postgres>>(),
-                "postgres".to_owned(),
+                TablePath::new(cdc(), "postgres"),
                 None,
                 None
             )
@@ -269,7 +262,9 @@ mod tests {
 
     #[test]
     fn a_dialect_debezium_does_not_read_is_rejected() {
-        let unknown = serde_json::from_value::<Config>(serde_json::json!({"dialect": "oracle"}));
+        let unknown = serde_json::from_value::<Config>(
+            serde_json::json!({"dialect": "oracle", "topic_prefix": "oracle"}),
+        );
 
         assert!(unknown.is_err());
     }

@@ -1,4 +1,4 @@
-use lithify_core::sink::WarehouseClient;
+use lithify_core::sink::{Namespace, WarehouseClient};
 use lithify_core::source::{ChangeLogs, SchemaChangeStream};
 
 // The client stays a parameter of the traits rather than of their methods: a capture can hand only
@@ -14,5 +14,6 @@ pub trait ChangeLogsFn<K: WarehouseClient> {
 }
 
 pub trait Capture<K: WarehouseClient> {
-    async fn with_change_logs<F: ChangeLogsFn<K>>(&self, topic_prefix: &str, f: F) -> F::Output;
+    async fn with_change_logs<F: ChangeLogsFn<K>>(&self, change_log: &Namespace, f: F)
+    -> F::Output;
 }

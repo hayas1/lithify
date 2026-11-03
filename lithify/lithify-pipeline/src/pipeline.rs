@@ -354,11 +354,14 @@ mod tests {
     fn a_pipeline_says_which_dialect_each_of_its_servers_is_captured_as() {
         assert_eq!(
             pipeline("mysql").sources().next().unwrap().capture(),
-            &Capture::Debezium(debezium::Config::of(debezium::Dialect::MySql))
+            &Capture::Debezium(debezium::Config::of(debezium::Dialect::MySql, "mysql"))
         );
         assert_eq!(
             pipeline("postgres").sources().next().unwrap().capture(),
-            &Capture::Debezium(debezium::Config::of(debezium::Dialect::Postgres))
+            &Capture::Debezium(debezium::Config::of(
+                debezium::Dialect::Postgres,
+                "postgres"
+            ))
         );
     }
 

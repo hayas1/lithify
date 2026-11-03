@@ -22,9 +22,13 @@ where
     K: WarehouseClient,
     <DebeziumFormat as CdcFormat>::Config: Capture<K>,
 {
-    async fn with_change_logs<F: ChangeLogsFn<K>>(&self, topic_prefix: &str, f: F) -> F::Output {
+    async fn with_change_logs<F: ChangeLogsFn<K>>(
+        &self,
+        change_log: &Namespace,
+        f: F,
+    ) -> F::Output {
         match self {
-            Self::Debezium(debezium) => debezium.with_change_logs(topic_prefix, f).await,
+            Self::Debezium(debezium) => debezium.with_change_logs(change_log, f).await,
         }
     }
 }
@@ -139,7 +143,8 @@ mod tests {
 
     #[test]
     fn a_source_is_captured_by_a_format_this_program_reads() {
-        let capture: CaptureConfig = toml::from_str("[debezium]\ndialect = \"mysql\"").unwrap();
+        let capture: CaptureConfig =
+            toml::from_str("[debezium]\ndialect = \"mysql\"\ntopic_prefix = \"mysql\"").unwrap();
 
         let CaptureConfig::Debezium(debezium) = capture;
         assert_eq!(debezium.dialect(), config::Dialect::MySql);
@@ -161,10 +166,17 @@ mod tests {
             }
         }
 
-        let capture: CaptureConfig = toml::from_str("[debezium]\ndialect = \"postgres\"").unwrap();
+        let capture: CaptureConfig =
+            toml::from_str("[debezium]\ndialect = \"postgres\"\ntopic_prefix = \"postgres\"")
+                .unwrap();
 
         assert_eq!(
-            Capture::<DuckDbClient>::with_change_logs(&capture, "postgres", Probe).await,
+            Capture::<DuckDbClient>::with_change_logs(
+                &capture,
+                &Namespace::from("postgres_shop_cdc"),
+                Probe
+            )
+            .await,
             std::any::type_name::<Debezium<Postgres>>()
         );
     }

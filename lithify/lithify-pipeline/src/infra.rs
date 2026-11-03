@@ -7,10 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use chrono_tz::Tz;
 
-use crate::capture::{Capture, ChangeLogsFn};
 use crate::warehouse::SinkWarehouse;
 use lithify_core::artifact::ArtifactName;
-use lithify_core::sink::WarehouseClient;
 use lithify_core::ts::{Event, Ts};
 
 use crate::artifact::{Declaration, Declarations};
@@ -136,7 +134,6 @@ struct WiredSource<C> {
     name: Option<String>,
     since: Option<DateTime<Utc>>,
     capture: Option<C>,
-    topic_prefix: Option<String>,
 }
 
 impl<C> Default for WiredSource<C> {
@@ -145,7 +142,6 @@ impl<C> Default for WiredSource<C> {
             name: None,
             since: None,
             capture: None,
-            topic_prefix: None,
         }
     }
 }
@@ -161,7 +157,6 @@ impl<C: Clone> WiredSource<C> {
                 .capture
                 .ok_or_else(|| Miswiring::SourceWithoutCapture(name.clone()))?,
             name,
-            topic_prefix: wired.topic_prefix,
         })
     }
 }
@@ -359,7 +354,6 @@ pub struct Source<C> {
     name: String,
     since: DateTime<Utc>,
     capture: C,
-    topic_prefix: Option<String>,
 }
 
 impl<C> Source<C> {
@@ -373,19 +367,6 @@ impl<C> Source<C> {
 
     pub fn since(&self) -> Ts<Event> {
         Ts::from(self.since)
-    }
-
-    pub fn topic_prefix(&self) -> Option<&str> {
-        self.topic_prefix.as_deref()
-    }
-
-    pub async fn with_change_logs<K, F>(&self, f: F) -> Option<F::Output>
-    where
-        K: WarehouseClient,
-        C: Capture<K>,
-        F: ChangeLogsFn<K>,
-    {
-        Some(self.capture.with_change_logs(self.topic_prefix()?, f).await)
     }
 }
 
@@ -733,12 +714,6 @@ mod tests {
         assert_eq!(sinks()[0].name(), "rustfs");
         assert_eq!(sinks()[0].change_log(), &prefix("mysql_shop_cdc"));
         assert_eq!(sinks()[1].change_log(), &dataset("mysql_shop_archive"));
-    }
-
-    #[test]
-    fn a_source_says_the_topic_prefix_of_its_connector_unless_it_captures_none() {
-        assert_eq!(sources()[0].topic_prefix(), Some("mysql"));
-        assert_eq!(sources()[1].topic_prefix(), None);
     }
 
     #[test]

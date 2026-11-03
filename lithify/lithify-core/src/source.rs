@@ -4,6 +4,7 @@ use crate::event::{MalformedEvent, SchemaChange};
 use crate::listener::{CatalogModel, OutOfOrder, SchemaChangeListener};
 use crate::model::{TableId, TableModel};
 use crate::position::{Coordinate, Position};
+use crate::sink::TablePath;
 use crate::ts::{Event, Ts};
 use crate::window::Window;
 
@@ -55,7 +56,7 @@ pub trait ChangeLog {
 pub trait SchemaChangeLog: ChangeLog {
     type Record;
 
-    fn ddl_topic(&self) -> String;
+    fn schema_change_table(&self) -> TablePath;
 
     fn schema_change(
         &self,
@@ -64,7 +65,7 @@ pub trait SchemaChangeLog: ChangeLog {
 }
 
 pub trait RowChangeLog: ChangeLog {
-    fn dml_topic(&self, table: &TableId) -> String;
+    fn row_change_table(&self, table: &TableId) -> TablePath;
 
     fn operation(&self) -> ColumnPath;
 

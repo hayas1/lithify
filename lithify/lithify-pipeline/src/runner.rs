@@ -33,7 +33,6 @@ pub enum Unsteppable {
         date: NaiveDate,
         built_until: Ts<Event>,
     },
-    Unprefixed(String),
 }
 
 impl Display for Unsteppable {
@@ -48,10 +47,6 @@ impl Display for Unsteppable {
             Self::Overtaken { date, built_until } => write!(
                 formatter,
                 "the build log has built past {date}, up to {built_until}"
-            ),
-            Self::Unprefixed(source) => write!(
-                formatter,
-                "{source} names no topic prefix to read its change logs by"
             ),
         }
     }

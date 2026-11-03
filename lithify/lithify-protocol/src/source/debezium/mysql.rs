@@ -118,8 +118,8 @@ impl Dialect for MySql {
 
 #[cfg(test)]
 mod tests {
-    use super::super::Debezium;
     use super::super::tests::described;
+    use super::super::{Debezium, SinkConnector};
     use super::*;
     use lithify_core::event::{Hint, MalformedEvent, TableChange};
     use serde_json::{Value, json};
@@ -150,12 +150,13 @@ mod tests {
 
     #[test]
     fn a_statement_whose_source_carries_no_binlog_offset_is_rejected() {
-        let statement = Debezium::new("mysql", MySql).schema_change_json(json!({
-            "source": {"lsn": 26738384i64},
-            "ts_ms": 1789800000000i64,
-            "ddl": "",
-            "tableChanges": []
-        }));
+        let statement = Debezium::new(SinkConnector::BigQuery, "mysql_shop_cdc", "mysql", MySql)
+            .schema_change_json(json!({
+                "source": {"lsn": 26738384i64},
+                "ts_ms": 1789800000000i64,
+                "ddl": "",
+                "tableChanges": []
+            }));
 
         assert!(matches!(
             statement.unwrap_err(),
@@ -225,7 +226,7 @@ mod tests {
 
     #[test]
     fn a_column_of_a_schema_change_carries_its_type() {
-        let change = Debezium::new("mysql", MySql)
+        let change = Debezium::new(SinkConnector::BigQuery, "mysql_shop_cdc", "mysql", MySql)
             .schema_change_json(json!({
                 "source": {"file": "binlog.000002", "pos": 448},
                 "ts_ms": 1789800000000i64,
@@ -255,7 +256,7 @@ mod tests {
 
     #[test]
     fn a_schema_change_is_positioned_by_its_binlog_offset() {
-        let change = Debezium::new("mysql", MySql)
+        let change = Debezium::new(SinkConnector::BigQuery, "mysql_shop_cdc", "mysql", MySql)
             .schema_change_json(json!({
                 "source": {"file": "binlog.000002", "pos": 448},
                 "ts_ms": 1789800000000i64,
@@ -281,7 +282,7 @@ mod tests {
                 })
             })
             .collect();
-        let change = Debezium::new("mysql", MySql)
+        let change = Debezium::new(SinkConnector::BigQuery, "mysql_shop_cdc", "mysql", MySql)
             .schema_change_json(json!({
                 "source": {"file": "binlog.000002", "pos": 448},
                 "ts_ms": 1789800000000i64,
@@ -438,7 +439,7 @@ mod tests {
     }
 
     fn captured(source: Value) -> bool {
-        Debezium::new("mysql", MySql)
+        Debezium::new(SinkConnector::BigQuery, "mysql_shop_cdc", "mysql", MySql)
             .schema_change_json(json!({
                 "source": source,
                 "ts_ms": 1789800000000i64,

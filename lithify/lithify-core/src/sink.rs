@@ -200,14 +200,6 @@ pub trait WarehouseSql {
 pub trait ChangeLogSql: WarehouseSql {
     fn change_log_namespace(&self) -> &Namespace;
 
-    fn change_log(&self, topic: &str) -> TablePath {
-        TablePath::new(self.change_log_namespace().clone(), topic)
-    }
-
-    fn change_log_ref(&self, topic: &str) -> SqlString {
-        self.table_ref(&self.change_log(topic))
-    }
-
     fn select_schema_changes(&self, log: &impl SchemaChangeLog, window: &Window) -> SqlString {
         let envelope = log
             .envelope()
@@ -223,7 +215,7 @@ pub trait ChangeLogSql: WarehouseSql {
 
         SqlString::from(format!(
             "SELECT {envelope}\nFROM {}\nWHERE {event_time} >= {} AND {event_time} < {}\nORDER BY {ordering}",
-            self.change_log_ref(&log.ddl_topic()),
+            self.table_ref(&log.schema_change_table()),
             window.from().milliseconds_since_epoch(),
             window.to().milliseconds_since_epoch(),
         ))

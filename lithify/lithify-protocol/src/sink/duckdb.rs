@@ -221,8 +221,8 @@ mod tests {
         );
     }
     use crate::sink::duckdb::config::tests::s3;
-    use crate::source::debezium::Debezium;
     use crate::source::debezium::mysql::MySql;
+    use crate::source::debezium::{Debezium, SinkConnector};
     use lithify_core::model::ColumnModel;
     use lithify_core::position::Coordinate;
     use lithify_core::ts::Ts;
@@ -366,7 +366,7 @@ mod tests {
     #[test]
     fn the_schema_changes_of_a_window_are_read_from_the_envelope_in_the_order_of_their_processing_time_then_position()
      {
-        let log = Debezium::under("value", "mysql", MySql);
+        let log = Debezium::new(SinkConnector::ObjectStore, "mysql_shop_cdc", "mysql", MySql);
         let window = Window::new(Ts::try_from(0).unwrap(), Ts::try_from(10).unwrap());
 
         assert_eq!(
@@ -383,12 +383,13 @@ mod tests {
     #[test]
     fn a_change_log_lives_in_the_database_unless_it_was_sunk_into_object_storage() {
         assert_eq!(
-            DuckDbWarehouse::new("mysql_shop_cdc").change_log_ref("mysql"),
+            DuckDbWarehouse::new("mysql_shop_cdc")
+                .table_ref(&TablePath::new("mysql_shop_cdc", "mysql")),
             "\"mysql_shop_cdc\".\"mysql\""
         );
         assert_eq!(
             DuckDbWarehouse::over("mysql_shop_cdc", s3("http://rustfs:9000"))
-                .change_log_ref("mysql"),
+                .table_ref(&TablePath::new("mysql_shop_cdc", "mysql")),
             "read_parquet('s3://lithify/mysql_shop_cdc/mysql/*.parquet', union_by_name = true)"
         );
     }

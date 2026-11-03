@@ -11,7 +11,7 @@ use lithify_core::sql::SqlString;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Engine {
     change_log: Namespace,
-    change_logs: BTreeMap<String, SqlString>,
+    change_logs: BTreeMap<TablePath, SqlString>,
 }
 
 impl Default for Engine {
@@ -24,9 +24,8 @@ impl Default for Engine {
 }
 
 impl Engine {
-    pub fn reading_change_log(mut self, topic: &str, from: &str) -> Self {
-        self.change_logs
-            .insert(topic.to_owned(), SqlString::from(from));
+    pub fn reading_change_log(mut self, table: TablePath, from: &str) -> Self {
+        self.change_logs.insert(table, SqlString::from(from));
 
         self
     }
@@ -38,11 +37,14 @@ impl WarehouseSql for Engine {
     }
 
     fn table_ref(&self, table: &TablePath) -> SqlString {
-        SqlString::from(format!(
-            "{}.{}",
-            self.namespace_ref(table.namespace()),
-            self.identifier(table.name())
-        ))
+        match self.change_logs.get(table) {
+            Some(from) => from.clone(),
+            None => SqlString::from(format!(
+                "{}.{}",
+                self.namespace_ref(table.namespace()),
+                self.identifier(table.name())
+            )),
+        }
     }
 
     fn column_type(&self, column_type: &ColumnType) -> Result<SqlString, UnsupportedColumn> {
@@ -91,13 +93,6 @@ impl WarehouseSql for Engine {
 impl ChangeLogSql for Engine {
     fn change_log_namespace(&self) -> &Namespace {
         &self.change_log
-    }
-
-    fn change_log_ref(&self, topic: &str) -> SqlString {
-        match self.change_logs.get(topic) {
-            Some(from) => from.clone(),
-            None => self.table_ref(&self.change_log(topic)),
-        }
     }
 }
 

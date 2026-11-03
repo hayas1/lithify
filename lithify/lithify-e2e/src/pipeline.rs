@@ -205,15 +205,10 @@ impl<'a> SinkEnd<'a> {
         table: &TableId,
         watch: &Watch,
     ) -> Result<TableModel, Unverifiable> {
-        let topic_prefix = Self::topic_prefix(source)?;
-
-        self.settle(source, topic_prefix, table, watch)?;
+        self.settle(source, table, watch)?;
 
         watch.wait(table, || {
-            match self
-                .client
-                .model(source.capture(), topic_prefix, table, Watch::end())
-            {
+            match self.client.model(source.capture(), table, Watch::end()) {
                 Ok(model) => Ok(Some(model)),
                 Err(Unbuildable::UnknownTable(_)) => Ok(None),
                 Err(unbuildable) => Err(unbuildable.into()),
@@ -224,7 +219,6 @@ impl<'a> SinkEnd<'a> {
     fn settle(
         &mut self,
         source: &SourceEnd,
-        topic_prefix: &str,
         table: &TableId,
         watch: &Watch,
     ) -> Result<(), Unverifiable> {
@@ -234,9 +228,7 @@ impl<'a> SinkEnd<'a> {
         let mut settling = (0, Instant::now());
 
         watch.wait(table, || {
-            let landed = self
-                .client
-                .landed(source.capture(), topic_prefix, table, at)?;
+            let landed = self.client.landed(source.capture(), table, at)?;
             let (previous, since) = settling;
 
             match (landed, landed == previous) {
@@ -260,7 +252,6 @@ impl<'a> SinkEnd<'a> {
     ) -> Result<(), Unverifiable> {
         Ok(self.client.snapshot(
             source.capture(),
-            Self::topic_prefix(source)?,
             model.id(),
             &self.snapshot()?,
             self.config.scheduled().namespace(),
@@ -277,13 +268,6 @@ impl<'a> SinkEnd<'a> {
                 artifact: name.clone(),
             })
         })
-    }
-
-    fn topic_prefix<'s>(source: &'s SourceEnd) -> Result<&'s str, Unverifiable> {
-        source
-            .config
-            .topic_prefix()
-            .ok_or(Unverifiable::WithoutTopicPrefix)
     }
 
     pub fn snapshot_rows(

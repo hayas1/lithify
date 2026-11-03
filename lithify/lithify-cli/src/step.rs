@@ -2,7 +2,7 @@
 pub(crate) mod tests {
     use duckdb::Connection;
 
-    use lithify_core::sink::{Namespace, TablePath, WarehouseClient};
+    use lithify_core::sink::{ChangeLogSql, Namespace, TablePath, WarehouseClient};
     use lithify_core::ts::Ts;
     use lithify_core::window::Window;
     use lithify_pipeline::Pipeline;
@@ -56,17 +56,20 @@ pub(crate) mod tests {
             .unwrap();
 
         source
-            .with_change_logs(Replaying::<_, _, _, _, Unrunnable>::new(
-                client,
-                &snapshot(sink),
-                sink.scheduled(),
-                window,
-                previous,
-                listed(pipeline.tables(), sink),
-                writer,
-            ))
+            .capture()
+            .with_change_logs(
+                client.warehouse().change_log_namespace(),
+                Replaying::<_, _, _, _, Unrunnable>::new(
+                    client,
+                    &snapshot(sink),
+                    sink.scheduled(),
+                    window,
+                    previous,
+                    listed(pipeline.tables(), sink),
+                    writer,
+                ),
+            )
             .await
-            .unwrap()
             .unwrap()
     }
 
@@ -253,7 +256,7 @@ pub(crate) mod tests {
         );
     }
 
-    pub(crate) const CAPTURE: &str = r#"{"debezium":{"dialect":"mysql"}}"#;
+    pub(crate) const CAPTURE: &str = r#"{"debezium":{"dialect":"mysql","topic_prefix":"mysql"}}"#;
 
     pub(crate) fn at(rfc3339: &str) -> DateTime<Utc> {
         rfc3339.parse().unwrap()
@@ -413,10 +416,7 @@ pub(crate) mod tests {
                 &client,
                 "SELECT DISTINCT capture, schedule || ' ' || artifact || ' ' || source FROM mysql_shop._lithify_log"
             ),
-            [(
-                r#"{"debezium":{"dialect":"mysql"}}"#.to_owned(),
-                "daily snapshot primary".to_owned()
-            )]
+            [(CAPTURE.to_owned(), "daily snapshot primary".to_owned())]
         );
     }
 

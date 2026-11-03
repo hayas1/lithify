@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 
 use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
 use lithify_core::sink::{ChangeLogSql, WarehouseSql};
+use lithify_core::source::{RowChangeLog, SchemaChangeLog};
 use lithify_core::sql::SqlString;
-use lithify_protocol::DuckDbWarehouse;
+use lithify_protocol::{Debezium, DuckDbWarehouse, MySql, SinkConnector};
 
 use crate::replica::{CellValue, ColumnDdl, Ddl, Dml, Mutation, Placed, Replica, ReplicaDump, Row};
 
@@ -12,16 +13,23 @@ pub struct Landing<'a> {
 }
 
 impl<'a> Landing<'a> {
-    pub const TOPIC_PREFIX: &'static str = "mysql";
-
     pub fn of(replica: &'a Replica) -> Self {
         Self { replica }
+    }
+
+    pub fn log(warehouse: &DuckDbWarehouse) -> Debezium<MySql> {
+        Debezium::new(
+            SinkConnector::ObjectStore,
+            warehouse.change_log_namespace().clone(),
+            "mysql",
+            MySql,
+        )
     }
 
     pub fn create(&self, warehouse: &DuckDbWarehouse) -> SqlString {
         let mut dump = ReplicaDump::default();
         let mut schema_changes = Vec::new();
-        let mut topics: BTreeMap<String, Topic> = BTreeMap::new();
+        let mut topics: BTreeMap<TableId, Topic> = BTreeMap::new();
 
         for (position, (at, mutation)) in self.replica.mutations().iter().enumerate() {
             let landed = Landed {
@@ -37,7 +45,7 @@ impl<'a> Landing<'a> {
                         .table(dml.table())
                         .unwrap_or_else(|| panic!("{} is changed while it stands", dml.table()));
                     topics
-                        .entry(Self::topic(dml.table()))
+                        .entry(dml.table().clone())
                         .or_default()
                         .push(table, landed.row_change(dml, before, after));
                 }
@@ -48,26 +56,18 @@ impl<'a> Landing<'a> {
             }
         }
 
+        let log = Self::log(warehouse);
         let mut statements = vec![format!(
             "{};\nCREATE TABLE {} AS SELECT * FROM (VALUES\n{}\n) AS t(value)",
             warehouse.create_namespace(warehouse.change_log_namespace()),
-            warehouse.change_log_ref(Self::TOPIC_PREFIX),
+            warehouse.table_ref(&log.schema_change_table()),
             schema_changes.join(",\n")
         )];
-        for (topic, landed) in &topics {
-            statements.extend(landed.create(&warehouse.change_log_ref(topic)));
+        for (table, landed) in &topics {
+            statements.extend(landed.create(&warehouse.table_ref(&log.row_change_table(table))));
         }
 
         SqlString::from(statements.join(";\n"))
-    }
-
-    fn topic(table: &TableId) -> String {
-        format!(
-            "{}.{}.{}",
-            Self::TOPIC_PREFIX,
-            table.schema(),
-            table.table()
-        )
     }
 
     fn literal(text: &str) -> String {

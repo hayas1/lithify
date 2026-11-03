@@ -30,7 +30,6 @@ pub trait Sink {
     fn landed(
         &mut self,
         capture: &CaptureConfig,
-        topic_prefix: &str,
         table: &TableId,
         at: Ts<Processing>,
     ) -> Result<u64, Unbuildable>;
@@ -38,7 +37,6 @@ pub trait Sink {
     fn model(
         &mut self,
         capture: &CaptureConfig,
-        topic_prefix: &str,
         table: &TableId,
         at: Ts<Event>,
     ) -> Result<TableModel, Unbuildable>;
@@ -46,7 +44,6 @@ pub trait Sink {
     fn snapshot(
         &mut self,
         capture: &CaptureConfig,
-        topic_prefix: &str,
         table: &TableId,
         artifact: &Snapshot,
         namespace: &Namespace,
@@ -142,19 +139,19 @@ impl Sink for DuckDb {
     fn landed(
         &mut self,
         capture: &CaptureConfig,
-        topic_prefix: &str,
         table: &TableId,
         at: Ts<Processing>,
     ) -> Result<u64, Unbuildable> {
-        let (topic, processing_time) = self
-            .runtime
-            .block_on(capture.with_change_logs(topic_prefix, LandedTopic { table }));
+        let (topic, processing_time) = self.runtime.block_on(capture.with_change_logs(
+            self.client.warehouse().change_log_namespace(),
+            LandedTopic { table },
+        ));
 
         let warehouse = self.client.warehouse();
         let landed = self.client.connection().query_row(
             &format!(
                 "SELECT COUNT(*) FROM {} WHERE {} >= {}",
-                warehouse.change_log_ref(&topic),
+                warehouse.table_ref(&topic),
                 warehouse.path(&processing_time),
                 at.milliseconds_since_epoch()
             ),
@@ -172,12 +169,11 @@ impl Sink for DuckDb {
     fn model(
         &mut self,
         capture: &CaptureConfig,
-        topic_prefix: &str,
         table: &TableId,
         at: Ts<Event>,
     ) -> Result<TableModel, Unbuildable> {
         let read = self.runtime.block_on(capture.with_change_logs(
-            topic_prefix,
+            self.client.warehouse().change_log_namespace(),
             Catalog {
                 client: &self.client,
                 table,
@@ -191,14 +187,13 @@ impl Sink for DuckDb {
     fn snapshot(
         &mut self,
         capture: &CaptureConfig,
-        topic_prefix: &str,
         table: &TableId,
         artifact: &Snapshot,
         namespace: &Namespace,
         window: &Window,
     ) -> Result<(), Unbuildable> {
         self.runtime.block_on(capture.with_change_logs(
-            topic_prefix,
+            self.client.warehouse().change_log_namespace(),
             SnapshotBuild {
                 client: &self.client,
                 table,
@@ -253,7 +248,7 @@ struct LandedTopic<'a> {
 }
 
 impl ChangeLogsFn<DuckDbClient> for LandedTopic<'_> {
-    type Output = (String, ColumnPath);
+    type Output = (TablePath, ColumnPath);
 
     async fn call<C>(self, logs: C) -> Self::Output
     where
@@ -261,7 +256,7 @@ impl ChangeLogsFn<DuckDbClient> for LandedTopic<'_> {
         DuckDbClient: SchemaChangeStream<C::Schema, Error = duckdb::Error>,
     {
         (
-            logs.row_changes().dml_topic(self.table),
+            logs.row_changes().row_change_table(self.table),
             logs.row_changes().processing_time(),
         )
     }

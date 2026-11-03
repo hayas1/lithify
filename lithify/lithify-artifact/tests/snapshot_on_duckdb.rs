@@ -16,7 +16,7 @@ use lithify_core::sql::SqlString;
 use lithify_core::ts::Ts;
 use lithify_core::window::Window;
 use lithify_protocol::sink::duckdb::client::DuckDbClient;
-use lithify_protocol::{Debezium, DuckDbWarehouse, MySql};
+use lithify_protocol::{Debezium, DuckDbWarehouse, MySql, SinkConnector};
 
 const CHANGE_LOG: &str = include_str!("../testdata/snapshot_on_duckdb/change_log.sql");
 
@@ -38,7 +38,7 @@ async fn a_snapshot_holds_each_key_as_the_change_log_last_left_it() {
         DuckDbWarehouse::new("cdc"),
     );
     client.execute(&SqlString::from(CHANGE_LOG)).await.unwrap();
-    let log = Debezium::under("value", "mysql", MySql);
+    let log = Debezium::new(SinkConnector::ObjectStore, "cdc", "mysql", MySql);
     let window = Window::new(Ts::try_from(0).unwrap(), Ts::try_from(10).unwrap());
     let artifact = Snapshot::new(Shard::new("%Y%m%d", chrono_tz::Tz::UTC));
     let target = TablePath::new(
@@ -88,7 +88,7 @@ fn rows(client: &DuckDbClient, query: &str) -> Vec<String> {
 }
 
 async fn build_snapshots(client: &DuckDbClient, window: &Window) {
-    let log = Debezium::under("value", "mysql", MySql);
+    let log = Debezium::new(SinkConnector::ObjectStore, "cdc", "mysql", MySql);
     let artifact = Snapshot::new(Shard::new("%Y%m%d", chrono_tz::Tz::UTC));
     let namespace = Namespace::from("shop_snapshot");
     let history = client.history::<Unbuilt>(&log, window).await.unwrap();
