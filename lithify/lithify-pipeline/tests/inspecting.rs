@@ -4,8 +4,9 @@ use lithify_core::sink::Namespace;
 use lithify_core::ts::{Replay, Ts};
 use lithify_pipeline::Pipeline;
 use lithify_pipeline::build_log::Series;
-use lithify_pipeline::check::{Inspecting, Uninspectable};
+use lithify_pipeline::check::{Expectation, Inspecting, Uninspectable};
 use lithify_pipeline::materialization::Materialization;
+use lithify_pipeline::schedule::Timeline;
 use lithify_pipeline::warehouse::SinkWarehouse;
 use lithify_testing::pipeline::{Captured, INFRA, Kept, Made, configure, logged, scratch};
 
@@ -44,6 +45,21 @@ fn a_sink_is_inspected_under_the_first_place_of_the_artifact_it_schedules() {
             None,
         )
     );
+}
+
+#[test]
+fn a_sink_is_expected_to_be_built_since_its_source_is_captured_until_now_as_it_is_captured() {
+    let pipeline = opened("expected", INFRA, SNAPSHOT);
+    let source = pipeline.sources().next().unwrap();
+    let sink = pipeline.sinks().next().unwrap();
+
+    let expectation = Expectation::of(sink, source, now()).unwrap();
+
+    assert_eq!(
+        expectation.timeline(),
+        &Timeline::new(sink.schedule(), source.since()..now().as_event())
+    );
+    assert_eq!(expectation.capture(), source.written_capture().unwrap());
 }
 
 #[tokio::test]

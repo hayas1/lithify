@@ -6,10 +6,10 @@ use lithify_core::artifact::ArtifactName;
 use lithify_core::ts::{Replay, Ts};
 use lithify_core::window::Window;
 use lithify_pipeline::build_log::Series;
+use lithify_pipeline::check::Expectation;
 use lithify_pipeline::infra::{Sink, Source};
 use lithify_pipeline::materialization::Materialization;
 use lithify_pipeline::runner::{StepTaker, Tables};
-use lithify_pipeline::schedule::Timeline;
 use lithify_pipeline::stepping::Stepping;
 
 use crate::artifacts::ArtifactConfig;
@@ -40,11 +40,7 @@ impl RunCommand {
         P: StepTaker<Error = Unrunnable>,
         B: Report,
     {
-        let stepping = Stepping::new(
-            taker,
-            Timeline::new(sink.schedule(), source.since()..now.as_event()),
-            source.written_capture()?,
-        );
+        let stepping = Stepping::new(taker, Expectation::of(sink, source, now)?);
 
         match self {
             Self::CatchUp { target, to: None } => {
@@ -173,8 +169,8 @@ pub(crate) mod tests {
     use crate::step::Taking;
     use crate::step::tests::{CAPTURE, PEOPLE, at, built_before, logged, pipeline, rows};
     use lithify_core::sink::WarehouseClient;
-    use lithify_pipeline::check::Expectation;
     use lithify_pipeline::schedule::Schedule;
+    use lithify_pipeline::schedule::Timeline;
 
     const NOW: &str = "2026-09-22T05:00:00Z";
 
@@ -876,10 +872,11 @@ pub(crate) mod tests {
         );
         assert_eq!(
             Expectation::new(
-                Schedule::default(),
-                pipeline.sources().next().unwrap().since(),
+                Timeline::new(
+                    Schedule::default(),
+                    pipeline.sources().next().unwrap().since()..Ts::from(at(NOW))
+                ),
                 CAPTURE,
-                Ts::from(at(NOW)),
             )
             .read::<_, Unrunnable>(&client, pipeline.sinks().next().unwrap().scheduled())
             .await

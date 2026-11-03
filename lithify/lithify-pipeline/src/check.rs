@@ -11,7 +11,7 @@ use lithify_core::window::Window;
 use crate::build_log::{BuildLog, Latest, UnreadableBuildLog};
 use crate::infra::{Sink, Source};
 use crate::materialization::Materialization;
-use crate::schedule::Schedule;
+use crate::schedule::{Schedule, Timeline};
 use crate::warehouse::{SinkWarehouse, WarehouseControl, WarehouseFn};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,14 +106,8 @@ impl Inspecting {
         now: Ts<Replay>,
     ) -> Result<Self, Uninspectable> {
         Ok(Self {
-            expectation: Expectation::new(
-                sink.schedule(),
-                source.since(),
-                &source
-                    .written_capture()
-                    .map_err(|unwritten| Uninspectable::Unwritten(unwritten.to_string()))?,
-                now,
-            ),
+            expectation: Expectation::of(sink, source, now)
+                .map_err(|unwritten| Uninspectable::Unwritten(unwritten.to_string()))?,
             scheduled: sink.scheduled().clone(),
         })
     }
@@ -169,19 +163,41 @@ impl<E: std::error::Error> From<E> for Unread {
 }
 
 pub struct Expectation {
-    schedule: Schedule,
-    since: Ts<Event>,
+    timeline: Timeline,
     capture: String,
-    now: Ts<Replay>,
 }
 
 impl Expectation {
-    pub fn new(schedule: Schedule, since: Ts<Event>, capture: &str, now: Ts<Replay>) -> Self {
+    pub fn new(timeline: Timeline, capture: &str) -> Self {
         Self {
-            schedule,
-            since,
+            timeline,
             capture: capture.to_owned(),
-            now,
+        }
+    }
+
+    pub fn of<C: Serialize, W: SinkWarehouse, A>(
+        sink: &Sink<W, A>,
+        source: &Source<C>,
+        now: Ts<Replay>,
+    ) -> Result<Self, serde_json::Error> {
+        Ok(Self::new(
+            Timeline::new(sink.schedule(), source.since()..now.as_event()),
+            &source.written_capture()?,
+        ))
+    }
+
+    pub fn timeline(&self) -> &Timeline {
+        &self.timeline
+    }
+
+    pub fn capture(&self) -> &str {
+        &self.capture
+    }
+
+    pub fn up_to(self, until: Ts<Event>) -> Self {
+        Self {
+            timeline: self.timeline.up_to(until),
+            ..self
         }
     }
 
@@ -197,7 +213,7 @@ impl Expectation {
         let (namespace, series) = (materialization.namespace(), materialization.series());
         if !client.exists(&BuildLog::path(namespace)).await? {
             return Ok(Inspection {
-                schedule: self.schedule,
+                schedule: self.timeline.schedule(),
                 latest: Vec::new(),
                 discrepancies: self.discrepancies(&[], &[], &BTreeSet::new()),
             });
@@ -217,7 +233,7 @@ impl Expectation {
         }
 
         Ok(Inspection {
-            schedule: self.schedule,
+            schedule: self.timeline.schedule(),
             discrepancies: self.discrepancies(&latest, &succeeded, &present),
             latest,
         })
@@ -232,8 +248,10 @@ impl Expectation {
         present: &BTreeSet<TablePath>,
     ) -> Vec<Discrepancy> {
         let Some(last_run) = latest.iter().map(BuildLog::run_id).max() else {
-            return match self.due_until(self.since) {
-                Some(_) => vec![Discrepancy::NeverBuilt { since: self.since }],
+            let since = self.timeline.range().start;
+
+            return match self.due_until(since) {
+                Some(_) => vec![Discrepancy::NeverBuilt { since }],
                 None => vec![],
             };
         };
@@ -259,8 +277,8 @@ impl Expectation {
     }
 
     fn due_until(&self, built_until: Ts<Event>) -> Option<Ts<Event>> {
-        self.schedule
-            .windows(built_until, self.now.as_event())
+        self.timeline
+            .windows(built_until)
             .last()
             .map(|window| *window.to())
     }
@@ -309,7 +327,7 @@ impl Expectation {
     }
 
     fn overdue(&self, table: &TableId, built: Option<&BuildLog>) -> Option<Discrepancy> {
-        let built_until = built.map_or(self.since, |built| *built.window().to());
+        let built_until = built.map_or(self.timeline.range().start, |built| *built.window().to());
 
         self.due_until(built_until)
             .map(|due_until| Discrepancy::Overdue {

@@ -143,6 +143,10 @@ impl Timeline {
         Self { schedule, range }
     }
 
+    pub fn schedule(&self) -> Schedule {
+        self.schedule
+    }
+
     pub fn range(&self) -> &Range<Ts<Event>> {
         &self.range
     }
@@ -156,6 +160,10 @@ impl Timeline {
 
     pub fn through(&self, date: NaiveDate) -> Option<Ts<Event>> {
         self.schedule.through(self.range.start, date)
+    }
+
+    pub fn windows(&self, from: Ts<Event>) -> impl Iterator<Item = Window> {
+        self.schedule.windows(from, self.range.end)
     }
 
     pub fn days(&self, from: Ts<Event>) -> impl Iterator<Item = Window> {

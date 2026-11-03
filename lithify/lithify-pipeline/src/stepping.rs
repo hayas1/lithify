@@ -2,10 +2,10 @@ use chrono::NaiveDate;
 
 use crate::artifact::ArtifactControl;
 use crate::build_log::{BuildLog, Latest};
+use crate::check::Expectation;
 use crate::materialization::Materialization;
 use crate::progress::{Progress, Step};
 use crate::runner::{BuildLogWriter, StepTaker, Tables, Unsteppable};
-use crate::schedule::Timeline;
 
 use crate::warehouse::WarehouseControl;
 use lithify_core::ts::{Event, Ts};
@@ -13,17 +13,12 @@ use lithify_core::window::Window;
 
 pub struct Stepping<'a, P> {
     taker: &'a P,
-    timeline: Timeline,
-    capture: String,
+    expectation: Expectation,
 }
 
 impl<'a, P: StepTaker> Stepping<'a, P> {
-    pub fn new(taker: &'a P, timeline: Timeline, capture: String) -> Self {
-        Self {
-            taker,
-            timeline,
-            capture,
-        }
+    pub fn new(taker: &'a P, expectation: Expectation) -> Self {
+        Self { taker, expectation }
     }
 
     pub async fn up_to(
@@ -31,11 +26,9 @@ impl<'a, P: StepTaker> Stepping<'a, P> {
         date: NaiveDate,
         scheduled: &Materialization,
     ) -> Result<Self, P::Error> {
-        let until = self
-            .timeline
-            .through(date)
-            .ok_or(Unsteppable::Unopened(date))?;
-        if until > self.timeline.range().end {
+        let timeline = self.expectation.timeline();
+        let until = timeline.through(date).ok_or(Unsteppable::Unopened(date))?;
+        if until > timeline.range().end {
             return Err(Unsteppable::Unclosed(date).into());
         }
         let standing = self.progress(scheduled).await?.standing();
@@ -43,7 +36,7 @@ impl<'a, P: StepTaker> Stepping<'a, P> {
         match standing.filter(|standing| *standing > until) {
             Some(built_until) => Err(Unsteppable::Overtaken { date, built_until }.into()),
             None => Ok(Self {
-                timeline: self.timeline.up_to(until),
+                expectation: self.expectation.up_to(until),
                 ..self
             }),
         }
@@ -74,24 +67,24 @@ impl<'a, P: StepTaker> Stepping<'a, P> {
         base: Option<&Window>,
         derived: bool,
     ) -> Option<Window> {
+        let timeline = self.expectation.timeline();
         let from = match (built, derived) {
             (Some(built), _) => *built.to(),
-            (None, false) => self.timeline.range().start,
+            (None, false) => timeline.range().start,
             (None, true) => *base?.from(),
         };
         let shard = base.map(|base| *base.to());
         // An artifact built from another and never built yet starts from the last shard its base
         // built, whichever side of the day its window opens on.
         let fresh = derived && built.is_none();
-        let window = self
-            .timeline
+        let window = timeline
             .days(from)
-            .filter_map(|day| artifact.window(&day, &self.timeline))
+            .filter_map(|day| artifact.window(&day, timeline))
             .skip_while(|window| fresh && shard.is_some_and(|shard| *window.from() < shard))
             .take_while(|window| !derived || shard.is_some_and(|shard| *window.from() <= shard))
             .next()?;
 
-        self.timeline.reached(&window).then_some(window)
+        timeline.reached(&window).then_some(window)
     }
 
     pub async fn take<A: ArtifactControl, B: BuildLogWriter>(
@@ -152,13 +145,13 @@ impl<'a, P: StepTaker> Stepping<'a, P> {
         );
         let changed = progress
             .captures()
-            .find(|logged| *logged != self.capture)
+            .find(|logged| *logged != self.expectation.capture())
             .map(str::to_owned);
 
         match changed {
             Some(logged) => Err(Unsteppable::CaptureChanged {
                 logged,
-                configured: self.capture.clone(),
+                configured: self.expectation.capture().to_owned(),
             }
             .into()),
             None => Ok(progress),

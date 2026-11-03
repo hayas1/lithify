@@ -6,12 +6,12 @@ use std::collections::BTreeSet;
 
 use lithify_core::model::TableId;
 use lithify_core::sink::{Namespace, TablePath};
-use lithify_core::ts::Ts;
+use lithify_core::ts::{Event, Ts};
 use lithify_core::window::Window;
 use lithify_pipeline::build_log::{BuildLog, Run, Series, Status, TableBuilt};
 use lithify_pipeline::check::*;
 use lithify_pipeline::materialization::Materialization;
-use lithify_pipeline::schedule::Schedule;
+use lithify_pipeline::schedule::{Schedule, Timeline};
 use lithify_testing::{Engine, Recorder};
 
 fn at<A>(rfc3339: &str) -> Ts<A> {
@@ -61,10 +61,11 @@ fn snapshot() -> Materialization {
 
 fn expected(now: &str) -> Expectation {
     Expectation::new(
-        Schedule::default(),
-        at("2026-09-19T00:00:00Z"),
+        Timeline::new(
+            Schedule::default(),
+            at("2026-09-19T00:00:00Z")..at::<Event>(now),
+        ),
         "{}",
-        at(now),
     )
 }
 
@@ -143,10 +144,11 @@ fn a_pipeline_whose_capture_changed_since_its_last_run_is_reported_as_such() {
 
     assert_eq!(
         Expectation::new(
-            Schedule::default(),
-            at("2026-09-19T00:00:00Z"),
+            Timeline::new(
+                Schedule::default(),
+                at("2026-09-19T00:00:00Z")..at::<Event>("2026-09-21T05:00:00Z"),
+            ),
             r#"{"debezium":{"dialect":"postgres"}}"#,
-            at("2026-09-21T05:00:00Z")
         )
         .discrepancies(&built, &built, &present(&built)),
         [Discrepancy::CaptureChanged {
