@@ -10,7 +10,7 @@ use lithify_cli::pipeline::{self, CaptureConfig};
 use lithify_core::artifact::UnbuildableArtifact;
 use lithify_core::listener::OutOfOrder;
 use lithify_core::model::{TableId, TableModel};
-use lithify_core::sink::{ChangeLogSql, Namespace, TablePath, WarehouseClient, WarehouseSql};
+use lithify_core::sink::{Namespace, TablePath, WarehouseClient, WarehouseSql};
 use lithify_core::source::{ChangeLog, ChangeLogs, ColumnPath, RowChangeLog, SchemaChangeStream};
 use lithify_core::sql::SqlString;
 use lithify_core::ts::{Event, Processing, Ts};
@@ -142,10 +142,9 @@ impl Sink for DuckDb {
         table: &TableId,
         at: Ts<Processing>,
     ) -> Result<u64, Unbuildable> {
-        let (topic, processing_time) = self.runtime.block_on(capture.with_change_logs(
-            self.client.warehouse().change_log_namespace(),
-            LandedTopic { table },
-        ));
+        let (topic, processing_time) = self
+            .runtime
+            .block_on(capture.with_change_logs(self.client.warehouse(), LandedTopic { table }));
 
         let warehouse = self.client.warehouse();
         let landed = self.client.connection().query_row(
@@ -173,7 +172,7 @@ impl Sink for DuckDb {
         at: Ts<Event>,
     ) -> Result<TableModel, Unbuildable> {
         let read = self.runtime.block_on(capture.with_change_logs(
-            self.client.warehouse().change_log_namespace(),
+            self.client.warehouse(),
             Catalog {
                 client: &self.client,
                 table,
@@ -193,7 +192,7 @@ impl Sink for DuckDb {
         window: &Window,
     ) -> Result<(), Unbuildable> {
         self.runtime.block_on(capture.with_change_logs(
-            self.client.warehouse().change_log_namespace(),
+            self.client.warehouse(),
             SnapshotBuild {
                 client: &self.client,
                 table,
@@ -256,7 +255,7 @@ impl ChangeLogsFn<DuckDbClient> for LandedTopic<'_> {
         DuckDbClient: SchemaChangeStream<C::Schema, Error = duckdb::Error>,
     {
         (
-            logs.row_changes().row_change_table(self.table),
+            logs.row_changes().dml_landed_table(self.table),
             logs.row_changes().processing_time(),
         )
     }

@@ -8,7 +8,7 @@ How the code is laid out and the rules it keeps, as opposed to the [design](desi
 | --- | --- |
 | `lithify-core` | The data plane, the vocabulary every other crate speaks: the replay of schema changes and the listeners it tells, the `Artifact` trait, and planning what one window builds of each table, without waiting on a warehouse |
 | `lithify-artifact` | One module for each kind of artifact, each naming its tables and building them from what the replay tells it, and saying which window it builds and what it folds onto |
-| `lithify-protocol` | The change log formats and the warehouses lithify reads and writes, the build log among what they hold |
+| `lithify-protocol` | The change log formats, how a sink connector lands them, and the warehouses lithify reads and writes, the build log among what they hold |
 | `lithify-pipeline` | The control plane, generic over the kinds of capture, warehouse and artifact it is given: reading and listing pipelines, the schedule and the days it cuts, the build log, stepping a series window by window, running what the core plans, and checking a sink |
 | `lithify-cli` | The one place that lists every kind, as enums of the configuration it accepts, and the commands |
 | `lithify-ui` | Pages showing what the build log holds, shaped from what `lithify-pipeline` reads |
@@ -80,6 +80,13 @@ When a builder seems to need something more, look first for the listener call th
 `lithify-core` decides what a window builds from what it is handed alone: the schema changes before the window opens and within it, read beforehand into a `SchemaHistory`, the table each one folds onto, and the dialect of the warehouse; `Replayer` replays them into a `TableBuild` for each table and runs nothing.
 `lithify-pipeline` does everything else: which window to build, read from the build log, the history it reads, running the statements and logging what came of them.
 The core names no build log, no schedule and no status, and each trait of the core is extended in `lithify-pipeline` with what the control plane asks of it, `ArtifactControl` of `Artifact` and `WarehouseControl` of `WarehouseClient`, which `lithify-artifact` and `lithify-protocol` implement beside the core ones.
+
+### A change log is read where it landed
+
+The core reads a change log from the table it landed in, named by `SchemaChangeLog::ddl_landed_table` and `RowChangeLog::dml_landed_table`, and knows no topic.
+`CdcFormat` says what a source publishes: the topic of its schema changes and of each table's row changes, where each field lies in a record, and how a record reads as a schema change.
+`Landing` says how a sink connector lands what a format publishes into its warehouse: the envelope it wraps each record in and the table it names after a topic, as `S3Sink` keeps the topic and `BigQuerySink` sanitizes it.
+`Landed` joins a format and a landing into the `ChangeLogs` the core reads, so neither knows the other, and the `Capture` of each warehouse picks the landing that lands into it.
 
 ### Only what talks to a warehouse waits
 

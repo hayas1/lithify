@@ -39,7 +39,7 @@ impl ChangeLog for Log {
 }
 
 impl RowChangeLog for Log {
-    fn row_change_table(&self, table: &TableId) -> TablePath {
+    fn dml_landed_table(&self, table: &TableId) -> TablePath {
         TablePath::new(
             "mysql_shop_cdc",
             &format!("mysql_{}_{}", table.schema(), table.table()),

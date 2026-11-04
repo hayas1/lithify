@@ -2,11 +2,11 @@ use serde::{Deserialize, Serialize};
 
 use lithify_core::sink::{Namespace, OpenWarehouse, WarehouseClient};
 
-use lithify_core::source::CdcFormat;
 use lithify_pipeline::capture::{Capture, ChangeLogsFn};
 use lithify_pipeline::warehouse::{SinkWarehouse, WarehouseFn};
 use lithify_pipeline::{Placed, Places, Placing};
-use lithify_protocol::{BigQueryWarehouse, DebeziumFormat, DuckDbWarehouse};
+use lithify_protocol::source::debezium::config as debezium;
+use lithify_protocol::{BigQueryWarehouse, DuckDbWarehouse};
 
 use crate::credential::Credentials;
 use crate::unrunnable::Unrunnable;
@@ -14,21 +14,21 @@ use crate::unrunnable::Unrunnable;
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "lowercase")]
 pub enum CaptureConfig {
-    Debezium(<DebeziumFormat as CdcFormat>::Config),
+    Debezium(debezium::Config),
 }
 
 impl<K> Capture<K> for CaptureConfig
 where
     K: WarehouseClient,
-    <DebeziumFormat as CdcFormat>::Config: Capture<K>,
+    debezium::Config: Capture<K>,
 {
     async fn with_change_logs<F: ChangeLogsFn<K>>(
         &self,
-        change_log: &Namespace,
+        warehouse: &K::Warehouse,
         f: F,
     ) -> F::Output {
         match self {
-            Self::Debezium(debezium) => debezium.with_change_logs(change_log, f).await,
+            Self::Debezium(debezium) => debezium.with_change_logs(warehouse, f).await,
         }
     }
 }
@@ -140,6 +140,7 @@ mod tests {
     use lithify_protocol::sink::duckdb::client::DuckDbClient;
     use lithify_protocol::source::debezium::Debezium;
     use lithify_protocol::source::debezium::config;
+    use lithify_protocol::{Landed, S3Sink};
 
     #[test]
     fn a_source_is_captured_by_a_format_this_program_reads() {
@@ -173,11 +174,11 @@ mod tests {
         assert_eq!(
             Capture::<DuckDbClient>::with_change_logs(
                 &capture,
-                &Namespace::from("postgres_shop_cdc"),
+                &DuckDbWarehouse::new("postgres_shop_cdc"),
                 Probe
             )
             .await,
-            std::any::type_name::<Debezium<Postgres>>()
+            std::any::type_name::<Landed<Debezium<Postgres>, S3Sink>>()
         );
     }
 

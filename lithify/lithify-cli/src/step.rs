@@ -2,7 +2,7 @@
 pub(crate) mod tests {
     use duckdb::Connection;
 
-    use lithify_core::sink::{ChangeLogSql, Namespace, TablePath, WarehouseClient};
+    use lithify_core::sink::{Namespace, TablePath, WarehouseClient};
     use lithify_core::ts::Ts;
     use lithify_core::window::Window;
     use lithify_pipeline::Pipeline;
@@ -58,7 +58,7 @@ pub(crate) mod tests {
         source
             .capture()
             .with_change_logs(
-                client.warehouse().change_log_namespace(),
+                client.warehouse(),
                 Replaying::<_, _, _, _, Unrunnable>::new(
                     client,
                     &snapshot(sink),

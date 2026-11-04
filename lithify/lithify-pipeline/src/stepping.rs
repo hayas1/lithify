@@ -17,7 +17,7 @@ use crate::warehouse::WarehouseControl;
 use lithify_core::artifact::UnbuildableArtifact;
 use lithify_core::listener::OutOfOrder;
 use lithify_core::model::TableId;
-use lithify_core::sink::{ChangeLogSql, WarehouseClient};
+use lithify_core::sink::WarehouseClient;
 use lithify_core::ts::{Event, Ts};
 use lithify_core::window::Window;
 
@@ -135,7 +135,7 @@ where
         self.source
             .capture()
             .with_change_logs(
-                self.client.warehouse().change_log_namespace(),
+                self.client.warehouse(),
                 Replaying::<_, _, _, _, E>::new(
                     self.client,
                     artifact,

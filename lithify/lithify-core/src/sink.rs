@@ -215,7 +215,7 @@ pub trait ChangeLogSql: WarehouseSql {
 
         SqlString::from(format!(
             "SELECT {envelope}\nFROM {}\nWHERE {event_time} >= {} AND {event_time} < {}\nORDER BY {ordering}",
-            self.table_ref(&log.schema_change_table()),
+            self.table_ref(&log.ddl_landed_table()),
             window.from().milliseconds_since_epoch(),
             window.to().milliseconds_since_epoch(),
         ))

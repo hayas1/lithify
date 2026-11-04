@@ -8,7 +8,11 @@ pub mod store;
 
 use lithify_core::model::ColumnType;
 use lithify_core::sink::{ChangeLogSql, Namespace, TablePath, UnsupportedColumn, WarehouseSql};
+use lithify_core::source::ColumnPath;
 use lithify_core::sql::SqlString;
+
+use crate::landing::Landing;
+use crate::source::CdcFormat;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DuckDbWarehouse {
@@ -199,6 +203,21 @@ impl ChangeLogSql for DuckDbWarehouse {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct S3Sink;
+
+impl<C: CdcFormat> Landing<C> for S3Sink {
+    type Warehouse = DuckDbWarehouse;
+
+    fn envelope(&self) -> Option<ColumnPath> {
+        Some(ColumnPath::from("value"))
+    }
+
+    fn landed_table(&self, change_log: &Namespace, topic: &str) -> TablePath {
+        TablePath::new(change_log.clone(), topic)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,9 +239,10 @@ mod tests {
                 .starts_with("CREATE OR REPLACE VIEW")
         );
     }
+    use crate::landing::Landed;
     use crate::sink::duckdb::config::tests::s3;
+    use crate::source::debezium::Debezium;
     use crate::source::debezium::mysql::MySql;
-    use crate::source::debezium::{Debezium, SinkConnector};
     use lithify_core::model::ColumnModel;
     use lithify_core::position::Coordinate;
     use lithify_core::ts::Ts;
@@ -366,7 +386,11 @@ mod tests {
     #[test]
     fn the_schema_changes_of_a_window_are_read_from_the_envelope_in_the_order_of_their_processing_time_then_position()
      {
-        let log = Debezium::new(SinkConnector::ObjectStore, "mysql_shop_cdc", "mysql", MySql);
+        let log = Landed::new(
+            Debezium::new("mysql", MySql),
+            S3Sink,
+            &DuckDbWarehouse::new("mysql_shop_cdc"),
+        );
         let window = Window::new(Ts::try_from(0).unwrap(), Ts::try_from(10).unwrap());
 
         assert_eq!(

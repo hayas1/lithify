@@ -16,7 +16,7 @@ impl<'a, L: RowChangeLog> ChangeLogQuery<'a, L> {
     }
 
     pub(crate) fn change_log<W: Warehouse>(&self, warehouse: &W, table: &TableId) -> SqlString {
-        warehouse.table_ref(&self.log.row_change_table(table))
+        warehouse.table_ref(&self.log.dml_landed_table(table))
     }
 
     pub(crate) fn captured<W: Warehouse>(

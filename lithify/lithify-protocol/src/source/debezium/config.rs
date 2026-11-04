@@ -1,22 +1,28 @@
 use serde::{Deserialize, Serialize};
 
 #[cfg(any(feature = "bigquery", feature = "duckdb"))]
-use lithify_core::sink::{Namespace, WarehouseClient};
+use lithify_core::sink::WarehouseClient;
 #[cfg(any(feature = "bigquery", feature = "duckdb"))]
 use lithify_core::source::SchemaChangeStream;
 #[cfg(any(feature = "bigquery", feature = "duckdb"))]
 use lithify_pipeline::capture::{Capture, ChangeLogsFn};
 
+#[cfg(any(feature = "bigquery", feature = "duckdb"))]
+use crate::landing::{Landed, Landing};
+#[cfg(feature = "bigquery")]
+use crate::sink::bigquery::BigQuerySink;
 #[cfg(feature = "bigquery")]
 use crate::sink::bigquery::client::{BigQueryClient, BigQueryExecution};
 #[cfg(feature = "duckdb")]
+use crate::sink::duckdb::S3Sink;
+#[cfg(feature = "duckdb")]
 use crate::sink::duckdb::client::{DuckDbClient, DuckDbExecution};
+#[cfg(any(feature = "bigquery", feature = "duckdb"))]
+use crate::source::debezium::Debezium;
 #[cfg(any(feature = "bigquery", feature = "duckdb"))]
 use crate::source::debezium::mysql::MySql;
 #[cfg(any(feature = "bigquery", feature = "duckdb"))]
 use crate::source::debezium::postgres::Postgres;
-#[cfg(any(feature = "bigquery", feature = "duckdb"))]
-use crate::source::debezium::{Debezium, SinkConnector};
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -41,13 +47,8 @@ impl Config {
     }
 
     #[cfg(any(feature = "bigquery", feature = "duckdb"))]
-    fn debezium<D: super::Dialect>(
-        &self,
-        connector: SinkConnector,
-        change_log: &Namespace,
-        dialect: D,
-    ) -> Debezium<D> {
-        let log = Debezium::new(connector, change_log.clone(), &self.topic_prefix, dialect);
+    fn debezium<D: super::Dialect>(&self, dialect: D) -> Debezium<D> {
+        let log = Debezium::new(&self.topic_prefix, dialect);
 
         match &self.ddl_topic {
             Some(ddl_topic) => log.with_ddl_topic(ddl_topic),
@@ -67,11 +68,11 @@ pub enum Dialect {
 impl<X: DuckDbExecution> Capture<DuckDbClient<X>> for Config {
     async fn with_change_logs<F: ChangeLogsFn<DuckDbClient<X>>>(
         &self,
-        change_log: &Namespace,
+        warehouse: &<DuckDbClient<X> as WarehouseClient>::Warehouse,
         f: F,
     ) -> F::Output {
         self.dialect
-            .with_change_logs(self, SinkConnector::ObjectStore, change_log, f)
+            .with_change_logs(self, S3Sink, warehouse, f)
             .await
     }
 }
@@ -80,34 +81,39 @@ impl<X: DuckDbExecution> Capture<DuckDbClient<X>> for Config {
 impl<X: BigQueryExecution> Capture<BigQueryClient<X>> for Config {
     async fn with_change_logs<F: ChangeLogsFn<BigQueryClient<X>>>(
         &self,
-        change_log: &Namespace,
+        warehouse: &<BigQueryClient<X> as WarehouseClient>::Warehouse,
         f: F,
     ) -> F::Output {
         self.dialect
-            .with_change_logs(self, SinkConnector::BigQuery, change_log, f)
+            .with_change_logs(self, BigQuerySink, warehouse, f)
             .await
     }
 }
 
 impl Dialect {
     #[cfg(any(feature = "bigquery", feature = "duckdb"))]
-    async fn with_change_logs<K, F>(
+    async fn with_change_logs<K, L, F>(
         self,
         config: &Config,
-        connector: SinkConnector,
-        change_log: &Namespace,
+        landing: L,
+        warehouse: &K::Warehouse,
         f: F,
     ) -> F::Output
     where
         K: WarehouseClient
-            + SchemaChangeStream<Debezium<MySql>, Error = <K as WarehouseClient>::Error>
-            + SchemaChangeStream<Debezium<Postgres>, Error = <K as WarehouseClient>::Error>,
+            + SchemaChangeStream<Landed<Debezium<MySql>, L>, Error = <K as WarehouseClient>::Error>
+            + SchemaChangeStream<Landed<Debezium<Postgres>, L>, Error = <K as WarehouseClient>::Error>,
+        L: Landing<Debezium<MySql>, Warehouse = K::Warehouse>
+            + Landing<Debezium<Postgres>, Warehouse = K::Warehouse>,
         F: ChangeLogsFn<K>,
     {
         match self {
-            Self::MySql => f.call(config.debezium(connector, change_log, MySql)).await,
+            Self::MySql => {
+                f.call(Landed::new(config.debezium(MySql), landing, warehouse))
+                    .await
+            }
             Self::Postgres => {
-                f.call(config.debezium(connector, change_log, Postgres))
+                f.call(Landed::new(config.debezium(Postgres), landing, warehouse))
                     .await
             }
         }
@@ -144,16 +150,21 @@ mod tests {
         {
             (
                 std::any::type_name::<C>(),
-                logs.schema_changes().schema_change_table(),
+                logs.schema_changes().ddl_landed_table(),
                 logs.schema_changes().envelope(),
                 logs.row_changes().envelope(),
             )
         }
     }
 
-    #[cfg(any(feature = "bigquery", feature = "duckdb"))]
-    fn cdc() -> Namespace {
-        Namespace::from("shop_cdc")
+    #[cfg(feature = "duckdb")]
+    fn lake() -> crate::DuckDbWarehouse {
+        crate::DuckDbWarehouse::new("shop_cdc")
+    }
+
+    #[cfg(feature = "bigquery")]
+    fn dataset() -> crate::BigQueryWarehouse {
+        crate::BigQueryWarehouse::new("local-project", "shop_cdc")
     }
 
     #[cfg(feature = "duckdb")]
@@ -167,10 +178,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            Capture::<DuckDbClient>::with_change_logs(&config, &cdc(), Probe)
+            Capture::<DuckDbClient>::with_change_logs(&config, &lake(), Probe)
                 .await
                 .1,
-            TablePath::new(cdc(), "mysql.schema-changes")
+            TablePath::new("shop_cdc", "mysql.schema-changes")
         );
     }
 
@@ -200,13 +211,13 @@ mod tests {
         assert_eq!(
             Capture::<DuckDbClient>::with_change_logs(
                 &Config::of(Dialect::MySql, "mysql"),
-                &cdc(),
+                &lake(),
                 Probe
             )
             .await,
             (
-                std::any::type_name::<Debezium<MySql>>(),
-                TablePath::new(cdc(), "mysql"),
+                std::any::type_name::<Landed<Debezium<MySql>, S3Sink>>(),
+                TablePath::new("shop_cdc", "mysql"),
                 value.clone(),
                 value.clone()
             )
@@ -214,13 +225,13 @@ mod tests {
         assert_eq!(
             Capture::<DuckDbClient>::with_change_logs(
                 &Config::of(Dialect::Postgres, "postgres"),
-                &cdc(),
+                &lake(),
                 Probe
             )
             .await,
             (
-                std::any::type_name::<Debezium<Postgres>>(),
-                TablePath::new(cdc(), "postgres"),
+                std::any::type_name::<Landed<Debezium<Postgres>, S3Sink>>(),
+                TablePath::new("shop_cdc", "postgres"),
                 value.clone(),
                 value
             )
@@ -233,13 +244,13 @@ mod tests {
         assert_eq!(
             Capture::<BigQueryClient>::with_change_logs(
                 &Config::of(Dialect::MySql, "mysql"),
-                &cdc(),
+                &dataset(),
                 Probe
             )
             .await,
             (
-                std::any::type_name::<Debezium<MySql>>(),
-                TablePath::new(cdc(), "mysql"),
+                std::any::type_name::<Landed<Debezium<MySql>, BigQuerySink>>(),
+                TablePath::new("shop_cdc", "mysql"),
                 None,
                 None
             )
@@ -247,13 +258,13 @@ mod tests {
         assert_eq!(
             Capture::<BigQueryClient>::with_change_logs(
                 &Config::of(Dialect::Postgres, "postgres"),
-                &cdc(),
+                &dataset(),
                 Probe
             )
             .await,
             (
-                std::any::type_name::<Debezium<Postgres>>(),
-                TablePath::new(cdc(), "postgres"),
+                std::any::type_name::<Landed<Debezium<Postgres>, BigQuerySink>>(),
+                TablePath::new("shop_cdc", "postgres"),
                 None,
                 None
             )

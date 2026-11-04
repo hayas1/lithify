@@ -13,7 +13,7 @@ use lithify_pipeline::runner::Runner;
 use lithify_protocol::DuckDbWarehouse;
 use lithify_protocol::sink::duckdb::client::DuckDbClient;
 
-use crate::landing::Landing;
+use crate::landing::ReplicaLanding;
 use crate::replica::{CellValue, Replica, Row};
 
 pub struct Shards {
@@ -23,7 +23,7 @@ pub struct Shards {
 impl Shards {
     pub async fn over(replica: &Replica) -> Self {
         let warehouse = DuckDbWarehouse::new("cdc");
-        let landing = Landing::of(replica).create(&warehouse);
+        let landing = ReplicaLanding::of(replica).create(&warehouse);
         let client = DuckDbClient::new(Connection::open_in_memory().unwrap(), warehouse);
         client.execute(&landing).await.unwrap();
 
@@ -52,7 +52,7 @@ impl Shards {
         window: &Window,
         previous: &[BuildLog],
     ) -> Vec<BuildLog> {
-        let log = Landing::log(self.client.warehouse());
+        let log = ReplicaLanding::log(self.client.warehouse());
         let run = Run::new(
             Ulid::nil(),
             Ts::from(DateTime::UNIX_EPOCH),

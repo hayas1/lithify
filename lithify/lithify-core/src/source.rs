@@ -29,10 +29,6 @@ impl fmt::Display for ColumnPath {
     }
 }
 
-pub trait CdcFormat {
-    type Config;
-}
-
 pub trait ChangeLog {
     type Position: Position;
 
@@ -56,7 +52,7 @@ pub trait ChangeLog {
 pub trait SchemaChangeLog: ChangeLog {
     type Record;
 
-    fn schema_change_table(&self) -> TablePath;
+    fn ddl_landed_table(&self) -> TablePath;
 
     fn schema_change(
         &self,
@@ -65,7 +61,7 @@ pub trait SchemaChangeLog: ChangeLog {
 }
 
 pub trait RowChangeLog: ChangeLog {
-    fn row_change_table(&self, table: &TableId) -> TablePath;
+    fn dml_landed_table(&self, table: &TableId) -> TablePath;
 
     fn operation(&self) -> ColumnPath;
 
