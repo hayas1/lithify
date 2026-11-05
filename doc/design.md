@@ -131,7 +131,7 @@ A sink places one `snapshot`, which the build log of the sink advances by, and a
 ### The set of artifacts is open
 
 No crate but the command line enumerates the kinds of artifact there are.
-As a capture is configured by `CdcFormat::Config` and a warehouse by `OpenWarehouse::Config`, each kind of artifact is configured by `Artifact::Config`, and is made by `Artifact::declared` from its name, its configuration and the time zone; the command line gathers the configurations into one enum tagged by `kind`, the way it gathers `CaptureConfig` and `WarehouseConfig`, so another kind is added without touching the configuration crate.
+As a capture is configured by `debezium::Config` and a warehouse by `OpenWarehouse::Config`, each kind of artifact is configured by `Artifact::Config`, and is made by `Artifact::declared` from its name, its configuration and the time zone; the command line gathers the configurations into one enum tagged by `kind`, the way it gathers `CaptureConfig` and `WarehouseConfig`, so another kind is added without touching the configuration crate.
 The build log records each series under the name of its artifact and by what makes it advance, such as the instant of the day it is cut at, so the `artifact` and `schedule` columns read whatever the artifact writes into them.
 
 ## Running
