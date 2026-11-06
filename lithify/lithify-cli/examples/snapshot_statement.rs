@@ -7,7 +7,7 @@ use lithify_core::artifact::Artifact;
 use lithify_core::build::Base;
 use lithify_core::listener::ReplayEnd;
 use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
-use lithify_core::sink::{TablePath, WarehouseSql};
+use lithify_core::sink::{TablePath, Warehouse, WarehouseSql};
 use lithify_core::ts::Ts;
 use lithify_core::window::Window;
 use lithify_pipeline::build_log::{BuildLog, Run, Series, Status, TableBuilt};
@@ -57,7 +57,11 @@ fn previous(window: &Window, shard: &str) -> BuildLog {
     )
 }
 
-fn statements<L: Landing<Debezium<MySql>>>(landing: L, warehouse: L::Warehouse) -> String {
+fn statements<L>(landing: L, warehouse: L::Warehouse) -> String
+where
+    L: Landing<Debezium<MySql>>,
+    L::Warehouse: Warehouse,
+{
     let log = Landed::new(Debezium::new("mysql", MySql), landing, &warehouse);
     let window = Window::new(
         Ts::try_from(1789862400000).unwrap(),

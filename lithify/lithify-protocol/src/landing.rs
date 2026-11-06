@@ -1,13 +1,13 @@
 use lithify_core::event::{MalformedEvent, SchemaChange};
 use lithify_core::model::TableId;
 use lithify_core::position::Coordinate;
-use lithify_core::sink::{ChangeLogSql, Namespace, TablePath, Warehouse};
+use lithify_core::sink::{ChangeLogSql, Namespace, TablePath};
 use lithify_core::source::{ChangeLog, ChangeLogs, ColumnPath, RowChangeLog, SchemaChangeLog};
 
 use crate::source::CdcFormat;
 
 pub trait Landing<C> {
-    type Warehouse: Warehouse;
+    type Warehouse: ChangeLogSql;
 
     fn envelope(&self) -> Option<ColumnPath>;
 
