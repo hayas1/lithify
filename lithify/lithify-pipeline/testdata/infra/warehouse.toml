@@ -1,0 +1,3 @@
+[sink.warehouse.files]
+bucket = "lithify"
+change_log = { prefix = "mysql_shop_cdc" }

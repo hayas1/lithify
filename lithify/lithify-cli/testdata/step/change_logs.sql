@@ -1,0 +1,9 @@
+CREATE SCHEMA mysql_shop_cdc;
+CREATE TABLE mysql_shop_cdc.mysql AS SELECT * FROM (VALUES
+  ({'source': {'file': 'binlog.000001', 'pos': 1::BIGINT, 'gtid': NULL, 'ts_ms': 0::BIGINT}, 'ts_ms': 0::BIGINT,
+    'ddl': 'CREATE TABLE people (id BIGINT)',
+    'tableChanges': [{'type': 'CREATE', 'id': '"shop"."people"',
+      'table': {'primaryKeyColumnNames': ['id'], 'columns': [
+        {'name': 'id', 'typeName': 'BIGINT', 'position': 1, 'optional': false,
+         'defaultValueExpression': NULL, 'length': NULL, 'scale': NULL}]}}]})
+) AS t(value)

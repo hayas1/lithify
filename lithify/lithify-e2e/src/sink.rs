@@ -1,148 +1,132 @@
+use std::convert::Infallible;
 use std::fmt::{self, Display, Formatter};
 
 use chrono::DateTime;
-use duckdb::types::{FromSql, TimeUnit, Value};
+use duckdb::types::{TimeUnit, Value};
 
-use lithify_cli::pipeline::{self, Capture};
-use lithify_core::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
-use lithify_core::era::EraTracker;
-use lithify_core::listener::OutOfOrder;
-use lithify_core::model::{TableId, TableModel};
-use lithify_core::position::RecordedAt;
-use lithify_core::sink::{TablePath, Warehouse, WarehouseClient};
-use lithify_core::source::{
-    ChangeLog, ChangeLogs, ColumnPath, RowChangeLog, SchemaChangeLog, SchemaChangeStream,
-};
-use lithify_core::sql::SqlString;
-use lithify_core::window::Window;
-use lithify_protocol::DuckDbWarehouse;
-use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbChangeLogsFn, DuckDbClient};
-use lithify_protocol::sink::duckdb::store::ObjectStore;
-use lithify_strategy::snapshot::Snapshot;
+use lithify_artifact::snapshot::Snapshot;
+use lithify_build::artifact::UnbuildableArtifact;
+use lithify_build::sink::{Namespace, OpenWarehouse, TablePath, WarehouseClient, WarehouseSql};
+use lithify_build::source::{ChangeLogs, RowChangeLog, SchemaChangeStream};
+use lithify_build::sql::SqlString;
+use lithify_cli::credential::Credentials;
+use lithify_cli::pipeline::{self, CaptureConfig};
+use lithify_cli::unrunnable::Unrunnable;
+use lithify_pipeline::build_log::Status;
+use lithify_pipeline::capture::{Capture, ChangeLogsFn};
+use lithify_pipeline::runner::Runner;
+use lithify_pipeline::warehouse::WarehouseControl;
+use lithify_protocol::sink::bigquery;
+use lithify_protocol::sink::bigquery::client::BigQueryClient;
+use lithify_protocol::sink::duckdb::client::DuckDbClient;
+use lithify_protocol::{BigQueryWarehouse, DuckDbWarehouse};
+use lithify_schema::listener::OutOfOrder;
+use lithify_schema::model::{TableId, TableModel};
+use lithify_schema::source::{ChangeLog, ColumnPath};
+use lithify_schema::ts::{Event, Processing, Ts};
+use lithify_schema::window::Window;
 
 use crate::row::{Cell, Row, Rows};
+use crate::run::Unverifiable;
 
-pub trait Sink {
-    fn execute(&mut self, statement: &str) -> Result<(), Unbuildable>;
-
-    fn landed(
-        &mut self,
-        capture: &Capture,
-        topic_prefix: &str,
-        table: &TableId,
-        at: RecordedAt,
+pub trait Sink: WarehouseControl + Sized {
+    async fn landed_since(
+        &self,
+        topic: &TablePath,
+        processing_time: &ColumnPath,
+        at: Ts<Processing>,
     ) -> Result<u64, Unbuildable>;
 
-    fn model(
-        &mut self,
-        capture: &Capture,
-        topic_prefix: &str,
-        table: &TableId,
-        at: RecordedAt,
-    ) -> Result<TableModel, Unbuildable>;
+    async fn rows(&self, table: &TablePath, model: &TableModel) -> Result<Rows, Unbuildable>;
 
-    fn snapshot(
-        &mut self,
-        capture: &Capture,
-        topic_prefix: &str,
+    async fn landed<C: Capture<Self>>(
+        &self,
+        capture: &C,
+        table: &TableId,
+        at: Ts<Processing>,
+    ) -> Result<u64, Unbuildable> {
+        let (topic, processing_time) = capture
+            .with_change_logs(self.warehouse(), LandedTopic { table })
+            .await;
+
+        self.landed_since(&topic, &processing_time, at).await
+    }
+
+    async fn model<C: Capture<Self>>(
+        &self,
+        capture: &C,
+        table: &TableId,
+        at: Ts<Event>,
+    ) -> Result<TableModel, Unbuildable>
+    where
+        Unbuildable: From<<Self as WarehouseClient>::Error>,
+    {
+        capture
+            .with_change_logs(
+                self.warehouse(),
+                Catalog {
+                    client: self,
+                    table,
+                    at,
+                },
+            )
+            .await?
+            .ok_or_else(|| Unbuildable::UnknownTable(table.clone()))
+    }
+
+    async fn snapshot<C: Capture<Self>>(
+        &self,
+        capture: &C,
         table: &TableId,
         artifact: &Snapshot,
+        namespace: &Namespace,
         window: &Window,
-    ) -> Result<(), Unbuildable>;
-
-    fn rows(&mut self, table: &TablePath, model: &TableModel) -> Result<Rows, Unbuildable>;
-}
-
-impl dyn Sink {
-    pub fn connect(
-        warehouse: &pipeline::Warehouse,
-        change_log: &str,
-        key_id: &str,
-        secret: &str,
-    ) -> Result<Box<Self>, Unbuildable> {
-        match warehouse {
-            pipeline::Warehouse::DuckDb(store) => Ok(Box::new(DuckDb::connect(
-                &ObjectStore::open(store, key_id, secret),
-                change_log,
-            )?)),
-            pipeline::Warehouse::BigQuery(_) => Err(Unbuildable::Unverified("bigquery")),
-        }
-    }
-}
-
-pub struct DuckDb {
-    client: DuckDbClient,
-}
-
-impl DuckDb {
-    pub fn connect(store: &ObjectStore, change_log: &str) -> Result<Self, Unbuildable> {
-        Ok(Self {
-            client: store.client(change_log)?,
-        })
+    ) -> Result<(), Unbuildable>
+    where
+        Unbuildable: From<<Self as WarehouseClient>::Error>,
+    {
+        capture
+            .with_change_logs(
+                self.warehouse(),
+                SnapshotBuild {
+                    client: self,
+                    table,
+                    artifact,
+                    namespace,
+                    window,
+                },
+            )
+            .await
     }
 
-    fn instant(unit: TimeUnit, read: i64) -> Cell {
-        let micros = match unit {
-            TimeUnit::Second => read * 1_000_000,
-            TimeUnit::Millisecond => read * 1_000,
-            TimeUnit::Microsecond => read,
-            TimeUnit::Nanosecond => read / 1_000,
-        };
-
-        match DateTime::from_timestamp_micros(micros) {
-            Some(at) => Cell::Read(at.format("%Y-%m-%d %H:%M:%S%.6f").to_string()),
-            None => Cell::Read(micros.to_string()),
-        }
-    }
-
-    fn date(days: i32) -> Cell {
-        match DateTime::from_timestamp(i64::from(days) * 86_400, 0) {
-            Some(at) => Cell::Read(at.format("%Y-%m-%d").to_string()),
-            None => Cell::Read(days.to_string()),
-        }
-    }
-
-    fn unwritten(unread: &duckdb::Error) -> bool {
-        unread
-            .to_string()
-            .contains("No files found that match the pattern")
-    }
-
-    fn select(&self, table: &TablePath, model: &TableModel) -> String {
-        let warehouse = self.client.warehouse();
+    fn select(&self, table: &TablePath, model: &TableModel) -> SqlString {
+        let warehouse = self.warehouse();
         let columns: Vec<String> = model
             .columns()
-            .map(|column| warehouse.identifier(column.name()).to_string())
+            .map(|column| warehouse.column_ref(column.name()).to_string())
             .collect();
 
-        format!(
+        SqlString::from(format!(
             "SELECT {} FROM {}",
             columns.join(", "),
             warehouse.table_ref(table)
-        )
+        ))
     }
 }
 
-impl Sink for DuckDb {
-    fn execute(&mut self, statement: &str) -> Result<(), Unbuildable> {
-        Ok(self.client.execute(&SqlString::from(statement))?)
-    }
-
-    fn landed(
-        &mut self,
-        capture: &Capture,
-        topic_prefix: &str,
-        table: &TableId,
-        at: RecordedAt,
+impl Sink for DuckDbClient {
+    async fn landed_since(
+        &self,
+        topic: &TablePath,
+        processing_time: &ColumnPath,
+        at: Ts<Processing>,
     ) -> Result<u64, Unbuildable> {
-        let (topic, recorded_at) = capture.with_duckdb_change_logs(topic_prefix, Landing { table });
-
-        let warehouse = self.client.warehouse();
-        let landed = self.client.connection().query_row(
+        let warehouse = self.warehouse();
+        let landed = self.connection().query_row(
             &format!(
                 "SELECT COUNT(*) FROM {} WHERE {} >= {}",
-                warehouse.change_log_ref(&topic),
-                warehouse.path(&recorded_at),
+                warehouse.table_ref(topic),
+                warehouse.path(processing_time),
                 at.milliseconds_since_epoch()
             ),
             [],
@@ -151,54 +135,21 @@ impl Sink for DuckDb {
 
         match landed {
             Ok(landed) => Ok(landed),
-            Err(unread) if Self::unwritten(&unread) => Ok(0),
+            Err(unread)
+                if unread
+                    .to_string()
+                    .contains("No files found that match the pattern") =>
+            {
+                Ok(0)
+            }
             Err(unread) => Err(unread.into()),
         }
     }
 
-    fn model(
-        &mut self,
-        capture: &Capture,
-        topic_prefix: &str,
-        table: &TableId,
-        at: RecordedAt,
-    ) -> Result<TableModel, Unbuildable> {
-        let read = capture.with_duckdb_change_logs(
-            topic_prefix,
-            Catalog {
-                client: &self.client,
-                table,
-                at,
-            },
-        )?;
-
-        read.ok_or_else(|| Unbuildable::UnknownTable(table.clone()))
-    }
-
-    fn snapshot(
-        &mut self,
-        capture: &Capture,
-        topic_prefix: &str,
-        table: &TableId,
-        artifact: &Snapshot,
-        window: &Window,
-    ) -> Result<(), Unbuildable> {
-        capture.with_duckdb_change_logs(
-            topic_prefix,
-            SnapshotBuild {
-                client: &self.client,
-                table,
-                artifact,
-                window,
-            },
-        )
-    }
-
-    fn rows(&mut self, table: &TablePath, model: &TableModel) -> Result<Rows, Unbuildable> {
+    async fn rows(&self, table: &TablePath, model: &TableModel) -> Result<Rows, Unbuildable> {
         let mut statement = self
-            .client
             .connection()
-            .prepare(&self.select(table, model))?;
+            .prepare(self.select(table, model).as_str())?;
         let read = statement.query_map([], |row| {
             Ok((0..model.columns().count())
                 .map(|at| Cell::from(&row.get::<_, Value>(at).unwrap_or(Value::Null)))
@@ -206,6 +157,132 @@ impl Sink for DuckDb {
         })?;
 
         read.collect::<Result<Rows, _>>().map_err(Unbuildable::from)
+    }
+}
+
+impl Sink for BigQueryClient {
+    async fn landed_since(
+        &self,
+        _: &TablePath,
+        _: &ColumnPath,
+        _: Ts<Processing>,
+    ) -> Result<u64, Unbuildable> {
+        todo!("count what landed once the bigquery client answers queries with rows")
+    }
+
+    async fn rows(&self, _: &TablePath, _: &TableModel) -> Result<Rows, Unbuildable> {
+        todo!("read the rows once the bigquery client answers queries with rows")
+    }
+}
+
+pub enum SinkClient {
+    DuckDb(DuckDbClient),
+    BigQuery(BigQueryClient),
+}
+
+impl SinkClient {
+    pub async fn connect(
+        warehouse: &pipeline::WarehouseConfig,
+        change_log: &pipeline::LocationConfig,
+        credentials: &Credentials,
+    ) -> Result<Self, Unverifiable> {
+        match warehouse.reach(change_log).ok_or(Unrunnable::Unreached)? {
+            pipeline::Reached::DuckDb(config, change_log) => Ok(Self::DuckDb(
+                DuckDbWarehouse::open(config, credentials.duckdb()?, change_log)
+                    .await
+                    .map_err(Unbuildable::from)?,
+            )),
+            pipeline::Reached::BigQuery(config, change_log) => Ok(Self::BigQuery(
+                BigQueryWarehouse::open(config, &(), change_log)
+                    .await
+                    .map_err(Unbuildable::from)?,
+            )),
+        }
+    }
+
+    pub async fn execute(&self, statement: &str) -> Result<(), Unbuildable> {
+        let statement = SqlString::from(statement);
+
+        match self {
+            Self::DuckDb(client) => Ok(client.execute(&statement).await?),
+            Self::BigQuery(client) => Ok(client.execute(&statement).await?),
+        }
+    }
+
+    pub async fn landed(
+        &self,
+        capture: &CaptureConfig,
+        table: &TableId,
+        at: Ts<Processing>,
+    ) -> Result<u64, Unbuildable> {
+        match self {
+            Self::DuckDb(client) => client.landed(capture, table, at).await,
+            Self::BigQuery(client) => client.landed(capture, table, at).await,
+        }
+    }
+
+    pub async fn model(
+        &self,
+        capture: &CaptureConfig,
+        table: &TableId,
+        at: Ts<Event>,
+    ) -> Result<TableModel, Unbuildable> {
+        match self {
+            Self::DuckDb(client) => client.model(capture, table, at).await,
+            Self::BigQuery(client) => client.model(capture, table, at).await,
+        }
+    }
+
+    pub async fn snapshot(
+        &self,
+        capture: &CaptureConfig,
+        table: &TableId,
+        artifact: &Snapshot,
+        namespace: &Namespace,
+        window: &Window,
+    ) -> Result<(), Unbuildable> {
+        match self {
+            Self::DuckDb(client) => {
+                client
+                    .snapshot(capture, table, artifact, namespace, window)
+                    .await
+            }
+            Self::BigQuery(client) => {
+                client
+                    .snapshot(capture, table, artifact, namespace, window)
+                    .await
+            }
+        }
+    }
+
+    pub async fn rows(&self, table: &TablePath, model: &TableModel) -> Result<Rows, Unbuildable> {
+        match self {
+            Self::DuckDb(client) => client.rows(table, model).await,
+            Self::BigQuery(client) => client.rows(table, model).await,
+        }
+    }
+}
+
+impl Cell {
+    fn instant(unit: TimeUnit, read: i64) -> Self {
+        let micros = match unit {
+            TimeUnit::Second => read * 1_000_000,
+            TimeUnit::Millisecond => read * 1_000,
+            TimeUnit::Microsecond => read,
+            TimeUnit::Nanosecond => read / 1_000,
+        };
+
+        match DateTime::from_timestamp_micros(micros) {
+            Some(at) => Self::Read(at.format("%Y-%m-%d %H:%M:%S%.6f").to_string()),
+            None => Self::Read(micros.to_string()),
+        }
+    }
+
+    fn date(days: i32) -> Self {
+        match DateTime::from_timestamp(i64::from(days) * 86_400, 0) {
+            Some(at) => Self::Read(at.format("%Y-%m-%d").to_string()),
+            None => Self::Read(days.to_string()),
+        }
     }
 }
 
@@ -226,96 +303,99 @@ impl From<&Value> for Cell {
             Value::Double(read) => Self::Read(read.to_string()),
             Value::Decimal(read) => Self::Read(read.to_string()),
             Value::Text(read) => Self::Read(read.clone()),
-            Value::Timestamp(unit, read) => DuckDb::instant(*unit, *read),
-            Value::Date32(days) => DuckDb::date(*days),
+            Value::Timestamp(unit, read) => Self::instant(*unit, *read),
+            Value::Date32(days) => Self::date(*days),
             read => Self::Read(format!("{read:?}")),
         }
     }
 }
 
-struct Landing<'a> {
+struct LandedTopic<'a> {
     table: &'a TableId,
 }
 
-impl DuckDbChangeLogsFn for Landing<'_> {
-    type Output = (String, ColumnPath);
+impl<K: WarehouseClient> ChangeLogsFn<K> for LandedTopic<'_> {
+    type Output = (TablePath, ColumnPath);
 
-    fn call_duckdb<C>(self, logs: C) -> Self::Output
+    async fn call<C>(self, logs: C) -> Self::Output
     where
         C: ChangeLogs,
-        <C::Schema as SchemaChangeLog>::Record: FromSql,
+        K: SchemaChangeStream<C::SchemaChangeLog, Error = <K as WarehouseClient>::Error>,
     {
         (
-            logs.row_changes().dml_topic(self.table),
-            logs.row_changes().recorded_at(),
+            logs.row_changes().dml_landed_table(self.table),
+            logs.row_changes().processing_time(),
         )
     }
 }
 
-struct Catalog<'a> {
-    client: &'a DuckDbClient,
+struct Catalog<'a, K> {
+    client: &'a K,
     table: &'a TableId,
-    at: RecordedAt,
+    at: Ts<Event>,
 }
 
-impl DuckDbChangeLogsFn for Catalog<'_> {
+impl<K> ChangeLogsFn<K> for Catalog<'_, K>
+where
+    K: WarehouseClient,
+    Unbuildable: From<<K as WarehouseClient>::Error>,
+{
     type Output = Result<Option<TableModel>, Unbuildable>;
 
-    fn call_duckdb<C>(self, logs: C) -> Self::Output
+    async fn call<C>(self, logs: C) -> Self::Output
     where
         C: ChangeLogs,
-        <C::Schema as SchemaChangeLog>::Record: FromSql,
+        K: SchemaChangeStream<C::SchemaChangeLog, Error = <K as WarehouseClient>::Error>,
     {
         self.client
             .table(logs.schema_changes(), self.table, self.at)
+            .await
     }
 }
 
-struct SnapshotBuild<'a> {
-    client: &'a DuckDbClient,
+struct SnapshotBuild<'a, K> {
+    client: &'a K,
     table: &'a TableId,
     artifact: &'a Snapshot,
+    namespace: &'a Namespace,
     window: &'a Window,
 }
 
-impl DuckDbChangeLogsFn for SnapshotBuild<'_> {
+impl<K> ChangeLogsFn<K> for SnapshotBuild<'_, K>
+where
+    K: WarehouseControl,
+    Unbuildable: From<<K as WarehouseClient>::Error>,
+{
     type Output = Result<(), Unbuildable>;
 
-    fn call_duckdb<C>(self, logs: C) -> Self::Output
+    async fn call<C>(self, logs: C) -> Self::Output
     where
         C: ChangeLogs,
-        <C::Schema as SchemaChangeLog>::Record: FromSql,
+        K: SchemaChangeStream<C::SchemaChangeLog, Error = <K as WarehouseClient>::Error>,
     {
-        let mut tracker = EraTracker::new(self.window.clone(), |table: &TableId| {
-            Ok::<_, Unbuildable>(self.artifact.builder::<_, DuckDbWarehouse>(
-                logs.row_changes(),
-                table.clone(),
-                self.window,
-                None,
-            )?)
-        });
-        let catalog = self.client.replay::<Unbuildable, _>(
-            self.client.warehouse(),
-            logs.schema_changes(),
-            self.window,
-            &mut tracker,
-        )?;
-        let snapshot = tracker
-            .finish(self.client.warehouse(), &catalog)?
+        let built = Runner::new(self.client, &logs)
+            .built::<_, Unbuildable>(self.artifact, self.namespace, self.window, &[], |table| {
+                table == self.table
+            })
+            .await?
             .into_iter()
-            .find(|snapshot| snapshot.table() == self.table)
+            .find(|built| built.table() == Some(self.table))
             .ok_or_else(|| Unbuildable::UnknownTable(self.table.clone()))?;
 
-        self.client.build(&snapshot)
+        match built.status() {
+            Status::Succeeded => Ok(()),
+            Status::Failed(cause) => Err(Unbuildable::Unbuilt(cause.clone())),
+        }
     }
 }
 
 #[derive(Debug)]
 pub enum Unbuildable {
     Unqueryable(duckdb::Error),
+    Unanswered(bigquery::client::Unqueryable),
     UnknownTable(TableId),
-    Unverified(&'static str),
     Unwritable(UnbuildableArtifact),
+    Unbuilt(String),
     OutOfOrder(OutOfOrder),
 }
 
@@ -323,9 +403,10 @@ impl Display for Unbuildable {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unqueryable(cause) => write!(formatter, "{cause}"),
+            Self::Unanswered(cause) => write!(formatter, "{cause}"),
             Self::UnknownTable(table) => write!(formatter, "{table} is not in the change log"),
-            Self::Unverified(kind) => write!(formatter, "{kind} sinks cannot be verified yet"),
             Self::Unwritable(cause) => write!(formatter, "{cause}"),
+            Self::Unbuilt(cause) => write!(formatter, "{cause}"),
             Self::OutOfOrder(cause) => write!(formatter, "{cause}"),
         }
     }
@@ -339,9 +420,21 @@ impl From<duckdb::Error> for Unbuildable {
     }
 }
 
+impl From<bigquery::client::Unqueryable> for Unbuildable {
+    fn from(cause: bigquery::client::Unqueryable) -> Self {
+        Self::Unanswered(cause)
+    }
+}
+
 impl From<UnbuildableArtifact> for Unbuildable {
     fn from(cause: UnbuildableArtifact) -> Self {
         Self::Unwritable(cause)
+    }
+}
+
+impl From<Infallible> for Unbuildable {
+    fn from(never: Infallible) -> Self {
+        match never {}
     }
 }
 

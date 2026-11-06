@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use sqlparser::dialect::MySqlDialect;
 
-use lithify_core::model::ColumnType;
-use lithify_core::position::{Coordinate, Position};
-use lithify_core::source::ColumnPath;
+use lithify_schema::model::ColumnType;
+use lithify_schema::position::{Coordinate, Position};
+use lithify_schema::source::ColumnPath;
 
 use super::Dialect;
 
@@ -121,7 +121,7 @@ mod tests {
     use super::super::Debezium;
     use super::super::tests::described;
     use super::*;
-    use lithify_core::event::{Hint, MalformedEvent, TableChange};
+    use lithify_schema::event::{Hint, MalformedEvent, TableChange};
     use serde_json::{Value, json};
 
     fn source(source: Value) -> MySqlSource {
@@ -245,7 +245,7 @@ mod tests {
             panic!("expected a created table");
         };
         assert_eq!(
-            table.column("amount").unwrap().column_type(),
+            table.column(&"amount".into()).unwrap().column_type(),
             &ColumnType::Decimal {
                 precision: 12,
                 scale: 2

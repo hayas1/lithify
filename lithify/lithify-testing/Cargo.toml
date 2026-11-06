@@ -1,0 +1,24 @@
+[package]
+name = "lithify-testing"
+version.workspace = true
+description.workspace = true
+authors.workspace = true
+edition.workspace = true
+repository.workspace = true
+license-file.workspace = true
+readme.workspace = true
+publish = false
+
+[dependencies]
+chrono = { workspace = true }
+duckdb = { workspace = true }
+lithify-cli = { workspace = true }
+lithify-pipeline = { workspace = true }
+lithify-build = { workspace = true }
+lithify-schema = { workspace = true }
+lithify-protocol = { workspace = true, features = ["duckdb"] }
+serde = { workspace = true }
+ulid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros"] }

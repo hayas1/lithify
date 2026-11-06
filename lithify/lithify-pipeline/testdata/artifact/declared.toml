@@ -1,0 +1,9 @@
+[[artifact]]
+name = "daily"
+kind = "snapshot"
+shard = "%Y%m%d"
+
+[[artifact]]
+name = "copy"
+kind = "copy"
+base = "daily"

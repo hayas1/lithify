@@ -3,20 +3,25 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use chrono::{NaiveDate, Utc};
+use chrono::NaiveDate;
 use clap::{Parser, Subcommand};
 
-use lithify_cli::course::Course;
-use lithify_cli::credential::{Credential, Secret};
+use lithify_build::artifact::ArtifactName;
+#[cfg(feature = "serve")]
+use lithify_cli::artifacts::ArtifactConfig;
+use lithify_cli::command::{RunCommand, Target};
+use lithify_cli::credential::Credentials;
 use lithify_cli::journal::Journal;
-use lithify_cli::plan::Tables;
+#[cfg(feature = "serve")]
+use lithify_cli::pipeline::{CaptureConfig, WarehouseConfig};
 use lithify_cli::run::Run;
 use lithify_cli::unrunnable::Unrunnable;
-use lithify_core::model::TableId;
+use lithify_protocol::sink::duckdb::store::{S3Credential, Secret};
+use lithify_schema::ts::Ts;
 #[cfg(feature = "serve")]
-use lithify_ui::overview::SinkOverview;
+use lithify_ui::pipelines::Survey;
 #[cfg(feature = "serve")]
-use lithify_ui::server::{Board, Survey};
+use lithify_ui::server::Board;
 
 #[derive(Parser)]
 #[command(
@@ -35,7 +40,7 @@ enum Command {
     )]
     CatchUp(CatchUpArguments),
     #[command(
-        about = "Build the shard of a pipeline's snapshots that is named, onto the one the build log recorded before it"
+        about = "Build the next window the build log leaves to build, or the one named, onto what the build log recorded before it"
     )]
     Build(BuildArguments),
     #[command(
@@ -44,19 +49,19 @@ enum Command {
     Check(CheckArguments),
     #[cfg(feature = "serve")]
     #[command(
-        about = "Serve the pages listing what was built, and assembling the builds to rebuild it with"
+        about = "Serve the pages listing what was built and what the check finds wrong with it"
     )]
     Serve(ServeArguments),
 }
 
 impl Command {
-    fn execute(self) -> ExitCode {
+    async fn execute(self) -> ExitCode {
         let journal = match self {
-            Self::CatchUp(arguments) => arguments.journal(),
-            Self::Build(arguments) => arguments.journal(),
-            Self::Check(arguments) => arguments.journal(),
+            Self::CatchUp(arguments) => arguments.journal().await,
+            Self::Build(arguments) => arguments.journal().await,
+            Self::Check(arguments) => arguments.journal().await,
             #[cfg(feature = "serve")]
-            Self::Serve(arguments) => arguments.journal(),
+            Self::Serve(arguments) => arguments.journal().await,
         };
 
         match journal {
@@ -80,28 +85,47 @@ impl Command {
 }
 
 #[derive(clap::Args)]
+struct CredentialArguments {
+    #[arg(
+        long,
+        env = "S3_ACCESS_KEY_ID",
+        hide_env_values = true,
+        value_name = "KEY",
+        requires = "secret_access_key",
+        help = "The key the object storage holding the change log is read with"
+    )]
+    access_key_id: Option<String>,
+    #[arg(
+        long,
+        env = "S3_SECRET_ACCESS_KEY",
+        hide_env_values = true,
+        value_name = "SECRET",
+        requires = "access_key_id",
+        help = "The secret the object storage holding the change log is read with"
+    )]
+    secret_access_key: Option<Secret>,
+}
+
+impl CredentialArguments {
+    fn credentials(&self) -> Credentials {
+        Credentials::new(
+            self.access_key_id
+                .clone()
+                .zip(self.secret_access_key.clone())
+                .map(|(key_id, secret)| S3Credential::new(key_id, secret)),
+        )
+    }
+}
+
+#[derive(clap::Args)]
 struct PipelineArguments {
     #[arg(
         value_name = "DIRECTORY",
         help = "The directory holding the infra.toml and table.toml of one pipeline"
     )]
     directory: PathBuf,
-    #[arg(
-        long,
-        env = "S3_ACCESS_KEY_ID",
-        hide_env_values = true,
-        value_name = "KEY",
-        help = "The key the object storage holding the change log is read with"
-    )]
-    access_key_id: String,
-    #[arg(
-        long,
-        env = "S3_SECRET_ACCESS_KEY",
-        hide_env_values = true,
-        value_name = "SECRET",
-        help = "The secret the object storage holding the change log is read with"
-    )]
-    secret_access_key: Secret,
+    #[command(flatten)]
+    credential: CredentialArguments,
     #[arg(
         long,
         value_name = "NAME",
@@ -114,44 +138,26 @@ impl PipelineArguments {
     fn run(&self) -> Run {
         Run::new(
             self.directory.clone(),
-            Credential::new(self.access_key_id.clone(), self.secret_access_key.clone()),
+            self.credential.credentials(),
             self.sink.clone(),
-            Utc::now(),
+            Ts::now(),
         )
     }
 }
 
-#[cfg(feature = "serve")]
-impl Survey for PipelineArguments {
-    fn directory(&self) -> String {
-        self.directory.display().to_string()
-    }
+#[derive(clap::Args)]
+struct TargetArguments {
+    #[arg(
+        long,
+        value_name = "ARTIFACT",
+        help = "The name of the artifact to build, out of every one the sink places when none is named"
+    )]
+    artifact: Option<ArtifactName>,
+}
 
-    fn sinks(&self) -> Result<Vec<String>, String> {
-        self.run()
-            .sinks()
-            .map_err(|unrunnable| unrunnable.to_string())
-    }
-
-    fn inspect(&self) -> Result<Vec<SinkOverview>, String> {
-        Ok(self
-            .run()
-            .inspect()
-            .map_err(|unrunnable| unrunnable.to_string())?
-            .into_iter()
-            .map(|(sink, inspection)| {
-                SinkOverview::new(
-                    &sink,
-                    inspection.schedule(),
-                    inspection.latest().to_vec(),
-                    inspection
-                        .discrepancies()
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect(),
-                )
-            })
-            .collect())
+impl TargetArguments {
+    fn target(&self) -> Target {
+        Target::new(self.artifact.clone())
     }
 }
 
@@ -159,11 +165,25 @@ impl Survey for PipelineArguments {
 struct CatchUpArguments {
     #[command(flatten)]
     pipeline: PipelineArguments,
+    #[command(flatten)]
+    target: TargetArguments,
+    #[arg(
+        long,
+        value_name = "DATE",
+        help = "The last day to build through, rather than the latest window that has closed"
+    )]
+    to: Option<NaiveDate>,
 }
 
 impl CatchUpArguments {
-    fn journal(self) -> Result<Journal, Unrunnable> {
-        self.pipeline.run().build(&Course::CatchUp)
+    async fn journal(self) -> Result<Journal, Unrunnable> {
+        self.pipeline
+            .run()
+            .build(&RunCommand::CatchUp {
+                target: self.target.target(),
+                to: self.to,
+            })
+            .await
     }
 }
 
@@ -171,41 +191,24 @@ impl CatchUpArguments {
 struct BuildArguments {
     #[command(flatten)]
     pipeline: PipelineArguments,
-    #[arg(
-        long,
-        value_name = "DATE",
-        help = "The date the window of the shard to build opens on, folding onto the shard the build log recorded closing then"
-    )]
-    snapshot: NaiveDate,
-    #[arg(
-        long,
-        value_name = "SCHEMA.TABLE",
-        value_parser = |table: &str| TableId::try_from(table),
-        help = "A table to build the shard of, out of every table the window holds when none is named"
-    )]
-    table: Vec<TableId>,
+    #[command(flatten)]
+    target: TargetArguments,
     #[arg(
         long,
         value_name = "DIRECTORY",
-        help = "Write the statements the shard would run into this directory, one file per sink, instead of running them"
+        help = "Write the statements the step would run into this directory, one file per sink, instead of running them"
     )]
     dry_run: Option<PathBuf>,
 }
 
 impl BuildArguments {
-    fn journal(self) -> Result<Journal, Unrunnable> {
-        let course = Course::Shard {
-            date: self.snapshot,
-            tables: match self.table.is_empty() {
-                true => Tables::Every,
-                false => Tables::Named(self.table.into_iter().collect()),
-            },
-        };
+    async fn journal(self) -> Result<Journal, Unrunnable> {
+        let command = RunCommand::Build(self.target.target());
         let run = self.pipeline.run();
 
         match self.dry_run {
-            Some(into) => run.plan(&course, &into),
-            None => run.build(&course),
+            Some(into) => run.dry_run(&command, &into).await,
+            None => run.build(&command).await,
         }
     }
 }
@@ -217,16 +220,21 @@ struct CheckArguments {
 }
 
 impl CheckArguments {
-    fn journal(self) -> Result<Journal, Unrunnable> {
-        self.pipeline.run().check()
+    async fn journal(self) -> Result<Journal, Unrunnable> {
+        self.pipeline.run().check().await
     }
 }
 
 #[cfg(feature = "serve")]
 #[derive(clap::Args)]
 struct ServeArguments {
+    #[arg(
+        value_name = "DIRECTORY",
+        help = "The directory of one pipeline, or the directory holding the directories of several"
+    )]
+    directory: PathBuf,
     #[command(flatten)]
-    pipeline: PipelineArguments,
+    credential: CredentialArguments,
     #[arg(
         long,
         value_name = "ADDRESS",
@@ -238,19 +246,27 @@ struct ServeArguments {
 
 #[cfg(feature = "serve")]
 impl ServeArguments {
-    fn journal(self) -> Result<Journal, Unrunnable> {
-        Board::new(self.pipeline).serve(self.address)?;
+    async fn journal(self) -> Result<Journal, Unrunnable> {
+        Board::new(
+            Survey::<CaptureConfig, WarehouseConfig, ArtifactConfig>::new(
+                self.directory,
+                self.credential.credentials(),
+            ),
+        )
+        .serve(self.address)
+        .await?;
 
         Ok(Journal::default())
     }
 }
 
-fn main() -> ExitCode {
+#[tokio::main]
+async fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .init();
 
-    Arguments::parse().command.execute()
+    Arguments::parse().command.execute().await
 }
 
 #[cfg(test)]
@@ -271,54 +287,68 @@ mod tests {
     }
 
     fn build_arguments(extra: &[&str]) -> BuildArguments {
-        match parsed(
-            "build",
-            &[&["--snapshot", "2026-09-20"][..], extra].concat(),
-        )
-        .unwrap()
-        {
+        match parsed("build", extra).unwrap() {
             Command::Build(arguments) => arguments,
             _ => unreachable!("build was named"),
         }
     }
 
     #[test]
-    fn a_catch_up_is_given_nothing_but_the_pipeline() {
-        assert!(matches!(parsed("catch-up", &[]), Ok(Command::CatchUp(_))));
-        assert!(parsed("catch-up", &["--from", "2026-09-20T00:00:00Z"]).is_err());
-        assert!(parsed("catch-up", &["--onto", "2026-09-19T00:00:00Z"]).is_err());
-        assert!(parsed("catch-up", &["--dry-run", "plans"]).is_err());
-    }
-
-    #[test]
-    fn a_build_is_given_the_shard_it_builds_every_table_of() {
-        let built = build_arguments(&[]);
-
-        assert_eq!(built.snapshot, "2026-09-20".parse::<NaiveDate>().unwrap());
-        assert_eq!(built.table, []);
-        assert_eq!(built.dry_run, None);
-    }
-
-    #[test]
-    fn a_build_is_narrowed_to_the_tables_it_names() {
-        let narrowed = build_arguments(&["--table", "shop.people", "--table", "shop.pets"]);
-
-        assert_eq!(
-            narrowed.table,
-            [TableId::new("shop", "people"), TableId::new("shop", "pets")]
+    fn a_pipeline_is_read_without_a_credential_unless_one_is_given_whole() {
+        assert!(Arguments::try_parse_from(["lithify", "catch-up", "mysql"]).is_ok());
+        assert!(
+            Arguments::try_parse_from([
+                "lithify",
+                "catch-up",
+                "mysql",
+                "--access-key-id",
+                "rustfsadmin"
+            ])
+            .is_err()
         );
     }
 
     #[test]
-    fn a_build_without_its_shard_is_rejected() {
-        assert!(parsed("build", &[]).is_err());
+    fn a_catch_up_is_given_the_pipeline_and_the_date_of_the_last_shard_it_builds() {
+        let Ok(Command::CatchUp(latest)) = parsed("catch-up", &[]) else {
+            panic!("catch-up was named");
+        };
+        let Ok(Command::CatchUp(past)) = parsed("catch-up", &["--to", "2026-09-20"]) else {
+            panic!("catch-up was named");
+        };
+
+        assert_eq!(latest.to, None);
+        assert_eq!(latest.target.artifact, None);
+        assert_eq!(past.to, Some("2026-09-20".parse::<NaiveDate>().unwrap()));
+        assert!(parsed("catch-up", &["--dry-run", "dry-run"]).is_err());
+        let Ok(Command::CatchUp(cut)) = parsed("catch-up", &["--artifact", "instant_0600"]) else {
+            panic!("catch-up was named");
+        };
+        assert_eq!(cut.target.artifact, Some("instant_0600".into()));
     }
 
     #[test]
-    fn a_dry_run_names_the_directory_the_plans_are_written_into() {
-        let planned = build_arguments(&["--dry-run", "plans"]);
+    fn a_build_named_nothing_takes_the_step_the_build_log_says_is_next() {
+        let Ok(Command::Build(next)) = parsed("build", &[]) else {
+            panic!("build was named");
+        };
 
-        assert_eq!(planned.dry_run, Some(PathBuf::from("plans")));
+        assert_eq!(next.target.artifact, None);
+        assert_eq!(next.dry_run, None);
+    }
+
+    #[test]
+    fn a_build_is_named_the_artifact_it_builds() {
+        let cut = build_arguments(&["--artifact", "instant_1200"]);
+
+        assert_eq!(cut.target.artifact, Some("instant_1200".into()));
+    }
+
+    #[test]
+    fn a_dry_run_names_the_directory_the_statements_are_written_into() {
+        let dry_run = build_arguments(&["--dry-run", "dry-run"]);
+
+        assert_eq!(dry_run.dry_run, Some(PathBuf::from("dry-run")));
     }
 
     #[test]
@@ -354,30 +384,7 @@ mod tests {
 
     #[cfg(feature = "serve")]
     #[test]
-    fn a_build_the_board_assembles_is_one_the_command_line_takes() {
-        let assembled =
-            lithify_ui::command::BuildCommand::new("mysql", "2026-09-20".parse().unwrap())
-                .sink("rustfs")
-                .table(TableId::new("shop", "pets"))
-                .dry_run("plans");
-
-        let Command::Build(built) = Arguments::try_parse_from(
-            assembled
-                .args()
-                .iter()
-                .map(String::as_str)
-                .chain(PIPELINE[1..].iter().copied()),
-        )
-        .unwrap()
-        .command
-        else {
-            panic!("build was assembled");
-        };
-
-        assert_eq!(built.pipeline.directory, PathBuf::from("mysql"));
-        assert_eq!(built.pipeline.sink.as_deref(), Some("rustfs"));
-        assert_eq!(built.snapshot, "2026-09-20".parse::<NaiveDate>().unwrap());
-        assert_eq!(built.table, [TableId::new("shop", "pets")]);
-        assert_eq!(built.dry_run, Some(PathBuf::from("plans")));
+    fn a_board_reads_every_sink_rather_than_one_it_is_told_of() {
+        assert!(parsed("serve", &["--sink", "rustfs"]).is_err());
     }
 }

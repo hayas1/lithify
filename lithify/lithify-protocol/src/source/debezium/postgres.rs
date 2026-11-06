@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 use sqlparser::dialect::PostgreSqlDialect;
 
-use lithify_core::model::ColumnType;
-use lithify_core::position::{Coordinate, Position};
-use lithify_core::source::ColumnPath;
+use lithify_schema::model::ColumnType;
+use lithify_schema::position::{Coordinate, Position};
+use lithify_schema::source::ColumnPath;
 
 use super::Dialect;
 
@@ -96,8 +96,8 @@ impl Dialect for Postgres {
 mod tests {
     use super::super::Debezium;
     use super::*;
-    use lithify_core::event::{Hint, MalformedEvent};
-    use lithify_core::model::{ColumnType, TableId};
+    use lithify_schema::event::{Hint, MalformedEvent};
+    use lithify_schema::model::{ColumnType, TableId};
     use serde_json::{Value, json};
 
     fn position(lsn: i64) -> PostgresPosition {
@@ -218,8 +218,8 @@ mod tests {
             change.hints().next(),
             Some(&Hint::ColumnRename {
                 table: TableId::new("shop", "customers"),
-                from: "name".to_owned(),
-                to: "full_name".to_owned(),
+                from: "name".into(),
+                to: "full_name".into(),
             })
         );
     }

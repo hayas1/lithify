@@ -7,21 +7,14 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use lithify_core::event::{Hint, MalformedEvent, SchemaChange, TableChange};
-use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
-use lithify_core::position::{Coordinate, Position, RecordedAt};
-use lithify_core::source::{
-    CdcFormat, ChangeLog, ChangeLogs, ColumnPath, RowChangeLog, SchemaChangeLog,
-};
+use lithify_schema::event::{Hint, MalformedEvent, SchemaChange, TableChange};
+use lithify_schema::model::{ColumnModel, ColumnName, ColumnType, TableId, TableModel};
+use lithify_schema::position::{Coordinate, Position};
+use lithify_schema::source::ColumnPath;
+use lithify_schema::ts::Ts;
 
+use super::CdcFormat;
 use rename::RenameReader;
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct DebeziumFormat;
-
-impl CdcFormat for DebeziumFormat {
-    type Config = config::Config;
-}
 
 pub trait Dialect {
     type Source;
@@ -93,24 +86,14 @@ pub struct DdlColumn {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Debezium<D> {
     dialect: D,
-    envelope: Option<ColumnPath>,
     topic_prefix: String,
     ddl_topic: String,
 }
 
 impl<D: Dialect> Debezium<D> {
     pub fn new(topic_prefix: &str, dialect: D) -> Self {
-        Self::within(None, topic_prefix, dialect)
-    }
-
-    pub fn under(column: &str, topic_prefix: &str, dialect: D) -> Self {
-        Self::within(Some(column), topic_prefix, dialect)
-    }
-
-    pub fn within(envelope: Option<&str>, topic_prefix: &str, dialect: D) -> Self {
         Self {
             dialect,
-            envelope: envelope.map(ColumnPath::from),
             topic_prefix: topic_prefix.to_owned(),
             ddl_topic: topic_prefix.to_owned(),
         }
@@ -123,13 +106,6 @@ impl<D: Dialect> Debezium<D> {
         }
     }
 
-    fn path(&self, name: &str) -> ColumnPath {
-        match &self.envelope {
-            Some(envelope) => ColumnPath::from(format!("{envelope}.{name}").as_str()),
-            None => ColumnPath::from(name),
-        }
-    }
-
     pub fn dialect(&self) -> &D {
         &self.dialect
     }
@@ -138,14 +114,6 @@ impl<D: Dialect> Debezium<D> {
         self.dialect
             .snapshot(source)
             .is_some_and(|mark| mark != "false")
-    }
-
-    fn ordered(&self) -> Vec<ColumnPath> {
-        self.dialect
-            .ordering()
-            .iter()
-            .map(|path| self.path(&path.parts().collect::<Vec<_>>().join(".")))
-            .collect()
     }
 
     fn table_change(&self, change: DdlTableChange) -> Result<TableChange, MalformedEvent> {
@@ -175,7 +143,15 @@ impl<D: Dialect> Debezium<D> {
             .map(|column| self.column(column))
             .collect();
 
-        TableModel::new(id, columns, table.primary_key_column_names)
+        TableModel::new(
+            id,
+            columns,
+            table
+                .primary_key_column_names
+                .into_iter()
+                .map(ColumnName::from)
+                .collect(),
+        )
     }
 
     fn column(&self, column: DdlColumn) -> ColumnModel {
@@ -209,45 +185,44 @@ where
     }
 }
 
-impl<D: Dialect> ChangeLog for Debezium<D> {
+impl<D: Dialect> CdcFormat for Debezium<D> {
     type Position = D::Position;
+    type Record = DebeziumDdl<D::Source>;
 
-    fn envelope(&self) -> Option<ColumnPath> {
-        self.envelope.clone()
+    fn ddl_topic(&self) -> String {
+        self.ddl_topic.clone()
     }
 
-    fn recorded_at(&self) -> ColumnPath {
-        self.path("ts_ms")
+    fn dml_topic(&self, table: &TableId) -> String {
+        format!("{}.{}.{}", self.topic_prefix, table.schema(), table.table())
+    }
+
+    fn event_time(&self) -> ColumnPath {
+        ColumnPath::from("source.ts_ms")
+    }
+
+    fn processing_time(&self) -> ColumnPath {
+        ColumnPath::from("ts_ms")
     }
 
     fn ordering(&self) -> Vec<ColumnPath> {
-        self.ordered()
+        self.dialect.ordering()
     }
 
     fn coordinates(&self, position: &Self::Position) -> Vec<Coordinate> {
         self.dialect.coordinates(position)
     }
-}
 
-impl<D: Dialect> ChangeLogs for Debezium<D> {
-    type Position = D::Position;
-    type Schema = Self;
-    type Row = Self;
-
-    fn schema_changes(&self) -> &Self::Schema {
-        self
+    fn operation(&self) -> ColumnPath {
+        ColumnPath::from("op")
     }
 
-    fn row_changes(&self) -> &Self::Row {
-        self
+    fn before(&self) -> ColumnPath {
+        ColumnPath::from("before")
     }
-}
 
-impl<D: Dialect> SchemaChangeLog for Debezium<D> {
-    type Record = DebeziumDdl<D::Source>;
-
-    fn ddl_topic(&self) -> String {
-        self.ddl_topic.clone()
+    fn after(&self) -> ColumnPath {
+        ColumnPath::from("after")
     }
 
     fn schema_change(
@@ -266,7 +241,8 @@ impl<D: Dialect> SchemaChangeLog for Debezium<D> {
 
         let change = SchemaChange::new(
             self.dialect.position(&statement.source),
-            RecordedAt::from(statement.ts_ms),
+            Ts::try_from(statement.ts_ms)
+                .map_err(|millis| MalformedEvent::Undecodable(format!("{millis} is no instant")))?,
             &statement.ddl,
             tables,
             hints,
@@ -276,24 +252,6 @@ impl<D: Dialect> SchemaChangeLog for Debezium<D> {
             true => Ok(change.captured()),
             false => Ok(change),
         }
-    }
-}
-
-impl<D: Dialect> RowChangeLog for Debezium<D> {
-    fn dml_topic(&self, table: &TableId) -> String {
-        format!("{}.{}.{}", self.topic_prefix, table.schema(), table.table())
-    }
-
-    fn operation(&self) -> ColumnPath {
-        self.path("op")
-    }
-
-    fn before(&self) -> ColumnPath {
-        self.path("before")
-    }
-
-    fn after(&self) -> ColumnPath {
-        self.path("after")
     }
 }
 
@@ -353,7 +311,11 @@ pub(crate) mod tests {
             panic!("expected an altered table");
         };
 
-        table.column("id").unwrap().comment().map(str::to_owned)
+        table
+            .column(&"id".into())
+            .unwrap()
+            .comment()
+            .map(str::to_owned)
     }
 
     #[test]
@@ -424,7 +386,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_row_changes_of_a_table_land_on_the_topic_named_after_the_prefix_and_the_table() {
+    fn the_row_changes_of_a_table_are_published_on_the_topic_named_after_the_prefix_and_the_table()
+    {
         assert_eq!(
             Debezium::new("mysql", MySql).dml_topic(&TableId::new("shop", "customers")),
             "mysql.shop.customers"
@@ -432,12 +395,12 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_schema_changes_land_on_the_topic_named_after_the_prefix_alone() {
+    fn the_schema_changes_are_published_on_the_topic_named_after_the_prefix_alone() {
         assert_eq!(Debezium::new("mysql", MySql).ddl_topic(), "mysql");
     }
 
     #[test]
-    fn the_schema_changes_land_on_a_topic_of_their_own_when_one_is_named() {
+    fn the_schema_changes_are_published_on_a_topic_of_their_own_when_one_is_named() {
         let log = Debezium::new("mysql", MySql).with_ddl_topic("mysql.schema-changes");
 
         assert_eq!(log.ddl_topic(), "mysql.schema-changes");

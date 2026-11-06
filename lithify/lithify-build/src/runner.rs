@@ -1,0 +1,55 @@
+use std::convert::Infallible;
+
+use crate::artifact::Artifact;
+use crate::build::{BuildContext, TableBuild, TableBuilder};
+use crate::sink::{TablePath, Warehouse};
+use crate::source::RowChangeLog;
+use lithify_schema::listener::{Finish, OutOfOrder};
+use lithify_schema::model::TableId;
+use lithify_schema::source::SchemaHistory;
+use lithify_schema::table_listeners::TableListeners;
+use lithify_schema::window::Window;
+
+pub struct Replayer<'a, W, L> {
+    context: BuildContext<'a, W>,
+    log: &'a L,
+}
+
+impl<'a, W, L> Replayer<'a, W, L>
+where
+    W: Warehouse,
+    L: RowChangeLog,
+{
+    pub fn new(context: BuildContext<'a, W>, log: &'a L) -> Self {
+        Self { context, log }
+    }
+
+    pub fn planned<A: Artifact, E>(
+        &self,
+        history: &SchemaHistory<L::Position>,
+        artifact: &'a A,
+        window: &'a Window,
+        base: impl Fn(&TableId) -> Option<TablePath>,
+        finishes: impl Fn(&TableId) -> bool,
+    ) -> Result<Vec<TableBuild>, E>
+    where
+        E: From<OutOfOrder> + From<Infallible>,
+    {
+        let mut listeners = TableListeners::new(
+            |table: &TableId, encounter| {
+                TableBuilder::opening::<W>(
+                    artifact,
+                    self.log,
+                    window,
+                    table,
+                    encounter,
+                    base(table),
+                )
+            },
+            finishes,
+        );
+        let catalog = history.replay::<E, _>(&self.context, &mut listeners)?;
+
+        Ok(listeners.finish(&self.context, catalog)?)
+    }
+}

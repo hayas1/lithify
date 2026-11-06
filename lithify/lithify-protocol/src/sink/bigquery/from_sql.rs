@@ -1,7 +1,7 @@
 use google_cloud_bigquery::error::{ConvertError, RowError};
 use google_cloud_bigquery::query::{FromSql, Row};
 
-use lithify_core::build_log::BuildLogRow;
+use lithify_pipeline::build_log::BuildLogRow;
 
 use crate::source::debezium::{DdlColumn, DebeziumDdl};
 
@@ -81,6 +81,7 @@ impl TryFrom<Row> for BigQueryBuildLogRow {
     fn try_from(row: Row) -> Result<Self, Self::Error> {
         Ok(Self(BuildLogRow {
             run_id: row.try_get("run_id")?,
+            started_at: row.try_get("started_at")?,
             artifact: row.try_get("artifact")?,
             schedule: row.try_get("schedule")?,
             source: row.try_get("source")?,

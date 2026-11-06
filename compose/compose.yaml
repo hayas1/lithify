@@ -55,6 +55,7 @@ services:
       KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_HEAP_OPTS: -Xms512m -Xmx512m
     ports:
       - "9094:9094"
     volumes:
@@ -69,6 +70,7 @@ services:
     build: ./connect
     environment:
       <<: [*bigquery-env, *s3-env]
+      HEAP_OPTS: -Xms256m -Xmx768m
       BOOTSTRAP_SERVERS: kafka:9092
       GROUP_ID: connect
       CONFIG_STORAGE_TOPIC: _connect-configs
@@ -112,6 +114,7 @@ services:
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
       KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: connect
       KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://connect:8083
+      JAVA_OPTS: -Xmx384m
     ports:
       - "8080:8080"
     depends_on:

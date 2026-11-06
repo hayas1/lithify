@@ -10,7 +10,9 @@ readme.workspace = true
 
 [dependencies]
 duckdb = { workspace = true, optional = true }
-lithify-core = { workspace = true }
+lithify-build = { workspace = true }
+lithify-schema = { workspace = true }
+lithify-pipeline = { workspace = true }
 google-cloud-auth = { workspace = true, optional = true }
 google-cloud-bigquery = { workspace = true, optional = true }
 google-cloud-gax = { workspace = true, optional = true }
@@ -18,7 +20,6 @@ wkt = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sqlparser = { workspace = true }
-tokio = { workspace = true, optional = true }
 
 [features]
 bigquery = [
@@ -26,10 +27,10 @@ bigquery = [
     "dep:google-cloud-bigquery",
     "dep:google-cloud-gax",
     "dep:wkt",
-    "dep:tokio",
 ]
 duckdb = ["dep:duckdb"]
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["macros"] }
 chrono = { workspace = true }
 ulid = { workspace = true }

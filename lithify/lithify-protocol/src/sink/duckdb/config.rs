@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use lithify_core::sink::TablePath;
-use lithify_core::sql::SqlString;
+use lithify_build::sink::{Namespace, TablePath};
+use lithify_build::sql::SqlString;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(try_from = "WrittenConfig", into = "WrittenConfig")]
@@ -78,6 +78,24 @@ impl Store {
         }
     }
 
+    pub fn existence(&self, table: &TablePath) -> SqlString {
+        match self {
+            Self::S3(s3) => s3.existence(table),
+        }
+    }
+
+    pub fn replace(&self, table: &TablePath, select: &SqlString) -> SqlString {
+        match self {
+            Self::S3(s3) => s3.replace(table, select),
+        }
+    }
+
+    pub fn append(&self, table: &TablePath, select: &SqlString) -> SqlString {
+        match self {
+            Self::S3(s3) => s3.append(table, select),
+        }
+    }
+
     pub fn secret(&self, key_id: &str, secret: &str) -> SqlString {
         match self {
             Self::S3(s3) => s3.secret(key_id, secret),
@@ -111,13 +129,58 @@ impl S3 {
     }
 
     fn scan(&self, table: &TablePath) -> SqlString {
-        self.format.scan(&format!(
-            "s3://{}/{}/{}/*.{}",
-            self.bucket,
-            table.namespace(),
-            table.name(),
-            self.format.extension()
+        self.format.scan(&self.files(table))
+    }
+
+    fn existence(&self, table: &TablePath) -> SqlString {
+        SqlString::from(format!(
+            "SELECT COUNT(*) AS \"count\" FROM glob('{}')",
+            self.files(table)
         ))
+    }
+
+    fn replace(&self, table: &TablePath, select: &SqlString) -> SqlString {
+        SqlString::from(format!(
+            "COPY (\n{select}\n) TO '{}/{}.{}' ({})",
+            self.directory(table),
+            table.name(),
+            self.format.extension(),
+            self.format.copy()
+        ))
+    }
+
+    fn append(&self, table: &TablePath, select: &SqlString) -> SqlString {
+        SqlString::from(format!(
+            "COPY (\n{select}\n) TO '{}' ({}, FILENAME_PATTERN '{}_{{uuid}}', PER_THREAD_OUTPUT true, APPEND true)",
+            self.directory(table),
+            self.format.copy(),
+            table.name()
+        ))
+    }
+
+    fn files(&self, table: &TablePath) -> String {
+        format!("{}/*.{}", self.directory(table), self.format.extension())
+    }
+
+    fn directory(&self, table: &TablePath) -> String {
+        format!(
+            "s3://{}/{}/{}",
+            self.bucket,
+            table.namespace().parts().collect::<Vec<_>>().join("/"),
+            table.name()
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Location {
+    prefix: String,
+}
+
+impl From<Location> for Namespace {
+    fn from(location: Location) -> Self {
+        Namespace::from(vec![location.prefix])
     }
 }
 
@@ -131,6 +194,12 @@ impl FileFormat {
     pub fn extension(&self) -> &'static str {
         match self {
             Self::Parquet => "parquet",
+        }
+    }
+
+    fn copy(&self) -> &'static str {
+        match self {
+            Self::Parquet => "FORMAT parquet",
         }
     }
 
@@ -214,6 +283,22 @@ pub(crate) mod tests {
         assert_eq!(
             s3("http://rustfs:9000").scan(&TablePath::new("mysql_shop_cdc", "mysql")),
             "read_parquet('s3://lithify/mysql_shop_cdc/mysql/*.parquet', union_by_name = true)"
+        );
+    }
+
+    #[test]
+    fn a_location_lies_under_the_prefix_it_names() {
+        let location: Location =
+            serde_json::from_value(serde_json::json!({"prefix": "mysql_shop_cdc"})).unwrap();
+
+        assert_eq!(Namespace::from(location), Namespace::from("mysql_shop_cdc"));
+    }
+
+    #[test]
+    fn a_table_lies_under_each_name_of_its_namespace_as_a_directory() {
+        assert_eq!(
+            s3("http://rustfs:9000").scan(&TablePath::new("lithify.mysql_shop", "people")),
+            "read_parquet('s3://lithify/lithify/mysql_shop/people/*.parquet', union_by_name = true)"
         );
     }
 }

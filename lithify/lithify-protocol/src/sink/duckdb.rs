@@ -6,57 +6,112 @@ pub mod from_sql;
 #[cfg(feature = "duckdb")]
 pub mod store;
 
-use lithify_core::model::ColumnType;
-use lithify_core::sink::{TablePath, UnsupportedColumn, Warehouse};
-use lithify_core::sql::SqlString;
+use lithify_build::sink::{ChangeLogSql, Namespace, TablePath, UnsupportedColumn, WarehouseSql};
+use lithify_build::sql::SqlString;
+use lithify_schema::model::ColumnType;
+use lithify_schema::source::ColumnPath;
+
+use crate::landing::Landing;
+use crate::source::CdcFormat;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DuckDbWarehouse {
-    change_log: String,
+    change_log: Namespace,
     store: Option<config::Store>,
 }
 
 impl DuckDbWarehouse {
-    pub fn new(change_log: &str) -> Self {
+    pub fn new(change_log: impl Into<Namespace>) -> Self {
         Self {
-            change_log: change_log.to_owned(),
+            change_log: change_log.into(),
             store: None,
         }
     }
 
-    pub fn over(change_log: &str, store: config::Store) -> Self {
+    pub fn over(change_log: impl Into<Namespace>, store: config::Store) -> Self {
         Self {
-            change_log: change_log.to_owned(),
+            change_log: change_log.into(),
             store: Some(store),
         }
     }
 }
-
-impl Warehouse for DuckDbWarehouse {
-    type Config = config::Config;
-
+impl WarehouseSql for DuckDbWarehouse {
     fn identifier(&self, name: &str) -> SqlString {
         SqlString::from(format!("\"{name}\""))
     }
 
     fn table_ref(&self, table: &TablePath) -> SqlString {
-        SqlString::from(format!(
-            "{}.{}",
-            self.namespace_ref(table.namespace()),
-            self.identifier(table.name())
-        ))
+        match &self.store {
+            Some(store) => store.scan(table),
+            None => SqlString::from(format!(
+                "{}.{}",
+                self.namespace_ref(table.namespace()),
+                self.identifier(table.name())
+            )),
+        }
     }
 
-    fn change_log_namespace(&self) -> &str {
-        &self.change_log
+    fn create_table(&self, table: &TablePath, columns: &[(SqlString, SqlString)]) -> SqlString {
+        let Some(store) = &self.store else {
+            let columns: Vec<_> = columns
+                .iter()
+                .map(|(name, column_type)| format!("{name} {column_type}"))
+                .collect();
+
+            return SqlString::from(format!(
+                "CREATE TABLE IF NOT EXISTS {} ({})",
+                self.table_ref(table),
+                columns.join(", ")
+            ));
+        };
+        let nulls: Vec<_> = columns
+            .iter()
+            .map(|(name, column_type)| format!("CAST(NULL AS {column_type}) AS {name}"))
+            .collect();
+
+        store.replace(
+            table,
+            &SqlString::from(format!("SELECT {} LIMIT 0", nulls.join(", "))),
+        )
     }
 
-    fn change_log_ref(&self, topic: &str) -> SqlString {
-        let table = self.change_log(topic);
+    fn create_table_as(&self, table: &TablePath, select: &SqlString) -> SqlString {
+        match &self.store {
+            Some(store) => store.replace(table, select),
+            None => SqlString::from(format!(
+                "CREATE OR REPLACE TABLE {} AS\n{select}",
+                self.table_ref(table)
+            )),
+        }
+    }
+
+    fn create_view(&self, view: &TablePath, select: &SqlString) -> SqlString {
+        match &self.store {
+            Some(store) => store.replace(view, select),
+            None => SqlString::from(format!(
+                "CREATE OR REPLACE VIEW {} AS\n{select}",
+                self.table_ref(view)
+            )),
+        }
+    }
+
+    fn insert(&self, table: &TablePath, columns: &[SqlString], select: &SqlString) -> SqlString {
+        let columns: Vec<_> = columns.iter().map(SqlString::to_string).collect();
 
         match &self.store {
-            Some(store) => store.scan(&table),
-            None => self.table_ref(&table),
+            Some(store) => store.append(
+                table,
+                &SqlString::from(format!(
+                    "SELECT * FROM (\n{select}\n) AS {}({})",
+                    self.identifier("inserted"),
+                    columns.join(", ")
+                )),
+            ),
+            None => SqlString::from(format!(
+                "INSERT INTO {} ({})\n{select}",
+                self.table_ref(table),
+                columns.join(", ")
+            )),
         }
     }
 
@@ -90,10 +145,14 @@ impl Warehouse for DuckDbWarehouse {
     }
 
     fn select_existence(&self, table: &TablePath) -> SqlString {
+        if let Some(store) = &self.store {
+            return store.existence(table);
+        }
+
         SqlString::from(format!(
             "SELECT COUNT(*) AS {} FROM information_schema.tables WHERE table_schema = {} AND table_name = {}",
             self.identifier("count"),
-            self.literal(table.namespace()),
+            self.literal(&table.namespace().to_string()),
             self.literal(table.name())
         ))
     }
@@ -138,15 +197,56 @@ impl Warehouse for DuckDbWarehouse {
     }
 }
 
+impl ChangeLogSql for DuckDbWarehouse {
+    fn change_log_namespace(&self) -> &Namespace {
+        &self.change_log
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct S3Sink;
+
+impl<C: CdcFormat> Landing<C> for S3Sink {
+    type Warehouse = DuckDbWarehouse;
+
+    fn envelope(&self) -> Option<ColumnPath> {
+        Some(ColumnPath::from("value"))
+    }
+
+    fn landed_table(&self, change_log: &Namespace, topic: &str) -> TablePath {
+        TablePath::new(change_log.clone(), topic)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_view_over_a_store_is_written_as_a_table_since_a_store_keeps_no_view() {
+        let warehouse = DuckDbWarehouse::over("cdc", s3("http://rustfs:9000"));
+        let view = TablePath::new("mysql_shop_scd1", "people");
+        let select = SqlString::from("SELECT 1");
+
+        assert_eq!(
+            warehouse.create_view(&view, &select),
+            warehouse.create_table_as(&view, &select)
+        );
+        assert!(
+            DuckDbWarehouse::new("cdc")
+                .create_view(&view, &select)
+                .as_str()
+                .starts_with("CREATE OR REPLACE VIEW")
+        );
+    }
+    use crate::landing::Landed;
     use crate::sink::duckdb::config::tests::s3;
     use crate::source::debezium::Debezium;
     use crate::source::debezium::mysql::MySql;
-    use lithify_core::model::ColumnModel;
-    use lithify_core::position::{Coordinate, RecordedAt};
-    use lithify_core::window::Window;
+    use lithify_schema::model::ColumnModel;
+    use lithify_schema::position::Coordinate;
+    use lithify_schema::ts::Ts;
+    use lithify_schema::window::Window;
 
     fn read(column_type: ColumnType) -> SqlString {
         DuckDbWarehouse::new("mysql_shop_cdc")
@@ -173,10 +273,10 @@ mod tests {
         let warehouse = DuckDbWarehouse::new("mysql_shop_cdc");
 
         assert_eq!(
-            Coordinate::Text("binlog.000002".to_owned()).sql(&warehouse),
+            warehouse.coordinate(&Coordinate::Text("binlog.000002".to_owned())),
             "'binlog.000002'"
         );
-        assert_eq!(Coordinate::Number(448).sql(&warehouse), "448");
+        assert_eq!(warehouse.coordinate(&Coordinate::Number(448)), "448");
     }
 
     #[test]
@@ -189,15 +289,6 @@ mod tests {
                 )
                 .unwrap(),
             "TRY_CAST('CURRENT_TIMESTAMP' AS TIMESTAMP)"
-        );
-    }
-
-    #[test]
-    fn a_table_is_qualified_by_the_schema_it_lives_in() {
-        assert_eq!(
-            DuckDbWarehouse::new("mysql_shop_cdc")
-                .table_ref(&TablePath::new("mysql_shop", "customers_20260920")),
-            "\"mysql_shop\".\"customers_20260920\""
         );
     }
 
@@ -293,17 +384,21 @@ mod tests {
         );
     }
     #[test]
-    fn the_schema_changes_of_a_window_are_read_from_the_envelope_in_the_order_they_were_recorded_then_logged()
+    fn the_schema_changes_of_a_window_are_read_from_the_envelope_in_the_order_of_their_processing_time_then_position()
      {
-        let log = Debezium::under("value", "mysql", MySql);
-        let window = Window::new(RecordedAt::from(0), RecordedAt::from(10));
+        let log = Landed::new(
+            Debezium::new("mysql", MySql),
+            S3Sink,
+            &DuckDbWarehouse::new("mysql_shop_cdc"),
+        );
+        let window = Window::new(Ts::try_from(0).unwrap(), Ts::try_from(10).unwrap());
 
         assert_eq!(
             DuckDbWarehouse::new("mysql_shop_cdc").select_schema_changes(&log, &window),
             concat!(
                 "SELECT \"value\"\n",
                 "FROM \"mysql_shop_cdc\".\"mysql\"\n",
-                "WHERE \"value\".\"ts_ms\" >= 0 AND \"value\".\"ts_ms\" < 10\n",
+                "WHERE \"value\".\"source\".\"ts_ms\" >= 0 AND \"value\".\"source\".\"ts_ms\" < 10\n",
                 "ORDER BY \"value\".\"ts_ms\", \"value\".\"source\".\"file\", \"value\".\"source\".\"pos\"",
             )
         );
@@ -312,22 +407,77 @@ mod tests {
     #[test]
     fn a_change_log_lives_in_the_database_unless_it_was_sunk_into_object_storage() {
         assert_eq!(
-            DuckDbWarehouse::new("mysql_shop_cdc").change_log_ref("mysql"),
+            DuckDbWarehouse::new("mysql_shop_cdc")
+                .table_ref(&TablePath::new("mysql_shop_cdc", "mysql")),
             "\"mysql_shop_cdc\".\"mysql\""
         );
         assert_eq!(
             DuckDbWarehouse::over("mysql_shop_cdc", s3("http://rustfs:9000"))
-                .change_log_ref("mysql"),
+                .table_ref(&TablePath::new("mysql_shop_cdc", "mysql")),
             "read_parquet('s3://lithify/mysql_shop_cdc/mysql/*.parquet', union_by_name = true)"
         );
     }
 
+    fn lake() -> DuckDbWarehouse {
+        DuckDbWarehouse::over("mysql_shop_cdc", s3("http://rustfs:9000"))
+    }
+
     #[test]
-    fn what_was_built_lives_in_the_database_even_when_the_change_log_does_not() {
+    fn what_is_built_lives_beside_the_change_log_in_object_storage_once_one_is_named() {
+        let customers = TablePath::new("mysql_shop", "customers");
+
         assert_eq!(
-            DuckDbWarehouse::over("mysql_shop_cdc", s3("http://rustfs:9000"))
-                .table_ref(&TablePath::new("mysql_shop", "customers")),
+            DuckDbWarehouse::new("mysql_shop_cdc").table_ref(&customers),
             "\"mysql_shop\".\"customers\""
+        );
+        assert_eq!(
+            lake().table_ref(&customers),
+            "read_parquet('s3://lithify/mysql_shop/customers/*.parquet', union_by_name = true)"
+        );
+    }
+
+    #[test]
+    fn a_table_built_into_object_storage_is_one_file_replaced_whole() {
+        assert_eq!(
+            lake().create_table_as(
+                &TablePath::new("mysql_shop", "customers_20260920"),
+                &SqlString::from("SELECT 1 AS id")
+            ),
+            "COPY (\nSELECT 1 AS id\n) TO 's3://lithify/mysql_shop/customers_20260920/customers_20260920.parquet' (FORMAT parquet)"
+        );
+    }
+
+    #[test]
+    fn a_table_created_in_object_storage_is_a_file_holding_its_columns_alone() {
+        assert_eq!(
+            lake().create_table(
+                &TablePath::new("mysql_shop", "_lithify_log"),
+                &[
+                    (SqlString::from("\"id\""), SqlString::from("BIGINT")),
+                    (SqlString::from("\"run_id\""), SqlString::from("VARCHAR"))
+                ]
+            ),
+            "COPY (\nSELECT CAST(NULL AS BIGINT) AS \"id\", CAST(NULL AS VARCHAR) AS \"run_id\" LIMIT 0\n) TO 's3://lithify/mysql_shop/_lithify_log/_lithify_log.parquet' (FORMAT parquet)"
+        );
+    }
+
+    #[test]
+    fn rows_inserted_into_object_storage_are_appended_as_a_file_of_their_own() {
+        assert_eq!(
+            lake().insert(
+                &TablePath::new("mysql_shop", "_lithify_log"),
+                &[SqlString::from("\"id\""), SqlString::from("\"run_id\"")],
+                &SqlString::from("SELECT 1, 'run'")
+            ),
+            "COPY (\nSELECT * FROM (\nSELECT 1, 'run'\n) AS \"inserted\"(\"id\", \"run_id\")\n) TO 's3://lithify/mysql_shop/_lithify_log' (FORMAT parquet, FILENAME_PATTERN '_lithify_log_{uuid}', PER_THREAD_OUTPUT true, APPEND true)"
+        );
+    }
+
+    #[test]
+    fn a_table_in_object_storage_exists_once_a_file_of_it_does() {
+        assert_eq!(
+            lake().select_existence(&TablePath::new("mysql_shop", "customers")),
+            "SELECT COUNT(*) AS \"count\" FROM glob('s3://lithify/mysql_shop/customers/*.parquet')"
         );
     }
 }

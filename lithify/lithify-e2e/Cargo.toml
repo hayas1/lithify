@@ -17,10 +17,12 @@ chrono = { workspace = true }
 clap = { workspace = true }
 duckdb = { workspace = true }
 lithify-cli = { workspace = true }
-lithify-config = { workspace = true }
-lithify-core = { workspace = true }
+lithify-pipeline = { workspace = true }
+lithify-build = { workspace = true }
+lithify-schema = { workspace = true }
 lithify-protocol = { workspace = true, features = ["bigquery", "duckdb"] }
-lithify-strategy = { workspace = true }
+lithify-artifact = { workspace = true }
 mysql = { workspace = true }
 serde = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 toml = { workspace = true }

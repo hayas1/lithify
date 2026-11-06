@@ -6,18 +6,18 @@ use crate::run::Unverifiable;
 use crate::scenario::Assertion;
 
 impl Assertion {
-    pub fn run(
+    pub async fn run(
         &self,
-        pipeline: &mut ConnectedPipeline,
+        pipeline: &mut ConnectedPipeline<'_>,
         step: &str,
         report: &mut Report,
     ) -> Result<(), Unverifiable> {
         match self {
             Self::Snapshot(snapshot) => {
                 let (source, sink, watch) = pipeline.ends(snapshot.source(), snapshot.sink())?;
-                let model = sink.table_model(source, snapshot.table(), watch)?;
-                let held = source.rows(&model)?;
-                let built = sink.snapshot_rows(&model, watch)?;
+                let model = sink.table_model(source, snapshot.table(), watch).await?;
+                let held = source.rows(&model).await?;
+                let built = sink.snapshot_rows(&model, watch).await?;
 
                 report.compared(
                     step,

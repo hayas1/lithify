@@ -1,12 +1,19 @@
-use lithify_core::artifact::{Artifact, ArtifactBuilder};
-use lithify_core::era::{Bound, Era};
-use lithify_core::listener::SchemaChangeListener;
-use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
-use lithify_core::position::RecordedAt;
-use lithify_core::sink::{TablePath, Warehouse};
-use lithify_core::window::Window;
-use lithify_protocol::{BigQueryWarehouse, Debezium, DuckDbWarehouse, MySql, MySqlPosition};
-use lithify_strategy::snapshot::Snapshot;
+use chrono::DateTime;
+use ulid::Ulid;
+
+use lithify_artifact::shard::Shard;
+use lithify_artifact::snapshot::Snapshot;
+use lithify_build::artifact::Artifact;
+use lithify_build::build::Base;
+use lithify_build::sink::{TablePath, Warehouse, WarehouseSql};
+use lithify_pipeline::build_log::{BuildLog, Run, Series, Status, TableBuilt};
+use lithify_protocol::{
+    BigQuerySink, BigQueryWarehouse, Debezium, DuckDbWarehouse, Landed, Landing, MySql, S3Sink,
+};
+use lithify_schema::listener::ReplayEnd;
+use lithify_schema::model::{ColumnModel, ColumnType, TableId, TableModel};
+use lithify_schema::ts::Ts;
+use lithify_schema::window::Window;
 
 fn column(name: &str, type_name: &str, column_type: ColumnType) -> ColumnModel {
     ColumnModel::new(name, type_name, column_type, false, None)
@@ -24,48 +31,83 @@ fn customers() -> TableModel {
             column("created_at", "DATETIME", ColumnType::Timestamp),
             column("updated_at", "DATETIME", ColumnType::Timestamp),
         ],
-        vec!["id".to_owned()],
+        ["id"].into(),
     )
 }
 
-fn statements<W: Warehouse>(warehouse: &W) -> String {
-    let log = Debezium::new("mysql", MySql);
+fn previous(window: &Window, shard: &str) -> BuildLog {
+    TableBuilt::new(
+        Some(customers().id().clone()),
+        Some(customers().id().clone()),
+        None,
+        Some(TablePath::new("mysql_shop", shard)),
+        Window::new(Ts::try_from(0).unwrap(), *window.from()),
+        Status::Succeeded,
+        Ts::from(DateTime::UNIX_EPOCH),
+    )
+    .logged(
+        &Run::new(
+            Ulid::nil(),
+            Ts::from(DateTime::UNIX_EPOCH),
+            "primary",
+            "{}",
+            "0.1.0",
+        ),
+        &Series::new("snapshot".into(), "daily"),
+    )
+}
+
+fn statements<L>(landing: L, warehouse: L::Warehouse) -> String
+where
+    L: Landing<Debezium<MySql>>,
+    L::Warehouse: Warehouse,
+{
+    let log = Landed::new(Debezium::new("mysql", MySql), landing, &warehouse);
     let window = Window::new(
-        RecordedAt::from(1789862400000),
-        RecordedAt::from(1789948800000),
+        Ts::try_from(1789862400000).unwrap(),
+        Ts::try_from(1789948800000).unwrap(),
     );
-    let artifact = Snapshot::new("mysql_shop", "%Y%m%d");
-    let mut snapshot = artifact
-        .builder::<_, W>(
-            &log,
-            customers().id().clone(),
-            &window,
-            std::env::args()
-                .nth(2)
-                .map(|shard| TablePath::new("mysql_shop", &shard)),
+    let artifact = Snapshot::new(Shard::new("%Y%m%d", chrono_tz::Tz::UTC));
+    let target = TablePath::new(
+        "mysql_shop",
+        &artifact.table_name(customers().id(), &window),
+    );
+    let previous = std::env::args()
+        .nth(2)
+        .map(|shard| previous(&window, &shard));
+    let snapshot = artifact.builder::<_, L::Warehouse>(
+        &log,
+        &window,
+        Base::from(previous.as_ref().and_then(BuildLog::target).cloned()),
+    );
+    let statements = artifact
+        .create(
+            &snapshot,
+            &warehouse,
+            &ReplayEnd::standing(customers(), None),
+            &target,
         )
         .unwrap();
 
-    SchemaChangeListener::<MySqlPosition>::era_boundary(
-        &mut snapshot,
-        warehouse,
-        &Era::new(
-            customers(),
-            Bound::Time(*window.from()),
-            Bound::Time(*window.to()),
-        ),
-    )
-    .unwrap();
-
-    snapshot.create().unwrap().join(";\n")
+    std::iter::once(warehouse.create_namespace(target.namespace()))
+        .chain(statements)
+        .map(|statement| statement.to_string())
+        .collect::<Vec<_>>()
+        .join(";\n")
 }
 
 fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("bigquery") => println!(
             "{}",
-            statements(&BigQueryWarehouse::new("local-project", "mysql_shop_cdc"))
+            statements(
+                BigQuerySink,
+                BigQueryWarehouse::new("local-project", "mysql_shop_cdc")
+            )
         ),
-        _ => println!("{}", statements(&DuckDbWarehouse::new("mysql_shop_cdc"))),
+        _ => println!(
+            "{}",
+            statements(S3Sink, DuckDbWarehouse::new("mysql_shop_cdc"))
+        ),
     }
 }

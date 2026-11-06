@@ -1,125 +1,109 @@
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
-
-use lithify_config::infra::{Sink, Source};
-use lithify_config::{ArtifactKind, Pipeline};
-use lithify_core::position::RecordedAt;
-use lithify_protocol::sink::bigquery;
-use lithify_protocol::sink::bigquery::client::{BigQueryCapture, BigQueryClient};
-use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbClient};
+use lithify_build::sink::OpenWarehouse;
+use lithify_pipeline::Pipeline;
+use lithify_pipeline::infra::{Sink, Source};
+use lithify_pipeline::runner::BuildLogWrite;
+use lithify_pipeline::table;
+use lithify_protocol::sink::bigquery::client::BigQueryClient;
+use lithify_protocol::sink::duckdb::client::DuckDbClient;
 use lithify_protocol::sink::duckdb::config::Config;
-use lithify_protocol::sink::duckdb::store::ObjectStore;
+use lithify_protocol::sink::{bigquery, duckdb};
+use lithify_protocol::{BigQueryWarehouse, DuckDbWarehouse};
+use lithify_schema::ts::{Replay, Ts};
 
-use crate::check::{Expectation, Inspection};
-use crate::course::Course;
-use crate::credential::Credential;
+use crate::artifacts::ArtifactConfig;
+use crate::command::RunCommand;
+use crate::credential::Credentials;
 use crate::journal::Journal;
-use crate::pipeline::{Capture, Warehouse};
-use crate::plan::SnapshotPlan;
-use crate::settlement::{Build, DryRun, Settlement};
+use crate::pipeline::{CaptureConfig, Reached, WarehouseConfig};
+use crate::report::{DryRunBuildLogWrite, Report};
 use crate::unrunnable::Unrunnable;
+use lithify_pipeline::check::{Expectation, Inspecting, Inspection};
+use lithify_pipeline::stepping::Stepping;
+use lithify_pipeline::warehouse::SinkWarehouse;
 
 pub struct Run {
     directory: PathBuf,
-    credential: Credential,
+    credentials: Credentials,
     sink: Option<String>,
-    now: DateTime<Utc>,
+    now: Ts<Replay>,
 }
 
 impl Run {
     pub fn new(
         directory: PathBuf,
-        credential: Credential,
+        credentials: Credentials,
         sink: Option<String>,
-        now: DateTime<Utc>,
+        now: Ts<Replay>,
     ) -> Self {
         Self {
             directory,
-            credential,
+            credentials,
             sink,
             now,
         }
     }
 
-    pub fn plan(&self, course: &Course, into: &Path) -> Result<Journal, Unrunnable> {
-        self.each_sink(|sink, source, topic_prefix, journal| {
+    pub async fn dry_run(&self, command: &RunCommand, into: &Path) -> Result<Journal, Unrunnable> {
+        self.each_sink(async |sink, source, listing, journal| {
+            let build = BuildLogWrite::of(source, self.now, env!("CARGO_PKG_VERSION"))?;
+
             self.settle(
-                course,
+                command,
                 sink,
                 source,
-                topic_prefix,
-                &DryRun::new(into, sink.name()),
+                listing,
+                &DryRunBuildLogWrite::new(build, into, sink.name()),
                 journal,
             )
+            .await
         })
+        .await
     }
 
-    pub fn build(&self, course: &Course) -> Result<Journal, Unrunnable> {
-        self.each_sink(|sink, source, topic_prefix, journal| {
+    pub async fn build(&self, command: &RunCommand) -> Result<Journal, Unrunnable> {
+        self.each_sink(async |sink, source, listing, journal| {
             self.settle(
-                course,
+                command,
                 sink,
                 source,
-                topic_prefix,
-                &Build::new(sink, source)?,
+                listing,
+                &BuildLogWrite::of(source, self.now, env!("CARGO_PKG_VERSION"))?,
                 journal,
             )
+            .await
         })
+        .await
     }
 
-    pub fn check(&self) -> Result<Journal, Unrunnable> {
-        self.each_sink(|sink, source, _, journal| {
-            for discrepancy in self.inspection(sink, source)?.discrepancies() {
+    pub async fn check(&self) -> Result<Journal, Unrunnable> {
+        self.each_sink(async |sink, source, _, journal| {
+            for discrepancy in self.inspection(sink, source).await?.discrepancies() {
                 journal.discrepancy(discrepancy);
             }
 
             Ok(())
         })
+        .await
     }
 
-    pub fn inspect(&self) -> Result<Vec<(String, Inspection)>, Unrunnable> {
-        let pipeline: Pipeline<Capture, Warehouse> = Pipeline::open(&self.directory)?;
-        let source = Self::source(&pipeline)?;
-
-        self.selected(&pipeline)?
-            .into_iter()
-            .map(|sink| Ok((sink.name().to_owned(), self.inspection(sink, source)?)))
-            .collect()
-    }
-
-    pub fn sinks(&self) -> Result<Vec<String>, Unrunnable> {
-        let pipeline: Pipeline<Capture, Warehouse> = Pipeline::open(&self.directory)?;
-
-        Ok(self
-            .selected(&pipeline)?
-            .into_iter()
-            .map(|sink| sink.name().to_owned())
-            .collect())
-    }
-
-    fn inspection(
+    async fn inspection(
         &self,
-        sink: &Sink<Warehouse>,
-        source: &Source<Capture>,
+        sink: &Sink<WarehouseConfig, ArtifactConfig>,
+        source: &Source<CaptureConfig>,
     ) -> Result<Inspection, Unrunnable> {
-        let expectation = Expectation::new(
-            sink.artifacts().schedule(),
-            source.since(),
-            &source.capture().to_json()?,
-            RecordedAt::from(self.now),
-        );
-        let namespace = sink.artifacts().namespace(ArtifactKind::Snapshot);
+        let inspecting = Inspecting::of(sink, source, self.now)?;
 
-        match sink.warehouse() {
-            Warehouse::DuckDb(config) => expectation.read(&self.duckdb(sink, config)?, namespace),
-            Warehouse::BigQuery(config) => {
-                expectation.read(&self.bigquery(sink, config)?, namespace)
-            }
-        }
+        Ok(sink
+            .warehouse()
+            .with_client(sink.change_log(), &self.credentials, &inspecting)
+            .await??)
     }
 
-    fn source(pipeline: &Pipeline<Capture, Warehouse>) -> Result<&Source<Capture>, Unrunnable> {
+    fn source(
+        pipeline: &Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig>,
+    ) -> Result<&Source<CaptureConfig>, Unrunnable> {
         let mut sources = pipeline.sources();
         let source = sources.next().ok_or(Unrunnable::WithoutSource)?;
 
@@ -130,32 +114,24 @@ impl Run {
         Ok(source)
     }
 
-    fn each_sink(
+    async fn each_sink(
         &self,
-        mut act: impl FnMut(
-            &Sink<Warehouse>,
-            &Source<Capture>,
-            &str,
+        mut act: impl AsyncFnMut(
+            &Sink<WarehouseConfig, ArtifactConfig>,
+            &Source<CaptureConfig>,
+            &table::Tables,
             &mut Journal,
         ) -> Result<(), Unrunnable>,
     ) -> Result<Journal, Unrunnable> {
-        let pipeline: Pipeline<Capture, Warehouse> = Pipeline::open(&self.directory)?;
+        let pipeline: Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig> =
+            Pipeline::open(&self.directory)?;
         let source = Self::source(&pipeline)?;
         let mut journal = Journal::default();
 
         for sink in self.selected(&pipeline)? {
             journal.sink(sink.name());
 
-            let Some(topic_prefix) = source.topic_prefix() else {
-                journal.note(&format!(
-                    "{} names no topic prefix to read its change logs by",
-                    source.name()
-                ));
-
-                continue;
-            };
-
-            if let Err(unrunnable) = act(sink, source, topic_prefix, &mut journal) {
+            if let Err(unrunnable) = act(sink, source, pipeline.tables(), &mut journal).await {
                 journal.failed(sink.name(), &unrunnable);
             }
         }
@@ -163,66 +139,77 @@ impl Run {
         Ok(journal)
     }
 
-    fn settle<S: Settlement>(
+    async fn settle<B: Report>(
         &self,
-        course: &Course,
-        sink: &Sink<Warehouse>,
-        source: &Source<Capture>,
-        topic_prefix: &str,
-        settlement: &S,
+        command: &RunCommand,
+        sink: &Sink<WarehouseConfig, ArtifactConfig>,
+        source: &Source<CaptureConfig>,
+        listing: &table::Tables,
+        writer: &B,
         journal: &mut Journal,
     ) -> Result<(), Unrunnable> {
-        match sink.warehouse() {
-            Warehouse::DuckDb(config) => {
-                let client = self.duckdb(sink, config)?;
+        let expectation = Expectation::of(sink, source, self.now)?;
 
-                course.itinerary(sink, source, self.now, &client)?.settle(
-                    settlement,
-                    journal,
-                    |window, base, tables| {
-                        source.capture().with_duckdb_change_logs(
-                            topic_prefix,
-                            SnapshotPlan::new(&client, sink, window, base, tables, settlement),
-                        )
-                    },
-                )
+        match Self::reach(sink)? {
+            Reached::DuckDb(config, change_log) => {
+                let client = self
+                    .duckdb(config, change_log)
+                    .await?
+                    .executing(writer.execution());
+
+                command
+                    .settle(
+                        sink,
+                        Stepping::new(&client, source, expectation, listing),
+                        writer,
+                        journal,
+                    )
+                    .await
             }
-            Warehouse::BigQuery(config) => {
-                let client = self.bigquery(sink, config)?;
+            Reached::BigQuery(config, change_log) => {
+                let client = self
+                    .bigquery(config, change_log)
+                    .await?
+                    .executing(writer.execution());
 
-                course.itinerary(sink, source, self.now, &client)?.settle(
-                    settlement,
-                    journal,
-                    |window, base, tables| {
-                        source.capture().with_bigquery_change_logs(
-                            topic_prefix,
-                            SnapshotPlan::new(&client, sink, window, base, tables, settlement),
-                        )
-                    },
-                )
+                command
+                    .settle(
+                        sink,
+                        Stepping::new(&client, source, expectation, listing),
+                        writer,
+                        journal,
+                    )
+                    .await
             }
         }
     }
 
-    fn duckdb(&self, sink: &Sink<Warehouse>, config: &Config) -> Result<DuckDbClient, Unrunnable> {
-        Ok(
-            ObjectStore::open(config, self.credential.key_id(), self.credential.secret())
-                .client(sink.change_log())?,
-        )
+    fn reach(sink: &Sink<WarehouseConfig, ArtifactConfig>) -> Result<Reached<'_>, Unrunnable> {
+        sink.warehouse()
+            .reach(sink.change_log())
+            .ok_or(Unrunnable::Unreached)
     }
 
-    fn bigquery(
+    async fn duckdb(
         &self,
-        sink: &Sink<Warehouse>,
+        config: &Config,
+        change_log: &duckdb::config::Location,
+    ) -> Result<DuckDbClient, Unrunnable> {
+        Ok(DuckDbWarehouse::open(config, self.credentials.duckdb()?, change_log).await?)
+    }
+
+    async fn bigquery(
+        &self,
         config: &bigquery::config::Config,
+        change_log: &bigquery::config::Location,
     ) -> Result<BigQueryClient, Unrunnable> {
-        Ok(BigQueryClient::open(config, sink.change_log())?)
+        Ok(BigQueryWarehouse::open(config, &(), change_log).await?)
     }
 
     fn selected<'a>(
         &self,
-        pipeline: &'a Pipeline<Capture, Warehouse>,
-    ) -> Result<Vec<&'a Sink<Warehouse>>, Unrunnable> {
+        pipeline: &'a Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig>,
+    ) -> Result<Vec<&'a Sink<WarehouseConfig, ArtifactConfig>>, Unrunnable> {
         let sinks: Vec<_> = pipeline
             .sinks()
             .filter(|sink| match &self.sink {

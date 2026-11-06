@@ -1,9 +1,9 @@
 use std::fmt::Display;
 
-use lithify_core::build_log::BuildLog;
-use lithify_core::window::Window;
+use lithify_pipeline::build_log::BuildLog;
+use lithify_schema::window::Window;
 
-use crate::check::Discrepancy;
+use lithify_pipeline::check::Discrepancy;
 
 #[derive(Debug, Default)]
 pub struct Journal {
@@ -53,10 +53,10 @@ impl Journal {
 mod tests {
     use chrono::DateTime;
 
-    use lithify_core::build_log::{Outcome, Run, Status};
-    use lithify_core::model::TableId;
-    use lithify_core::position::RecordedAt;
-    use lithify_core::sink::TablePath;
+    use lithify_build::sink::TablePath;
+    use lithify_pipeline::build_log::{Run, Series, Status, TableBuilt};
+    use lithify_schema::model::TableId;
+    use lithify_schema::ts::Ts;
 
     use super::*;
 
@@ -64,11 +64,11 @@ mod tests {
     fn a_note_is_reported_as_it_stands() {
         let mut journal = Journal::default();
 
-        journal.note("wrote 3 statements to plans/rustfs.sql");
+        journal.note("wrote 3 statements to dry-run/rustfs.sql");
 
         assert_eq!(
             journal.entries().collect::<Vec<_>>(),
-            ["wrote 3 statements to plans/rustfs.sql"]
+            ["wrote 3 statements to dry-run/rustfs.sql"]
         );
         assert!(journal.complete());
     }
@@ -97,27 +97,27 @@ mod tests {
     }
 
     fn logged(status: Status) -> BuildLog {
-        BuildLog::new(
-            &Run::new(
-                ulid::Ulid::nil(),
-                "snapshot",
-                "daily",
-                "primary",
-                "{}",
-                "0.1.0",
-            ),
+        TableBuilt::new(
             Some(TableId::new("shop", "people")),
             Some(TableId::new("shop", "people")),
             None,
             Some(TablePath::new("mysql_shop", "people_20260920")),
             Window::new(
-                RecordedAt::from(1789862400000),
-                RecordedAt::from(1789948800000),
+                Ts::try_from(1789862400000).unwrap(),
+                Ts::try_from(1789948800000).unwrap(),
             ),
-            Outcome::new(
-                status,
-                DateTime::from_timestamp_millis(1789949000000).unwrap(),
+            status,
+            Ts::from(DateTime::from_timestamp_millis(1789949000000).unwrap()),
+        )
+        .logged(
+            &Run::new(
+                ulid::Ulid::nil(),
+                Ts::from(DateTime::UNIX_EPOCH),
+                "primary",
+                "{}",
+                "0.1.0",
             ),
+            &Series::new("snapshot".into(), "daily"),
         )
     }
 
@@ -126,8 +126,8 @@ mod tests {
         let mut journal = Journal::default();
 
         journal.window(&Window::new(
-            RecordedAt::from(1789862400000),
-            RecordedAt::from(1789948800000),
+            Ts::try_from(1789862400000).unwrap(),
+            Ts::try_from(1789948800000).unwrap(),
         ));
 
         assert_eq!(
@@ -141,7 +141,7 @@ mod tests {
         let mut journal = Journal::default();
 
         journal.discrepancy(&Discrepancy::NeverBuilt {
-            since: RecordedAt::from(1789862400000),
+            since: Ts::try_from(1789862400000).unwrap(),
         });
 
         assert_eq!(

@@ -1,0 +1,13 @@
+[[artifact]]
+name = "six"
+kind = "instant"
+base = "snapshot"
+at = "06:00"
+shard = "%Y%m%d%H"
+
+[[artifact]]
+name = "eighteen"
+kind = "instant"
+base = "snapshot"
+at = "18:00"
+shard = "%Y%m%d%H"

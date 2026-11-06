@@ -1,0 +1,428 @@
+use std::marker::PhantomData;
+
+use chrono_tz::Tz;
+use serde::Deserialize;
+
+use lithify_build::artifact::{Artifact, ArtifactBuilder, ArtifactName, UnbuildableArtifact};
+use lithify_build::build::Base;
+use lithify_build::sink::{Namespace, TablePath, Warehouse};
+use lithify_build::source::RowChangeLog;
+use lithify_build::sql::SqlString;
+use lithify_pipeline::schedule::{Schedule, Timeline};
+use lithify_schema::era::{Bound, Era, EraTracker};
+use lithify_schema::listener::{
+    Alteration, ReplayEnd, SchemaChangeListener, TableAltered, TableCreated, TableRenamed,
+};
+use lithify_schema::model::TableId;
+use lithify_schema::window::Window;
+
+use lithify_pipeline::artifact::ArtifactControl;
+use lithify_pipeline::build_log::{BuildLog, Series};
+
+use crate::scd1::query::ChangeLogQuery;
+use crate::shard::Shard;
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Scd2Config {
+    shard: String,
+}
+
+impl Scd2Config {
+    pub fn shard(&self) -> &str {
+        &self.shard
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Scd2 {
+    name: ArtifactName,
+    open: Shard,
+    closed: Shard,
+}
+
+impl Scd2 {
+    pub const VALID_FROM: &'static str = "_valid_from";
+    pub const VALID_TO: &'static str = "_valid_to";
+
+    pub fn new(shard: &str, zone: Tz) -> Self {
+        Self {
+            name: ArtifactName::from(Self::KIND),
+            open: Shard::new(&format!("open_{shard}"), zone),
+            closed: Shard::new(&format!("closed_{shard}"), zone),
+        }
+    }
+
+    pub fn named(self, name: ArtifactName) -> Self {
+        Self { name, ..self }
+    }
+
+    // The versions of a day are those it closed and those it left open as it ended, so both are
+    // named after the last instant the window holds, as a snapshot of that day is.
+    pub fn closed(&self, namespace: &Namespace, table: &TableId, window: &Window) -> TablePath {
+        TablePath::new(namespace.clone(), &self.closed.name(table, window.last()))
+    }
+}
+
+impl Artifact for Scd2 {
+    const KIND: &'static str = "scd2";
+
+    type From = Self;
+
+    type Builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a> = Scd2Builder<'a, L, W>;
+
+    fn table_name(&self, table: &TableId, window: &Window) -> String {
+        self.open.name(table, window.last())
+    }
+
+    fn builder<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>(
+        &'a self,
+        log: &'a L,
+        window: &'a Window,
+        base: Base,
+    ) -> Self::Builder<'a, L, W> {
+        Scd2Builder {
+            query: ChangeLogQuery::new(log),
+            window: window.clone(),
+            base,
+            eras: EraTracker::since(Bound::EventTime(*window.from())),
+            warehouse: PhantomData,
+        }
+    }
+
+    fn create<'a, L: RowChangeLog + 'a, W: Warehouse + 'a>(
+        &'a self,
+        builder: &Self::Builder<'a, L, W>,
+        warehouse: &W,
+        end: &ReplayEnd<UnbuildableArtifact>,
+        target: &TablePath,
+    ) -> Result<Vec<SqlString>, UnbuildableArtifact> {
+        let Some(versions) = builder.versions_at(warehouse, end)? else {
+            return Ok(Vec::new());
+        };
+        let closed = self.closed(target.namespace(), end.table(), &builder.window);
+
+        Ok(vec![
+            warehouse.create_table_as(&closed, &versions.closed),
+            warehouse.create_table_as(target, &versions.open),
+        ])
+    }
+}
+
+impl ArtifactControl for Scd2 {
+    type Config = Scd2Config;
+
+    fn declared(name: &ArtifactName, config: &Scd2Config, zone: Tz) -> Self {
+        Self::new(config.shard(), zone).named(name.clone())
+    }
+
+    fn series(&self) -> Series {
+        Series::new(self.name.clone(), &Schedule::default().to_string())
+    }
+
+    fn window(&self, day: &Window, _: &Timeline) -> Option<Window> {
+        Some(day.clone())
+    }
+
+    fn base<'b>(
+        &self,
+        built: &'b [BuildLog],
+        table: &TableId,
+        window: &Window,
+    ) -> Option<&'b BuildLog> {
+        built
+            .iter()
+            .find(|log| log.table_to() == Some(table) && log.window().to() == window.from())
+    }
+}
+
+// Holds what Scd1SelectBuilder holds but its fold, as an scd2 refuses a window its table changed its
+// schema within, and so folds the versions of that table from its one era as it is finished.
+pub struct Scd2Builder<'a, L: RowChangeLog, W> {
+    query: ChangeLogQuery<'a, L>,
+    window: Window,
+    base: Base,
+    eras: EraTracker<L::Position>,
+    warehouse: PhantomData<fn(&W)>,
+}
+
+struct Versions {
+    closed: SqlString,
+    open: SqlString,
+}
+
+impl<L: RowChangeLog, W: Warehouse> Scd2Builder<'_, L, W> {
+    fn versions_at(
+        &self,
+        warehouse: &W,
+        end: &ReplayEnd<UnbuildableArtifact>,
+    ) -> Result<Option<Versions>, UnbuildableArtifact> {
+        if let Some(refused) = end.refusal() {
+            return Err(refused.clone());
+        }
+        let Some(table) = end.model() else {
+            return Ok(None);
+        };
+        if table.primary_key().is_empty() {
+            return Err(UnbuildableArtifact::WithoutPrimaryKey(table.id().clone()));
+        }
+        let era = self.eras.last(table, Bound::EventTime(*self.window.to()));
+
+        self.versions(warehouse, &era).map(Some)
+    }
+
+    fn versions(
+        &self,
+        warehouse: &W,
+        era: &Era<L::Position>,
+    ) -> Result<Versions, UnbuildableArtifact> {
+        let table = era.table();
+        let ident = |name: &str| warehouse.identifier(name);
+        let [changes, versions, base] = ["changes", "versions", "base"].map(ident);
+        let [op, at, next, last, valid_from, valid_to] = [
+            "_op",
+            "_at",
+            "_next",
+            "_last",
+            Scd2::VALID_FROM,
+            Scd2::VALID_TO,
+        ]
+        .map(ident);
+        let columns: Vec<String> = table
+            .columns()
+            .map(|column| warehouse.column_ref(column.name()).to_string())
+            .collect();
+        let columns = columns.join(", ");
+        let keys: Vec<SqlString> = table
+            .primary_key()
+            .columns()
+            .map(|key| warehouse.column_ref(key))
+            .collect();
+        let partition = keys
+            .iter()
+            .map(SqlString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sequence = self.query.sequenced(warehouse);
+        let ordered = |direction: &str| {
+            sequence
+                .iter()
+                .map(|column| format!("{column}{direction}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let matched = keys
+            .iter()
+            .map(|key| format!("{changes}.{key} = {base}.{key}"))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let read = self.query.versions(
+            warehouse,
+            &self.query.change_log(warehouse, table.id()),
+            era,
+        )?;
+        let opened = match self.base.as_built() {
+            Some(base) => format!(
+                "  SELECT {columns}, {valid_from}, {valid_to}\n  FROM {}",
+                warehouse.table_ref(base)
+            ),
+            None => format!(
+                "  SELECT {columns}, {at} AS {valid_from}, {at} AS {valid_to}\n  FROM {changes}\n  WHERE FALSE"
+            ),
+        };
+        let with = format!(
+            concat!(
+                "WITH {changes} AS (\n{read}\n),\n",
+                "{versions} AS (\n",
+                "  SELECT *,\n",
+                "    LEAD({at}) OVER (PARTITION BY {partition} ORDER BY {forward}) AS {next},\n",
+                "    ROW_NUMBER() OVER (PARTITION BY {partition} ORDER BY {backward}) AS {last}\n",
+                "  FROM {changes}\n",
+                "),\n",
+                "{base} AS (\n{opened}\n)\n"
+            ),
+            changes = changes,
+            read = read,
+            versions = versions,
+            at = at,
+            partition = partition,
+            forward = ordered(""),
+            backward = ordered(" DESC"),
+            next = next,
+            last = last,
+            base = base,
+            opened = opened,
+        );
+
+        Ok(Versions {
+            closed: SqlString::from(format!(
+                concat!(
+                    "{with}",
+                    "SELECT {columns}, {valid_from}, (SELECT MIN({changes}.{at}) FROM {changes} WHERE {matched}) AS {valid_to}\n",
+                    "FROM {base}\n",
+                    "WHERE EXISTS (SELECT 1 FROM {changes} WHERE {matched})\n",
+                    "UNION ALL\n",
+                    "SELECT {columns}, {at} AS {valid_from}, {next} AS {valid_to}\n",
+                    "FROM {versions}\n",
+                    "WHERE {op} <> 'd' AND {next} IS NOT NULL"
+                ),
+                with = with,
+                columns = columns,
+                valid_from = valid_from,
+                changes = changes,
+                at = at,
+                matched = matched,
+                valid_to = valid_to,
+                base = base,
+                next = next,
+                versions = versions,
+                op = op,
+            )),
+            open: SqlString::from(format!(
+                concat!(
+                    "{with}",
+                    "SELECT {columns}, {valid_from}, {valid_to}\n",
+                    "FROM {base}\n",
+                    "WHERE NOT EXISTS (SELECT 1 FROM {changes} WHERE {matched})\n",
+                    "UNION ALL\n",
+                    "SELECT {columns}, {at} AS {valid_from}, NULLIF({at}, {at}) AS {valid_to}\n",
+                    "FROM {versions}\n",
+                    "WHERE {op} <> 'd' AND {last} = 1"
+                ),
+                with = with,
+                columns = columns,
+                valid_from = valid_from,
+                valid_to = valid_to,
+                base = base,
+                changes = changes,
+                matched = matched,
+                at = at,
+                versions = versions,
+                op = op,
+                last = last,
+            )),
+        })
+    }
+}
+
+impl<L: RowChangeLog, W: Warehouse> SchemaChangeListener<L::Position> for Scd2Builder<'_, L, W> {
+    type Context = W;
+    type Error = UnbuildableArtifact;
+
+    fn table_created(
+        &mut self,
+        _: &W,
+        event: &TableCreated<'_, L::Position>,
+    ) -> Result<(), Self::Error> {
+        self.eras = EraTracker::since(Bound::from(event.change()));
+
+        Ok(())
+    }
+
+    // TODO: carry the versions across a schema change, closing the era before it as the builder of
+    // an scd1 does, rather than refusing the window.
+    fn table_renamed(
+        &mut self,
+        _: &W,
+        event: &TableRenamed<'_, L::Position>,
+    ) -> Result<(), Self::Error> {
+        Err(UnbuildableArtifact::AcrossEras(event.before().id().clone()))
+    }
+
+    fn table_altered(
+        &mut self,
+        _: &W,
+        event: &TableAltered<'_, L::Position>,
+    ) -> Result<(), Self::Error> {
+        match event.alterations().iter().all(Alteration::is_metadata_only) {
+            true => Ok(()),
+            false => Err(UnbuildableArtifact::AcrossEras(event.before().id().clone())),
+        }
+    }
+}
+
+impl<L: RowChangeLog, W: Warehouse> ArtifactBuilder<L::Position> for Scd2Builder<'_, L, W> {
+    fn select(
+        &self,
+        warehouse: &W,
+        end: &ReplayEnd<UnbuildableArtifact>,
+    ) -> Result<SqlString, UnbuildableArtifact> {
+        self.versions_at(warehouse, end)?
+            .map(|versions| versions.open)
+            .ok_or_else(|| UnbuildableArtifact::WithoutEra(end.table().clone()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use lithify_pipeline::schedule::Timeline;
+    use lithify_schema::event::{SchemaChange, TableChange};
+    use lithify_schema::listener::{CatalogModel, OutOfOrder};
+    use lithify_schema::model::{ColumnModel, ColumnType, TableModel};
+    use lithify_schema::ts::Ts;
+    use lithify_testing::Engine;
+
+    use super::*;
+    use lithify_testing::{Log, Offset, Untold};
+
+    const DAY: i64 = 86_400_000;
+
+    #[test]
+    fn an_scd2_appends_the_day_it_is_built_for() {
+        let scd2 = Scd2::new("%Y%m%d", Tz::UTC);
+        let timeline = Timeline::new(
+            Schedule::default(),
+            Ts::try_from(0).unwrap()..Ts::try_from(DAY * 3 + 5).unwrap(),
+        );
+        let day = Window::new(Ts::try_from(DAY).unwrap(), Ts::try_from(DAY * 2).unwrap());
+
+        assert_eq!(scd2.window(&day, &timeline), Some(day));
+    }
+
+    fn people(columns: &[&str]) -> TableModel {
+        TableModel::new(
+            TableId::new("shop", "people"),
+            columns
+                .iter()
+                .map(|name| ColumnModel::new(name, "BIGINT", ColumnType::Int64, false, None))
+                .collect(),
+            ["id"].into(),
+        )
+    }
+
+    fn change(at: i64, table: TableChange) -> SchemaChange<Offset> {
+        SchemaChange::new(
+            Offset(at as u64),
+            Ts::try_from(at).unwrap(),
+            "",
+            vec![table],
+            vec![],
+        )
+    }
+
+    #[test]
+    fn an_scd2_whose_table_changed_its_schema_within_the_window_is_refused() {
+        let scd2 = Scd2::new("%Y%m%d", Tz::UTC);
+        let window = Window::new(Ts::try_from(10).unwrap(), Ts::try_from(20).unwrap());
+        let mut versions = scd2.builder::<Log, Engine>(&Log, &window, Base::Missing);
+        let mut catalog = CatalogModel::default();
+        catalog
+            .accept::<OutOfOrder, _>(
+                &(),
+                &change(1, TableChange::Created(people(&["id"]))),
+                &mut (),
+            )
+            .unwrap();
+
+        assert_eq!(
+            catalog.accept::<Untold, _>(
+                &Engine::default(),
+                &change(15, TableChange::Altered(people(&["id", "name"]))),
+                &mut versions,
+            ),
+            Err(Untold::Unbuildable(UnbuildableArtifact::AcrossEras(
+                TableId::new("shop", "people")
+            )))
+        );
+    }
+}

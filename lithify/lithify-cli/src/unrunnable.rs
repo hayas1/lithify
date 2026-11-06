@@ -1,18 +1,17 @@
 use std::convert::Infallible;
 use std::fmt::{self, Display, Formatter};
 
-use chrono::NaiveDate;
-
-use lithify_config::Unreadable;
-use lithify_core::artifact::UnbuildableArtifact;
-use lithify_core::listener::OutOfOrder;
-use lithify_core::model::TableId;
-use lithify_core::window::Window;
+use lithify_build::artifact::{ArtifactName, UnbuildableArtifact};
+use lithify_pipeline::Unreadable;
+use lithify_pipeline::build_log::UnreadableBuildLog;
+use lithify_pipeline::check::Uninspectable;
+use lithify_pipeline::runner::Unsteppable;
 use lithify_protocol::sink::bigquery::client::Unqueryable;
+use lithify_schema::listener::OutOfOrder;
 
 #[derive(Debug)]
 pub enum Unrunnable {
-    Configuration(Unreadable),
+    Configuration(Box<Unreadable>),
     Unqueryable(duckdb::Error),
     Unanswerable(Unqueryable),
     OutOfOrder(OutOfOrder),
@@ -20,18 +19,16 @@ pub enum Unrunnable {
     Unwritable(std::io::Error),
     Unserializable(serde_json::Error),
     UnknownSink(String),
-    CaptureChanged {
-        logged: String,
-        configured: String,
+    Unreached,
+    Undeclared {
+        sink: String,
+        artifact: ArtifactName,
     },
     WithoutSource,
-    Unsharded(NaiveDate),
-    Unclosed(Window),
-    Baseless {
-        window: Window,
-        tables: Vec<TableId>,
-    },
-    UnknownTables(Vec<TableId>),
+    Unsteppable(Unsteppable),
+    Unlogged(UnreadableBuildLog),
+    Uncredentialed(&'static str),
+    Uninspectable(Uninspectable),
 }
 
 impl Display for Unrunnable {
@@ -48,36 +45,19 @@ impl Display for Unrunnable {
                 write!(formatter, "nothing in this pipeline is sunk into {name}")
             }
             Self::WithoutSource => write!(formatter, "this pipeline captures no server"),
-            Self::CaptureChanged { logged, configured } => write!(
+            Self::Undeclared { sink, artifact } => {
+                write!(formatter, "{sink} places no {artifact}")
+            }
+            Self::Unreached => write!(
                 formatter,
-                "the build log was captured as {logged} but the pipeline is captured as {configured} now"
+                "the change log lies in a warehouse other than the one it is sunk into"
             ),
-            Self::Unsharded(date) => write!(formatter, "the schedule dates no shard {date}"),
-            Self::Unclosed(window) => write!(
+            Self::Unsteppable(cause) => write!(formatter, "{cause}"),
+            Self::Uninspectable(cause) => write!(formatter, "{cause}"),
+            Self::Unlogged(cause) => write!(formatter, "{cause}"),
+            Self::Uncredentialed(warehouse) => write!(
                 formatter,
-                "the window {} .. {} has not closed yet",
-                window.from(),
-                window.to()
-            ),
-            Self::Baseless { window, tables } => write!(
-                formatter,
-                "nothing was built for {} closing at {}, which the window to {} folds onto; build the windows before it first",
-                tables
-                    .iter()
-                    .map(TableId::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                window.from(),
-                window.to()
-            ),
-            Self::UnknownTables(tables) => write!(
-                formatter,
-                "the window holds no table named {}",
-                tables
-                    .iter()
-                    .map(TableId::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                "a {warehouse} sink is read with a credential, but none was given"
             ),
         }
     }
@@ -86,27 +66,46 @@ impl Display for Unrunnable {
 impl std::error::Error for Unrunnable {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Configuration(cause) => Some(cause),
+            Self::Configuration(cause) => Some(cause.as_ref()),
             Self::Unqueryable(cause) => Some(cause),
             Self::Unanswerable(cause) => Some(cause),
             Self::OutOfOrder(cause) => Some(cause),
             Self::Unbuildable(cause) => Some(cause),
             Self::Unwritable(cause) => Some(cause),
             Self::Unserializable(cause) => Some(cause),
+            Self::Unsteppable(cause) => Some(cause),
+            Self::Uninspectable(cause) => Some(cause),
+            Self::Unlogged(cause) => Some(cause),
             Self::UnknownSink(_)
+            | Self::Unreached
+            | Self::Undeclared { .. }
             | Self::WithoutSource
-            | Self::CaptureChanged { .. }
-            | Self::Unsharded(_)
-            | Self::Unclosed(_)
-            | Self::Baseless { .. }
-            | Self::UnknownTables(_) => None,
+            | Self::Uncredentialed(_) => None,
         }
     }
 }
 
 impl From<Unreadable> for Unrunnable {
     fn from(cause: Unreadable) -> Self {
-        Self::Configuration(cause)
+        Self::Configuration(Box::new(cause))
+    }
+}
+
+impl From<UnreadableBuildLog> for Unrunnable {
+    fn from(cause: UnreadableBuildLog) -> Self {
+        Self::Unlogged(cause)
+    }
+}
+
+impl From<Uninspectable> for Unrunnable {
+    fn from(cause: Uninspectable) -> Self {
+        Self::Uninspectable(cause)
+    }
+}
+
+impl From<Unsteppable> for Unrunnable {
+    fn from(cause: Unsteppable) -> Self {
+        Self::Unsteppable(cause)
     }
 }
 
