@@ -6,10 +6,11 @@ How the code is laid out and the rules it keeps, as opposed to the [design](desi
 
 | Crate | Holds |
 | --- | --- |
-| `lithify-core` | The data plane, the vocabulary every other crate speaks: the replay of schema changes and the listeners it tells, the `Artifact` trait, and planning what one window builds of each table, without waiting on a warehouse |
+| `lithify-schema` | The vocabulary of a source's schema as it changes, the replay vocabulary that also runs under a Kappa architecture: the schema changes, the catalog `CatalogModel::accept` folds them into, the listeners it tells, the eras they cut, and the fields of a change log record and the values they hold, knowing no warehouse, no SQL and no I/O |
+| `lithify-build` | The data plane, built on `lithify-schema`: the SQL a warehouse speaks, where a change log landed in it and how schema changes are read from it, the `Artifact` trait, and planning what one window builds of each table, without waiting on a warehouse |
 | `lithify-artifact` | One module for each kind of artifact, each naming its tables and building them from what the replay tells it, and saying which window it builds and what it folds onto |
 | `lithify-protocol` | The change log formats, how a sink connector lands them, and the warehouses lithify reads and writes, the build log among what they hold |
-| `lithify-pipeline` | The control plane, generic over the kinds of capture, warehouse and artifact it is given: reading and listing pipelines, the schedule and the days it cuts, the build log, stepping a series window by window, running what the core plans, and checking a sink |
+| `lithify-pipeline` | The control plane, generic over the kinds of capture, warehouse and artifact it is given: reading and listing pipelines, the schedule and the days it cuts, the build log, stepping a series window by window, running what the data plane plans, and checking a sink |
 | `lithify-cli` | The one place that lists every kind, as enums of the configuration it accepts, and the commands |
 | `lithify-ui` | Pages showing what the build log holds, shaped from what `lithify-pipeline` reads |
 | `lithify-testing` | What `cargo test` of the other crates builds on, as a dev-dependency alone: a replica of a source database and its history as the oracle, its change log landed in an in-memory DuckDB as Debezium would land it, the shards an artifact builds over it, and stand-ins for a change log, a warehouse and a pipeline |
@@ -22,7 +23,8 @@ An arrow points from a crate to one it depends on.
 
 ```mermaid
 flowchart BT
-    pipeline[lithify-pipeline] --> core[lithify-core]
+    pipeline[lithify-pipeline] --> build[lithify-build]
+    build --> schema[lithify-schema]
     artifact[lithify-artifact] --> pipeline
     protocol[lithify-protocol] --> pipeline
     ui[lithify-ui] --> pipeline
@@ -33,7 +35,7 @@ flowchart BT
 
 ### How a step runs
 
-The control plane reads what the core is handed and runs what it plans; the core reads and writes nothing.
+The control plane reads what the data plane is handed and runs what it plans; the data plane reads and writes nothing.
 
 ```mermaid
 flowchart TD
@@ -48,14 +50,18 @@ flowchart TD
         built --> writer[BuildLogWrite]
         writer -->|WarehouseControl| log
     end
-    subgraph core[lithify-core]
-        replayer[Replayer] --> listeners[TableListeners]
-        listeners -->|SchemaChangeListener, Finish| builder[an ArtifactBuilder per table]
-        builder --> build[TableBuild]
+    subgraph build[lithify-build]
+        replayer[Replayer]
+        builder[an ArtifactBuilder per table] --> tablebuild[TableBuild]
+    end
+    subgraph schema[lithify-schema]
+        replay[SchemaHistory::replay] -->|CatalogModel::accept| listeners[TableListeners]
     end
     base --> replayer
     history --> replayer
-    build --> runner
+    replayer --> replay
+    listeners -->|SchemaChangeListener, Finish| builder
+    tablebuild --> runner
 ```
 
 ## Rules
@@ -75,11 +81,20 @@ Eras are the builder's own to cut: `EraTracker` closes one at each schema change
 
 When a builder seems to need something more, look first for the listener call that already tells it.
 
-### The core plans, the pipeline runs and records
+### The schema knows no warehouse
 
-`lithify-core` decides what a window builds from what it is handed alone: the schema changes before the window opens and within it, read beforehand into a `SchemaHistory`, the table each one folds onto, and the dialect of the warehouse; `Replayer` replays them into a `TableBuild` for each table and runs nothing.
+`lithify-schema` holds what a replay of schema changes is made of and nothing of where the changes are read from or what is built of them: it names no SQL, no warehouse, no table a change log landed in and nothing async, and depends on `chrono` and `tracing` alone.
+`lithify-build` depends on it and never the other way: a change log record is described in the schema only as the `ColumnPath` of each field and the `Coordinate` it holds, while writing a coordinate as SQL is `WarehouseSql::coordinate`'s; how a window meets a table is `Encounter`'s, while what the table is built onto is `Base::new`'s.
+
+This keeps the replay open to being driven by a stream as well as by a window, as a Kappa architecture would.
+A step reads the schema changes landed in the warehouse into a `SchemaHistory` and replays them a window at a time; a stream would instead consume the topic of schema changes as it is published, the command line opening it and the pipeline feeding each change to `CatalogModel::accept`, and replace the SCD type 1 view of a table the moment a schema change opens an era rather than each time its daily snapshot steps.
+As the view already reads the row changes up to now, it would then stay current in real time, and the stream would ask nothing of the schema crate that a step does not.
+
+### The data plane plans, the pipeline runs and records
+
+`lithify-build` decides what a window builds from what it is handed alone: the schema changes before the window opens and within it, read beforehand into a `SchemaHistory`, the table each one folds onto, and the dialect of the warehouse; `Replayer` replays them into a `TableBuild` for each table and runs nothing.
 `lithify-pipeline` does everything else: which window to build, read from the build log, the history it reads, running the statements and logging what came of them.
-The core names no build log, no schedule and no status, and each trait of the core is extended in `lithify-pipeline` with what the control plane asks of it, `ArtifactControl` of `Artifact` and `WarehouseControl` of `WarehouseClient`, which `lithify-artifact` and `lithify-protocol` implement beside the core ones.
+The data plane names no build log, no schedule and no status, and each trait of `lithify-build` is extended in `lithify-pipeline` with what the control plane asks of it, `ArtifactControl` of `Artifact` and `WarehouseControl` of `WarehouseClient`, which `lithify-artifact` and `lithify-protocol` implement beside the data plane ones.
 
 ### Only the command line lists the kinds
 
@@ -90,10 +105,10 @@ A stand-in is written only where the kind itself cannot be had, as a warehouse o
 
 ### A change log is read where it landed
 
-The core reads a change log from the table it landed in, named by `SchemaChangeLog::ddl_landed_table` and `RowChangeLog::dml_landed_table`, and knows no topic.
+The data plane reads a change log from the table it landed in, named by `SchemaChangeLog::ddl_landed_table` and `RowChangeLog::dml_landed_table`, and knows no topic.
 `CdcFormat` says what a source publishes: the topic of its schema changes and of each table's row changes, where each field lies in a record, and how a record reads as a schema change.
 `Landing` says how a sink connector lands what a format publishes into its warehouse: the envelope it wraps each record in and the table it names after a topic, as `S3Sink` keeps the topic and `BigQuerySink` sanitizes it.
-`Landed` joins a format and a landing into the `ChangeLogs` the core reads, so neither knows the other.
+`Landed` joins a format and a landing into the `ChangeLogs` the data plane reads, so neither knows the other.
 The protocol crate only provides the formats, dialects and landings; the command line lists the dialects it reads in `CaptureConfig`, as it lists the warehouses it sinks into in `WarehouseConfig`, and its `Capture` for the client of each warehouse picks the landing that lands into it.
 
 ### Only what talks to a warehouse waits
