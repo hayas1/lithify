@@ -4,6 +4,7 @@ use crate::event::{MalformedEvent, SchemaChange};
 use crate::listener::{CatalogModel, OutOfOrder, SchemaChangeListener};
 use crate::model::{TableId, TableModel};
 use crate::position::{Coordinate, Position};
+use crate::sink::TablePath;
 use crate::ts::{Event, Ts};
 use crate::window::Window;
 
@@ -26,10 +27,6 @@ impl fmt::Display for ColumnPath {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0.join("."))
     }
-}
-
-pub trait CdcFormat {
-    type Config;
 }
 
 pub trait ChangeLog {
@@ -55,7 +52,7 @@ pub trait ChangeLog {
 pub trait SchemaChangeLog: ChangeLog {
     type Record;
 
-    fn ddl_topic(&self) -> String;
+    fn ddl_landed_table(&self) -> TablePath;
 
     fn schema_change(
         &self,
@@ -64,7 +61,7 @@ pub trait SchemaChangeLog: ChangeLog {
 }
 
 pub trait RowChangeLog: ChangeLog {
-    fn dml_topic(&self, table: &TableId) -> String;
+    fn dml_landed_table(&self, table: &TableId) -> TablePath;
 
     fn operation(&self) -> ColumnPath;
 
@@ -75,12 +72,12 @@ pub trait RowChangeLog: ChangeLog {
 
 pub trait ChangeLogs {
     type Position: Position;
-    type Schema: SchemaChangeLog<Position = Self::Position>;
-    type Row: RowChangeLog<Position = Self::Position>;
+    type SchemaChangeLog: SchemaChangeLog<Position = Self::Position>;
+    type RowChangeLog: RowChangeLog<Position = Self::Position>;
 
-    fn schema_changes(&self) -> &Self::Schema;
+    fn schema_changes(&self) -> &Self::SchemaChangeLog;
 
-    fn row_changes(&self) -> &Self::Row;
+    fn row_changes(&self) -> &Self::RowChangeLog;
 }
 
 // The log stays a parameter of the trait rather than of its methods: each warehouse decodes the

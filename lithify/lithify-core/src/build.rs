@@ -99,12 +99,33 @@ impl TableBuild {
     }
 }
 
+pub struct BuildContext<'a, W> {
+    warehouse: &'a W,
+    namespace: &'a Namespace,
+}
+
+impl<'a, W> BuildContext<'a, W> {
+    pub fn new(warehouse: &'a W, namespace: &'a Namespace) -> Self {
+        Self {
+            warehouse,
+            namespace,
+        }
+    }
+
+    pub fn warehouse(&self) -> &'a W {
+        self.warehouse
+    }
+
+    pub fn namespace(&self) -> &'a Namespace {
+        self.namespace
+    }
+}
+
 // One table as an artifact builds it: what every artifact records of the table alike, the name it
 // opened the window under and what it is built onto, around the fold the artifact keeps of it.
 pub struct TableBuilder<'a, A, L, B> {
     artifact: &'a A,
     log: PhantomData<&'a L>,
-    namespace: &'a Namespace,
     window: &'a Window,
     table_from: Option<TableId>,
     base: Base,
@@ -115,7 +136,6 @@ impl<'a, A, L, B> TableBuilder<'a, A, L, B> {
     pub fn opening<W>(
         artifact: &'a A,
         log: &'a L,
-        namespace: &'a Namespace,
         window: &'a Window,
         table: &TableId,
         encounter: Encounter,
@@ -131,7 +151,6 @@ impl<'a, A, L, B> TableBuilder<'a, A, L, B> {
         Self {
             artifact,
             log: PhantomData,
-            namespace,
             window,
             table_from: encounter.table_from(table),
             builder: artifact.builder::<L, W>(log, window, base.clone()),
@@ -140,59 +159,60 @@ impl<'a, A, L, B> TableBuilder<'a, A, L, B> {
     }
 }
 
-impl<P, A, L, B> SchemaChangeListener<P> for TableBuilder<'_, A, L, B>
+impl<'a, P, A, L, B> SchemaChangeListener<P> for TableBuilder<'a, A, L, B>
 where
     B: SchemaChangeListener<P, Error = UnbuildableArtifact>,
+    B::Context: 'a,
 {
-    type Context = B::Context;
+    type Context = BuildContext<'a, B::Context>;
     type Error = UnbuildableArtifact;
 
     fn visit_statement(
         &mut self,
-        context: &B::Context,
+        context: &BuildContext<'a, B::Context>,
         change: &SchemaChange<P>,
     ) -> Result<(), UnbuildableArtifact> {
-        self.builder.visit_statement(context, change)
+        self.builder.visit_statement(context.warehouse(), change)
     }
 
     fn leave_statement(
         &mut self,
-        context: &B::Context,
+        context: &BuildContext<'a, B::Context>,
         change: &SchemaChange<P>,
     ) -> Result<(), UnbuildableArtifact> {
-        self.builder.leave_statement(context, change)
+        self.builder.leave_statement(context.warehouse(), change)
     }
 
     fn table_created(
         &mut self,
-        context: &B::Context,
+        context: &BuildContext<'a, B::Context>,
         event: &TableCreated<'_, P>,
     ) -> Result<(), UnbuildableArtifact> {
-        self.builder.table_created(context, event)
+        self.builder.table_created(context.warehouse(), event)
     }
 
     fn table_dropped(
         &mut self,
-        context: &B::Context,
+        context: &BuildContext<'a, B::Context>,
         event: &TableDropped<'_, P>,
     ) -> Result<(), UnbuildableArtifact> {
-        self.builder.table_dropped(context, event)
+        self.builder.table_dropped(context.warehouse(), event)
     }
 
     fn table_renamed(
         &mut self,
-        context: &B::Context,
+        context: &BuildContext<'a, B::Context>,
         event: &TableRenamed<'_, P>,
     ) -> Result<(), UnbuildableArtifact> {
-        self.builder.table_renamed(context, event)
+        self.builder.table_renamed(context.warehouse(), event)
     }
 
     fn table_altered(
         &mut self,
-        context: &B::Context,
+        context: &BuildContext<'a, B::Context>,
         event: &TableAltered<'_, P>,
     ) -> Result<(), UnbuildableArtifact> {
-        self.builder.table_altered(context, event)
+        self.builder.table_altered(context.warehouse(), event)
     }
 }
 
@@ -232,17 +252,17 @@ where
 
     fn finish(
         self,
-        context: &B::Context,
+        context: &BuildContext<'a, W>,
         end: ReplayEnd<UnbuildableArtifact>,
     ) -> Result<TableBuild, Infallible> {
         let target = end.model().map(|table| {
             TablePath::new(
-                self.namespace.clone(),
+                context.namespace().clone(),
                 &self.artifact.table_name(table.id(), self.window),
             )
         });
         let making = match &target {
-            Some(target) => self.made(context, &end, target),
+            Some(target) => self.made(context.warehouse(), &end, target),
             None => end.refusal().cloned().map_or(Ok(Vec::new()), Err),
         };
 

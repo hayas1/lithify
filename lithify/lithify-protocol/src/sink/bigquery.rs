@@ -6,7 +6,11 @@ pub mod from_sql;
 
 use lithify_core::model::ColumnType;
 use lithify_core::sink::{ChangeLogSql, Namespace, TablePath, UnsupportedColumn, WarehouseSql};
+use lithify_core::source::ColumnPath;
 use lithify_core::sql::SqlString;
+
+use crate::landing::Landing;
+use crate::source::CdcFormat;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BigQueryWarehouse {
@@ -133,10 +137,21 @@ impl ChangeLogSql for BigQueryWarehouse {
     fn change_log_namespace(&self) -> &Namespace {
         &self.change_log
     }
+}
 
-    fn change_log(&self, topic: &str) -> TablePath {
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BigQuerySink;
+
+impl<C: CdcFormat> Landing<C> for BigQuerySink {
+    type Warehouse = BigQueryWarehouse;
+
+    fn envelope(&self) -> Option<ColumnPath> {
+        None
+    }
+
+    fn landed_table(&self, change_log: &Namespace, topic: &str) -> TablePath {
         TablePath::new(
-            self.change_log_namespace().clone(),
+            change_log.clone(),
             &topic
                 .chars()
                 .map(|character| match character.is_ascii_alphanumeric() {
@@ -151,6 +166,7 @@ impl ChangeLogSql for BigQueryWarehouse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::landing::Landed;
     use crate::source::debezium::Debezium;
     use crate::source::debezium::mysql::MySql;
 
@@ -159,7 +175,9 @@ mod tests {
     use lithify_core::sink::{ChangeLogSql, TablePath, UnsupportedColumn};
     use lithify_core::ts::Ts;
     use lithify_core::window::Window;
-    use lithify_pipeline::build_log::{BuildLog, BuildLogQuery, Latest, Run, Status, TableBuilt};
+    use lithify_pipeline::build_log::{
+        BuildLog, BuildLogQuery, Latest, Run, Series, Status, TableBuilt,
+    };
     use ulid::Ulid;
 
     fn bigquery() -> BigQueryWarehouse {
@@ -207,15 +225,16 @@ mod tests {
             Status::Succeeded,
             Ts::from(chrono::DateTime::from_timestamp_millis(1789949000000).unwrap()),
         )
-        .logged(&Run::new(
-            Ulid::nil(),
-            Ts::from(DateTime::UNIX_EPOCH),
-            &"snapshot".into(),
-            "daily",
-            "primary",
-            "{}",
-            "0.1.0",
-        ));
+        .logged(
+            &Run::new(
+                Ulid::nil(),
+                Ts::from(DateTime::UNIX_EPOCH),
+                "primary",
+                "{}",
+                "0.1.0",
+            ),
+            &Series::new("snapshot".into(), "daily"),
+        );
 
         assert_eq!(
             BuildLog::insert(
@@ -379,7 +398,7 @@ mod tests {
     #[test]
     fn the_schema_changes_of_a_window_are_read_whole_in_the_order_of_their_processing_time_then_position()
      {
-        let log = Debezium::new("mysql", MySql);
+        let log = Landed::new(Debezium::new("mysql", MySql), BigQuerySink, &bigquery());
         let window = Window::new(Ts::try_from(0).unwrap(), Ts::try_from(10).unwrap());
 
         assert_eq!(
@@ -391,22 +410,6 @@ mod tests {
                 "WHERE `source`.`ts_ms` >= 0 AND `source`.`ts_ms` < 10\n",
                 "ORDER BY `ts_ms`, `source`.`file`, `source`.`pos`",
             )
-        );
-    }
-
-    #[test]
-    fn a_change_log_is_read_from_the_table_its_topic_was_sanitized_into() {
-        assert_eq!(
-            bigquery().change_log_ref("mysql.shop.customers"),
-            "`local-project`.`mysql_shop_cdc`.`mysql_shop_customers`"
-        );
-    }
-
-    #[test]
-    fn a_change_log_is_read_from_a_table_named_only_with_what_bigquery_allows() {
-        assert_eq!(
-            bigquery().change_log_ref("mysql.shop.order-lines"),
-            "`local-project`.`mysql_shop_cdc`.`mysql_shop_order_lines`"
         );
     }
 

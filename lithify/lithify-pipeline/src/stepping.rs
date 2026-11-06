@@ -1,69 +1,72 @@
+use std::convert::Infallible;
+use std::marker::PhantomData;
+
 use chrono::NaiveDate;
 
 use crate::artifact::ArtifactControl;
-use crate::build_log::{BuildLog, Latest, Series};
+use crate::build_log::{BuildLog, Latest, UnreadableBuildLog};
+use crate::capture::Capture;
+use crate::check::Expectation;
+use crate::infra::Source;
+use crate::materialization::Materialization;
 use crate::progress::{Progress, Step};
-use crate::runner::{BuildLogWriter, StepTaker, Tables, Unsteppable};
-use crate::schedule::Timeline;
-use lithify_core::sink::Namespace;
+use crate::runner::{BuildLogWriter, Replaying, Unsteppable};
+use crate::table;
 
 use crate::warehouse::WarehouseControl;
+use lithify_core::artifact::UnbuildableArtifact;
+use lithify_core::listener::OutOfOrder;
+use lithify_core::model::TableId;
+use lithify_core::sink::WarehouseClient;
 use lithify_core::ts::{Event, Ts};
 use lithify_core::window::Window;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SeriesLog {
-    namespace: Namespace,
-    series: Series,
+pub struct Stepping<'a, K, C, E> {
+    client: &'a K,
+    source: &'a Source<C>,
+    expectation: Expectation,
+    listing: &'a table::Tables,
+    failure: PhantomData<fn() -> E>,
 }
 
-impl SeriesLog {
-    pub fn new(namespace: Namespace, series: Series) -> Self {
-        Self { namespace, series }
-    }
-
-    pub fn of<A: ArtifactControl>(artifact: &A, namespace: &Namespace) -> Self {
-        Self::new(namespace.clone(), artifact.series())
-    }
-
-    pub fn namespace(&self) -> &Namespace {
-        &self.namespace
-    }
-
-    pub fn series(&self) -> &Series {
-        &self.series
-    }
-}
-
-pub struct Stepping<'a, P> {
-    taker: &'a P,
-    timeline: Timeline,
-    capture: String,
-}
-
-impl<'a, P: StepTaker> Stepping<'a, P> {
-    pub fn new(taker: &'a P, timeline: Timeline, capture: String) -> Self {
+impl<'a, K, C, E> Stepping<'a, K, C, E>
+where
+    K: WarehouseControl,
+    C: Capture<K>,
+    E: From<<K as WarehouseClient>::Error>
+        + From<UnbuildableArtifact>
+        + From<UnreadableBuildLog>
+        + From<Unsteppable>
+        + From<OutOfOrder>
+        + From<Infallible>,
+{
+    pub fn new(
+        client: &'a K,
+        source: &'a Source<C>,
+        expectation: Expectation,
+        listing: &'a table::Tables,
+    ) -> Self {
         Self {
-            taker,
-            timeline,
-            capture,
+            client,
+            source,
+            expectation,
+            listing,
+            failure: PhantomData,
         }
     }
 
-    pub async fn up_to(self, date: NaiveDate, snapshot: &SeriesLog) -> Result<Self, P::Error> {
-        let until = self
-            .timeline
-            .through(date)
-            .ok_or(Unsteppable::Unopened(date))?;
-        if until > self.timeline.range().end {
+    pub async fn up_to(self, date: NaiveDate, scheduled: &Materialization) -> Result<Self, E> {
+        let timeline = self.expectation.timeline();
+        let until = timeline.through(date).ok_or(Unsteppable::Unopened(date))?;
+        if until > timeline.range().end {
             return Err(Unsteppable::Unclosed(date).into());
         }
-        let standing = self.progress(snapshot).await?.standing();
+        let standing = self.progress(scheduled).await?.standing();
 
         match standing.filter(|standing| *standing > until) {
             Some(built_until) => Err(Unsteppable::Overtaken { date, built_until }.into()),
             None => Ok(Self {
-                timeline: self.timeline.up_to(until),
+                expectation: self.expectation.up_to(until),
                 ..self
             }),
         }
@@ -72,13 +75,12 @@ impl<'a, P: StepTaker> Stepping<'a, P> {
     pub async fn next<A: ArtifactControl>(
         &self,
         artifact: &A,
-        namespace: &Namespace,
-        base: Option<&SeriesLog>,
+        materialization: &Materialization,
         taken: &[Window],
-    ) -> Result<Option<Step>, P::Error> {
-        let progress = self.progress(&SeriesLog::of(artifact, namespace)).await?;
-        let derived = base.is_some();
-        let base = match base {
+    ) -> Result<Option<Step>, E> {
+        let progress = self.progress(materialization).await?;
+        let derived = materialization.base().is_some();
+        let base = match materialization.base() {
             Some(base) => Some(self.progress(base).await?),
             None => None,
         };
@@ -95,78 +97,100 @@ impl<'a, P: StepTaker> Stepping<'a, P> {
         base: Option<&Window>,
         derived: bool,
     ) -> Option<Window> {
+        let timeline = self.expectation.timeline();
         let from = match (built, derived) {
             (Some(built), _) => *built.to(),
-            (None, false) => self.timeline.range().start,
+            (None, false) => timeline.range().start,
             (None, true) => *base?.from(),
         };
         let shard = base.map(|base| *base.to());
         // An artifact built from another and never built yet starts from the last shard its base
         // built, whichever side of the day its window opens on.
         let fresh = derived && built.is_none();
-        let window = self
-            .timeline
+        let window = timeline
             .days(from)
-            .filter_map(|day| artifact.window(&day, &self.timeline))
+            .filter_map(|day| artifact.window(&day, timeline))
             .skip_while(|window| fresh && shard.is_some_and(|shard| *window.from() < shard))
             .take_while(|window| !derived || shard.is_some_and(|shard| *window.from() <= shard))
             .next()?;
 
-        self.timeline.reached(&window).then_some(window)
+        timeline.reached(&window).then_some(window)
     }
 
     pub async fn take<A: ArtifactControl, B: BuildLogWriter>(
         &self,
         artifact: &A,
-        namespace: &Namespace,
-        base: Option<&SeriesLog>,
-        window: &Window,
-        tables: &Tables,
+        materialization: &Materialization,
+        step: &Step,
         writer: &B,
-    ) -> Result<B::Output, P::Error> {
-        let log = SeriesLog::of(artifact, namespace);
-        let previous = self.built(base.unwrap_or(&log), *window.from()).await?;
+    ) -> Result<B::Output, E> {
+        let window = step.window();
+        let previous = self
+            .built(
+                materialization.base().unwrap_or(materialization),
+                *window.from(),
+            )
+            .await?;
 
-        self.taker
-            .take(
-                artifact,
-                namespace,
-                window,
-                &previous,
-                tables,
-                &writer.advancing(log.namespace(), log.series()),
+        self.source
+            .capture()
+            .with_change_logs(
+                self.client.warehouse(),
+                Replaying::<_, _, _, _, E>::new(
+                    self.client,
+                    artifact,
+                    materialization,
+                    window,
+                    &previous,
+                    self.finishes(materialization, step),
+                    writer,
+                ),
             )
             .await
     }
 
-    async fn built(&self, log: &SeriesLog, closing: Ts<Event>) -> Result<Vec<BuildLog>, P::Error> {
-        self.latest(log, Latest::SucceededUntil(closing)).await
+    fn finishes<'f>(
+        &'f self,
+        materialization: &'f Materialization,
+        step: &'f Step,
+    ) -> impl Fn(&TableId) -> bool + 'f {
+        move |table| {
+            step.includes(table) && self.listing.table(table).builds(materialization.artifact())
+        }
     }
 
-    async fn latest(&self, log: &SeriesLog, latest: Latest) -> Result<Vec<BuildLog>, P::Error> {
-        self.taker
-            .client()
-            .build_logs::<P::Error>(log.namespace(), log.series(), &latest.into())
+    async fn built(
+        &self,
+        materialization: &Materialization,
+        closing: Ts<Event>,
+    ) -> Result<Vec<BuildLog>, E> {
+        self.latest(materialization, Latest::SucceededUntil(closing))
             .await
     }
 
-    async fn progress(&self, log: &SeriesLog) -> Result<Progress, P::Error> {
-        let progress = Progress::read(
-            &self.latest(log, Latest::Attempted).await?,
-            &self.latest(log, Latest::Succeeded).await?,
-        );
-        let changed = progress
-            .captures()
-            .find(|logged| *logged != self.capture)
-            .map(str::to_owned);
+    async fn latest(
+        &self,
+        materialization: &Materialization,
+        latest: Latest,
+    ) -> Result<Vec<BuildLog>, E> {
+        self.client
+            .build_logs::<E>(
+                materialization.namespace(),
+                materialization.series(),
+                &latest.into(),
+            )
+            .await
+    }
 
-        match changed {
-            Some(logged) => Err(Unsteppable::CaptureChanged {
-                logged,
-                configured: self.capture.clone(),
-            }
-            .into()),
-            None => Ok(progress),
+    async fn progress(&self, materialization: &Materialization) -> Result<Progress, E> {
+        let latest = self.latest(materialization, Latest::Attempted).await?;
+        if let Some(changed) = self.expectation.capture_changed(&latest) {
+            return Err(Unsteppable::CaptureChanged(changed).into());
         }
+
+        Ok(Progress::read(
+            &latest,
+            &self.latest(materialization, Latest::Succeeded).await?,
+        ))
     }
 }

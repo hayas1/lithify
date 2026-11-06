@@ -1,10 +1,11 @@
 [[artifact]]
 name = "snapshot"
 kind = "snapshot"
-at = "00:00"
 shard = "%Y%m%d"
 
 [[artifact]]
-name = "copy"
-kind = "copy"
+name = "noon"
+kind = "instant"
 base = "snapshot"
+at = "12:00"
+shard = "%Y%m%d"

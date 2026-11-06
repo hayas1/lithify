@@ -2,29 +2,32 @@ use std::collections::BTreeMap;
 
 use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
 use lithify_core::sink::{ChangeLogSql, WarehouseSql};
+use lithify_core::source::{RowChangeLog, SchemaChangeLog};
 use lithify_core::sql::SqlString;
-use lithify_protocol::DuckDbWarehouse;
+use lithify_protocol::{Debezium, DuckDbWarehouse, Landed, MySql, S3Sink};
 
 use crate::replica::{CellValue, ColumnDdl, Ddl, Dml, Mutation, Placed, Replica, ReplicaDump, Row};
 
-pub struct Landing<'a> {
+pub struct ReplicaLanding<'a> {
     replica: &'a Replica,
 }
 
-impl<'a> Landing<'a> {
-    pub const TOPIC_PREFIX: &'static str = "mysql";
-
+impl<'a> ReplicaLanding<'a> {
     pub fn of(replica: &'a Replica) -> Self {
         Self { replica }
+    }
+
+    pub fn log(warehouse: &DuckDbWarehouse) -> Landed<Debezium<MySql>, S3Sink> {
+        Landed::new(Debezium::new("mysql", MySql), S3Sink, warehouse)
     }
 
     pub fn create(&self, warehouse: &DuckDbWarehouse) -> SqlString {
         let mut dump = ReplicaDump::default();
         let mut schema_changes = Vec::new();
-        let mut topics: BTreeMap<String, Topic> = BTreeMap::new();
+        let mut topics: BTreeMap<TableId, Topic> = BTreeMap::new();
 
         for (position, (at, mutation)) in self.replica.mutations().iter().enumerate() {
-            let landed = Landed {
+            let stamp = Stamp {
                 position: position + 1,
                 at: at.milliseconds_since_epoch(),
             };
@@ -37,37 +40,29 @@ impl<'a> Landing<'a> {
                         .table(dml.table())
                         .unwrap_or_else(|| panic!("{} is changed while it stands", dml.table()));
                     topics
-                        .entry(Self::topic(dml.table()))
+                        .entry(dml.table().clone())
                         .or_default()
-                        .push(table, landed.row_change(dml, before, after));
+                        .push(table, stamp.row_change(dml, before, after));
                 }
                 Mutation::Ddl(ddl) => {
                     dump.apply(mutation);
-                    schema_changes.push(landed.schema_change(ddl, &dump));
+                    schema_changes.push(stamp.schema_change(ddl, &dump));
                 }
             }
         }
 
+        let log = Self::log(warehouse);
         let mut statements = vec![format!(
             "{};\nCREATE TABLE {} AS SELECT * FROM (VALUES\n{}\n) AS t(value)",
             warehouse.create_namespace(warehouse.change_log_namespace()),
-            warehouse.change_log_ref(Self::TOPIC_PREFIX),
+            warehouse.table_ref(&log.ddl_landed_table()),
             schema_changes.join(",\n")
         )];
-        for (topic, landed) in &topics {
-            statements.extend(landed.create(&warehouse.change_log_ref(topic)));
+        for (table, topic) in &topics {
+            statements.extend(topic.create(&warehouse.table_ref(&log.dml_landed_table(table))));
         }
 
         SqlString::from(statements.join(";\n"))
-    }
-
-    fn topic(table: &TableId) -> String {
-        format!(
-            "{}.{}.{}",
-            Self::TOPIC_PREFIX,
-            table.schema(),
-            table.table()
-        )
     }
 
     fn literal(text: &str) -> String {
@@ -82,12 +77,12 @@ impl<'a> Landing<'a> {
     }
 }
 
-struct Landed {
+struct Stamp {
     position: usize,
     at: i64,
 }
 
-impl Landed {
+impl Stamp {
     fn row_change(&self, dml: &Dml, before: Option<Row>, after: Option<Row>) -> RowChange {
         RowChange {
             position: self.position,
@@ -114,8 +109,8 @@ impl Landed {
         format!(
             "({{'source': {{'file': 'binlog.000001', 'pos': {}::BIGINT, 'gtid': NULL::VARCHAR, 'ts_ms': {at}::BIGINT}}, 'ts_ms': {at}::BIGINT, 'ddl': {}, 'tableChanges': [{{'type': '{kind}', 'id': {}, 'table': {table}}}]}})",
             self.position,
-            Landing::literal(&Statement(ddl).to_string()),
-            Landing::literal(&format!("\"{}\".\"{}\"", id.schema(), id.table())),
+            ReplicaLanding::literal(&Statement(ddl).to_string()),
+            ReplicaLanding::literal(&format!("\"{}\".\"{}\"", id.schema(), id.table())),
             at = self.at,
         )
     }
@@ -124,7 +119,7 @@ impl Landed {
         let key = table
             .primary_key()
             .columns()
-            .map(|column| Landing::literal(column.as_str()))
+            .map(|column| ReplicaLanding::literal(column.as_str()))
             .collect::<Vec<_>>()
             .join(", ");
         let columns = table
@@ -133,12 +128,12 @@ impl Landed {
             .map(|(index, column)| {
                 format!(
                     "{{'name': {}, 'typeName': {}, 'position': {}::BIGINT, 'optional': {}, 'defaultValueExpression': {}, 'length': NULL::BIGINT, 'scale': NULL::BIGINT, 'comment': {}}}",
-                    Landing::literal(column.name().as_str()),
-                    Landing::literal(column.type_name()),
+                    ReplicaLanding::literal(column.name().as_str()),
+                    ReplicaLanding::literal(column.type_name()),
                     index + 1,
                     column.is_optional(),
-                    Landing::nullable(column.default_value(), "VARCHAR"),
-                    Landing::nullable(column.comment(), "VARCHAR"),
+                    ReplicaLanding::nullable(column.default_value(), "VARCHAR"),
+                    ReplicaLanding::nullable(column.comment(), "VARCHAR"),
                 )
             })
             .collect::<Vec<_>>()
@@ -234,7 +229,7 @@ impl Topic {
             .map(|column| {
                 format!(
                     "{}: {}",
-                    Landing::literal(column.name().as_str()),
+                    ReplicaLanding::literal(column.name().as_str()),
                     Cell(
                         row.get(column.name()).unwrap_or(&CellValue::Null),
                         Self::sql_type(column)
@@ -265,7 +260,9 @@ impl std::fmt::Display for Cell<'_> {
         match value {
             CellValue::Null => write!(formatter, "NULL::{sql_type}"),
             CellValue::Int(number) => write!(formatter, "{number}::{sql_type}"),
-            CellValue::Text(text) => write!(formatter, "{}::{sql_type}", Landing::literal(text)),
+            CellValue::Text(text) => {
+                write!(formatter, "{}::{sql_type}", ReplicaLanding::literal(text))
+            }
         }
     }
 }

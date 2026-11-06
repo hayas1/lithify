@@ -282,8 +282,8 @@ impl Reading {
             (BuildLogView::All, false) => Ok(inspection.showing(
                 client
                     .build_logs::<Misread>(
-                        self.inspecting.namespace(),
-                        self.inspecting.series(),
+                        self.inspecting.scheduled().namespace(),
+                        self.inspecting.scheduled().series(),
                         &BuildLogQuery::from(self.view),
                     )
                     .await?,
@@ -313,9 +313,11 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use lithify_testing::pipeline::{Captured, INFRA, Kept, Made, configure, logged, scratch};
+    use lithify_testing::pipeline::{
+        ArtifactConfig, CaptureConfig, INFRA, Kept, configure, logged, scratch,
+    };
 
-    fn under(root: &Path) -> Survey<Captured, Kept, Made> {
+    fn under(root: &Path) -> Survey<CaptureConfig, Kept, ArtifactConfig> {
         Survey::new(root.to_owned(), ())
     }
 

@@ -4,6 +4,7 @@ use lithify_core::sink::OpenWarehouse;
 use lithify_core::ts::{Replay, Ts};
 use lithify_pipeline::Pipeline;
 use lithify_pipeline::infra::{Sink, Source};
+use lithify_pipeline::runner::BuildLogWrite;
 use lithify_pipeline::table;
 use lithify_protocol::sink::bigquery::client::BigQueryClient;
 use lithify_protocol::sink::duckdb::client::DuckDbClient;
@@ -11,15 +12,15 @@ use lithify_protocol::sink::duckdb::config::Config;
 use lithify_protocol::sink::{bigquery, duckdb};
 use lithify_protocol::{BigQueryWarehouse, DuckDbWarehouse};
 
-use crate::artifacts::{ArtifactConfig, DeclaredSnapshot};
+use crate::artifacts::ArtifactConfig;
 use crate::command::RunCommand;
 use crate::credential::Credentials;
 use crate::journal::Journal;
 use crate::pipeline::{CaptureConfig, Reached, WarehouseConfig};
 use crate::report::{DryRunBuildLogWrite, Report};
-use crate::step::Taking;
 use crate::unrunnable::Unrunnable;
-use lithify_pipeline::check::{Inspecting, Inspection};
+use lithify_pipeline::check::{Expectation, Inspecting, Inspection};
+use lithify_pipeline::stepping::Stepping;
 use lithify_pipeline::warehouse::SinkWarehouse;
 
 pub struct Run {
@@ -46,7 +47,7 @@ impl Run {
 
     pub async fn dry_run(&self, command: &RunCommand, into: &Path) -> Result<Journal, Unrunnable> {
         self.each_sink(async |sink, source, listing, journal| {
-            let build = DeclaredSnapshot::of(sink)?.build(source, self.now)?;
+            let build = BuildLogWrite::of(source, self.now, env!("CARGO_PKG_VERSION"))?;
 
             self.settle(
                 command,
@@ -68,7 +69,7 @@ impl Run {
                 sink,
                 source,
                 listing,
-                &DeclaredSnapshot::of(sink)?.build(source, self.now)?,
+                &BuildLogWrite::of(source, self.now, env!("CARGO_PKG_VERSION"))?,
                 journal,
             )
             .await
@@ -147,14 +148,7 @@ impl Run {
         writer: &B,
         journal: &mut Journal,
     ) -> Result<(), Unrunnable> {
-        let Some(topic_prefix) = source.topic_prefix() else {
-            journal.note(&format!(
-                "{} names no topic prefix to read its change logs by",
-                source.name()
-            ));
-
-            return Ok(());
-        };
+        let expectation = Expectation::of(sink, source, self.now)?;
 
         match Self::reach(sink)? {
             Reached::DuckDb(config, change_log) => {
@@ -166,9 +160,7 @@ impl Run {
                 command
                     .settle(
                         sink,
-                        source,
-                        self.now,
-                        &Taking::new(&client, source.capture(), topic_prefix, listing),
+                        Stepping::new(&client, source, expectation, listing),
                         writer,
                         journal,
                     )
@@ -183,9 +175,7 @@ impl Run {
                 command
                     .settle(
                         sink,
-                        source,
-                        self.now,
-                        &Taking::new(&client, source.capture(), topic_prefix, listing),
+                        Stepping::new(&client, source, expectation, listing),
                         writer,
                         journal,
                     )

@@ -219,7 +219,6 @@ async fn an_instant_holds_what_the_source_held_as_it_was_cut() {
     let shards = Shards::over(&replica).await;
     let six = Instant::new(
         NaiveTime::from_hms_opt(6, 0, 0).unwrap(),
-        Schedule::default(),
         Shard::new("%Y%m%d%H", chrono_tz::Tz::UTC),
     );
     let first = shards

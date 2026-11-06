@@ -2,7 +2,7 @@ use std::convert::Infallible;
 use std::fmt::{self, Display, Formatter};
 
 use chrono::DateTime;
-use duckdb::types::{FromSql, TimeUnit, Value};
+use duckdb::types::{TimeUnit, Value};
 use tokio::runtime::Runtime;
 
 use lithify_artifact::snapshot::Snapshot;
@@ -10,16 +10,15 @@ use lithify_cli::pipeline::{self, CaptureConfig};
 use lithify_core::artifact::UnbuildableArtifact;
 use lithify_core::listener::OutOfOrder;
 use lithify_core::model::{TableId, TableModel};
-use lithify_core::sink::{ChangeLogSql, Namespace, TablePath, WarehouseClient, WarehouseSql};
-use lithify_core::source::{
-    ChangeLog, ChangeLogs, ColumnPath, RowChangeLog, SchemaChangeLog, SchemaChangeStream,
-};
+use lithify_core::sink::{Namespace, TablePath, WarehouseClient, WarehouseSql};
+use lithify_core::source::{ChangeLog, ChangeLogs, ColumnPath, RowChangeLog, SchemaChangeStream};
 use lithify_core::sql::SqlString;
 use lithify_core::ts::{Event, Processing, Ts};
 use lithify_core::window::Window;
 use lithify_pipeline::build_log::Status;
+use lithify_pipeline::capture::{Capture, ChangeLogsFn};
 use lithify_pipeline::runner::Runner;
-use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbChangeLogsFn, DuckDbClient};
+use lithify_protocol::sink::duckdb::client::DuckDbClient;
 use lithify_protocol::sink::duckdb::config::Location;
 use lithify_protocol::sink::duckdb::store::ObjectStore;
 
@@ -31,7 +30,6 @@ pub trait Sink {
     fn landed(
         &mut self,
         capture: &CaptureConfig,
-        topic_prefix: &str,
         table: &TableId,
         at: Ts<Processing>,
     ) -> Result<u64, Unbuildable>;
@@ -39,7 +37,6 @@ pub trait Sink {
     fn model(
         &mut self,
         capture: &CaptureConfig,
-        topic_prefix: &str,
         table: &TableId,
         at: Ts<Event>,
     ) -> Result<TableModel, Unbuildable>;
@@ -47,7 +44,6 @@ pub trait Sink {
     fn snapshot(
         &mut self,
         capture: &CaptureConfig,
-        topic_prefix: &str,
         table: &TableId,
         artifact: &Snapshot,
         namespace: &Namespace,
@@ -143,19 +139,18 @@ impl Sink for DuckDb {
     fn landed(
         &mut self,
         capture: &CaptureConfig,
-        topic_prefix: &str,
         table: &TableId,
         at: Ts<Processing>,
     ) -> Result<u64, Unbuildable> {
         let (topic, processing_time) = self
             .runtime
-            .block_on(capture.with_duckdb_change_logs(topic_prefix, LandedTopic { table }));
+            .block_on(capture.with_change_logs(self.client.warehouse(), LandedTopic { table }));
 
         let warehouse = self.client.warehouse();
         let landed = self.client.connection().query_row(
             &format!(
                 "SELECT COUNT(*) FROM {} WHERE {} >= {}",
-                warehouse.change_log_ref(&topic),
+                warehouse.table_ref(&topic),
                 warehouse.path(&processing_time),
                 at.milliseconds_since_epoch()
             ),
@@ -173,12 +168,11 @@ impl Sink for DuckDb {
     fn model(
         &mut self,
         capture: &CaptureConfig,
-        topic_prefix: &str,
         table: &TableId,
         at: Ts<Event>,
     ) -> Result<TableModel, Unbuildable> {
-        let read = self.runtime.block_on(capture.with_duckdb_change_logs(
-            topic_prefix,
+        let read = self.runtime.block_on(capture.with_change_logs(
+            self.client.warehouse(),
             Catalog {
                 client: &self.client,
                 table,
@@ -192,14 +186,13 @@ impl Sink for DuckDb {
     fn snapshot(
         &mut self,
         capture: &CaptureConfig,
-        topic_prefix: &str,
         table: &TableId,
         artifact: &Snapshot,
         namespace: &Namespace,
         window: &Window,
     ) -> Result<(), Unbuildable> {
-        self.runtime.block_on(capture.with_duckdb_change_logs(
-            topic_prefix,
+        self.runtime.block_on(capture.with_change_logs(
+            self.client.warehouse(),
             SnapshotBuild {
                 client: &self.client,
                 table,
@@ -253,16 +246,16 @@ struct LandedTopic<'a> {
     table: &'a TableId,
 }
 
-impl DuckDbChangeLogsFn for LandedTopic<'_> {
-    type Output = (String, ColumnPath);
+impl ChangeLogsFn<DuckDbClient> for LandedTopic<'_> {
+    type Output = (TablePath, ColumnPath);
 
-    async fn call_duckdb<C>(self, logs: C) -> Self::Output
+    async fn call<C>(self, logs: C) -> Self::Output
     where
         C: ChangeLogs,
-        <C::Schema as SchemaChangeLog>::Record: FromSql,
+        DuckDbClient: SchemaChangeStream<C::SchemaChangeLog, Error = duckdb::Error>,
     {
         (
-            logs.row_changes().dml_topic(self.table),
+            logs.row_changes().dml_landed_table(self.table),
             logs.row_changes().processing_time(),
         )
     }
@@ -274,13 +267,13 @@ struct Catalog<'a> {
     at: Ts<Event>,
 }
 
-impl DuckDbChangeLogsFn for Catalog<'_> {
+impl ChangeLogsFn<DuckDbClient> for Catalog<'_> {
     type Output = Result<Option<TableModel>, Unbuildable>;
 
-    async fn call_duckdb<C>(self, logs: C) -> Self::Output
+    async fn call<C>(self, logs: C) -> Self::Output
     where
         C: ChangeLogs,
-        <C::Schema as SchemaChangeLog>::Record: FromSql,
+        DuckDbClient: SchemaChangeStream<C::SchemaChangeLog, Error = duckdb::Error>,
     {
         self.client
             .table(logs.schema_changes(), self.table, self.at)
@@ -296,13 +289,13 @@ struct SnapshotBuild<'a> {
     window: &'a Window,
 }
 
-impl DuckDbChangeLogsFn for SnapshotBuild<'_> {
+impl ChangeLogsFn<DuckDbClient> for SnapshotBuild<'_> {
     type Output = Result<(), Unbuildable>;
 
-    async fn call_duckdb<C>(self, logs: C) -> Self::Output
+    async fn call<C>(self, logs: C) -> Self::Output
     where
         C: ChangeLogs,
-        <C::Schema as SchemaChangeLog>::Record: FromSql,
+        DuckDbClient: SchemaChangeStream<C::SchemaChangeLog, Error = duckdb::Error>,
     {
         let built = Runner::new(self.client, &logs)
             .built::<_, Unbuildable>(self.artifact, self.namespace, self.window, &[], |table| {

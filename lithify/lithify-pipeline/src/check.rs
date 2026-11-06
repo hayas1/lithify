@@ -3,16 +3,15 @@ use std::fmt::{self, Display, Formatter};
 
 use serde::Serialize;
 
-use lithify_core::artifact::ArtifactName;
 use lithify_core::model::TableId;
-use lithify_core::sink::{Namespace, TablePath};
+use lithify_core::sink::TablePath;
 use lithify_core::ts::{Event, Replay, Ts};
 use lithify_core::window::Window;
 
-use crate::artifact::Declaration;
-use crate::build_log::{BuildLog, Latest, Series, UnreadableBuildLog};
+use crate::build_log::{BuildLog, Latest, UnreadableBuildLog};
 use crate::infra::{Sink, Source};
-use crate::schedule::Schedule;
+use crate::materialization::Materialization;
+use crate::schedule::{Schedule, Timeline};
 use crate::warehouse::{SinkWarehouse, WarehouseControl, WarehouseFn};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,10 +33,7 @@ pub enum Discrepancy {
         table: TableId,
         target: TablePath,
     },
-    CaptureChanged {
-        logged: String,
-        configured: String,
-    },
+    CaptureChanged(CaptureChanged),
 }
 
 impl Display for Discrepancy {
@@ -66,11 +62,33 @@ impl Display for Discrepancy {
                 formatter,
                 "{table} is logged as built into {target} but {target} is not there"
             ),
-            Self::CaptureChanged { logged, configured } => write!(
-                formatter,
-                "the last run captured as {logged} but the pipeline is captured as {configured} now"
-            ),
+            Self::CaptureChanged(changed) => changed.fmt(formatter),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureChanged {
+    logged: String,
+    configured: String,
+}
+
+impl CaptureChanged {
+    pub fn new(logged: &str, configured: &str) -> Self {
+        Self {
+            logged: logged.to_owned(),
+            configured: configured.to_owned(),
+        }
+    }
+}
+
+impl Display for CaptureChanged {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "the last run captured as {} but the pipeline is captured as {} now",
+            self.logged, self.configured
+        )
     }
 }
 
@@ -97,66 +115,24 @@ impl Inspection {
 
 pub struct Inspecting {
     expectation: Expectation,
-    namespace: Namespace,
-    series: Series,
+    scheduled: Materialization,
 }
 
 impl Inspecting {
-    pub fn of<C, W, A>(
+    pub fn of<C: Serialize, W: SinkWarehouse, A>(
         sink: &Sink<W, A>,
         source: &Source<C>,
         now: Ts<Replay>,
-    ) -> Result<Self, Uninspectable>
-    where
-        C: Serialize,
-        W: SinkWarehouse,
-        A: Declaration,
-    {
-        let (artifact, schedule) = Self::scheduled(sink)?;
-        let namespace = sink
-            .place(artifact)
-            .map(|place| place.clone().into())
-            .ok_or_else(|| Uninspectable::Unplaced {
-                sink: sink.name().to_owned(),
-                artifact: artifact.clone(),
-            })?;
-
+    ) -> Result<Self, Uninspectable> {
         Ok(Self {
-            expectation: Expectation::new(
-                schedule,
-                source.since(),
-                &source
-                    .written_capture()
-                    .map_err(|unwritten| Uninspectable::Unwritten(unwritten.to_string()))?,
-                now,
-            ),
-            namespace,
-            series: Series::new(artifact.clone(), &schedule.to_string()),
+            expectation: Expectation::of(sink, source, now)
+                .map_err(|unwritten| Uninspectable::Unwritten(unwritten.to_string()))?,
+            scheduled: sink.scheduled().clone(),
         })
     }
 
-    fn scheduled<W: SinkWarehouse, A: Declaration>(
-        sink: &Sink<W, A>,
-    ) -> Result<(&ArtifactName, Schedule), Uninspectable> {
-        let mut scheduled = sink
-            .artifacts()
-            .filter_map(|(name, declared)| Some((name, declared.schedule(sink.time_zone())?)));
-        let found = scheduled
-            .next()
-            .ok_or_else(|| Uninspectable::Unscheduled(sink.name().to_owned()))?;
-
-        match scheduled.next() {
-            Some(_) => Err(Uninspectable::ScheduledTwice(sink.name().to_owned())),
-            None => Ok(found),
-        }
-    }
-
-    pub fn namespace(&self) -> &Namespace {
-        &self.namespace
-    }
-
-    pub fn series(&self) -> &Series {
-        &self.series
+    pub fn scheduled(&self) -> &Materialization {
+        &self.scheduled
     }
 
     pub async fn read<K, E>(&self, client: &K) -> Result<Inspection, E>
@@ -164,20 +140,12 @@ impl Inspecting {
         K: WarehouseControl,
         E: From<K::Error> + From<UnreadableBuildLog>,
     {
-        self.expectation
-            .read(client, &self.namespace, &self.series)
-            .await
+        self.expectation.read(client, &self.scheduled).await
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Uninspectable {
-    Unscheduled(String),
-    ScheduledTwice(String),
-    Unplaced {
-        sink: String,
-        artifact: ArtifactName,
-    },
     Unwritten(String),
     Unread(String),
 }
@@ -185,16 +153,6 @@ pub enum Uninspectable {
 impl Display for Uninspectable {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unscheduled(sink) => {
-                write!(formatter, "{sink} declares no scheduled artifact to check")
-            }
-            Self::ScheduledTwice(sink) => write!(
-                formatter,
-                "{sink} declares more than one scheduled artifact, which a check does not tell apart yet"
-            ),
-            Self::Unplaced { sink, artifact } => {
-                write!(formatter, "{sink} places {artifact} nowhere")
-            }
             Self::Unwritten(cause) => {
                 write!(formatter, "the capture could not be written: {cause}")
             }
@@ -224,35 +182,57 @@ impl<E: std::error::Error> From<E> for Unread {
 }
 
 pub struct Expectation {
-    schedule: Schedule,
-    since: Ts<Event>,
+    timeline: Timeline,
     capture: String,
-    now: Ts<Replay>,
 }
 
 impl Expectation {
-    pub fn new(schedule: Schedule, since: Ts<Event>, capture: &str, now: Ts<Replay>) -> Self {
+    pub fn new(timeline: Timeline, capture: &str) -> Self {
         Self {
-            schedule,
-            since,
+            timeline,
             capture: capture.to_owned(),
-            now,
+        }
+    }
+
+    pub fn of<C: Serialize, W: SinkWarehouse, A>(
+        sink: &Sink<W, A>,
+        source: &Source<C>,
+        now: Ts<Replay>,
+    ) -> Result<Self, serde_json::Error> {
+        Ok(Self::new(
+            Timeline::new(sink.schedule(), source.since()..now.as_event()),
+            &source.written_capture()?,
+        ))
+    }
+
+    pub fn timeline(&self) -> &Timeline {
+        &self.timeline
+    }
+
+    pub fn capture(&self) -> &str {
+        &self.capture
+    }
+
+    pub fn up_to(self, until: Ts<Event>) -> Self {
+        Self {
+            timeline: self.timeline.up_to(until),
+            ..self
         }
     }
 
     pub async fn read<K, E>(
         &self,
         client: &K,
-        namespace: &Namespace,
-        series: &Series,
+        materialization: &Materialization,
     ) -> Result<Inspection, E>
     where
         K: WarehouseControl,
         E: From<K::Error> + From<UnreadableBuildLog>,
     {
+        let (namespace, series) = (materialization.namespace(), materialization.series());
         if !client.exists(&BuildLog::path(namespace)).await? {
             return Ok(Inspection {
-                schedule: self.schedule,
+                schedule: self.timeline.schedule(),
                 latest: Vec::new(),
                 discrepancies: self.discrepancies(&[], &[], &BTreeSet::new()),
             });
@@ -272,7 +252,7 @@ impl Expectation {
         }
 
         Ok(Inspection {
-            schedule: self.schedule,
+            schedule: self.timeline.schedule(),
             discrepancies: self.discrepancies(&latest, &succeeded, &present),
             latest,
         })
@@ -286,16 +266,17 @@ impl Expectation {
         succeeded: &[BuildLog],
         present: &BTreeSet<TablePath>,
     ) -> Vec<Discrepancy> {
-        let Some(last_run) = latest.iter().map(BuildLog::run_id).max() else {
-            return match self.due_until(self.since) {
-                Some(_) => vec![Discrepancy::NeverBuilt { since: self.since }],
+        if latest.is_empty() {
+            let since = self.timeline.range().start;
+
+            return match self.due_until(since) {
+                Some(_) => vec![Discrepancy::NeverBuilt { since }],
                 None => vec![],
             };
-        };
+        }
 
-        let built_last = latest.iter().filter(|log| log.run_id() == last_run);
-
-        self.capture_changed(built_last)
+        self.capture_changed(latest)
+            .map(Discrepancy::CaptureChanged)
             .into_iter()
             .chain(
                 latest
@@ -314,22 +295,20 @@ impl Expectation {
     }
 
     fn due_until(&self, built_until: Ts<Event>) -> Option<Ts<Event>> {
-        self.schedule
-            .windows(built_until, self.now.as_event())
+        self.timeline
+            .windows(built_until)
             .last()
             .map(|window| *window.to())
     }
 
-    fn capture_changed<'b>(
-        &self,
-        mut built_last: impl Iterator<Item = &'b BuildLog>,
-    ) -> Option<Discrepancy> {
-        built_last
+    pub fn capture_changed(&self, latest: &[BuildLog]) -> Option<CaptureChanged> {
+        let last_run = latest.iter().map(BuildLog::run_id).max()?;
+
+        latest
+            .iter()
+            .filter(|log| log.run_id() == last_run)
             .find(|log| log.capture() != self.capture)
-            .map(|log| Discrepancy::CaptureChanged {
-                logged: log.capture().to_owned(),
-                configured: self.capture.clone(),
-            })
+            .map(|log| CaptureChanged::new(log.capture(), &self.capture))
     }
 
     fn missing_from(
@@ -364,7 +343,7 @@ impl Expectation {
     }
 
     fn overdue(&self, table: &TableId, built: Option<&BuildLog>) -> Option<Discrepancy> {
-        let built_until = built.map_or(self.since, |built| *built.window().to());
+        let built_until = built.map_or(self.timeline.range().start, |built| *built.window().to());
 
         self.due_until(built_until)
             .map(|due_until| Discrepancy::Overdue {

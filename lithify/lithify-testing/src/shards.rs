@@ -10,10 +10,10 @@ use lithify_core::window::Window;
 use lithify_pipeline::artifact::ArtifactControl;
 use lithify_pipeline::build_log::{BuildLog, Run, Status};
 use lithify_pipeline::runner::Runner;
+use lithify_protocol::DuckDbWarehouse;
 use lithify_protocol::sink::duckdb::client::DuckDbClient;
-use lithify_protocol::{Debezium, DuckDbWarehouse, MySql};
 
-use crate::landing::Landing;
+use crate::landing::ReplicaLanding;
 use crate::replica::{CellValue, Replica, Row};
 
 pub struct Shards {
@@ -23,7 +23,7 @@ pub struct Shards {
 impl Shards {
     pub async fn over(replica: &Replica) -> Self {
         let warehouse = DuckDbWarehouse::new("cdc");
-        let landing = Landing::of(replica).create(&warehouse);
+        let landing = ReplicaLanding::of(replica).create(&warehouse);
         let client = DuckDbClient::new(Connection::open_in_memory().unwrap(), warehouse);
         client.execute(&landing).await.unwrap();
 
@@ -52,12 +52,10 @@ impl Shards {
         window: &Window,
         previous: &[BuildLog],
     ) -> Vec<BuildLog> {
-        let log = Debezium::under("value", Landing::TOPIC_PREFIX, MySql);
+        let log = ReplicaLanding::log(self.client.warehouse());
         let run = Run::new(
             Ulid::nil(),
             Ts::from(DateTime::UNIX_EPOCH),
-            artifact.series().artifact(),
-            artifact.series().schedule(),
             "primary",
             "{}",
             "0.1.0",
@@ -68,7 +66,7 @@ impl Shards {
             .await
             .unwrap()
             .into_iter()
-            .map(|built| built.logged(&run))
+            .map(|built| built.logged(&run, &artifact.series()))
             .collect()
     }
 

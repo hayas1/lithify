@@ -1,28 +1,32 @@
-use std::collections::BTreeSet;
 use std::convert::Infallible;
 use std::fmt::{self, Display, Formatter};
+use std::marker::PhantomData;
 
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, Utc};
+use serde::Serialize;
+use ulid::Ulid;
 
 use lithify_core::artifact::UnbuildableArtifact;
+use lithify_core::build::BuildContext;
 use lithify_core::listener::OutOfOrder;
 use lithify_core::model::TableId;
 use lithify_core::runner::Replayer;
 use lithify_core::sink::{Namespace, WarehouseClient};
 use lithify_core::source::{ChangeLogs, SchemaChangeStream};
-use lithify_core::ts::{Event, Ts};
+use lithify_core::ts::{Event, Replay, Ts};
 use lithify_core::window::Window;
 
 use crate::artifact::ArtifactControl;
-use crate::build_log::{BuildLog, Run, Series, TableBuilt, UnreadableBuildLog};
+use crate::build_log::{BuildLog, Run, TableBuilt};
+use crate::capture::ChangeLogsFn;
+use crate::check::CaptureChanged;
+use crate::infra::Source;
+use crate::materialization::Materialization;
 use crate::warehouse::WarehouseControl;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Unsteppable {
-    CaptureChanged {
-        logged: String,
-        configured: String,
-    },
+    CaptureChanged(CaptureChanged),
     Unopened(NaiveDate),
     Unclosed(NaiveDate),
     Overtaken {
@@ -34,10 +38,7 @@ pub enum Unsteppable {
 impl Display for Unsteppable {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Self::CaptureChanged { logged, configured } => write!(
-                formatter,
-                "the build log was captured as {logged} but the pipeline is captured as {configured} now"
-            ),
+            Self::CaptureChanged(changed) => changed.fmt(formatter),
             Self::Unopened(date) => write!(
                 formatter,
                 "no window closes by the end of {date} since the change log opened"
@@ -53,65 +54,64 @@ impl Display for Unsteppable {
 
 impl std::error::Error for Unsteppable {}
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum Tables {
-    #[default]
-    Every,
-    Except(BTreeSet<TableId>),
-}
-
-impl Tables {
-    pub fn includes(&self, table: &TableId) -> bool {
-        match self {
-            Self::Every => true,
-            Self::Except(tables) => !tables.contains(table),
-        }
-    }
-}
-
 pub trait BuildLogWriter {
     type Output;
 
-    fn advancing(&self, namespace: &Namespace, series: &Series) -> Self;
-
-    async fn write<K, E>(&self, client: &K, built: Vec<TableBuilt>) -> Result<Self::Output, E>
+    async fn write<K, E>(
+        &self,
+        client: &K,
+        materialization: &Materialization,
+        built: Vec<TableBuilt>,
+    ) -> Result<Self::Output, E>
     where
         K: WarehouseControl,
         E: From<K::Error> + From<UnbuildableArtifact>;
 }
 
 pub struct BuildLogWrite {
-    namespace: Namespace,
     run: Run,
 }
 
 impl BuildLogWrite {
-    pub fn new(namespace: Namespace, run: Run) -> Self {
-        Self { namespace, run }
+    pub fn new(run: Run) -> Self {
+        Self { run }
+    }
+
+    pub fn of<C: Serialize>(
+        source: &Source<C>,
+        now: Ts<Replay>,
+        version: &str,
+    ) -> Result<Self, serde_json::Error> {
+        Ok(Self::new(Run::new(
+            Ulid::from_datetime(DateTime::<Utc>::from(now).into()),
+            now,
+            source.name(),
+            &source.written_capture()?,
+            version,
+        )))
     }
 }
 
 impl BuildLogWriter for BuildLogWrite {
     type Output = Vec<BuildLog>;
 
-    fn advancing(&self, namespace: &Namespace, series: &Series) -> Self {
-        Self {
-            namespace: namespace.clone(),
-            run: self.run.advancing(series),
-        }
-    }
-
-    async fn write<K, E>(&self, client: &K, built: Vec<TableBuilt>) -> Result<Self::Output, E>
+    async fn write<K, E>(
+        &self,
+        client: &K,
+        materialization: &Materialization,
+        built: Vec<TableBuilt>,
+    ) -> Result<Self::Output, E>
     where
         K: WarehouseControl,
         E: From<K::Error> + From<UnbuildableArtifact>,
     {
+        let namespace = materialization.namespace();
         let logs: Vec<_> = built
             .into_iter()
-            .map(|built| built.logged(&self.run))
+            .map(|built| built.logged(&self.run, materialization.series()))
             .collect();
-        client.create_build_log::<E>(&self.namespace).await?;
-        client.append_build_logs(&self.namespace, &logs).await?;
+        client.create_build_log::<E>(namespace).await?;
+        client.append_build_logs(namespace, &logs).await?;
 
         Ok(logs)
     }
@@ -125,7 +125,7 @@ pub struct Runner<'a, K, C> {
 impl<'a, K, C> Runner<'a, K, C>
 where
     C: ChangeLogs,
-    K: SchemaChangeStream<C::Schema> + WarehouseControl,
+    K: SchemaChangeStream<C::SchemaChangeLog> + WarehouseControl,
 {
     pub fn new(client: &'a K, logs: &'a C) -> Self {
         Self { client, logs }
@@ -141,7 +141,7 @@ where
     ) -> Result<Vec<TableBuilt>, E>
     where
         E: From<OutOfOrder> + From<Infallible>,
-        <K as SchemaChangeStream<C::Schema>>::Error: Into<E>,
+        <K as SchemaChangeStream<C::SchemaChangeLog>>::Error: Into<E>,
     {
         let history = self
             .client
@@ -149,21 +149,20 @@ where
             .await?;
         let mut built = Vec::new();
 
-        for build in Replayer::new(self.client.warehouse(), self.logs.row_changes())
-            .planned::<A, E>(
-                &history,
-                artifact,
-                namespace,
-                window,
-                |table| {
-                    artifact
-                        .base(previous, table, window)
-                        .and_then(BuildLog::target)
-                        .cloned()
-                },
-                finishes,
-            )?
-        {
+        let context = BuildContext::new(self.client.warehouse(), namespace);
+
+        for build in Replayer::new(context, self.logs.row_changes()).planned::<A, E>(
+            &history,
+            artifact,
+            window,
+            |table| {
+                artifact
+                    .base(previous, table, window)
+                    .and_then(BuildLog::target)
+                    .cloned()
+            },
+            finishes,
+        )? {
             built.push(self.client.build(build).await);
         }
 
@@ -173,7 +172,7 @@ where
     pub async fn run<A: ArtifactControl, B: BuildLogWriter, E>(
         &self,
         artifact: &'a A,
-        namespace: &'a Namespace,
+        materialization: &'a Materialization,
         window: &'a Window,
         previous: &[BuildLog],
         finishes: impl Fn(&TableId) -> bool,
@@ -184,32 +183,83 @@ where
             + From<Infallible>
             + From<UnbuildableArtifact>
             + From<<K as WarehouseClient>::Error>,
-        <K as SchemaChangeStream<C::Schema>>::Error: Into<E>,
+        <K as SchemaChangeStream<C::SchemaChangeLog>>::Error: Into<E>,
     {
         let built = self
-            .built::<A, E>(artifact, namespace, window, previous, finishes)
+            .built::<A, E>(
+                artifact,
+                materialization.namespace(),
+                window,
+                previous,
+                finishes,
+            )
             .await?;
 
-        writer.write(self.client, built).await
+        writer.write(self.client, materialization, built).await
     }
 }
 
-pub trait StepTaker {
-    type Client: WarehouseControl;
-    type Error: From<<Self::Client as WarehouseClient>::Error>
+pub struct Replaying<'a, K, A, B, F, E> {
+    client: &'a K,
+    artifact: &'a A,
+    materialization: &'a Materialization,
+    window: &'a Window,
+    previous: &'a [BuildLog],
+    finishes: F,
+    writer: &'a B,
+    failure: PhantomData<fn() -> E>,
+}
+
+impl<'a, K, A, B, F, E> Replaying<'a, K, A, B, F, E> {
+    pub fn new(
+        client: &'a K,
+        artifact: &'a A,
+        materialization: &'a Materialization,
+        window: &'a Window,
+        previous: &'a [BuildLog],
+        finishes: F,
+        writer: &'a B,
+    ) -> Self {
+        Self {
+            client,
+            artifact,
+            materialization,
+            window,
+            previous,
+            finishes,
+            writer,
+            failure: PhantomData,
+        }
+    }
+}
+
+impl<K, A, B, F, E> ChangeLogsFn<K> for Replaying<'_, K, A, B, F, E>
+where
+    K: WarehouseControl,
+    A: ArtifactControl,
+    B: BuildLogWriter,
+    F: Fn(&TableId) -> bool,
+    E: From<OutOfOrder>
+        + From<Infallible>
         + From<UnbuildableArtifact>
-        + From<UnreadableBuildLog>
-        + From<Unsteppable>;
+        + From<<K as WarehouseClient>::Error>,
+{
+    type Output = Result<B::Output, E>;
 
-    fn client(&self) -> &Self::Client;
-
-    async fn take<A: ArtifactControl, B: BuildLogWriter>(
-        &self,
-        artifact: &A,
-        namespace: &Namespace,
-        window: &Window,
-        previous: &[BuildLog],
-        tables: &Tables,
-        writer: &B,
-    ) -> Result<B::Output, Self::Error>;
+    async fn call<C>(self, logs: C) -> Self::Output
+    where
+        C: ChangeLogs,
+        K: SchemaChangeStream<C::SchemaChangeLog, Error = <K as WarehouseClient>::Error>,
+    {
+        Runner::new(self.client, &logs)
+            .run(
+                self.artifact,
+                self.materialization,
+                self.window,
+                self.previous,
+                self.finishes,
+                self.writer,
+            )
+            .await
+    }
 }

@@ -1,13 +1,18 @@
 use serde::{Deserialize, Serialize};
 
-use lithify_core::sink::{Namespace, OpenWarehouse};
+use lithify_core::sink::{Namespace, OpenWarehouse, WarehouseClient};
+use lithify_core::source::SchemaChangeStream;
 
-use lithify_core::source::CdcFormat;
+use lithify_pipeline::capture::{Capture, ChangeLogsFn};
 use lithify_pipeline::warehouse::{SinkWarehouse, WarehouseFn};
 use lithify_pipeline::{Placed, Places, Placing};
-use lithify_protocol::sink::bigquery::client::{BigQueryCapture, BigQueryChangeLogsFn};
-use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbChangeLogsFn};
-use lithify_protocol::{BigQueryWarehouse, DebeziumFormat, DuckDbWarehouse};
+use lithify_protocol::sink::bigquery::client::{BigQueryClient, BigQueryExecution};
+use lithify_protocol::sink::duckdb::client::{DuckDbClient, DuckDbExecution};
+use lithify_protocol::source::debezium::Debezium;
+use lithify_protocol::source::debezium::config as debezium;
+use lithify_protocol::{
+    BigQuerySink, BigQueryWarehouse, DuckDbWarehouse, Landed, Landing, MySql, Postgres, S3Sink,
+};
 
 use crate::credential::Credentials;
 use crate::unrunnable::Unrunnable;
@@ -15,29 +20,64 @@ use crate::unrunnable::Unrunnable;
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "lowercase")]
 pub enum CaptureConfig {
-    Debezium(<DebeziumFormat as CdcFormat>::Config),
+    Debezium(DebeziumConfig),
 }
 
-impl DuckDbCapture for CaptureConfig {
-    async fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(
+impl<X: DuckDbExecution> Capture<DuckDbClient<X>> for CaptureConfig {
+    async fn with_change_logs<F: ChangeLogsFn<DuckDbClient<X>>>(
         &self,
-        topic_prefix: &str,
+        warehouse: &DuckDbWarehouse,
         f: F,
     ) -> F::Output {
         match self {
-            Self::Debezium(debezium) => debezium.with_duckdb_change_logs(topic_prefix, f).await,
+            Self::Debezium(debezium) => debezium.with_change_logs(S3Sink, warehouse, f).await,
         }
     }
 }
 
-impl BigQueryCapture for CaptureConfig {
-    async fn with_bigquery_change_logs<F: BigQueryChangeLogsFn>(
+impl<X: BigQueryExecution> Capture<BigQueryClient<X>> for CaptureConfig {
+    async fn with_change_logs<F: ChangeLogsFn<BigQueryClient<X>>>(
         &self,
-        topic_prefix: &str,
+        warehouse: &BigQueryWarehouse,
         f: F,
     ) -> F::Output {
         match self {
-            Self::Debezium(debezium) => debezium.with_bigquery_change_logs(topic_prefix, f).await,
+            Self::Debezium(debezium) => debezium.with_change_logs(BigQuerySink, warehouse, f).await,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "lowercase")]
+pub enum DebeziumConfig {
+    MySql(debezium::Config),
+    Postgres(debezium::Config),
+}
+
+impl DebeziumConfig {
+    async fn with_change_logs<K, L, F>(
+        &self,
+        landing: L,
+        warehouse: &K::Warehouse,
+        f: F,
+    ) -> F::Output
+    where
+        K: WarehouseClient
+            + SchemaChangeStream<Landed<Debezium<MySql>, L>, Error = <K as WarehouseClient>::Error>
+            + SchemaChangeStream<Landed<Debezium<Postgres>, L>, Error = <K as WarehouseClient>::Error>,
+        L: Landing<Debezium<MySql>, Warehouse = K::Warehouse>
+            + Landing<Debezium<Postgres>, Warehouse = K::Warehouse>,
+        F: ChangeLogsFn<K>,
+    {
+        match self {
+            Self::MySql(config) => {
+                f.call(Landed::new(config.debezium(MySql), landing, warehouse))
+                    .await
+            }
+            Self::Postgres(config) => {
+                f.call(Landed::new(config.debezium(Postgres), landing, warehouse))
+                    .await
+            }
         }
     }
 }
@@ -144,48 +184,129 @@ pub enum Reached<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lithify_core::source::{ChangeLogs, SchemaChangeLog};
-    use lithify_protocol::Postgres;
-    use lithify_protocol::source::debezium::Debezium;
-    use lithify_protocol::source::debezium::config;
+    use std::path::Path;
 
-    #[test]
-    fn a_source_is_captured_by_a_format_this_program_reads() {
-        let capture: CaptureConfig = toml::from_str("[debezium]\ndialect = \"mysql\"").unwrap();
+    use lithify_core::sink::TablePath;
+    use lithify_core::source::{ChangeLog, ChangeLogs, ColumnPath, SchemaChangeLog};
+    use lithify_pipeline::Pipeline;
 
-        let CaptureConfig::Debezium(debezium) = capture;
-        assert_eq!(debezium.dialect(), config::Dialect::MySql);
+    use crate::artifacts::ArtifactConfig;
+
+    type Probed = (&'static str, TablePath, Option<ColumnPath>);
+
+    struct Probe;
+
+    impl<K: WarehouseClient> ChangeLogsFn<K> for Probe {
+        type Output = Probed;
+
+        async fn call<C>(self, logs: C) -> Self::Output
+        where
+            C: ChangeLogs,
+            K: SchemaChangeStream<C::SchemaChangeLog, Error = <K as WarehouseClient>::Error>,
+        {
+            (
+                std::any::type_name::<C>(),
+                logs.schema_changes().ddl_landed_table(),
+                logs.row_changes().envelope(),
+            )
+        }
     }
 
-    #[tokio::test]
-    async fn a_capture_calls_a_fn_with_the_logs_of_the_dialect_it_captures_in() {
-        struct Probe;
+    fn capture(dialect: &str) -> CaptureConfig {
+        toml::from_str(&format!(
+            "[debezium.{dialect}]\ntopic_prefix = \"{dialect}\""
+        ))
+        .unwrap()
+    }
 
-        impl DuckDbChangeLogsFn for Probe {
-            type Output = &'static str;
+    fn example(name: &str) -> CaptureConfig {
+        let pipeline: Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig> = Pipeline::open(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../compose/lithify")
+                .join(name),
+        )
+        .unwrap();
 
-            async fn call_duckdb<C>(self, _: C) -> Self::Output
-            where
-                C: ChangeLogs,
-                <C::Schema as SchemaChangeLog>::Record: duckdb::types::FromSql,
-            {
-                std::any::type_name::<C>()
-            }
-        }
+        pipeline.sources().next().unwrap().capture().clone()
+    }
 
-        let capture: CaptureConfig = toml::from_str("[debezium]\ndialect = \"postgres\"").unwrap();
+    #[test]
+    fn each_example_pipeline_is_captured_in_the_dialect_of_its_source() {
+        assert_eq!(example("mysql"), capture("mysql"));
+        assert_eq!(example("postgres"), capture("postgres"));
+    }
 
+    #[test]
+    fn a_source_is_captured_by_a_dialect_of_a_format_this_program_reads() {
         assert_eq!(
-            capture.with_duckdb_change_logs("postgres", Probe).await,
-            std::any::type_name::<Debezium<Postgres>>()
+            capture("mysql"),
+            CaptureConfig::Debezium(DebeziumConfig::MySql(debezium::Config::new("mysql")))
+        );
+        assert_eq!(
+            capture("postgres"),
+            CaptureConfig::Debezium(DebeziumConfig::Postgres(debezium::Config::new("postgres")))
         );
     }
 
     #[test]
     fn a_format_this_program_does_not_read_is_rejected() {
-        let unknown = toml::from_str::<CaptureConfig>("[maxwell]\ndialect = \"mysql\"");
+        let unknown = toml::from_str::<CaptureConfig>("[maxwell.mysql]\ntopic_prefix = \"mysql\"");
 
         assert!(unknown.is_err());
+    }
+
+    #[test]
+    fn a_dialect_this_program_does_not_read_debezium_in_is_rejected() {
+        let unknown =
+            toml::from_str::<CaptureConfig>("[debezium.oracle]\ntopic_prefix = \"oracle\"");
+
+        assert!(unknown.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_duckdb_fn_is_called_with_the_logs_of_the_dialect_landed_in_object_storage() {
+        let lake = DuckDbWarehouse::new("shop_cdc");
+        let value = Some(ColumnPath::from("value"));
+
+        assert_eq!(
+            Capture::<DuckDbClient>::with_change_logs(&capture("mysql"), &lake, Probe).await,
+            (
+                std::any::type_name::<Landed<Debezium<MySql>, S3Sink>>(),
+                TablePath::new("shop_cdc", "mysql"),
+                value.clone()
+            )
+        );
+        assert_eq!(
+            Capture::<DuckDbClient>::with_change_logs(&capture("postgres"), &lake, Probe).await,
+            (
+                std::any::type_name::<Landed<Debezium<Postgres>, S3Sink>>(),
+                TablePath::new("shop_cdc", "postgres"),
+                value
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bigquery_fn_is_called_with_the_logs_of_the_dialect_landed_in_bigquery() {
+        let dataset = BigQueryWarehouse::new("local-project", "shop_cdc");
+
+        assert_eq!(
+            Capture::<BigQueryClient>::with_change_logs(&capture("mysql"), &dataset, Probe).await,
+            (
+                std::any::type_name::<Landed<Debezium<MySql>, BigQuerySink>>(),
+                TablePath::new("shop_cdc", "mysql"),
+                None
+            )
+        );
+        assert_eq!(
+            Capture::<BigQueryClient>::with_change_logs(&capture("postgres"), &dataset, Probe)
+                .await,
+            (
+                std::any::type_name::<Landed<Debezium<Postgres>, BigQuerySink>>(),
+                TablePath::new("shop_cdc", "postgres"),
+                None
+            )
+        );
     }
 
     const BIGQUERY: &str = include_str!("../testdata/pipeline/bigquery.toml");

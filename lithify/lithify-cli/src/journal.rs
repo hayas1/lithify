@@ -56,7 +56,7 @@ mod tests {
     use lithify_core::model::TableId;
     use lithify_core::sink::TablePath;
     use lithify_core::ts::Ts;
-    use lithify_pipeline::build_log::{Run, Status, TableBuilt};
+    use lithify_pipeline::build_log::{Run, Series, Status, TableBuilt};
 
     use super::*;
 
@@ -109,15 +109,16 @@ mod tests {
             status,
             Ts::from(DateTime::from_timestamp_millis(1789949000000).unwrap()),
         )
-        .logged(&Run::new(
-            ulid::Ulid::nil(),
-            Ts::from(DateTime::UNIX_EPOCH),
-            &"snapshot".into(),
-            "daily",
-            "primary",
-            "{}",
-            "0.1.0",
-        ))
+        .logged(
+            &Run::new(
+                ulid::Ulid::nil(),
+                Ts::from(DateTime::UNIX_EPOCH),
+                "primary",
+                "{}",
+                "0.1.0",
+            ),
+            &Series::new("snapshot".into(), "daily"),
+        )
     }
 
     #[test]

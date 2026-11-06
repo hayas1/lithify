@@ -14,8 +14,6 @@ use lithify_core::window::Window;
 pub struct Run {
     run_id: Ulid,
     started_at: Ts<Replay>,
-    artifact: ArtifactName,
-    schedule: String,
     source: String,
     capture: String,
     version: String,
@@ -25,8 +23,6 @@ impl Run {
     pub fn new(
         run_id: Ulid,
         started_at: Ts<Replay>,
-        artifact: &ArtifactName,
-        schedule: &str,
         source: &str,
         capture: &str,
         version: &str,
@@ -34,19 +30,9 @@ impl Run {
         Self {
             run_id,
             started_at,
-            artifact: artifact.clone(),
-            schedule: schedule.to_owned(),
             source: source.to_owned(),
             capture: capture.to_owned(),
             version: version.to_owned(),
-        }
-    }
-
-    pub fn advancing(&self, series: &Series) -> Self {
-        Self {
-            artifact: series.artifact.clone(),
-            schedule: series.schedule.clone(),
-            ..self.clone()
         }
     }
 }
@@ -146,9 +132,10 @@ impl TableBuilt {
         }
     }
 
-    pub fn logged(self, run: &Run) -> BuildLog {
+    pub fn logged(self, run: &Run, series: &Series) -> BuildLog {
         BuildLog {
             run: run.clone(),
+            series: series.clone(),
             built: self,
         }
     }
@@ -169,6 +156,7 @@ impl TableBuilt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildLog {
     run: Run,
+    series: Series,
     built: TableBuilt,
 }
 
@@ -273,7 +261,7 @@ impl BuildLog {
     }
 
     pub fn advances(&self, series: &Series) -> bool {
-        self.run.artifact == series.artifact && self.run.schedule == series.schedule
+        self.series == *series
     }
 
     pub fn table_from(&self) -> Option<&TableId> {
@@ -333,8 +321,8 @@ impl BuildLog {
         [
             warehouse.literal(&self.run.run_id.to_string()),
             warehouse.timestamp_millis(self.run.started_at.milliseconds_since_epoch()),
-            warehouse.literal(self.run.artifact.as_str()),
-            warehouse.literal(&self.run.schedule),
+            warehouse.literal(self.series.artifact.as_str()),
+            warehouse.literal(&self.series.schedule),
             warehouse.literal(&self.run.source),
             warehouse.literal(&self.run.capture),
             Self::nullable(warehouse, self.built.table_from.as_ref()),
@@ -358,8 +346,8 @@ impl BuildLog {
         [
             Some(self.run.run_id.to_string()),
             Some(self.run.started_at.to_string()),
-            Some(self.run.artifact.to_string()),
-            Some(self.run.schedule.clone()),
+            Some(self.series.artifact.to_string()),
+            Some(self.series.schedule.clone()),
             Some(self.run.source.clone()),
             Some(self.run.capture.clone()),
             self.built.table_from.as_ref().map(ToString::to_string),
@@ -657,8 +645,8 @@ impl From<&BuildLog> for BuildLogRow {
         Self {
             run_id: log.run.run_id.to_string(),
             started_at: log.run.started_at.milliseconds_since_epoch(),
-            artifact: log.run.artifact.to_string(),
-            schedule: log.run.schedule.clone(),
+            artifact: log.series.artifact.to_string(),
+            schedule: log.series.schedule.clone(),
             source: log.run.source.clone(),
             capture: log.run.capture.clone(),
             table_from: log.built.table_from.as_ref().map(ToString::to_string),
@@ -695,15 +683,16 @@ impl TryFrom<BuildLogRow> for BuildLog {
             row.status()?,
             BuildLogRow::ts(row.finished_at)?,
         )
-        .logged(&Run::new(
-            run_id,
-            BuildLogRow::ts(row.started_at)?,
-            &ArtifactName::from(row.artifact.as_str()),
-            &row.schedule,
-            &row.source,
-            &row.capture,
-            &row.version,
-        ));
+        .logged(
+            &Run::new(
+                run_id,
+                BuildLogRow::ts(row.started_at)?,
+                &row.source,
+                &row.capture,
+                &row.version,
+            ),
+            &Series::new(ArtifactName::from(row.artifact.as_str()), &row.schedule),
+        );
         let written = row
             .lifecycle
             .as_deref()
@@ -752,15 +741,16 @@ mod tests {
             Status::Succeeded,
             Ts::from(DateTime::from_timestamp_millis(1).unwrap()),
         )
-        .logged(&Run::new(
-            Ulid::nil(),
-            Ts::from(DateTime::UNIX_EPOCH),
-            &"snapshot".into(),
-            "daily",
-            "primary",
-            "{}",
-            "0.1.0",
-        ))
+        .logged(
+            &Run::new(
+                Ulid::nil(),
+                Ts::from(DateTime::UNIX_EPOCH),
+                "primary",
+                "{}",
+                "0.1.0",
+            ),
+            &Series::new("snapshot".into(), "daily"),
+        )
     }
 
     #[test]
@@ -824,33 +814,6 @@ mod tests {
         assert_eq!(
             BuildLogRow::path("analytics-project.shop.people_20260920").unwrap(),
             TablePath::new("analytics-project.shop", "people_20260920")
-        );
-    }
-
-    #[test]
-    fn a_run_advancing_another_series_is_the_same_run() {
-        let run = Run::new(
-            Ulid::nil(),
-            Ts::from(DateTime::UNIX_EPOCH),
-            &"snapshot".into(),
-            "daily",
-            "primary",
-            "{}",
-            "0.1.0",
-        );
-        let cut = run.advancing(&Series::new("instant".into(), "09:00"));
-
-        assert_eq!(
-            cut,
-            Run::new(
-                Ulid::nil(),
-                Ts::from(DateTime::UNIX_EPOCH),
-                &"instant".into(),
-                "09:00",
-                "primary",
-                "{}",
-                "0.1.0",
-            )
         );
     }
 

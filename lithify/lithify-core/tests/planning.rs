@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use proptest::prelude::*;
 
 use lithify_core::artifact::UnbuildableArtifact;
-use lithify_core::build::{Base, TableBuild};
+use lithify_core::build::{Base, BuildContext, TableBuild};
 use lithify_core::event::{SchemaChange, TableChange};
 use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
 use lithify_core::runner::Replayer;
@@ -50,16 +50,11 @@ fn planned_with(
     finishes: impl Fn(&TableId) -> bool,
 ) -> Vec<TableBuild> {
     let window = window();
+    let engine = Engine::default();
+    let namespace = Namespace::from("shelf");
 
-    Replayer::new(&Engine::default(), &Log)
-        .planned::<_, Untold>(
-            history,
-            &Mirror,
-            &Namespace::from("shelf"),
-            &window,
-            base,
-            finishes,
-        )
+    Replayer::new(BuildContext::new(&engine, &namespace), &Log)
+        .planned::<_, Untold>(history, &Mirror, &window, base, finishes)
         .unwrap()
 }
 

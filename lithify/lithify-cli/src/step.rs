@@ -1,255 +1,76 @@
-use duckdb::types::FromSql;
-use google_cloud_bigquery::error::RowError;
-use google_cloud_bigquery::query::Row;
-
-use lithify_core::model::TableId;
-use lithify_core::sink::Namespace;
-use lithify_core::source::{ChangeLogs, SchemaChangeLog};
-use lithify_core::window::Window;
-use lithify_pipeline::artifact::ArtifactControl;
-use lithify_pipeline::build_log::BuildLog;
-use lithify_pipeline::runner::{BuildLogWriter, Runner, StepTaker, Tables};
-use lithify_pipeline::table;
-use lithify_protocol::sink::bigquery::client::{
-    BigQueryCapture, BigQueryChangeLogsFn, BigQueryClient, BigQueryExecution,
-};
-use lithify_protocol::sink::duckdb::client::{
-    DuckDbCapture, DuckDbChangeLogsFn, DuckDbClient, DuckDbExecution,
-};
-
-use crate::pipeline::CaptureConfig;
-use crate::unrunnable::Unrunnable;
-
-pub struct Replaying<'a, K, B, A, F> {
-    client: &'a K,
-    artifact: &'a A,
-    namespace: &'a Namespace,
-    window: &'a Window,
-    previous: &'a [BuildLog],
-    finishes: F,
-    writer: &'a B,
-}
-
-impl<'a, K, B: BuildLogWriter, A: ArtifactControl, F: Fn(&TableId) -> bool>
-    Replaying<'a, K, B, A, F>
-{
-    pub fn new(
-        client: &'a K,
-        artifact: &'a A,
-        namespace: &'a Namespace,
-        window: &'a Window,
-        previous: &'a [BuildLog],
-        finishes: F,
-        writer: &'a B,
-    ) -> Self {
-        Self {
-            client,
-            artifact,
-            namespace,
-            window,
-            previous,
-            finishes,
-            writer,
-        }
-    }
-}
-
-pub struct Taking<'a, K> {
-    client: &'a K,
-    capture: &'a CaptureConfig,
-    topic_prefix: &'a str,
-    listing: &'a table::Tables,
-}
-
-impl<'a, K> Taking<'a, K> {
-    pub fn new(
-        client: &'a K,
-        capture: &'a CaptureConfig,
-        topic_prefix: &'a str,
-        listing: &'a table::Tables,
-    ) -> Self {
-        Self {
-            client,
-            capture,
-            topic_prefix,
-            listing,
-        }
-    }
-}
-
-impl<K> Taking<'_, K> {
-    fn finishes<'f, A: ArtifactControl>(
-        &'f self,
-        artifact: &'f A,
-        tables: &'f Tables,
-    ) -> impl Fn(&TableId) -> bool + 'f {
-        move |table| {
-            tables.includes(table)
-                && self
-                    .listing
-                    .table(table)
-                    .builds(artifact.series().artifact())
-        }
-    }
-}
-
-impl<X: DuckDbExecution> StepTaker for Taking<'_, DuckDbClient<X>> {
-    type Client = DuckDbClient<X>;
-    type Error = Unrunnable;
-
-    fn client(&self) -> &DuckDbClient<X> {
-        self.client
-    }
-
-    async fn take<A: ArtifactControl, B: BuildLogWriter>(
-        &self,
-        artifact: &A,
-        namespace: &Namespace,
-        window: &Window,
-        previous: &[BuildLog],
-        tables: &Tables,
-        writer: &B,
-    ) -> Result<B::Output, Unrunnable> {
-        self.capture
-            .with_duckdb_change_logs(
-                self.topic_prefix,
-                Replaying::new(
-                    self.client,
-                    artifact,
-                    namespace,
-                    window,
-                    previous,
-                    self.finishes(artifact, tables),
-                    writer,
-                ),
-            )
-            .await
-    }
-}
-
-impl<X: BigQueryExecution> StepTaker for Taking<'_, BigQueryClient<X>> {
-    type Client = BigQueryClient<X>;
-    type Error = Unrunnable;
-
-    fn client(&self) -> &BigQueryClient<X> {
-        self.client
-    }
-
-    async fn take<A: ArtifactControl, B: BuildLogWriter>(
-        &self,
-        artifact: &A,
-        namespace: &Namespace,
-        window: &Window,
-        previous: &[BuildLog],
-        tables: &Tables,
-        writer: &B,
-    ) -> Result<B::Output, Unrunnable> {
-        self.capture
-            .with_bigquery_change_logs(
-                self.topic_prefix,
-                Replaying::new(
-                    self.client,
-                    artifact,
-                    namespace,
-                    window,
-                    previous,
-                    self.finishes(artifact, tables),
-                    writer,
-                ),
-            )
-            .await
-    }
-}
-
-impl<X, B, A, F> DuckDbChangeLogsFn for Replaying<'_, DuckDbClient<X>, B, A, F>
-where
-    X: DuckDbExecution,
-    B: BuildLogWriter,
-    A: ArtifactControl,
-    F: Fn(&TableId) -> bool,
-{
-    type Output = Result<B::Output, Unrunnable>;
-
-    async fn call_duckdb<C>(self, logs: C) -> Self::Output
-    where
-        C: ChangeLogs,
-        <C::Schema as SchemaChangeLog>::Record: FromSql,
-    {
-        Runner::new(self.client, &logs)
-            .run(
-                self.artifact,
-                self.namespace,
-                self.window,
-                self.previous,
-                self.finishes,
-                self.writer,
-            )
-            .await
-    }
-}
-
-impl<X, B, A, F> BigQueryChangeLogsFn for Replaying<'_, BigQueryClient<X>, B, A, F>
-where
-    X: BigQueryExecution,
-    B: BuildLogWriter,
-    A: ArtifactControl,
-    F: Fn(&TableId) -> bool,
-{
-    type Output = Result<B::Output, Unrunnable>;
-
-    async fn call_bigquery<C>(self, logs: C) -> Self::Output
-    where
-        C: ChangeLogs,
-        <C::Schema as SchemaChangeLog>::Record: TryFrom<Row, Error = RowError>,
-    {
-        Runner::new(self.client, &logs)
-            .run(
-                self.artifact,
-                self.namespace,
-                self.window,
-                self.previous,
-                self.finishes,
-                self.writer,
-            )
-            .await
-    }
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use duckdb::Connection;
 
     use lithify_core::sink::{Namespace, TablePath, WarehouseClient};
     use lithify_core::ts::Ts;
+    use lithify_core::window::Window;
     use lithify_pipeline::Pipeline;
+    use lithify_pipeline::artifact::ArtifactControl;
+    use lithify_pipeline::capture::Capture;
+    use lithify_pipeline::runner::{BuildLogWriter, Replaying};
     use lithify_pipeline::warehouse::WarehouseControl;
     use lithify_protocol::DuckDbWarehouse;
-    use lithify_protocol::sink::duckdb::client::{DuckDbCapture, DuckDbClient};
+    use lithify_protocol::sink::duckdb::client::DuckDbClient;
 
     use chrono::{DateTime, Utc};
     use ulid::Ulid;
 
     use lithify_core::sql::SqlString;
 
-    use super::*;
-    use crate::artifacts::{ArtifactConfig, DeclaredSnapshot};
+    use crate::artifacts::ArtifactConfig;
     use crate::pipeline::{CaptureConfig, WarehouseConfig};
+    use crate::unrunnable::Unrunnable;
     use lithify_artifact::snapshot::Snapshot;
     use lithify_core::artifact::UnbuildableArtifact;
     use lithify_core::model::TableId;
-    use lithify_pipeline::build_log::{BuildLog, Latest, Run, Status, TableBuilt};
+    use lithify_pipeline::build_log::{BuildLog, Latest, Run, Series, Status, TableBuilt};
     use lithify_pipeline::infra::Sink;
     use lithify_pipeline::runner::BuildLogWrite;
+    use lithify_pipeline::table;
     use lithify_protocol::sink::execution::DryRun;
 
     const CHANGE_LOGS: &str = include_str!("../testdata/step/change_logs.sql");
 
     fn snapshot(sink: &Sink<WarehouseConfig, ArtifactConfig>) -> Snapshot {
-        DeclaredSnapshot::of(sink).unwrap().artifact()
+        ArtifactConfig::snapshot(sink, sink.scheduled().series().artifact()).unwrap()
     }
 
-    fn namespace(sink: &Sink<WarehouseConfig, ArtifactConfig>) -> Namespace {
-        DeclaredSnapshot::of(sink).unwrap().namespace().clone()
+    async fn replayed<K, B>(
+        pipeline: &Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig>,
+        client: &K,
+        window: &Window,
+        previous: &[BuildLog],
+        writer: &B,
+    ) -> B::Output
+    where
+        K: WarehouseControl,
+        CaptureConfig: Capture<K>,
+        Unrunnable: From<<K as WarehouseClient>::Error>,
+        B: BuildLogWriter,
+    {
+        let source = pipeline.sources().next().unwrap();
+        let sink = pipeline
+            .sinks()
+            .find(|sink| sink.name() == "duckdb_s3")
+            .unwrap();
+
+        source
+            .capture()
+            .with_change_logs(
+                client.warehouse(),
+                Replaying::<_, _, _, _, Unrunnable>::new(
+                    client,
+                    &snapshot(sink),
+                    sink.scheduled(),
+                    window,
+                    previous,
+                    listed(pipeline.tables(), sink),
+                    writer,
+                ),
+            )
+            .await
+            .unwrap()
     }
 
     fn listed<'t>(
@@ -315,18 +136,13 @@ pub(crate) mod tests {
     }
 
     fn snapshot_build() -> BuildLogWrite {
-        BuildLogWrite::new(
-            Namespace::from("mysql_shop"),
-            Run::new(
-                Ulid::nil(),
-                Ts::from(DateTime::UNIX_EPOCH),
-                &"snapshot".into(),
-                "daily",
-                "primary",
-                CAPTURE,
-                "0.1.0",
-            ),
-        )
+        BuildLogWrite::new(Run::new(
+            Ulid::nil(),
+            Ts::from(DateTime::UNIX_EPOCH),
+            "primary",
+            CAPTURE,
+            "0.1.0",
+        ))
     }
 
     fn statements(client: &DuckDbClient<DryRun>, starting: &str) -> Vec<String> {
@@ -342,7 +158,6 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_dry_run_records_the_snapshot_of_every_table_the_schema_changes_left_standing() {
         let pipeline = pipeline();
-        let source = pipeline.sources().next().unwrap();
         let sink = pipeline
             .sinks()
             .find(|sink| sink.name() == "duckdb_s3")
@@ -353,22 +168,7 @@ pub(crate) mod tests {
             Ts::try_from(1789948800000).unwrap(),
         );
 
-        source
-            .capture()
-            .with_duckdb_change_logs(
-                source.topic_prefix().unwrap(),
-                Replaying::new(
-                    &client,
-                    &snapshot(sink),
-                    &namespace(sink),
-                    &window,
-                    &[],
-                    listed(pipeline.tables(), sink),
-                    &snapshot_build(),
-                ),
-            )
-            .await
-            .unwrap();
+        replayed(&pipeline, &client, &window, &[], &snapshot_build()).await;
         let created = statements(&client, "CREATE OR REPLACE TABLE \"mysql_shop\".\"people_");
 
         assert_eq!(created.len(), 1);
@@ -387,7 +187,6 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_dry_run_records_the_build_log_it_would_write_without_writing_it() {
         let pipeline = pipeline();
-        let source = pipeline.sources().next().unwrap();
         let sink = pipeline
             .sinks()
             .find(|sink| sink.name() == "duckdb_s3")
@@ -398,22 +197,7 @@ pub(crate) mod tests {
             Ts::try_from(1789948800000).unwrap(),
         );
 
-        source
-            .capture()
-            .with_duckdb_change_logs(
-                source.topic_prefix().unwrap(),
-                Replaying::new(
-                    &client,
-                    &snapshot(sink),
-                    &namespace(sink),
-                    &window,
-                    &[],
-                    listed(pipeline.tables(), sink),
-                    &snapshot_build(),
-                ),
-            )
-            .await
-            .unwrap();
+        replayed(&pipeline, &client, &window, &[], &snapshot_build()).await;
 
         assert_eq!(
             statements(&client, "INSERT INTO \"mysql_shop\".\"_lithify_log\"").len(),
@@ -430,7 +214,6 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_dry_run_logs_a_table_with_nothing_to_fold_onto_as_failed_as_a_build_does() {
         let pipeline = pipeline();
-        let source = pipeline.sources().next().unwrap();
         let sink = pipeline
             .sinks()
             .find(|sink| sink.name() == "duckdb_s3")
@@ -441,22 +224,7 @@ pub(crate) mod tests {
             Ts::try_from(1789948800000).unwrap(),
         );
 
-        let logs = source
-            .capture()
-            .with_duckdb_change_logs(
-                source.topic_prefix().unwrap(),
-                Replaying::new(
-                    &client,
-                    &snapshot(sink),
-                    &namespace(sink),
-                    &window,
-                    &[],
-                    listed(pipeline.tables(), sink),
-                    &snapshot_build(),
-                ),
-            )
-            .await
-            .unwrap();
+        let logs = replayed(&pipeline, &client, &window, &[], &snapshot_build()).await;
 
         assert_eq!(
             logs.iter().map(BuildLog::status).collect::<Vec<_>>(),
@@ -469,7 +237,6 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_dry_run_folds_each_table_onto_the_shard_its_last_build_log_targeted() {
         let pipeline = pipeline();
-        let source = pipeline.sources().next().unwrap();
         let sink = pipeline
             .sinks()
             .find(|sink| sink.name() == "duckdb_s3")
@@ -481,22 +248,7 @@ pub(crate) mod tests {
         );
         let previous = [built_before("people", CAPTURE)];
 
-        source
-            .capture()
-            .with_duckdb_change_logs(
-                source.topic_prefix().unwrap(),
-                Replaying::new(
-                    &client,
-                    &snapshot(sink),
-                    &namespace(sink),
-                    &window,
-                    &previous,
-                    listed(pipeline.tables(), sink),
-                    &snapshot_build(),
-                ),
-            )
-            .await
-            .unwrap();
+        replayed(&pipeline, &client, &window, &previous, &snapshot_build()).await;
 
         assert!(
             statements(&client, "CREATE OR REPLACE TABLE \"mysql_shop\".\"people_")[0]
@@ -504,7 +256,7 @@ pub(crate) mod tests {
         );
     }
 
-    pub(crate) const CAPTURE: &str = r#"{"debezium":{"dialect":"mysql"}}"#;
+    pub(crate) const CAPTURE: &str = r#"{"debezium":{"mysql":{"topic_prefix":"mysql"}}}"#;
 
     pub(crate) fn at(rfc3339: &str) -> DateTime<Utc> {
         rfc3339.parse().unwrap()
@@ -523,15 +275,16 @@ pub(crate) mod tests {
             Status::Succeeded,
             Ts::from(at("2026-09-20T00:10:00Z")),
         )
-        .logged(&Run::new(
-            Ulid::from_parts(1, 0),
-            Ts::from(DateTime::UNIX_EPOCH),
-            &"snapshot".into(),
-            "daily",
-            "primary",
-            capture,
-            "0.1.0",
-        ))
+        .logged(
+            &Run::new(
+                Ulid::from_parts(1, 0),
+                Ts::from(DateTime::UNIX_EPOCH),
+                "primary",
+                capture,
+                "0.1.0",
+            ),
+            &Series::new("snapshot".into(), "daily"),
+        )
     }
 
     pub(crate) async fn logged(change_logs: &str, before: &[BuildLog]) -> DuckDbClient {
@@ -602,34 +355,24 @@ pub(crate) mod tests {
         client: &DuckDbClient,
     ) -> Vec<BuildLog> {
         let source = pipeline.sources().next().unwrap();
-        let sink = pipeline
-            .sinks()
-            .find(|sink| sink.name() == "duckdb_s3")
-            .unwrap();
         let window = Window::new(
             Ts::try_from(0).unwrap(),
             Ts::try_from(1789948800000).unwrap(),
         );
 
-        source
-            .capture()
-            .with_duckdb_change_logs(
-                source.topic_prefix().unwrap(),
-                Replaying::new(
-                    client,
-                    &snapshot(sink),
-                    &namespace(sink),
-                    &window,
-                    &[],
-                    listed(pipeline.tables(), sink),
-                    &DeclaredSnapshot::of(sink)
-                        .unwrap()
-                        .build(source, Ts::from(at("2026-09-22T05:00:00Z")))
-                        .unwrap(),
-                ),
+        replayed(
+            pipeline,
+            client,
+            &window,
+            &[],
+            &BuildLogWrite::of(
+                source,
+                Ts::from(at("2026-09-22T05:00:00Z")),
+                env!("CARGO_PKG_VERSION"),
             )
-            .await
-            .unwrap()
+            .unwrap(),
+        )
+        .await
     }
 
     #[tokio::test]
@@ -673,10 +416,7 @@ pub(crate) mod tests {
                 &client,
                 "SELECT DISTINCT capture, schedule || ' ' || artifact || ' ' || source FROM mysql_shop._lithify_log"
             ),
-            [(
-                r#"{"debezium":{"dialect":"mysql"}}"#.to_owned(),
-                "daily snapshot primary".to_owned()
-            )]
+            [(CAPTURE.to_owned(), "daily snapshot primary".to_owned())]
         );
     }
 

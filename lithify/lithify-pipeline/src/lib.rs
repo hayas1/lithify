@@ -4,8 +4,10 @@
 
 pub mod artifact;
 pub mod build_log;
+pub mod capture;
 pub mod check;
 pub mod infra;
+pub mod materialization;
 pub mod pipeline;
 pub mod pipelines;
 pub mod place;

@@ -12,3 +12,8 @@ base = "snapshot"
 name = "nine"
 kind = "copy"
 base = "snapshot"
+
+[[artifact]]
+name = "versions"
+kind = "history"
+shard = "%Y%m%d"

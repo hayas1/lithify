@@ -42,11 +42,3 @@ fn a_table_is_written_after_the_namespace_it_lies_in() {
         "analytics.shop.people"
     );
 }
-
-#[test]
-fn a_change_log_is_read_from_the_topic_it_landed_on_in_the_namespace_of_the_warehouse() {
-    assert_eq!(
-        Engine::default().change_log_ref("mysql.shop.people"),
-        Engine::default().table_ref(&TablePath::new("mysql_shop_cdc", "mysql.shop.people"))
-    );
-}

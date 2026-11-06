@@ -3,32 +3,13 @@ use duckdb::{Connection, Error, Statement};
 use lithify_pipeline::warehouse::WarehouseControl;
 
 use lithify_core::sink::{ChangeLogSql, Namespace, TablePath, WarehouseClient, WarehouseSql};
-use lithify_core::source::{
-    ChangeLogs, SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed,
-};
+use lithify_core::source::{SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed};
 use lithify_core::sql::SqlString;
 use lithify_core::window::Window;
 use lithify_pipeline::build_log::{BuildLogQuery, BuildLogRow};
 
 use crate::sink::duckdb::DuckDbWarehouse;
 use crate::sink::execution::{Apply, DryRun};
-
-pub trait DuckDbChangeLogsFn {
-    type Output;
-
-    async fn call_duckdb<C>(self, logs: C) -> Self::Output
-    where
-        C: ChangeLogs,
-        <C::Schema as SchemaChangeLog>::Record: FromSql;
-}
-
-pub trait DuckDbCapture {
-    async fn with_duckdb_change_logs<F: DuckDbChangeLogsFn>(
-        &self,
-        topic_prefix: &str,
-        f: F,
-    ) -> F::Output;
-}
 
 // DuckDB answers on the calling thread, so executing a statement waits on nothing.
 pub trait DuckDbExecution {
@@ -195,6 +176,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::landing::Landed;
+    use crate::sink::duckdb::S3Sink;
     use crate::source::debezium::Debezium;
     use crate::source::debezium::mysql::MySql;
     use crate::source::debezium::tests::described;
@@ -223,7 +206,11 @@ mod tests {
         let connection = Connection::open_in_memory().unwrap();
         connection.execute_batch(CHANGE_LOG).unwrap();
         let client = DuckDbClient::new(connection, DuckDbWarehouse::new("mysql_shop_cdc"));
-        let log = Debezium::under("value", "mysql", MySql);
+        let log = Landed::new(
+            Debezium::new("mysql", MySql),
+            S3Sink,
+            &DuckDbWarehouse::new("mysql_shop_cdc"),
+        );
         let mut changes = client.schema_changes(&log, window).await.unwrap();
 
         changes
@@ -270,7 +257,11 @@ mod tests {
         let connection = Connection::open_in_memory().unwrap();
         connection.execute_batch(CHANGE_LOG).unwrap();
         let client = DuckDbClient::new(connection, DuckDbWarehouse::new("mysql_shop_cdc"));
-        let log = Debezium::under("value", "mysql", MySql);
+        let log = Landed::new(
+            Debezium::new("mysql", MySql),
+            S3Sink,
+            &DuckDbWarehouse::new("mysql_shop_cdc"),
+        );
 
         let customers = client
             .table::<Unread>(
@@ -296,7 +287,11 @@ mod tests {
         let connection = Connection::open_in_memory().unwrap();
         connection.execute_batch(CHANGE_LOG).unwrap();
         let client = DuckDbClient::new(connection, DuckDbWarehouse::new("mysql_shop_cdc"));
-        let log = Debezium::under("value", "mysql", MySql);
+        let log = Landed::new(
+            Debezium::new("mysql", MySql),
+            S3Sink,
+            &DuckDbWarehouse::new("mysql_shop_cdc"),
+        );
         let tables = async |at: i64| {
             client
                 .catalog_at::<Unread>(&log, Ts::try_from(at).unwrap())
@@ -371,15 +366,16 @@ mod tests {
             status,
             Ts::from(DateTime::from_timestamp_millis(finished_at as i64).unwrap()),
         )
-        .logged(&Run::new(
-            Ulid::from_parts(finished_at, 0),
-            Ts::from(DateTime::UNIX_EPOCH),
-            &"snapshot".into(),
-            "daily",
-            "primary",
-            r#"{"debezium":{"dialect":"mysql"}}"#,
-            "0.1.0",
-        ))
+        .logged(
+            &Run::new(
+                Ulid::from_parts(finished_at, 0),
+                Ts::from(DateTime::UNIX_EPOCH),
+                "primary",
+                r#"{"debezium":{"mysql":{"topic_prefix":"mysql"}}}"#,
+                "0.1.0",
+            ),
+            &Series::new("snapshot".into(), "daily"),
+        )
     }
 
     async fn logging(logs: &[BuildLog]) -> DuckDbClient {
@@ -672,7 +668,11 @@ mod tests {
     async fn a_table_that_does_not_hold_a_change_log_is_rejected() {
         let connection = Connection::open_in_memory().unwrap();
         let client = DuckDbClient::new(connection, DuckDbWarehouse::new("mysql_shop_cdc"));
-        let log = Debezium::under("value", "mysql", MySql);
+        let log = Landed::new(
+            Debezium::new("mysql", MySql),
+            S3Sink,
+            &DuckDbWarehouse::new("mysql_shop_cdc"),
+        );
 
         let changes = client.schema_changes(&log, &window(0, 1)).await;
 
@@ -713,8 +713,8 @@ mod tests {
     impl SchemaChangeLog for Ledger {
         type Record = String;
 
-        fn ddl_topic(&self) -> String {
-            "statements".to_owned()
+        fn ddl_landed_table(&self) -> TablePath {
+            TablePath::new("ledger", "statements")
         }
 
         fn schema_change(

@@ -86,7 +86,6 @@ pub enum Unverifiable {
     Unwritable(Unwritable),
     UnknownSource(String),
     UnknownSink(String),
-    WithoutTopicPrefix,
     Unlanded(String),
 }
 
@@ -101,12 +100,6 @@ impl Display for Unverifiable {
             Self::Unwritable(cause) => write!(formatter, "{cause}"),
             Self::UnknownSource(name) => write!(formatter, "the pipeline captures no {name}"),
             Self::UnknownSink(name) => write!(formatter, "the pipeline is not sunk into {name}"),
-            Self::WithoutTopicPrefix => {
-                write!(
-                    formatter,
-                    "the source names no topic prefix to read its change logs by"
-                )
-            }
             Self::Unlanded(table) => write!(formatter, "{table} did not land what was applied"),
         }
     }

@@ -41,28 +41,19 @@ impl Scd1Config {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scd1 {
     name: ArtifactName,
-    base: Series,
 }
 
 impl Default for Scd1 {
     fn default() -> Self {
         Self {
             name: ArtifactName::from(Self::KIND),
-            base: Snapshot::days(&ArtifactName::from(Snapshot::KIND)),
         }
     }
 }
 
 impl Scd1 {
     pub fn named(self, name: ArtifactName) -> Self {
-        Self { name, ..self }
-    }
-
-    pub fn based_on(self, base: &Snapshot) -> Self {
-        Self {
-            base: base.series(),
-            ..self
-        }
+        Self { name }
     }
 }
 
@@ -123,7 +114,7 @@ impl ArtifactControl for Scd1 {
         table: &TableId,
         window: &Window,
     ) -> Option<&'b BuildLog> {
-        Snapshot::shard_closing(&self.base, built, table, *window.from())
+        Snapshot::shard_closing(built, table, *window.from())
     }
 }
 
@@ -647,7 +638,10 @@ mod tests {
     #[test]
     fn a_snapshot_reads_the_change_log_where_the_warehouse_reads_change_logs() {
         let statement = statement(snapshots_in(
-            Engine::default().reading_change_log("mysql_shop_customers", "changes_of_customers"),
+            Engine::default().reading_change_log(
+                TablePath::new("mysql_shop_cdc", "mysql_shop_customers"),
+                "changes_of_customers",
+            ),
             customers(),
             vec![],
             || None,

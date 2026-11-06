@@ -8,13 +8,10 @@ use lithify_core::window::Window;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Progress {
     built: BTreeMap<TableId, Option<Window>>,
-    captures: BTreeSet<String>,
 }
 
 impl Progress {
     pub fn read(latest: &[BuildLog], succeeded: &[BuildLog]) -> Self {
-        let last_run = latest.iter().map(BuildLog::run_id).max();
-
         Self {
             built: latest
                 .iter()
@@ -26,16 +23,7 @@ impl Progress {
                     Some((log.table_to()?.clone(), built))
                 })
                 .collect(),
-            captures: latest
-                .iter()
-                .filter(|log| Some(log.run_id()) == last_run)
-                .map(|log| log.capture().to_owned())
-                .collect(),
         }
-    }
-
-    pub fn captures(&self) -> impl Iterator<Item = &str> {
-        self.captures.iter().map(String::as_str)
     }
 
     pub fn standing(&self) -> Option<Ts<Event>> {
@@ -105,6 +93,10 @@ impl Step {
     pub fn left_out(&self) -> &BTreeSet<TableId> {
         &self.left_out
     }
+
+    pub fn includes(&self, table: &TableId) -> bool {
+        !self.left_out.contains(table)
+    }
 }
 
 #[cfg(test)]
@@ -117,7 +109,7 @@ mod tests {
 
     use super::*;
 
-    const CAPTURE: &str = r#"{"debezium":{"dialect":"mysql"}}"#;
+    const CAPTURE: &str = r#"{"debezium":{"mysql":{"topic_prefix":"mysql"}}}"#;
     const DAY: i64 = 86_400_000;
 
     fn day(from: i64) -> Window {
@@ -143,15 +135,16 @@ mod tests {
             status,
             Ts::from(DateTime::UNIX_EPOCH),
         )
-        .logged(&Run::new(
-            Ulid::from_parts(run, 0),
-            Ts::from(DateTime::UNIX_EPOCH),
-            series.artifact(),
-            series.schedule(),
-            "primary",
-            CAPTURE,
-            "0.1.0",
-        ))
+        .logged(
+            &Run::new(
+                Ulid::from_parts(run, 0),
+                Ts::from(DateTime::UNIX_EPOCH),
+                "primary",
+                CAPTURE,
+                "0.1.0",
+            ),
+            series,
+        )
     }
 
     fn daily() -> Series {
@@ -306,6 +299,5 @@ mod tests {
         ]);
 
         assert_eq!(progress.standing(), Some(*day(1).to()));
-        assert_eq!(progress.captures().collect::<Vec<_>>(), [CAPTURE]);
     }
 }

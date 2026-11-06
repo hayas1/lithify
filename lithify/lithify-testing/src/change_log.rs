@@ -4,6 +4,7 @@ use lithify_core::artifact::UnbuildableArtifact;
 use lithify_core::listener::OutOfOrder;
 use lithify_core::model::TableId;
 use lithify_core::position::{Coordinate, Position};
+use lithify_core::sink::TablePath;
 use lithify_core::source::{ChangeLog, ColumnPath, RowChangeLog};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -38,8 +39,11 @@ impl ChangeLog for Log {
 }
 
 impl RowChangeLog for Log {
-    fn dml_topic(&self, table: &TableId) -> String {
-        format!("mysql_{}_{}", table.schema(), table.table())
+    fn dml_landed_table(&self, table: &TableId) -> TablePath {
+        TablePath::new(
+            "mysql_shop_cdc",
+            &format!("mysql_{}_{}", table.schema(), table.table()),
+        )
     }
 
     fn operation(&self) -> ColumnPath {

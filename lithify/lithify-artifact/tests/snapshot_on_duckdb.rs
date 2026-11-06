@@ -5,7 +5,7 @@ use duckdb::Connection;
 use lithify_artifact::shard::Shard;
 use lithify_artifact::snapshot::Snapshot;
 use lithify_core::artifact::{Artifact, UnbuildableArtifact};
-use lithify_core::build::Base;
+use lithify_core::build::{Base, BuildContext};
 use lithify_core::listener::OutOfOrder;
 use lithify_core::listener::ReplayEnd;
 use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
@@ -16,7 +16,7 @@ use lithify_core::sql::SqlString;
 use lithify_core::ts::Ts;
 use lithify_core::window::Window;
 use lithify_protocol::sink::duckdb::client::DuckDbClient;
-use lithify_protocol::{Debezium, DuckDbWarehouse, MySql};
+use lithify_protocol::{Debezium, DuckDbWarehouse, Landed, MySql, S3Sink};
 
 const CHANGE_LOG: &str = include_str!("../testdata/snapshot_on_duckdb/change_log.sql");
 
@@ -38,7 +38,11 @@ async fn a_snapshot_holds_each_key_as_the_change_log_last_left_it() {
         DuckDbWarehouse::new("cdc"),
     );
     client.execute(&SqlString::from(CHANGE_LOG)).await.unwrap();
-    let log = Debezium::under("value", "mysql", MySql);
+    let log = Landed::new(
+        Debezium::new("mysql", MySql),
+        S3Sink,
+        &DuckDbWarehouse::new("cdc"),
+    );
     let window = Window::new(Ts::try_from(0).unwrap(), Ts::try_from(10).unwrap());
     let artifact = Snapshot::new(Shard::new("%Y%m%d", chrono_tz::Tz::UTC));
     let target = TablePath::new(
@@ -88,12 +92,16 @@ fn rows(client: &DuckDbClient, query: &str) -> Vec<String> {
 }
 
 async fn build_snapshots(client: &DuckDbClient, window: &Window) {
-    let log = Debezium::under("value", "mysql", MySql);
+    let log = Landed::new(
+        Debezium::new("mysql", MySql),
+        S3Sink,
+        &DuckDbWarehouse::new("cdc"),
+    );
     let artifact = Snapshot::new(Shard::new("%Y%m%d", chrono_tz::Tz::UTC));
     let namespace = Namespace::from("shop_snapshot");
     let history = client.history::<Unbuilt>(&log, window).await.unwrap();
-    let builds = Replayer::new(client.warehouse(), &log)
-        .planned::<_, Unbuilt>(&history, &artifact, &namespace, window, |_| None, |_| true)
+    let builds = Replayer::new(BuildContext::new(client.warehouse(), &namespace), &log)
+        .planned::<_, Unbuilt>(&history, &artifact, window, |_| None, |_| true)
         .unwrap();
     for build in builds {
         for statement in build.statements().unwrap() {

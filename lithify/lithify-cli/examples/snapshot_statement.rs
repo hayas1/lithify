@@ -7,11 +7,13 @@ use lithify_core::artifact::Artifact;
 use lithify_core::build::Base;
 use lithify_core::listener::ReplayEnd;
 use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
-use lithify_core::sink::{TablePath, Warehouse};
+use lithify_core::sink::{TablePath, Warehouse, WarehouseSql};
 use lithify_core::ts::Ts;
 use lithify_core::window::Window;
-use lithify_pipeline::build_log::{BuildLog, Run, Status, TableBuilt};
-use lithify_protocol::{BigQueryWarehouse, Debezium, DuckDbWarehouse, MySql};
+use lithify_pipeline::build_log::{BuildLog, Run, Series, Status, TableBuilt};
+use lithify_protocol::{
+    BigQuerySink, BigQueryWarehouse, Debezium, DuckDbWarehouse, Landed, Landing, MySql, S3Sink,
+};
 
 fn column(name: &str, type_name: &str, column_type: ColumnType) -> ColumnModel {
     ColumnModel::new(name, type_name, column_type, false, None)
@@ -43,19 +45,24 @@ fn previous(window: &Window, shard: &str) -> BuildLog {
         Status::Succeeded,
         Ts::from(DateTime::UNIX_EPOCH),
     )
-    .logged(&Run::new(
-        Ulid::nil(),
-        Ts::from(DateTime::UNIX_EPOCH),
-        &"snapshot".into(),
-        "daily",
-        "primary",
-        "{}",
-        "0.1.0",
-    ))
+    .logged(
+        &Run::new(
+            Ulid::nil(),
+            Ts::from(DateTime::UNIX_EPOCH),
+            "primary",
+            "{}",
+            "0.1.0",
+        ),
+        &Series::new("snapshot".into(), "daily"),
+    )
 }
 
-fn statements<W: Warehouse>(warehouse: W) -> String {
-    let log = Debezium::new("mysql", MySql);
+fn statements<L>(landing: L, warehouse: L::Warehouse) -> String
+where
+    L: Landing<Debezium<MySql>>,
+    L::Warehouse: Warehouse,
+{
+    let log = Landed::new(Debezium::new("mysql", MySql), landing, &warehouse);
     let window = Window::new(
         Ts::try_from(1789862400000).unwrap(),
         Ts::try_from(1789948800000).unwrap(),
@@ -68,7 +75,7 @@ fn statements<W: Warehouse>(warehouse: W) -> String {
     let previous = std::env::args()
         .nth(2)
         .map(|shard| previous(&window, &shard));
-    let snapshot = artifact.builder::<_, W>(
+    let snapshot = artifact.builder::<_, L::Warehouse>(
         &log,
         &window,
         Base::from(previous.as_ref().and_then(BuildLog::target).cloned()),
@@ -93,8 +100,14 @@ fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("bigquery") => println!(
             "{}",
-            statements(BigQueryWarehouse::new("local-project", "mysql_shop_cdc"))
+            statements(
+                BigQuerySink,
+                BigQueryWarehouse::new("local-project", "mysql_shop_cdc")
+            )
         ),
-        _ => println!("{}", statements(DuckDbWarehouse::new("mysql_shop_cdc"))),
+        _ => println!(
+            "{}",
+            statements(S3Sink, DuckDbWarehouse::new("mysql_shop_cdc"))
+        ),
     }
 }

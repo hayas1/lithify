@@ -1,13 +1,18 @@
+use std::collections::BTreeMap;
+
 use chrono::NaiveDate;
 
 use lithify_core::artifact::ArtifactName;
-use lithify_core::ts::{Replay, Ts};
-use lithify_pipeline::infra::{Sink, Source};
-use lithify_pipeline::runner::StepTaker;
-use lithify_pipeline::schedule::Timeline;
+use lithify_core::sink::WarehouseClient;
+use lithify_core::window::Window;
+use lithify_pipeline::build_log::Series;
+use lithify_pipeline::capture::Capture;
+use lithify_pipeline::infra::Sink;
+use lithify_pipeline::materialization::Materialization;
 use lithify_pipeline::stepping::Stepping;
+use lithify_pipeline::warehouse::WarehouseControl;
 
-use crate::artifacts::{ArtifactConfig, Declared, DeclaredSnapshot, Lineup};
+use crate::artifacts::ArtifactConfig;
 use crate::journal::Journal;
 use crate::pipeline::{CaptureConfig, WarehouseConfig};
 use crate::report::Report;
@@ -22,49 +27,32 @@ pub enum RunCommand {
 }
 
 impl RunCommand {
-    pub async fn settle<P, B>(
+    pub async fn settle<K, B>(
         &self,
         sink: &Sink<WarehouseConfig, ArtifactConfig>,
-        source: &Source<CaptureConfig>,
-        now: Ts<Replay>,
-        taker: &P,
+        stepping: Stepping<'_, K, CaptureConfig, Unrunnable>,
         writer: &B,
         journal: &mut Journal,
     ) -> Result<(), Unrunnable>
     where
-        P: StepTaker<Error = Unrunnable>,
+        K: WarehouseControl,
+        CaptureConfig: Capture<K>,
+        Unrunnable: From<<K as WarehouseClient>::Error>,
         B: Report,
     {
-        let lineup = Lineup::of(sink)?;
-        let stepping = Stepping::new(
-            taker,
-            Timeline::new(
-                DeclaredSnapshot::of(sink)?.schedule(),
-                source.since()..now.as_event(),
-            ),
-            source.written_capture()?,
-        );
-
         match self {
             Self::CatchUp { target, to: None } => {
-                lineup
-                    .catch_up(&stepping, target.named(), writer, journal)
-                    .await
+                target.catch_up(sink, &stepping, writer, journal).await
             }
             Self::CatchUp {
                 target,
                 to: Some(date),
             } => {
-                lineup
-                    .catch_up(
-                        &stepping.up_to(*date, lineup.snapshot()).await?,
-                        target.named(),
-                        writer,
-                        journal,
-                    )
-                    .await
+                let stepping = stepping.up_to(*date, sink.scheduled()).await?;
+
+                target.catch_up(sink, &stepping, writer, journal).await
             }
-            Self::Build(target) => target.build(&lineup, &stepping, writer, journal).await,
+            Self::Build(target) => target.build(sink, &stepping, writer, journal).await,
         }
     }
 }
@@ -79,26 +67,28 @@ impl Target {
         Self { artifact }
     }
 
-    fn named(&self) -> impl Fn(&Declared) -> bool {
-        move |declared| match &self.artifact {
-            Some(artifact) => declared.is(artifact),
+    fn names(&self, materialization: &Materialization) -> bool {
+        match &self.artifact {
+            Some(artifact) => materialization.artifact() == artifact,
             None => true,
         }
     }
 
-    async fn build<P, B>(
+    async fn build<K, B>(
         &self,
-        lineup: &Lineup,
-        stepping: &Stepping<'_, P>,
+        sink: &Sink<WarehouseConfig, ArtifactConfig>,
+        stepping: &Stepping<'_, K, CaptureConfig, Unrunnable>,
         writer: &B,
         journal: &mut Journal,
     ) -> Result<(), Unrunnable>
     where
-        P: StepTaker<Error = Unrunnable>,
+        K: WarehouseControl,
+        CaptureConfig: Capture<K>,
+        Unrunnable: From<<K as WarehouseClient>::Error>,
         B: Report,
     {
-        if lineup
-            .step(stepping, self.named(), &Default::default(), writer, journal)
+        if self
+            .step(sink, stepping, &Default::default(), writer, journal)
             .await?
             .is_none()
         {
@@ -107,24 +97,84 @@ impl Target {
 
         Ok(())
     }
+
+    async fn catch_up<K, B>(
+        &self,
+        sink: &Sink<WarehouseConfig, ArtifactConfig>,
+        stepping: &Stepping<'_, K, CaptureConfig, Unrunnable>,
+        writer: &B,
+        journal: &mut Journal,
+    ) -> Result<(), Unrunnable>
+    where
+        K: WarehouseControl,
+        CaptureConfig: Capture<K>,
+        Unrunnable: From<<K as WarehouseClient>::Error>,
+        B: Report,
+    {
+        let mut taken: BTreeMap<Series, Vec<Window>> = BTreeMap::new();
+
+        while let Some((series, window)) =
+            self.step(sink, stepping, &taken, writer, journal).await?
+        {
+            taken.entry(series).or_default().push(window);
+        }
+
+        Ok(())
+    }
+
+    async fn step<K, B>(
+        &self,
+        sink: &Sink<WarehouseConfig, ArtifactConfig>,
+        stepping: &Stepping<'_, K, CaptureConfig, Unrunnable>,
+        taken: &BTreeMap<Series, Vec<Window>>,
+        writer: &B,
+        journal: &mut Journal,
+    ) -> Result<Option<(Series, Window)>, Unrunnable>
+    where
+        K: WarehouseControl,
+        CaptureConfig: Capture<K>,
+        Unrunnable: From<<K as WarehouseClient>::Error>,
+        B: Report,
+    {
+        for (config, materialization) in sink
+            .materializations()
+            .filter(|(_, materialization)| self.names(materialization))
+        {
+            let declared = config.declared(materialization.artifact(), sink.time_zone());
+            let series = materialization.series();
+            let taken = taken.get(series).map(Vec::as_slice).unwrap_or_default();
+
+            if let Some(step) = declared.next(stepping, materialization, taken).await? {
+                journal.window(step.window());
+                let output = declared
+                    .take(stepping, materialization, &step, writer)
+                    .await?;
+                writer.report(series, step.window(), output, journal)?;
+
+                return Ok(Some((series.clone(), step.window().clone())));
+            }
+        }
+
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use lithify_core::sink::Namespace;
+    use crate::pipeline::CaptureConfig;
     use lithify_core::sql::SqlString;
     use lithify_pipeline::Pipeline;
+    use lithify_pipeline::check::Expectation;
+    use lithify_pipeline::runner::BuildLogWrite;
     use lithify_protocol::sink::duckdb::client::DuckDbClient;
 
     use super::*;
     use lithify_core::ts::Ts;
 
-    use crate::step::Taking;
     use crate::step::tests::{CAPTURE, PEOPLE, at, built_before, logged, pipeline, rows};
-    use lithify_artifact::snapshot::Snapshot;
     use lithify_core::sink::WarehouseClient;
-    use lithify_pipeline::check::Expectation;
     use lithify_pipeline::schedule::Schedule;
+    use lithify_pipeline::schedule::Timeline;
 
     const NOW: &str = "2026-09-22T05:00:00Z";
 
@@ -334,21 +384,17 @@ pub(crate) mod tests {
             .sinks()
             .find(|sink| sink.name() == "duckdb_s3")
             .unwrap();
-        let writer = DeclaredSnapshot::of(sink)
-            .unwrap()
-            .build(source, Ts::from(at(now)))
-            .unwrap();
+        let writer =
+            BuildLogWrite::of(source, Ts::from(at(now)), env!("CARGO_PKG_VERSION")).unwrap();
         let mut journal = Journal::default();
 
         command
             .settle(
                 sink,
-                source,
-                Ts::from(at(now)),
-                &Taking::new(
+                Stepping::new(
                     client,
-                    source.capture(),
-                    source.topic_prefix().unwrap(),
+                    source,
+                    Expectation::of(sink, source, Ts::from(at(now))).unwrap(),
                     pipeline.tables(),
                 ),
                 &writer,
@@ -828,16 +874,13 @@ pub(crate) mod tests {
         );
         assert_eq!(
             Expectation::new(
-                Schedule::default(),
-                pipeline.sources().next().unwrap().since(),
+                Timeline::new(
+                    Schedule::default(),
+                    pipeline.sources().next().unwrap().since()..Ts::from(at(NOW))
+                ),
                 CAPTURE,
-                Ts::from(at(NOW)),
             )
-            .read::<_, Unrunnable>(
-                &client,
-                &Namespace::from("mysql_shop"),
-                &Snapshot::days(&"snapshot".into())
-            )
+            .read::<_, Unrunnable>(&client, pipeline.sinks().next().unwrap().scheduled())
             .await
             .unwrap()
             .discrepancies(),
@@ -1213,7 +1256,7 @@ mod catch_up {
             PEOPLE,
             &[built_before(
                 "people",
-                r#"{"debezium":{"dialect":"postgres"}}"#,
+                r#"{"debezium":{"postgres":{"topic_prefix":"postgres"}}}"#,
             )],
         )
         .await;
@@ -1231,7 +1274,7 @@ mod catch_up {
 
         assert!(matches!(
             changed,
-            Err(Unrunnable::Unsteppable(Unsteppable::CaptureChanged { .. }))
+            Err(Unrunnable::Unsteppable(Unsteppable::CaptureChanged(_)))
         ));
     }
 }

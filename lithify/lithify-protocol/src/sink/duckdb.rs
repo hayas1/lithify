@@ -8,7 +8,11 @@ pub mod store;
 
 use lithify_core::model::ColumnType;
 use lithify_core::sink::{ChangeLogSql, Namespace, TablePath, UnsupportedColumn, WarehouseSql};
+use lithify_core::source::ColumnPath;
 use lithify_core::sql::SqlString;
+
+use crate::landing::Landing;
+use crate::source::CdcFormat;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DuckDbWarehouse {
@@ -199,6 +203,21 @@ impl ChangeLogSql for DuckDbWarehouse {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct S3Sink;
+
+impl<C: CdcFormat> Landing<C> for S3Sink {
+    type Warehouse = DuckDbWarehouse;
+
+    fn envelope(&self) -> Option<ColumnPath> {
+        Some(ColumnPath::from("value"))
+    }
+
+    fn landed_table(&self, change_log: &Namespace, topic: &str) -> TablePath {
+        TablePath::new(change_log.clone(), topic)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,6 +239,7 @@ mod tests {
                 .starts_with("CREATE OR REPLACE VIEW")
         );
     }
+    use crate::landing::Landed;
     use crate::sink::duckdb::config::tests::s3;
     use crate::source::debezium::Debezium;
     use crate::source::debezium::mysql::MySql;
@@ -366,7 +386,11 @@ mod tests {
     #[test]
     fn the_schema_changes_of_a_window_are_read_from_the_envelope_in_the_order_of_their_processing_time_then_position()
      {
-        let log = Debezium::under("value", "mysql", MySql);
+        let log = Landed::new(
+            Debezium::new("mysql", MySql),
+            S3Sink,
+            &DuckDbWarehouse::new("mysql_shop_cdc"),
+        );
         let window = Window::new(Ts::try_from(0).unwrap(), Ts::try_from(10).unwrap());
 
         assert_eq!(
@@ -383,12 +407,13 @@ mod tests {
     #[test]
     fn a_change_log_lives_in_the_database_unless_it_was_sunk_into_object_storage() {
         assert_eq!(
-            DuckDbWarehouse::new("mysql_shop_cdc").change_log_ref("mysql"),
+            DuckDbWarehouse::new("mysql_shop_cdc")
+                .table_ref(&TablePath::new("mysql_shop_cdc", "mysql")),
             "\"mysql_shop_cdc\".\"mysql\""
         );
         assert_eq!(
             DuckDbWarehouse::over("mysql_shop_cdc", s3("http://rustfs:9000"))
-                .change_log_ref("mysql"),
+                .table_ref(&TablePath::new("mysql_shop_cdc", "mysql")),
             "read_parquet('s3://lithify/mysql_shop_cdc/mysql/*.parquet', union_by_name = true)"
         );
     }

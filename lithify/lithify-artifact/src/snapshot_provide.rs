@@ -39,7 +39,6 @@ impl SnapshotProvideConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotProvide {
     name: ArtifactName,
-    base: Series,
     shard: Shard,
 }
 
@@ -47,20 +46,12 @@ impl SnapshotProvide {
     pub fn new(shard: Shard) -> Self {
         Self {
             name: ArtifactName::from(Self::KIND),
-            base: Snapshot::days(&ArtifactName::from(Snapshot::KIND)),
             shard,
         }
     }
 
     pub fn named(self, name: ArtifactName) -> Self {
         Self { name, ..self }
-    }
-
-    pub fn based_on(self, base: &Snapshot) -> Self {
-        Self {
-            base: base.series(),
-            ..self
-        }
     }
 }
 
@@ -127,7 +118,7 @@ impl ArtifactControl for SnapshotProvide {
         table: &TableId,
         window: &Window,
     ) -> Option<&'b BuildLog> {
-        Snapshot::shard_closing(&self.base, built, table, *window.from())
+        Snapshot::shard_closing(built, table, *window.from())
     }
 }
 

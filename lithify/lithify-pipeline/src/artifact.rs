@@ -36,6 +36,8 @@ pub trait Declaration {
 
     fn built_from(&self) -> &'static str;
 
+    fn series(&self, name: &ArtifactName, time_zone: Tz) -> Series;
+
     fn base(&self) -> Option<&ArtifactName> {
         None
     }
@@ -225,6 +227,10 @@ mod tests {
 
         fn built_from(&self) -> &'static str {
             "snapshot"
+        }
+
+        fn series(&self, name: &ArtifactName, _: Tz) -> Series {
+            Series::new(name.clone(), self.kind())
         }
 
         fn base(&self) -> Option<&ArtifactName> {

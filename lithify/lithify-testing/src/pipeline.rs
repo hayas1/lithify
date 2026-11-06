@@ -1,26 +1,21 @@
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use ulid::Ulid;
 
 use lithify_core::model::TableId;
 use lithify_core::sink::{Namespace, TablePath};
 use lithify_core::ts::Ts;
 use lithify_core::window::Window;
-use lithify_pipeline::build_log::{BuildLog, Run, Status, TableBuilt};
+use lithify_pipeline::build_log::{BuildLog, Run, Series, Status, TableBuilt};
 use lithify_pipeline::warehouse::{SinkWarehouse, WarehouseFn};
-
-use lithify_pipeline::schedule::Schedule;
-use lithify_pipeline::{Declaration, Placed, Places, Placing};
+use lithify_pipeline::{Placed, Places, Placing};
 
 use crate::{Engine, Recorder};
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Captured {
-    Debezium { dialect: String },
-}
+pub use lithify_cli::artifacts::ArtifactConfig;
+pub use lithify_cli::pipeline::CaptureConfig;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -52,26 +47,6 @@ impl From<Shelf> for Namespace {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields, tag = "kind", rename_all = "lowercase")]
-pub enum Made {
-    Snapshot {},
-}
-
-impl Declaration for Made {
-    fn kind(&self) -> &'static str {
-        "snapshot"
-    }
-
-    fn built_from(&self) -> &'static str {
-        "snapshot"
-    }
-
-    fn schedule(&self, time_zone: chrono_tz::Tz) -> Option<Schedule> {
-        Some(Schedule::daily(chrono::NaiveTime::MIN, time_zone))
-    }
-}
-
 #[derive(Debug)]
 pub struct Unreached(String);
 
@@ -99,15 +74,16 @@ impl Kept {
                 status,
                 Ts::from(at(closed)),
             )
-            .logged(&Run::new(
-                Ulid::from_parts(1, 0),
-                Ts::from(DateTime::UNIX_EPOCH),
-                &"snapshot".into(),
-                "daily",
-                "primary",
-                "{}",
-                "0.1.0",
-            ))
+            .logged(
+                &Run::new(
+                    Ulid::from_parts(1, 0),
+                    Ts::from(DateTime::UNIX_EPOCH),
+                    "primary",
+                    "{}",
+                    "0.1.0",
+                ),
+                &Series::new("snapshot".into(), "daily"),
+            )
         };
 
         vec![
@@ -199,7 +175,7 @@ pub fn configure(directory: &Path, infra: &str) {
     std::fs::write(directory.join("infra.toml"), infra).unwrap();
     std::fs::write(
         directory.join("artifact.toml"),
-        "[[artifact]]\nname = \"snapshot\"\nkind = \"snapshot\"\n",
+        "[[artifact]]\nname = \"snapshot\"\nkind = \"snapshot\"\nshard = \"%Y%m%d\"\n",
     )
     .unwrap();
     std::fs::write(

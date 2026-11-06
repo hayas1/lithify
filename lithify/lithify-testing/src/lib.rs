@@ -12,7 +12,7 @@ pub mod shards;
 
 pub use change_log::{Log, Offset, Untold};
 pub use engine::Engine;
-pub use landing::Landing;
+pub use landing::ReplicaLanding;
 pub use recorder::Recorder;
 pub use replica::{CellValue, ColumnDdl, Ddl, Dml, Mutation, Placed, Replica, ReplicaDump, Row};
 pub use shards::Shards;

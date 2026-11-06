@@ -463,7 +463,7 @@ mod tests {
     use lithify_core::sink::TablePath;
     use lithify_core::ts::Ts;
     use lithify_core::window::Window;
-    use lithify_pipeline::build_log::{Run, TableBuilt};
+    use lithify_pipeline::build_log::{Run, Series, TableBuilt};
 
     use super::*;
     use lithify_testing::pipeline::Kept;
@@ -519,15 +519,16 @@ mod tests {
             Status::Succeeded,
             Ts::from(at("2026-09-21T00:10:00Z")),
         )
-        .logged(&Run::new(
-            Ulid::from_parts(1, 0),
-            Ts::from(DateTime::UNIX_EPOCH),
-            &"snapshot".into(),
-            "daily",
-            "primary",
-            "{}",
-            "0.1.0",
-        ));
+        .logged(
+            &Run::new(
+                Ulid::from_parts(1, 0),
+                Ts::from(DateTime::UNIX_EPOCH),
+                "primary",
+                "{}",
+                "0.1.0",
+            ),
+            &Series::new("snapshot".into(), "daily"),
+        );
         let rows = listed(vec![renamed]);
 
         assert_eq!(rows[0].table, TableId::new("shop", "persons"));
