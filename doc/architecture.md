@@ -81,6 +81,12 @@ When a builder seems to need something more, look first for the listener call th
 `lithify-pipeline` does everything else: which window to build, read from the build log, the history it reads, running the statements and logging what came of them.
 The core names no build log, no schedule and no status, and each trait of the core is extended in `lithify-pipeline` with what the control plane asks of it, `ArtifactControl` of `Artifact` and `WarehouseControl` of `WarehouseClient`, which `lithify-artifact` and `lithify-protocol` implement beside the core ones.
 
+### Only the command line lists the kinds
+
+The command line is the one crate that enumerates the kinds of capture, dialect, warehouse, landing and artifact, as the enums of the configuration it accepts.
+The pipeline crate states what each kind must do as a trait, such as `Capture`, `SinkWarehouse`, `Placing` and `Declaration`, and the protocol and artifact crates implement them for each kind without listing them.
+The tests of the other crates read a configuration through the stand-ins of `lithify-testing` rather than restating these lists, and so are written in `tests/`: a unit test links a build of its crate of its own, whose traits the stand-ins do not implement.
+
 ### A change log is read where it landed
 
 The core reads a change log from the table it landed in, named by `SchemaChangeLog::ddl_landed_table` and `RowChangeLog::dml_landed_table`, and knows no topic.
