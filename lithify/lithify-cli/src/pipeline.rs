@@ -184,13 +184,13 @@ pub enum Reached<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
     use lithify_core::sink::TablePath;
-    use lithify_core::source::SchemaChangeStream;
     use lithify_core::source::{ChangeLog, ChangeLogs, ColumnPath, SchemaChangeLog};
-    use lithify_protocol::sink::bigquery::client::BigQueryClient;
-    use lithify_protocol::sink::duckdb::client::DuckDbClient;
-    use lithify_protocol::source::debezium::Debezium;
-    use lithify_protocol::{BigQuerySink, Landed, MySql, Postgres, S3Sink};
+    use lithify_pipeline::Pipeline;
+
+    use crate::artifacts::ArtifactConfig;
 
     type Probed = (&'static str, TablePath, Option<ColumnPath>);
 
@@ -217,6 +217,23 @@ mod tests {
             "[debezium.{dialect}]\ntopic_prefix = \"{dialect}\""
         ))
         .unwrap()
+    }
+
+    fn example(name: &str) -> CaptureConfig {
+        let pipeline: Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig> = Pipeline::open(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../compose/lithify")
+                .join(name),
+        )
+        .unwrap();
+
+        pipeline.sources().next().unwrap().capture().clone()
+    }
+
+    #[test]
+    fn each_example_pipeline_is_captured_in_the_dialect_of_its_source() {
+        assert_eq!(example("mysql"), capture("mysql"));
+        assert_eq!(example("postgres"), capture("postgres"));
     }
 
     #[test]

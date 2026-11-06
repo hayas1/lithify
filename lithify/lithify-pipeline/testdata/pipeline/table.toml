@@ -1,0 +1,8 @@
+[default]
+artifacts = ["snapshot"]
+
+[[table]]
+schema = "shop"
+name = "orders"
+artifacts = ["snapshot", "copy"]
+column.attributes.mask = "null"

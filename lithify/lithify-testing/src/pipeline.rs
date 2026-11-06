@@ -57,11 +57,15 @@ impl From<Shelf> for Namespace {
 #[serde(deny_unknown_fields, tag = "kind", rename_all = "lowercase")]
 pub enum Made {
     Snapshot {},
+    Copy { base: ArtifactName },
 }
 
 impl Declaration for Made {
     fn kind(&self) -> &'static str {
-        "snapshot"
+        match self {
+            Self::Snapshot {} => "snapshot",
+            Self::Copy { .. } => "copy",
+        }
     }
 
     fn built_from(&self) -> &'static str {
@@ -69,11 +73,24 @@ impl Declaration for Made {
     }
 
     fn series(&self, name: &ArtifactName, _: chrono_tz::Tz) -> Series {
-        Series::new(name.clone(), "daily")
+        match self {
+            Self::Snapshot {} => Series::new(name.clone(), "daily"),
+            Self::Copy { .. } => Series::new(name.clone(), "copy"),
+        }
+    }
+
+    fn base(&self) -> Option<&ArtifactName> {
+        match self {
+            Self::Snapshot {} => None,
+            Self::Copy { base } => Some(base),
+        }
     }
 
     fn schedule(&self, time_zone: chrono_tz::Tz) -> Option<Schedule> {
-        Some(Schedule::daily(chrono::NaiveTime::MIN, time_zone))
+        match self {
+            Self::Snapshot {} => Some(Schedule::daily(chrono::NaiveTime::MIN, time_zone)),
+            Self::Copy { .. } => None,
+        }
     }
 }
 
