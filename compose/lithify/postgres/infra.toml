@@ -1,5 +1,5 @@
 [default]
-source.capture.debezium = { dialect = "postgres", topic_prefix = "postgres" }
+source.capture.debezium.postgres = { topic_prefix = "postgres" }
 
 [[source]]
 name = "primary"

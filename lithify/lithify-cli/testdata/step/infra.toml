@@ -1,5 +1,5 @@
 [default]
-source.capture.debezium = { dialect = "mysql", topic_prefix = "mysql" }
+source.capture.debezium.mysql = { topic_prefix = "mysql" }
 
 [[source]]
 name = "primary"

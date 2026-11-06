@@ -86,7 +86,8 @@ The core names no build log, no schedule and no status, and each trait of the co
 The core reads a change log from the table it landed in, named by `SchemaChangeLog::ddl_landed_table` and `RowChangeLog::dml_landed_table`, and knows no topic.
 `CdcFormat` says what a source publishes: the topic of its schema changes and of each table's row changes, where each field lies in a record, and how a record reads as a schema change.
 `Landing` says how a sink connector lands what a format publishes into its warehouse: the envelope it wraps each record in and the table it names after a topic, as `S3Sink` keeps the topic and `BigQuerySink` sanitizes it.
-`Landed` joins a format and a landing into the `ChangeLogs` the core reads, so neither knows the other, and the `Capture` of each warehouse picks the landing that lands into it.
+`Landed` joins a format and a landing into the `ChangeLogs` the core reads, so neither knows the other.
+The protocol crate only provides the formats, dialects and landings; the command line lists the dialects it reads in `CaptureConfig`, as it lists the warehouses it sinks into in `WarehouseConfig`, and its `Capture` for the client of each warehouse picks the landing that lands into it.
 
 ### Only what talks to a warehouse waits
 

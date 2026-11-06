@@ -256,7 +256,7 @@ pub(crate) mod tests {
         );
     }
 
-    pub(crate) const CAPTURE: &str = r#"{"debezium":{"dialect":"mysql","topic_prefix":"mysql"}}"#;
+    pub(crate) const CAPTURE: &str = r#"{"debezium":{"mysql":{"topic_prefix":"mysql"}}}"#;
 
     pub(crate) fn at(rfc3339: &str) -> DateTime<Utc> {
         rfc3339.parse().unwrap()
