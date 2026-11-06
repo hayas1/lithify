@@ -23,5 +23,5 @@ lithify-protocol = { workspace = true, features = ["bigquery", "duckdb"] }
 lithify-artifact = { workspace = true }
 mysql = { workspace = true }
 serde = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 toml = { workspace = true }

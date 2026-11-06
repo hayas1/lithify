@@ -11,7 +11,11 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
+use lithify_cli::credential::Credentials;
+use lithify_protocol::sink::duckdb::store::{S3Credential, Secret};
+
 use crate::run::{Run, Unverifiable};
+use crate::runnable::Report;
 
 #[derive(Parser)]
 #[command(
@@ -39,7 +43,7 @@ struct Arguments {
         value_name = "SECRET",
         help = "The secret the object storage holding the change log is read with"
     )]
-    secret_access_key: String,
+    secret_access_key: Secret,
     #[arg(
         long,
         default_value = "180",
@@ -56,17 +60,28 @@ impl Arguments {
         Ok(Run::new(
             written.parse()?,
             self.scenario.parent().unwrap_or(Path::new(".")),
-            &self.access_key_id,
-            &self.secret_access_key,
+            self.credentials(),
             self.patience,
         ))
     }
+
+    fn credentials(&self) -> Credentials {
+        Credentials::new(Some(S3Credential::new(
+            self.access_key_id.clone(),
+            self.secret_access_key.clone(),
+        )))
+    }
+
+    async fn report(&self) -> Result<Report, Unverifiable> {
+        self.run()?.report().await
+    }
 }
 
-fn main() -> ExitCode {
+#[tokio::main]
+async fn main() -> ExitCode {
     let arguments = Arguments::parse();
 
-    match arguments.run().and_then(|run| run.report()) {
+    match arguments.report().await {
         Ok(report) => report.print(),
         Err(unverifiable) => {
             eprintln!("{}: {unverifiable}", arguments.scenario.display());

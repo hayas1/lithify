@@ -8,55 +8,27 @@ use lithify_core::model::TableModel;
 use crate::row::{Cell, Rows};
 
 pub trait Source {
-    fn execute(&mut self, statement: &str) -> Result<(), Unreachable>;
+    async fn execute(&self, statement: &str) -> Result<(), Unreachable>;
 
-    fn rows(&mut self, table: &TableModel) -> Result<Rows, Unreachable>;
+    async fn rows(&self, table: &TableModel) -> Result<Rows, Unreachable>;
 }
 
-impl dyn Source {
-    pub fn connect(url: &str) -> Result<Box<Self>, Unreachable> {
-        match url.split_once("://").map(|(scheme, _)| scheme) {
-            Some("mysql") => Ok(Box::new(MySql::connect(url)?)),
-            scheme => Err(Unreachable::UnknownScheme(
-                scheme.unwrap_or_default().to_owned(),
-            )),
-        }
-    }
-}
-
-pub struct MySql {
-    pool: Pool,
-}
-
-impl MySql {
-    pub fn connect(url: &str) -> Result<Self, Unreachable> {
-        Ok(Self {
-            pool: Pool::new(url)?,
-        })
+impl Source for Pool {
+    async fn execute(&self, statement: &str) -> Result<(), Unreachable> {
+        Ok(self.get_conn()?.query_drop(statement)?)
     }
 
-    fn select(table: &TableModel) -> String {
+    async fn rows(&self, table: &TableModel) -> Result<Rows, Unreachable> {
         let columns: Vec<String> = table
             .columns()
             .map(|column| format!("`{}`", column.name()))
             .collect();
-
-        format!(
+        let read: Vec<mysql::Row> = self.get_conn()?.query(format!(
             "SELECT {} FROM `{}`.`{}`",
             columns.join(", "),
             table.id().schema(),
             table.id().table()
-        )
-    }
-}
-
-impl Source for MySql {
-    fn execute(&mut self, statement: &str) -> Result<(), Unreachable> {
-        Ok(self.pool.get_conn()?.query_drop(statement)?)
-    }
-
-    fn rows(&mut self, table: &TableModel) -> Result<Rows, Unreachable> {
-        let read: Vec<mysql::Row> = self.pool.get_conn()?.query(Self::select(table))?;
+        ))?;
 
         Ok(read
             .iter()
@@ -66,6 +38,33 @@ impl Source for MySql {
                     .collect()
             })
             .collect())
+    }
+}
+
+pub enum SourceClient {
+    MySql(Pool),
+}
+
+impl SourceClient {
+    pub async fn connect(url: &str) -> Result<Self, Unreachable> {
+        match url.split_once("://").map(|(scheme, _)| scheme) {
+            Some("mysql") => Ok(Self::MySql(Pool::new(url)?)),
+            scheme => Err(Unreachable::UnknownScheme(
+                scheme.unwrap_or_default().to_owned(),
+            )),
+        }
+    }
+
+    pub async fn execute(&self, statement: &str) -> Result<(), Unreachable> {
+        match self {
+            Self::MySql(client) => client.execute(statement).await,
+        }
+    }
+
+    pub async fn rows(&self, table: &TableModel) -> Result<Rows, Unreachable> {
+        match self {
+            Self::MySql(client) => client.rows(table).await,
+        }
     }
 }
 
@@ -114,10 +113,10 @@ impl From<mysql::Error> for Unreachable {
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_source_is_reached_by_the_client_its_scheme_names() {
+    #[tokio::test]
+    async fn a_source_is_reached_by_the_client_its_scheme_names() {
         assert!(matches!(
-            <dyn Source>::connect("oracle://system@oracle:1521/shop"),
+            SourceClient::connect("oracle://system@oracle:1521/shop").await,
             Err(Unreachable::UnknownScheme(scheme)) if scheme == "oracle"
         ));
     }

@@ -3,14 +3,14 @@ use crate::run::Unverifiable;
 use crate::scenario::Build;
 
 impl Build {
-    pub fn run(&self, pipeline: &mut ConnectedPipeline) -> Result<(), Unverifiable> {
+    pub async fn run(&self, pipeline: &mut ConnectedPipeline<'_>) -> Result<(), Unverifiable> {
         match self {
             Self::Snapshot(snapshot) => {
                 let (source, sink, watch) = pipeline.ends(snapshot.source(), snapshot.sink())?;
 
-                let model = sink.table_model(source, snapshot.table(), watch)?;
+                let model = sink.table_model(source, snapshot.table(), watch).await?;
 
-                sink.build_snapshot(source, &model, watch)
+                sink.build_snapshot(source, &model, watch).await
             }
         }
     }

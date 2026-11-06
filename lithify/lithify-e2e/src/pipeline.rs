@@ -4,6 +4,7 @@ use chrono::Utc;
 
 use lithify_artifact::snapshot::Snapshot;
 use lithify_cli::artifacts::ArtifactConfig;
+use lithify_cli::credential::Credentials;
 use lithify_cli::pipeline::{CaptureConfig, WarehouseConfig};
 use lithify_cli::unrunnable::Unrunnable;
 use lithify_core::artifact::Artifact;
@@ -16,8 +17,8 @@ use lithify_pipeline::{Pipeline, infra};
 use crate::row::Rows;
 use crate::run::Unverifiable;
 use crate::scenario::{Action, Scenario, SinkConnection, SourceConnection};
-use crate::sink::{Sink, Unbuildable};
-use crate::source::Source;
+use crate::sink::{SinkClient, Unbuildable};
+use crate::source::SourceClient;
 
 pub struct ConnectedPipeline<'a> {
     sources: Vec<SourceEnd<'a>>,
@@ -26,24 +27,25 @@ pub struct ConnectedPipeline<'a> {
 }
 
 impl<'a> ConnectedPipeline<'a> {
-    pub fn connect(
+    pub async fn connect(
         scenario: &'a Scenario,
         pipeline: &'a Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig>,
         watch: Watch,
-        key_id: &str,
-        secret: &str,
+        credentials: &Credentials,
     ) -> Result<Self, Unverifiable> {
+        let mut sources = Vec::new();
+        for (name, connection) in scenario.sources() {
+            sources.push(SourceEnd::connect(pipeline, name, connection).await?);
+        }
+
+        let mut sinks = Vec::new();
+        for (name, connection) in scenario.sinks() {
+            sinks.push(SinkEnd::connect(pipeline, name, connection, credentials).await?);
+        }
+
         Ok(Self {
-            sources: scenario
-                .sources()
-                .map(|(name, connection)| SourceEnd::connect(pipeline, name, connection))
-                .collect::<Result<_, _>>()?,
-            sinks: scenario
-                .sinks()
-                .map(|(name, connection)| {
-                    SinkEnd::connect(pipeline, name, connection, key_id, secret)
-                })
-                .collect::<Result<_, _>>()?,
+            sources,
+            sinks,
             watch,
         })
     }
@@ -84,15 +86,15 @@ impl Watch {
         }
     }
 
-    fn wait<T>(
+    async fn wait<T>(
         &self,
         table: &TableId,
-        mut ready: impl FnMut() -> Result<Option<T>, Unverifiable>,
+        mut ready: impl AsyncFnMut() -> Result<Option<T>, Unverifiable>,
     ) -> Result<T, Unverifiable> {
         let since = Instant::now();
 
         loop {
-            if let Some(read) = ready()? {
+            if let Some(read) = ready().await? {
                 return Ok(read);
             }
 
@@ -100,7 +102,7 @@ impl Watch {
                 return Err(Unverifiable::Unlanded(table.to_string()));
             }
 
-            std::thread::sleep(Duration::from_secs(2));
+            tokio::time::sleep(Duration::from_secs(2)).await;
         }
     }
 
@@ -115,7 +117,7 @@ impl Watch {
 
 pub struct SourceEnd<'a> {
     config: &'a infra::Source<CaptureConfig>,
-    client: Box<dyn Source>,
+    client: SourceClient,
     applied: Option<Ts<Processing>>,
 }
 
@@ -126,7 +128,7 @@ impl<'a> SourceEnd<'a> {
             .ok_or_else(|| Unverifiable::UnknownSource(name.to_owned()))
     }
 
-    fn connect(
+    async fn connect(
         pipeline: &'a Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig>,
         name: &str,
         connection: &'a SourceConnection,
@@ -136,24 +138,24 @@ impl<'a> SourceEnd<'a> {
                 .sources()
                 .find(|source| source.name() == name)
                 .ok_or_else(|| Unverifiable::UnknownSource(name.to_owned()))?,
-            client: <dyn Source>::connect(connection.url())?,
+            client: SourceClient::connect(connection.url()).await?,
             applied: None,
         })
     }
 
-    pub fn query(&mut self, action: &Action) -> Result<(), Unverifiable> {
+    pub async fn query(&mut self, action: &Action) -> Result<(), Unverifiable> {
         let applied = Ts::from(Utc::now());
 
         for query in action.queries() {
-            self.client.execute(query)?;
+            self.client.execute(query).await?;
             self.applied = Some(applied);
         }
 
         Ok(())
     }
 
-    pub fn rows(&mut self, model: &TableModel) -> Result<Rows, Unverifiable> {
-        Ok(self.client.rows(model)?)
+    pub async fn rows(&mut self, model: &TableModel) -> Result<Rows, Unverifiable> {
+        Ok(self.client.rows(model).await?)
     }
 
     fn capture(&self) -> &CaptureConfig {
@@ -163,7 +165,7 @@ impl<'a> SourceEnd<'a> {
 
 pub struct SinkEnd<'a> {
     config: &'a infra::Sink<WarehouseConfig, ArtifactConfig>,
-    client: Box<dyn Sink>,
+    client: SinkClient,
 }
 
 impl<'a> SinkEnd<'a> {
@@ -173,12 +175,11 @@ impl<'a> SinkEnd<'a> {
             .ok_or_else(|| Unverifiable::UnknownSink(name.to_owned()))
     }
 
-    fn connect(
+    async fn connect(
         pipeline: &'a Pipeline<CaptureConfig, WarehouseConfig, ArtifactConfig>,
         name: &str,
         _: &'a SinkConnection,
-        key_id: &str,
-        secret: &str,
+        credentials: &Credentials,
     ) -> Result<Self, Unverifiable> {
         let config = pipeline
             .sinks()
@@ -187,38 +188,45 @@ impl<'a> SinkEnd<'a> {
 
         Ok(Self {
             config,
-            client: <dyn Sink>::connect(config.warehouse(), config.change_log(), key_id, secret)?,
+            client: SinkClient::connect(config.warehouse(), config.change_log(), credentials)
+                .await?,
         })
     }
 
-    pub fn query(&mut self, action: &Action) -> Result<(), Unverifiable> {
+    pub async fn query(&mut self, action: &Action) -> Result<(), Unverifiable> {
         for query in action.queries() {
-            self.client.execute(query)?;
+            self.client.execute(query).await?;
         }
 
         Ok(())
     }
 
-    pub fn table_model(
+    pub async fn table_model(
         &mut self,
-        source: &SourceEnd,
+        source: &SourceEnd<'_>,
         table: &TableId,
         watch: &Watch,
     ) -> Result<TableModel, Unverifiable> {
-        self.settle(source, table, watch)?;
+        self.settle(source, table, watch).await?;
 
-        watch.wait(table, || {
-            match self.client.model(source.capture(), table, Watch::end()) {
-                Ok(model) => Ok(Some(model)),
-                Err(Unbuildable::UnknownTable(_)) => Ok(None),
-                Err(unbuildable) => Err(unbuildable.into()),
-            }
-        })
+        watch
+            .wait(table, async || {
+                match self
+                    .client
+                    .model(source.capture(), table, Watch::end())
+                    .await
+                {
+                    Ok(model) => Ok(Some(model)),
+                    Err(Unbuildable::UnknownTable(_)) => Ok(None),
+                    Err(unbuildable) => Err(unbuildable.into()),
+                }
+            })
+            .await
     }
 
-    fn settle(
+    async fn settle(
         &mut self,
-        source: &SourceEnd,
+        source: &SourceEnd<'_>,
         table: &TableId,
         watch: &Watch,
     ) -> Result<(), Unverifiable> {
@@ -227,36 +235,43 @@ impl<'a> SinkEnd<'a> {
         };
         let mut settling = (0, Instant::now());
 
-        watch.wait(table, || {
-            let landed = self.client.landed(source.capture(), table, at)?;
-            let (previous, since) = settling;
+        watch
+            .wait(table, async || {
+                let landed = self.client.landed(source.capture(), table, at).await?;
+                let (previous, since) = settling;
 
-            match (landed, landed == previous) {
-                (0, _) => Ok(None),
-                (_, true) if since.elapsed() >= watch.settling => Ok(Some(())),
-                (_, true) => Ok(None),
-                (_, false) => {
-                    settling = (landed, Instant::now());
+                match (landed, landed == previous) {
+                    (0, _) => Ok(None),
+                    (_, true) if since.elapsed() >= watch.settling => Ok(Some(())),
+                    (_, true) => Ok(None),
+                    (_, false) => {
+                        settling = (landed, Instant::now());
 
-                    Ok(None)
+                        Ok(None)
+                    }
                 }
-            }
-        })
+            })
+            .await
     }
 
-    pub fn build_snapshot(
+    pub async fn build_snapshot(
         &mut self,
-        source: &SourceEnd,
+        source: &SourceEnd<'_>,
         model: &TableModel,
         watch: &Watch,
     ) -> Result<(), Unverifiable> {
-        Ok(self.client.snapshot(
-            source.capture(),
-            model.id(),
-            &self.snapshot()?,
-            self.config.scheduled().namespace(),
-            &watch.changes(),
-        )?)
+        let snapshot = self.snapshot()?;
+
+        Ok(self
+            .client
+            .snapshot(
+                source.capture(),
+                model.id(),
+                &snapshot,
+                self.config.scheduled().namespace(),
+                &watch.changes(),
+            )
+            .await?)
     }
 
     fn snapshot(&self) -> Result<Snapshot, Unverifiable> {
@@ -270,7 +285,7 @@ impl<'a> SinkEnd<'a> {
         })
     }
 
-    pub fn snapshot_rows(
+    pub async fn snapshot_rows(
         &mut self,
         model: &TableModel,
         watch: &Watch,
@@ -280,6 +295,6 @@ impl<'a> SinkEnd<'a> {
             &self.snapshot()?.table_name(model.id(), &watch.changes()),
         );
 
-        Ok(self.client.rows(&target, model)?)
+        Ok(self.client.rows(&target, model).await?)
     }
 }
