@@ -149,12 +149,12 @@ fn a_pipeline_whose_capture_changed_since_its_last_run_is_reported_as_such() {
                 Schedule::default(),
                 at("2026-09-19T00:00:00Z")..at::<Event>("2026-09-21T05:00:00Z"),
             ),
-            r#"{"debezium":{"dialect":"postgres"}}"#,
+            r#"{"debezium":{"postgres":{"topic_prefix":"postgres"}}}"#,
         )
         .discrepancies(&built, &built, &present(&built)),
         [Discrepancy::CaptureChanged(CaptureChanged::new(
             "{}",
-            r#"{"debezium":{"dialect":"postgres"}}"#
+            r#"{"debezium":{"postgres":{"topic_prefix":"postgres"}}}"#
         ))]
     );
 }

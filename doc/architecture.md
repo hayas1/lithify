@@ -85,7 +85,8 @@ The core names no build log, no schedule and no status, and each trait of the co
 
 The command line is the one crate that enumerates the kinds of capture, dialect, warehouse, landing and artifact, as the enums of the configuration it accepts.
 The pipeline crate states what each kind must do as a trait, such as `Capture`, `SinkWarehouse`, `Placing` and `Declaration`, and the protocol and artifact crates implement them for each kind without listing them.
-The tests of the other crates read a configuration through the stand-ins of `lithify-testing` rather than restating these lists, and so are written in `tests/`: a unit test links a build of its crate of its own, whose traits the stand-ins do not implement.
+A test takes the kinds as they are, such as the configuration of the command line that `lithify-testing` hands on, or keeps a list of its own, and runs on an in-memory database where a warehouse is needed.
+A stand-in is written only where the kind itself cannot be had, as a warehouse out of reach is, or where a dependency cannot be resolved: a unit test links a build of its crate of its own, which the kinds of the command line do not implement the traits of, so a test taking them is written in `tests/`.
 
 ### A change log is read where it landed
 

@@ -1,27 +1,21 @@
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use ulid::Ulid;
 
-use lithify_core::artifact::ArtifactName;
 use lithify_core::model::TableId;
 use lithify_core::sink::{Namespace, TablePath};
 use lithify_core::ts::Ts;
 use lithify_core::window::Window;
 use lithify_pipeline::build_log::{BuildLog, Run, Series, Status, TableBuilt};
 use lithify_pipeline::warehouse::{SinkWarehouse, WarehouseFn};
-
-use lithify_pipeline::schedule::Schedule;
-use lithify_pipeline::{Declaration, Placed, Places, Placing};
+use lithify_pipeline::{Placed, Places, Placing};
 
 use crate::{Engine, Recorder};
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Captured {
-    Debezium { dialect: String },
-}
+pub use lithify_cli::artifacts::ArtifactConfig;
+pub use lithify_cli::pipeline::CaptureConfig;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -50,47 +44,6 @@ pub struct Shelf {
 impl From<Shelf> for Namespace {
     fn from(shelf: Shelf) -> Self {
         Namespace::from(shelf.prefix.as_str())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields, tag = "kind", rename_all = "lowercase")]
-pub enum Made {
-    Snapshot {},
-    Copy { base: ArtifactName },
-}
-
-impl Declaration for Made {
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::Snapshot {} => "snapshot",
-            Self::Copy { .. } => "copy",
-        }
-    }
-
-    fn built_from(&self) -> &'static str {
-        "snapshot"
-    }
-
-    fn series(&self, name: &ArtifactName, _: chrono_tz::Tz) -> Series {
-        match self {
-            Self::Snapshot {} => Series::new(name.clone(), "daily"),
-            Self::Copy { .. } => Series::new(name.clone(), "copy"),
-        }
-    }
-
-    fn base(&self) -> Option<&ArtifactName> {
-        match self {
-            Self::Snapshot {} => None,
-            Self::Copy { base } => Some(base),
-        }
-    }
-
-    fn schedule(&self, time_zone: chrono_tz::Tz) -> Option<Schedule> {
-        match self {
-            Self::Snapshot {} => Some(Schedule::daily(chrono::NaiveTime::MIN, time_zone)),
-            Self::Copy { .. } => None,
-        }
     }
 }
 
@@ -222,7 +175,7 @@ pub fn configure(directory: &Path, infra: &str) {
     std::fs::write(directory.join("infra.toml"), infra).unwrap();
     std::fs::write(
         directory.join("artifact.toml"),
-        "[[artifact]]\nname = \"snapshot\"\nkind = \"snapshot\"\n",
+        "[[artifact]]\nname = \"snapshot\"\nkind = \"snapshot\"\nshard = \"%Y%m%d\"\n",
     )
     .unwrap();
     std::fs::write(

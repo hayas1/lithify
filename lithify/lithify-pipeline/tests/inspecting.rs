@@ -8,9 +8,15 @@ use lithify_pipeline::check::{Expectation, Inspecting, Uninspectable};
 use lithify_pipeline::materialization::Materialization;
 use lithify_pipeline::schedule::Timeline;
 use lithify_pipeline::warehouse::SinkWarehouse;
-use lithify_testing::pipeline::{Captured, INFRA, Kept, Made, configure, logged, scratch};
+use lithify_testing::pipeline::{
+    ArtifactConfig, CaptureConfig, INFRA, Kept, configure, logged, scratch,
+};
 
-fn opened(name: &str, infra: &str, artifacts: &str) -> Pipeline<Captured, Kept, Made> {
+fn opened(
+    name: &str,
+    infra: &str,
+    artifacts: &str,
+) -> Pipeline<CaptureConfig, Kept, ArtifactConfig> {
     let directory = scratch(name);
     configure(&directory, infra);
     std::fs::write(directory.join("artifact.toml"), artifacts).unwrap();
@@ -22,7 +28,9 @@ fn now() -> Ts<Replay> {
     Ts::from(DateTime::UNIX_EPOCH)
 }
 
-fn inspecting(pipeline: &Pipeline<Captured, Kept, Made>) -> Result<Inspecting, Uninspectable> {
+fn inspecting(
+    pipeline: &Pipeline<CaptureConfig, Kept, ArtifactConfig>,
+) -> Result<Inspecting, Uninspectable> {
     let source = pipeline.sources().next().unwrap();
     let sink = pipeline.sinks().next().unwrap();
 

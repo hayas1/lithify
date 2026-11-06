@@ -313,9 +313,11 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use lithify_testing::pipeline::{Captured, INFRA, Kept, Made, configure, logged, scratch};
+    use lithify_testing::pipeline::{
+        ArtifactConfig, CaptureConfig, INFRA, Kept, configure, logged, scratch,
+    };
 
-    fn under(root: &Path) -> Survey<Captured, Kept, Made> {
+    fn under(root: &Path) -> Survey<CaptureConfig, Kept, ArtifactConfig> {
         Survey::new(root.to_owned(), ())
     }
 

@@ -109,7 +109,7 @@ mod tests {
 
     use super::*;
 
-    const CAPTURE: &str = r#"{"debezium":{"dialect":"mysql"}}"#;
+    const CAPTURE: &str = r#"{"debezium":{"mysql":{"topic_prefix":"mysql"}}}"#;
     const DAY: i64 = 86_400_000;
 
     fn day(from: i64) -> Window {

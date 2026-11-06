@@ -444,10 +444,12 @@ mod tests {
     use crate::place::Placed;
     use lithify_core::sink::Namespace;
 
-    #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-    #[serde(deny_unknown_fields, rename_all = "lowercase")]
-    enum Captured {
-        Debezium { dialect: String },
+    // A unit test cannot take the CaptureConfig of the command line, which links a build of this
+    // crate of its own, so a capture is read as the value it is written as.
+    type Captured = toml::Value;
+
+    fn captured(dialect: &str) -> Captured {
+        toml::from_str(&format!("debezium.{dialect}.topic_prefix = \"{dialect}\"")).unwrap()
     }
 
     #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -633,23 +635,13 @@ mod tests {
     }
 
     #[test]
-    fn a_source_is_captured_as_the_dialect_it_names() {
-        assert_eq!(
-            sources()[1].capture(),
-            &Captured::Debezium {
-                dialect: "postgres".into()
-            }
-        );
+    fn a_source_is_captured_as_it_names() {
+        assert_eq!(sources()[1].capture(), &captured("postgres"));
     }
 
     #[test]
     fn a_source_that_names_no_capture_is_captured_like_the_others() {
-        assert_eq!(
-            sources()[0].capture(),
-            &Captured::Debezium {
-                dialect: "mysql".into()
-            }
-        );
+        assert_eq!(sources()[0].capture(), &captured("mysql"));
     }
 
     #[test]
@@ -825,7 +817,7 @@ mod tests {
     #[test]
     fn a_source_that_says_since_when_nowhere_is_captured_since_the_epoch() {
         let wiring = wired(
-            "[[source]]\nname = \"primary\"\ncapture.debezium.dialect = \"mysql\"",
+            "[[source]]\nname = \"primary\"\ncapture.debezium.mysql = { topic_prefix = \"mysql\" }",
             &format!("{WAREHOUSE}{ARTIFACTS}"),
         );
 

@@ -1,5 +1,5 @@
 [default]
-source.capture.debezium.dialect = "mysql"
+source.capture.debezium.mysql = { topic_prefix = "mysql" }
 
 [[source]]
 name = "primary"
@@ -9,7 +9,7 @@ since = "1970-01-01T00:00:00Z"
 name = "replica"
 since = "2026-09-21T00:00:00Z"
 
-capture.debezium.dialect = "postgres"
+capture.debezium.postgres = { topic_prefix = "postgres" }
 
 [[sink]]
 name = "rustfs"

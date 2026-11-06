@@ -1,9 +1,9 @@
 use std::path::Path;
 
 use lithify_pipeline::pipelines::{PipelineLocation, Pipelines};
-use lithify_testing::pipeline::{Captured, INFRA, Kept, Made, configure, scratch};
+use lithify_testing::pipeline::{ArtifactConfig, CaptureConfig, INFRA, Kept, configure, scratch};
 
-fn under(root: &Path) -> Pipelines<Captured, Kept, Made> {
+fn under(root: &Path) -> Pipelines<CaptureConfig, Kept, ArtifactConfig> {
     Pipelines::new(root.to_owned())
 }
 

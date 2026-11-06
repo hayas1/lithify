@@ -5,7 +5,7 @@ use lithify_core::sink::Namespace;
 use lithify_pipeline::infra::Miswiring;
 use lithify_pipeline::table::{Mask, Mislisting};
 use lithify_pipeline::{Cause, Misdeclaring, Pipeline, Unreadable};
-use lithify_testing::pipeline::{Captured, Kept, Made, scratch};
+use lithify_testing::pipeline::{ArtifactConfig, CaptureConfig, Kept, scratch};
 
 const ARTIFACTS: &str = include_str!("../testdata/pipeline/artifacts.toml");
 
@@ -15,7 +15,7 @@ const SINK: &str = include_str!("../testdata/pipeline/sink.toml");
 
 const TABLES: &str = include_str!("../testdata/pipeline/table.toml");
 
-type Opened = Result<Pipeline<Captured, Kept, Made>, Unreadable>;
+type Opened = Result<Pipeline<CaptureConfig, Kept, ArtifactConfig>, Unreadable>;
 
 fn open(directory: &Path) -> Opened {
     Pipeline::open(directory)
@@ -32,20 +32,20 @@ fn configure(directory: &Path, infra: &str, listed: &str) {
     write(directory, "table.toml", listed);
 }
 
-fn placing_copies() -> String {
-    format!("{SOURCE}{SINK}place.copy = {{ prefix = \"mysql_shop_copy\" }}\n")
+fn placing_noons() -> String {
+    format!("{SOURCE}{SINK}place.noon = {{ prefix = \"mysql_shop_noon\" }}\n")
 }
 
 fn configured(name: &str) -> PathBuf {
     let directory = scratch(name).join(name);
-    configure(&directory, &placing_copies(), TABLES);
+    configure(&directory, &placing_noons(), TABLES);
 
     directory
 }
 
 fn listing(name: &str, listed: &str) -> Opened {
     let directory = scratch(name);
-    configure(&directory, &placing_copies(), listed);
+    configure(&directory, &placing_noons(), listed);
 
     open(&directory)
 }
@@ -61,7 +61,7 @@ fn a_directory_that_configures_a_pipeline_is_the_one_pipeline_it_holds() {
     let directory = configured("one-pipeline");
 
     assert_eq!(
-        Pipeline::<Captured, Kept, Made>::directories(&directory).unwrap(),
+        Pipeline::<CaptureConfig, Kept, ArtifactConfig>::directories(&directory).unwrap(),
         [directory]
     );
 }
@@ -75,7 +75,7 @@ fn a_directory_holding_pipelines_holds_each_one_configured_in_it_in_the_order_of
     std::fs::create_dir_all(root.join("dry-run")).unwrap();
 
     assert_eq!(
-        Pipeline::<Captured, Kept, Made>::directories(&root).unwrap(),
+        Pipeline::<CaptureConfig, Kept, ArtifactConfig>::directories(&root).unwrap(),
         [root.join("mysql"), root.join("postgres")]
     );
 }
@@ -98,7 +98,7 @@ fn a_table_the_pipeline_does_not_configure_takes_the_defaults() {
     let table = pipeline.tables().table(&TableId::new("shop", "heartbeat"));
 
     assert!(table.builds(&"snapshot".into()));
-    assert!(!table.builds(&"copy".into()));
+    assert!(!table.builds(&"noon".into()));
     assert_eq!(table.mask("beat_at"), Mask::Identity);
 }
 
@@ -107,7 +107,7 @@ fn a_table_the_pipeline_configures_overrides_the_defaults() {
     let pipeline = open(&configured("overrides")).unwrap();
     let table = pipeline.tables().table(&TableId::new("shop", "orders"));
 
-    assert!(table.builds(&"copy".into()));
+    assert!(table.builds(&"noon".into()));
     assert_eq!(table.mask("attributes"), Mask::Null);
     assert_eq!(table.mask("amount"), Mask::Identity);
 }
@@ -189,14 +189,14 @@ fn a_table_built_into_an_artifact_declared_but_placed_by_no_sink_is_rejected() {
     configure(
         &directory,
         &format!("{SOURCE}{SINK}"),
-        "[default]\nartifacts = [\"snapshot\", \"copy\"]\n",
+        "[default]\nartifacts = [\"snapshot\", \"noon\"]\n",
     );
 
     let unreadable = open(&directory).unwrap_err();
 
     assert!(matches!(
         unreadable.cause(),
-        Cause::Mislisting(Mislisting::Undeclared { table: None, artifact }) if artifact.as_str() == "copy"
+        Cause::Mislisting(Mislisting::Undeclared { table: None, artifact }) if artifact.as_str() == "noon"
     ));
 }
 
@@ -204,14 +204,14 @@ fn a_table_built_into_an_artifact_declared_but_placed_by_no_sink_is_rejected() {
 fn a_table_built_into_an_artifact_but_not_into_the_one_it_is_built_from_is_rejected() {
     let unreadable = listing(
         "pipeline-without-a-source",
-        "[default]\nartifacts = [\"copy\"]\n",
+        "[default]\nartifacts = [\"noon\"]\n",
     )
     .unwrap_err();
 
     assert!(matches!(
         unreadable.cause(),
         Cause::Mislisting(Mislisting::WithoutBase { table: None, artifact, base })
-            if artifact.as_str() == "copy" && base.as_str() == "snapshot"
+            if artifact.as_str() == "noon" && base.as_str() == "snapshot"
     ));
 }
 
@@ -220,7 +220,7 @@ fn a_table_built_into_an_artifact_and_the_one_it_is_built_from_is_read() {
     assert!(
         listing(
             "pipeline-with-a-source",
-            "[default]\nartifacts = [\"snapshot\", \"copy\"]\n",
+            "[default]\nartifacts = [\"snapshot\", \"noon\"]\n",
         )
         .is_ok()
     );
@@ -257,7 +257,7 @@ fn an_artifact_declared_twice_is_reported_with_the_file_that_declares_it() {
         &directory,
         "artifact.toml",
         &format!(
-            "{ARTIFACTS}\n[[artifact]]\nname = \"copy\"\nkind = \"copy\"\nbase = \"snapshot\"\n"
+            "{ARTIFACTS}\n[[artifact]]\nname = \"noon\"\nkind = \"instant\"\nbase = \"snapshot\"\nat = \"12:00\"\nshard = \"%Y%m%d\"\n"
         ),
     );
 
@@ -265,7 +265,7 @@ fn an_artifact_declared_twice_is_reported_with_the_file_that_declares_it() {
 
     assert!(matches!(
         unreadable.cause(),
-        Cause::Misdeclaring(Misdeclaring::NamedTwice(artifact)) if artifact.as_str() == "copy"
+        Cause::Misdeclaring(Misdeclaring::NamedTwice(artifact)) if artifact.as_str() == "noon"
     ));
     assert_eq!(unreadable.path(), directory.join("artifact.toml"));
 }

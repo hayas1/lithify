@@ -1256,7 +1256,7 @@ mod catch_up {
             PEOPLE,
             &[built_before(
                 "people",
-                r#"{"debezium":{"dialect":"postgres"}}"#,
+                r#"{"debezium":{"postgres":{"topic_prefix":"postgres"}}}"#,
             )],
         )
         .await;

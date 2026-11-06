@@ -4,5 +4,5 @@ artifacts = ["snapshot"]
 [[table]]
 schema = "shop"
 name = "orders"
-artifacts = ["snapshot", "copy"]
+artifacts = ["snapshot", "noon"]
 column.attributes.mask = "null"

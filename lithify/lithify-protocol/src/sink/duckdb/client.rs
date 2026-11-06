@@ -371,7 +371,7 @@ mod tests {
                 Ulid::from_parts(finished_at, 0),
                 Ts::from(DateTime::UNIX_EPOCH),
                 "primary",
-                r#"{"debezium":{"dialect":"mysql"}}"#,
+                r#"{"debezium":{"mysql":{"topic_prefix":"mysql"}}}"#,
                 "0.1.0",
             ),
             &Series::new("snapshot".into(), "daily"),
