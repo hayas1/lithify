@@ -11,8 +11,8 @@ use lithify_core::listener::{
 };
 use lithify_core::model::TableId;
 use lithify_core::sink::{Namespace, TablePath, Warehouse};
-use lithify_core::source::RowChangeLog;
 use lithify_core::sql::SqlString;
+use lithify_core::warehouse_source::RowChangeLog;
 use lithify_core::window::Window;
 use lithify_pipeline::schedule::{Schedule, Timeline};
 

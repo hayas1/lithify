@@ -8,9 +8,9 @@ use crate::listener::{
 };
 use crate::model::TableId;
 use crate::sink::{Namespace, TablePath, Warehouse};
-use crate::source::RowChangeLog;
 use crate::sql::SqlString;
 use crate::table_listeners::Encounter;
+use crate::warehouse_source::RowChangeLog;
 use crate::window::Window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,6 +21,13 @@ pub enum Base {
 }
 
 impl Base {
+    pub fn new(encounter: &Encounter, built: Option<TablePath>) -> Self {
+        match encounter.is_logged_from_start() {
+            true => Self::ChangeLog,
+            false => Self::from(built),
+        }
+    }
+
     pub fn as_built(&self) -> Option<&TablePath> {
         match self {
             Self::Built(built) => Some(built),
@@ -146,7 +153,7 @@ impl<'a, A, L, B> TableBuilder<'a, A, L, B> {
         L: RowChangeLog + 'a,
         W: Warehouse + 'a,
     {
-        let base = encounter.base(built);
+        let base = Base::new(&encounter, built);
 
         Self {
             artifact,
@@ -274,5 +281,45 @@ where
             self.window.clone(),
             making,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::listener::Appearance;
+
+    fn built() -> TablePath {
+        TablePath::new("shelf", "people_before")
+    }
+
+    #[test]
+    fn a_table_the_window_opened_with_is_built_onto_what_its_name_was_built_into() {
+        assert_eq!(
+            Base::new(&Encounter::Opened, Some(built())),
+            Base::Built(built())
+        );
+    }
+
+    #[test]
+    fn a_table_discovered_within_the_window_is_built_onto_what_its_name_was_built_into() {
+        let discovered = Encounter::Appeared(Appearance::Discovered);
+
+        assert_eq!(Base::new(&discovered, Some(built())), Base::Built(built()));
+        assert_eq!(Base::new(&discovered, None), Base::Missing);
+    }
+
+    #[test]
+    fn a_table_created_within_the_window_is_built_onto_the_change_log() {
+        let created = Encounter::Appeared(Appearance::Created);
+
+        assert_eq!(Base::new(&created, Some(built())), Base::ChangeLog);
+    }
+
+    #[test]
+    fn a_table_captured_within_the_window_is_built_onto_the_change_log() {
+        let captured = Encounter::Appeared(Appearance::Captured);
+
+        assert_eq!(Base::new(&captured, Some(built())), Base::ChangeLog);
     }
 }

@@ -7,8 +7,8 @@ use crate::build::Base;
 use crate::listener::{ReplayEnd, SchemaChangeListener};
 use crate::model::TableId;
 use crate::sink::{TablePath, UnsupportedColumn, Warehouse};
-use crate::source::RowChangeLog;
 use crate::sql::SqlString;
+use crate::warehouse_source::RowChangeLog;
 use crate::window::Window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

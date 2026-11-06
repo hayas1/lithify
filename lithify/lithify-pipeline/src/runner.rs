@@ -12,8 +12,8 @@ use lithify_core::listener::OutOfOrder;
 use lithify_core::model::TableId;
 use lithify_core::runner::Replayer;
 use lithify_core::sink::{Namespace, WarehouseClient};
-use lithify_core::source::{ChangeLogs, SchemaChangeStream};
 use lithify_core::ts::{Event, Replay, Ts};
+use lithify_core::warehouse_source::{ChangeLogs, SchemaChangeStream};
 use lithify_core::window::Window;
 
 use crate::artifact::ArtifactControl;

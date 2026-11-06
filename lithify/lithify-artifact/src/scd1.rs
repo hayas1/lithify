@@ -10,9 +10,9 @@ use lithify_core::listener::{
 };
 use lithify_core::model::{ColumnModel, TableId, TableModel};
 use lithify_core::sink::{TablePath, Warehouse};
-use lithify_core::source::RowChangeLog;
 use lithify_core::sql::SqlString;
 use lithify_core::ts::{Event, Ts};
+use lithify_core::warehouse_source::RowChangeLog;
 use lithify_core::window::Window;
 use lithify_pipeline::schedule::Timeline;
 
@@ -595,7 +595,7 @@ mod tests {
                 Kept(Scd1SelectBuilder::new(
                     &Log,
                     &window(),
-                    encounter.base(base()),
+                    Base::new(&encounter, base()),
                     Some(*window().to()),
                 ))
             },

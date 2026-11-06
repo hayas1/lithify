@@ -273,10 +273,10 @@ mod tests {
         let warehouse = DuckDbWarehouse::new("mysql_shop_cdc");
 
         assert_eq!(
-            Coordinate::Text("binlog.000002".to_owned()).sql(&warehouse),
+            warehouse.coordinate(&Coordinate::Text("binlog.000002".to_owned())),
             "'binlog.000002'"
         );
-        assert_eq!(Coordinate::Number(448).sql(&warehouse), "448");
+        assert_eq!(warehouse.coordinate(&Coordinate::Number(448)), "448");
     }
 
     #[test]

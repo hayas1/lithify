@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
 use lithify_core::sink::{ChangeLogSql, WarehouseSql};
-use lithify_core::source::{RowChangeLog, SchemaChangeLog};
 use lithify_core::sql::SqlString;
+use lithify_core::warehouse_source::{RowChangeLog, SchemaChangeLog};
 use lithify_protocol::{Debezium, DuckDbWarehouse, Landed, MySql, S3Sink};
 
 use crate::replica::{CellValue, ColumnDdl, Ddl, Dml, Mutation, Placed, Replica, ReplicaDump, Row};

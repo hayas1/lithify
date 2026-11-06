@@ -5,7 +5,8 @@ use lithify_core::listener::OutOfOrder;
 use lithify_core::model::TableId;
 use lithify_core::position::{Coordinate, Position};
 use lithify_core::sink::TablePath;
-use lithify_core::source::{ChangeLog, ColumnPath, RowChangeLog};
+use lithify_core::source::{ChangeLog, ColumnPath};
+use lithify_core::warehouse_source::RowChangeLog;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Offset(pub u64);

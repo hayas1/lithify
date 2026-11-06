@@ -15,4 +15,5 @@ pub mod source;
 pub mod sql;
 pub mod table_listeners;
 pub mod ts;
+pub mod warehouse_source;
 pub mod window;

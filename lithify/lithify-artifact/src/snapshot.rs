@@ -8,9 +8,9 @@ use lithify_core::build::Base;
 use lithify_core::listener::ReplayEnd;
 use lithify_core::model::TableId;
 use lithify_core::sink::{TablePath, Warehouse};
-use lithify_core::source::RowChangeLog;
 use lithify_core::sql::SqlString;
 use lithify_core::ts::{Event, Ts};
+use lithify_core::warehouse_source::RowChangeLog;
 use lithify_core::window::Window;
 use lithify_pipeline::schedule::{Schedule, Timeline};
 

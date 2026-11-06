@@ -2,14 +2,12 @@ use std::collections::BTreeMap;
 use std::collections::btree_map;
 use std::convert::Infallible;
 
-use crate::build::Base;
 use crate::listener::{
     Appearance, CatalogModel, Finish, ReplayEnd, SchemaChangeListener, TableAltered, TableCreated,
     TableDropped, TableRenamed,
 };
 use crate::model::{TableId, TableModel};
 use crate::position::Position;
-use crate::sink::TablePath;
 
 pub struct TableListeners<F, G, L, E> {
     make_listener: F,
@@ -25,10 +23,10 @@ pub enum Encounter {
 }
 
 impl Encounter {
-    pub fn base(&self, built: Option<TablePath>) -> Base {
+    pub fn is_logged_from_start(&self) -> bool {
         match self {
-            Self::Appeared(appearance) if appearance.is_logged_from_start() => Base::ChangeLog,
-            Self::Appeared(_) | Self::Opened => Base::from(built),
+            Self::Appeared(appearance) => appearance.is_logged_from_start(),
+            Self::Opened => false,
         }
     }
 
@@ -869,38 +867,34 @@ mod tests {
         );
     }
 
-    fn built() -> TablePath {
-        TablePath::new("shelf", "people_before")
-    }
-
     #[test]
-    fn a_table_the_window_opened_with_is_built_onto_what_its_name_was_built_into() {
-        assert_eq!(Encounter::Opened.base(Some(built())), Base::Built(built()));
+    fn a_table_the_window_opened_with_is_followed_from_its_name_but_not_logged_from_its_start() {
+        assert!(!Encounter::Opened.is_logged_from_start());
         assert_eq!(Encounter::Opened.table_from(&people()), Some(people()));
     }
 
     #[test]
-    fn a_table_discovered_within_the_window_is_built_onto_what_its_name_was_built_into() {
+    fn a_table_discovered_within_the_window_is_followed_from_its_name_but_not_logged_from_its_start()
+     {
         let discovered = Encounter::Appeared(Appearance::Discovered);
 
-        assert_eq!(discovered.base(Some(built())), Base::Built(built()));
-        assert_eq!(discovered.base(None), Base::Missing);
+        assert!(!discovered.is_logged_from_start());
         assert_eq!(discovered.table_from(&people()), Some(people()));
     }
 
     #[test]
-    fn a_table_created_within_the_window_is_built_from_nothing_onto_the_change_log() {
+    fn a_table_created_within_the_window_is_followed_from_nothing_and_logged_from_its_start() {
         let created = Encounter::Appeared(Appearance::Created);
 
-        assert_eq!(created.base(Some(built())), Base::ChangeLog);
+        assert!(created.is_logged_from_start());
         assert_eq!(created.table_from(&people()), None);
     }
 
     #[test]
-    fn a_table_captured_within_the_window_is_built_from_its_name_onto_the_change_log() {
+    fn a_table_captured_within_the_window_is_followed_from_its_name_and_logged_from_its_start() {
         let captured = Encounter::Appeared(Appearance::Captured);
 
-        assert_eq!(captured.base(Some(built())), Base::ChangeLog);
+        assert!(captured.is_logged_from_start());
         assert_eq!(captured.table_from(&people()), Some(people()));
     }
 }

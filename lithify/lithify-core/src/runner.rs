@@ -5,8 +5,9 @@ use crate::build::{BuildContext, TableBuild, TableBuilder};
 use crate::listener::{Finish, OutOfOrder};
 use crate::model::TableId;
 use crate::sink::{TablePath, Warehouse};
-use crate::source::{RowChangeLog, SchemaHistory};
+use crate::source::SchemaHistory;
 use crate::table_listeners::TableListeners;
+use crate::warehouse_source::RowChangeLog;
 use crate::window::Window;
 
 pub struct Replayer<'a, W, L> {

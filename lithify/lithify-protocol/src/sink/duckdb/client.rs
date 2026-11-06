@@ -3,8 +3,10 @@ use duckdb::{Connection, Error, Statement};
 use lithify_pipeline::warehouse::WarehouseControl;
 
 use lithify_core::sink::{ChangeLogSql, Namespace, TablePath, WarehouseClient, WarehouseSql};
-use lithify_core::source::{SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed};
 use lithify_core::sql::SqlString;
+use lithify_core::warehouse_source::{
+    SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed,
+};
 use lithify_core::window::Window;
 use lithify_pipeline::build_log::{BuildLogQuery, BuildLogRow};
 
