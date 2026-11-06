@@ -125,7 +125,7 @@ pub struct Runner<'a, K, C> {
 impl<'a, K, C> Runner<'a, K, C>
 where
     C: ChangeLogs,
-    K: SchemaChangeStream<C::Schema> + WarehouseControl,
+    K: SchemaChangeStream<C::SchemaChangeLog> + WarehouseControl,
 {
     pub fn new(client: &'a K, logs: &'a C) -> Self {
         Self { client, logs }
@@ -141,7 +141,7 @@ where
     ) -> Result<Vec<TableBuilt>, E>
     where
         E: From<OutOfOrder> + From<Infallible>,
-        <K as SchemaChangeStream<C::Schema>>::Error: Into<E>,
+        <K as SchemaChangeStream<C::SchemaChangeLog>>::Error: Into<E>,
     {
         let history = self
             .client
@@ -183,7 +183,7 @@ where
             + From<Infallible>
             + From<UnbuildableArtifact>
             + From<<K as WarehouseClient>::Error>,
-        <K as SchemaChangeStream<C::Schema>>::Error: Into<E>,
+        <K as SchemaChangeStream<C::SchemaChangeLog>>::Error: Into<E>,
     {
         let built = self
             .built::<A, E>(
@@ -249,7 +249,7 @@ where
     async fn call<C>(self, logs: C) -> Self::Output
     where
         C: ChangeLogs,
-        K: SchemaChangeStream<C::Schema, Error = <K as WarehouseClient>::Error>,
+        K: SchemaChangeStream<C::SchemaChangeLog, Error = <K as WarehouseClient>::Error>,
     {
         Runner::new(self.client, &logs)
             .run(

@@ -72,14 +72,14 @@ impl<C: CdcFormat, L: Landing<C>> ChangeLog for Landed<C, L> {
 
 impl<C: CdcFormat, L: Landing<C>> ChangeLogs for Landed<C, L> {
     type Position = C::Position;
-    type Schema = Self;
-    type Row = Self;
+    type SchemaChangeLog = Self;
+    type RowChangeLog = Self;
 
-    fn schema_changes(&self) -> &Self::Schema {
+    fn schema_changes(&self) -> &Self::SchemaChangeLog {
         self
     }
 
-    fn row_changes(&self) -> &Self::Row {
+    fn row_changes(&self) -> &Self::RowChangeLog {
         self
     }
 }

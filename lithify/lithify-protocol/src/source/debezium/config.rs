@@ -146,7 +146,7 @@ mod tests {
         async fn call<C>(self, logs: C) -> Self::Output
         where
             C: ChangeLogs,
-            K: SchemaChangeStream<C::Schema, Error = <K as WarehouseClient>::Error>,
+            K: SchemaChangeStream<C::SchemaChangeLog, Error = <K as WarehouseClient>::Error>,
         {
             (
                 std::any::type_name::<C>(),

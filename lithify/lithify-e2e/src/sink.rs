@@ -252,7 +252,7 @@ impl ChangeLogsFn<DuckDbClient> for LandedTopic<'_> {
     async fn call<C>(self, logs: C) -> Self::Output
     where
         C: ChangeLogs,
-        DuckDbClient: SchemaChangeStream<C::Schema, Error = duckdb::Error>,
+        DuckDbClient: SchemaChangeStream<C::SchemaChangeLog, Error = duckdb::Error>,
     {
         (
             logs.row_changes().dml_landed_table(self.table),
@@ -273,7 +273,7 @@ impl ChangeLogsFn<DuckDbClient> for Catalog<'_> {
     async fn call<C>(self, logs: C) -> Self::Output
     where
         C: ChangeLogs,
-        DuckDbClient: SchemaChangeStream<C::Schema, Error = duckdb::Error>,
+        DuckDbClient: SchemaChangeStream<C::SchemaChangeLog, Error = duckdb::Error>,
     {
         self.client
             .table(logs.schema_changes(), self.table, self.at)
@@ -295,7 +295,7 @@ impl ChangeLogsFn<DuckDbClient> for SnapshotBuild<'_> {
     async fn call<C>(self, logs: C) -> Self::Output
     where
         C: ChangeLogs,
-        DuckDbClient: SchemaChangeStream<C::Schema, Error = duckdb::Error>,
+        DuckDbClient: SchemaChangeStream<C::SchemaChangeLog, Error = duckdb::Error>,
     {
         let built = Runner::new(self.client, &logs)
             .built::<_, Unbuildable>(self.artifact, self.namespace, self.window, &[], |table| {

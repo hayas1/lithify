@@ -72,12 +72,12 @@ pub trait RowChangeLog: ChangeLog {
 
 pub trait ChangeLogs {
     type Position: Position;
-    type Schema: SchemaChangeLog<Position = Self::Position>;
-    type Row: RowChangeLog<Position = Self::Position>;
+    type SchemaChangeLog: SchemaChangeLog<Position = Self::Position>;
+    type RowChangeLog: RowChangeLog<Position = Self::Position>;
 
-    fn schema_changes(&self) -> &Self::Schema;
+    fn schema_changes(&self) -> &Self::SchemaChangeLog;
 
-    fn row_changes(&self) -> &Self::Row;
+    fn row_changes(&self) -> &Self::RowChangeLog;
 }
 
 // The log stays a parameter of the trait rather than of its methods: each warehouse decodes the
