@@ -3,7 +3,7 @@ use std::fmt::{self, Display, Formatter};
 use mysql::prelude::Queryable;
 use mysql::{Pool, Value};
 
-use lithify_core::model::TableModel;
+use lithify_schema::model::TableModel;
 
 use crate::row::{Cell, Rows};
 

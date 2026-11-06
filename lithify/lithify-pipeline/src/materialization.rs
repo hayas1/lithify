@@ -1,5 +1,5 @@
-use lithify_core::artifact::ArtifactName;
-use lithify_core::sink::Namespace;
+use lithify_build::artifact::ArtifactName;
+use lithify_build::sink::Namespace;
 
 use crate::build_log::Series;
 

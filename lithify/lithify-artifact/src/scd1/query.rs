@@ -1,11 +1,11 @@
-use lithify_core::artifact::UnbuildableArtifact;
-use lithify_core::era::Era;
-use lithify_core::model::{ColumnModel, TableId, TableModel};
-use lithify_core::position::Coordinate;
-use lithify_core::sink::{TablePath, Warehouse};
-use lithify_core::source::ColumnPath;
-use lithify_core::sql::SqlString;
-use lithify_core::warehouse_source::RowChangeLog;
+use lithify_build::artifact::UnbuildableArtifact;
+use lithify_build::sink::{TablePath, Warehouse};
+use lithify_build::source::RowChangeLog;
+use lithify_build::sql::SqlString;
+use lithify_schema::era::Era;
+use lithify_schema::model::{ColumnModel, TableId, TableModel};
+use lithify_schema::position::Coordinate;
+use lithify_schema::source::ColumnPath;
 
 pub(crate) struct ChangeLogQuery<'a, L> {
     log: &'a L,

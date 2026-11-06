@@ -2,11 +2,11 @@ use std::collections::BTreeMap;
 use std::convert::Infallible;
 
 use crate::recorder::Recorder;
-use lithify_core::model::ColumnType;
-use lithify_core::sink::{
+use lithify_build::sink::{
     ChangeLogSql, Namespace, OpenWarehouse, TablePath, UnsupportedColumn, WarehouseSql,
 };
-use lithify_core::sql::SqlString;
+use lithify_build::sql::SqlString;
+use lithify_schema::model::ColumnType;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Engine {

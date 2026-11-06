@@ -4,8 +4,8 @@ use std::str::FromStr;
 
 use duckdb::Connection;
 
-use lithify_core::sink::{Namespace, OpenWarehouse};
-use lithify_core::sql::SqlString;
+use lithify_build::sink::{Namespace, OpenWarehouse};
+use lithify_build::sql::SqlString;
 
 use crate::sink::duckdb::DuckDbWarehouse;
 use crate::sink::duckdb::client::DuckDbClient;

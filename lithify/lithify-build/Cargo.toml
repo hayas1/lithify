@@ -1,0 +1,17 @@
+[package]
+name = "lithify-build"
+version.workspace = true
+description.workspace = true
+authors.workspace = true
+edition.workspace = true
+repository.workspace = true
+license-file.workspace = true
+readme.workspace = true
+
+[dependencies]
+lithify-schema = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+lithify-testing = { workspace = true }
+proptest = { workspace = true }

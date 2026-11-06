@@ -7,16 +7,14 @@ use google_cloud_bigquery::query::Row;
 use google_cloud_gax::client_builder;
 use lithify_pipeline::warehouse::WarehouseControl;
 
-use lithify_core::event::MalformedEvent;
-use lithify_core::sink::{
+use lithify_build::sink::{
     ChangeLogSql, Namespace, OpenWarehouse, TablePath, WarehouseClient, WarehouseSql,
 };
-use lithify_core::sql::SqlString;
-use lithify_core::warehouse_source::{
-    SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed,
-};
-use lithify_core::window::Window;
+use lithify_build::source::{SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed};
+use lithify_build::sql::SqlString;
 use lithify_pipeline::build_log::{BuildLogQuery, BuildLogRow, UnreadableBuildLog};
+use lithify_schema::event::MalformedEvent;
+use lithify_schema::window::Window;
 
 use crate::sink::bigquery::BigQueryWarehouse;
 use crate::sink::bigquery::config::{Config, Credentials, Location};

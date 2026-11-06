@@ -1,12 +1,12 @@
 use std::convert::Infallible;
 
-use lithify_core::artifact::UnbuildableArtifact;
-use lithify_core::listener::OutOfOrder;
-use lithify_core::model::TableId;
-use lithify_core::position::{Coordinate, Position};
-use lithify_core::sink::TablePath;
-use lithify_core::source::{ChangeLog, ColumnPath};
-use lithify_core::warehouse_source::RowChangeLog;
+use lithify_build::artifact::UnbuildableArtifact;
+use lithify_build::sink::TablePath;
+use lithify_build::source::RowChangeLog;
+use lithify_schema::listener::OutOfOrder;
+use lithify_schema::model::TableId;
+use lithify_schema::position::{Coordinate, Position};
+use lithify_schema::source::{ChangeLog, ColumnPath};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Offset(pub u64);

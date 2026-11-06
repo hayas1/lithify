@@ -2,13 +2,13 @@ use std::convert::Infallible;
 
 use crate::artifact::Artifact;
 use crate::build::{BuildContext, TableBuild, TableBuilder};
-use crate::listener::{Finish, OutOfOrder};
-use crate::model::TableId;
 use crate::sink::{TablePath, Warehouse};
-use crate::source::SchemaHistory;
-use crate::table_listeners::TableListeners;
-use crate::warehouse_source::RowChangeLog;
-use crate::window::Window;
+use crate::source::RowChangeLog;
+use lithify_schema::listener::{Finish, OutOfOrder};
+use lithify_schema::model::TableId;
+use lithify_schema::source::SchemaHistory;
+use lithify_schema::table_listeners::TableListeners;
+use lithify_schema::window::Window;
 
 pub struct Replayer<'a, W, L> {
     context: BuildContext<'a, W>,

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use lithify_core::sink::{Namespace, OpenWarehouse, WarehouseClient};
-use lithify_core::warehouse_source::SchemaChangeStream;
+use lithify_build::sink::{Namespace, OpenWarehouse, WarehouseClient};
+use lithify_build::source::SchemaChangeStream;
 
 use lithify_pipeline::capture::{Capture, ChangeLogsFn};
 use lithify_pipeline::warehouse::{SinkWarehouse, WarehouseFn};
@@ -186,10 +186,10 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    use lithify_core::sink::TablePath;
-    use lithify_core::source::{ChangeLog, ColumnPath};
-    use lithify_core::warehouse_source::{ChangeLogs, SchemaChangeLog};
+    use lithify_build::sink::TablePath;
+    use lithify_build::source::{ChangeLogs, SchemaChangeLog};
     use lithify_pipeline::Pipeline;
+    use lithify_schema::source::{ChangeLog, ColumnPath};
 
     use crate::artifacts::ArtifactConfig;
 

@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 
-use lithify_core::model::TableId;
-use lithify_core::ts::{Event, Ts};
+use lithify_schema::model::TableId;
+use lithify_schema::ts::{Event, Ts};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shard {

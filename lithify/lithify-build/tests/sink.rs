@@ -1,5 +1,5 @@
-use lithify_core::sink::*;
-use lithify_core::sql::SqlString;
+use lithify_build::sink::*;
+use lithify_build::sql::SqlString;
 use lithify_testing::Engine;
 
 #[test]

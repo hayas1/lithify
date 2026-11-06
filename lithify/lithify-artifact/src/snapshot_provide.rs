@@ -3,15 +3,15 @@ use std::marker::PhantomData;
 use chrono_tz::Tz;
 use serde::Deserialize;
 
-use lithify_core::artifact::{Artifact, ArtifactBuilder, ArtifactName, UnbuildableArtifact};
-use lithify_core::build::Base;
-use lithify_core::listener::{ReplayEnd, SchemaChangeListener};
-use lithify_core::model::TableId;
-use lithify_core::sink::{TablePath, Warehouse};
-use lithify_core::sql::SqlString;
-use lithify_core::warehouse_source::RowChangeLog;
-use lithify_core::window::Window;
+use lithify_build::artifact::{Artifact, ArtifactBuilder, ArtifactName, UnbuildableArtifact};
+use lithify_build::build::Base;
+use lithify_build::sink::{TablePath, Warehouse};
+use lithify_build::source::RowChangeLog;
+use lithify_build::sql::SqlString;
 use lithify_pipeline::schedule::{Schedule, Timeline};
+use lithify_schema::listener::{ReplayEnd, SchemaChangeListener};
+use lithify_schema::model::TableId;
+use lithify_schema::window::Window;
 
 use lithify_pipeline::artifact::ArtifactControl;
 use lithify_pipeline::build_log::{BuildLog, Series};
@@ -152,8 +152,8 @@ impl<P, W: Warehouse> ArtifactBuilder<P> for SnapshotProvideBuilder<W> {
 mod tests {
     use chrono::{DateTime, Utc};
 
-    use lithify_core::model::TableModel;
-    use lithify_core::ts::{Event, Ts};
+    use lithify_schema::model::TableModel;
+    use lithify_schema::ts::{Event, Ts};
     use lithify_testing::{Engine, Log};
 
     use super::*;

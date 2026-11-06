@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use chrono_tz::Tz;
 
 use crate::warehouse::SinkWarehouse;
-use lithify_core::artifact::ArtifactName;
-use lithify_core::ts::{Event, Ts};
+use lithify_build::artifact::ArtifactName;
+use lithify_schema::ts::{Event, Ts};
 
 use crate::artifact::{Declaration, Declarations};
 use crate::materialization::Materialization;
@@ -442,7 +442,7 @@ mod tests {
 
     use crate::build_log::Series;
     use crate::place::Placed;
-    use lithify_core::sink::Namespace;
+    use lithify_build::sink::Namespace;
 
     // A unit test cannot take the CaptureConfig of the command line, which links a build of this
     // crate of its own, so a capture is read as the value it is written as.
@@ -489,7 +489,7 @@ mod tests {
         Warehouse(Dataset),
     }
 
-    impl From<Lying> for lithify_core::sink::Namespace {
+    impl From<Lying> for lithify_build::sink::Namespace {
         fn from(location: Lying) -> Self {
             match location {
                 Lying::Files(Prefix { prefix }) => Self::from(prefix.as_str()),

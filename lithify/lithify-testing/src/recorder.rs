@@ -2,8 +2,8 @@ use lithify_pipeline::warehouse::WarehouseControl;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 
-use lithify_core::sink::{Namespace, TablePath, Warehouse, WarehouseClient};
-use lithify_core::sql::SqlString;
+use lithify_build::sink::{Namespace, TablePath, Warehouse, WarehouseClient};
+use lithify_build::sql::SqlString;
 use lithify_pipeline::build_log::{BuildLog, BuildLogQuery, BuildLogRow, Latest};
 
 pub struct Recorder<W> {

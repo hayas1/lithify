@@ -1,9 +1,9 @@
-use lithify_core::artifact::UnbuildableArtifact;
-use lithify_core::build::TableBuild;
+use lithify_build::artifact::UnbuildableArtifact;
+use lithify_build::build::TableBuild;
 use std::fmt;
 
-use lithify_core::sink::{Namespace, WarehouseClient, WarehouseSql};
-use lithify_core::ts::Ts;
+use lithify_build::sink::{Namespace, WarehouseClient, WarehouseSql};
+use lithify_schema::ts::Ts;
 
 use crate::build_log::{
     BuildLog, BuildLogQuery, BuildLogRow, Series, Status, TableBuilt, UnreadableBuildLog,

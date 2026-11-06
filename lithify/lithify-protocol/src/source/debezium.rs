@@ -7,11 +7,11 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use lithify_core::event::{Hint, MalformedEvent, SchemaChange, TableChange};
-use lithify_core::model::{ColumnModel, ColumnName, ColumnType, TableId, TableModel};
-use lithify_core::position::{Coordinate, Position};
-use lithify_core::source::ColumnPath;
-use lithify_core::ts::Ts;
+use lithify_schema::event::{Hint, MalformedEvent, SchemaChange, TableChange};
+use lithify_schema::model::{ColumnModel, ColumnName, ColumnType, TableId, TableModel};
+use lithify_schema::position::{Coordinate, Position};
+use lithify_schema::source::ColumnPath;
+use lithify_schema::ts::Ts;
 
 use super::CdcFormat;
 use rename::RenameReader;

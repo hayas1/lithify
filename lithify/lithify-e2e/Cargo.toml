@@ -18,7 +18,8 @@ clap = { workspace = true }
 duckdb = { workspace = true }
 lithify-cli = { workspace = true }
 lithify-pipeline = { workspace = true }
-lithify-core = { workspace = true }
+lithify-build = { workspace = true }
+lithify-schema = { workspace = true }
 lithify-protocol = { workspace = true, features = ["bigquery", "duckdb"] }
 lithify-artifact = { workspace = true }
 mysql = { workspace = true }

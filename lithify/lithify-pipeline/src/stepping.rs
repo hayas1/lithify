@@ -14,12 +14,12 @@ use crate::runner::{BuildLogWriter, Replaying, Unsteppable};
 use crate::table;
 
 use crate::warehouse::WarehouseControl;
-use lithify_core::artifact::UnbuildableArtifact;
-use lithify_core::listener::OutOfOrder;
-use lithify_core::model::TableId;
-use lithify_core::sink::WarehouseClient;
-use lithify_core::ts::{Event, Ts};
-use lithify_core::window::Window;
+use lithify_build::artifact::UnbuildableArtifact;
+use lithify_build::sink::WarehouseClient;
+use lithify_schema::listener::OutOfOrder;
+use lithify_schema::model::TableId;
+use lithify_schema::ts::{Event, Ts};
+use lithify_schema::window::Window;
 
 pub struct Stepping<'a, K, C, E> {
     client: &'a K,

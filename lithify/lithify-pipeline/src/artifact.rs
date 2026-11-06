@@ -5,9 +5,9 @@ use chrono_tz::Tz;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
-use lithify_core::artifact::{Artifact, ArtifactName};
-use lithify_core::model::TableId;
-use lithify_core::window::Window;
+use lithify_build::artifact::{Artifact, ArtifactName};
+use lithify_schema::model::TableId;
+use lithify_schema::window::Window;
 
 use crate::build_log::{BuildLog, Series};
 use crate::schedule::{Schedule, Timeline};

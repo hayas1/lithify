@@ -1,11 +1,11 @@
-use crate::event::{MalformedEvent, SchemaChange};
-use crate::listener::{CatalogModel, OutOfOrder};
-use crate::model::{TableId, TableModel};
-use crate::position::Position;
 use crate::sink::TablePath;
-use crate::source::{ChangeLog, ColumnPath, SchemaHistory};
-use crate::ts::{Event, Ts};
-use crate::window::Window;
+use lithify_schema::event::{MalformedEvent, SchemaChange};
+use lithify_schema::listener::{CatalogModel, OutOfOrder};
+use lithify_schema::model::{TableId, TableModel};
+use lithify_schema::position::Position;
+use lithify_schema::source::{ChangeLog, ColumnPath, SchemaHistory};
+use lithify_schema::ts::{Event, Ts};
+use lithify_schema::window::Window;
 
 pub trait SchemaChangeLog: ChangeLog {
     type Record;

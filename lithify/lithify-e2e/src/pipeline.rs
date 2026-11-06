@@ -3,16 +3,16 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 
 use lithify_artifact::snapshot::Snapshot;
+use lithify_build::artifact::Artifact;
+use lithify_build::sink::TablePath;
 use lithify_cli::artifacts::ArtifactConfig;
 use lithify_cli::credential::Credentials;
 use lithify_cli::pipeline::{CaptureConfig, WarehouseConfig};
 use lithify_cli::unrunnable::Unrunnable;
-use lithify_core::artifact::Artifact;
-use lithify_core::model::{TableId, TableModel};
-use lithify_core::sink::TablePath;
-use lithify_core::ts::{Event, Processing, Ts};
-use lithify_core::window::Window;
 use lithify_pipeline::{Pipeline, infra};
+use lithify_schema::model::{TableId, TableModel};
+use lithify_schema::ts::{Event, Processing, Ts};
+use lithify_schema::window::Window;
 
 use crate::row::Rows;
 use crate::run::Unverifiable;

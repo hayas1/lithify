@@ -4,14 +4,14 @@ use chrono::{DateTime, Utc};
 
 use std::collections::BTreeSet;
 
-use lithify_core::model::TableId;
-use lithify_core::sink::{Namespace, TablePath};
-use lithify_core::ts::{Event, Ts};
-use lithify_core::window::Window;
+use lithify_build::sink::{Namespace, TablePath};
 use lithify_pipeline::build_log::{BuildLog, Run, Series, Status, TableBuilt};
 use lithify_pipeline::check::*;
 use lithify_pipeline::materialization::Materialization;
 use lithify_pipeline::schedule::{Schedule, Timeline};
+use lithify_schema::model::TableId;
+use lithify_schema::ts::{Event, Ts};
+use lithify_schema::window::Window;
 use lithify_testing::{Engine, Recorder};
 
 fn at<A>(rfc3339: &str) -> Ts<A> {

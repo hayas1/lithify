@@ -2,16 +2,16 @@ use std::convert::Infallible;
 use std::marker::PhantomData;
 
 use crate::artifact::{Artifact, ArtifactBuilder, UnbuildableArtifact};
-use crate::event::SchemaChange;
-use crate::listener::{
+use crate::sink::{Namespace, TablePath, Warehouse};
+use crate::source::RowChangeLog;
+use crate::sql::SqlString;
+use lithify_schema::event::SchemaChange;
+use lithify_schema::listener::{
     Finish, ReplayEnd, SchemaChangeListener, TableAltered, TableCreated, TableDropped, TableRenamed,
 };
-use crate::model::TableId;
-use crate::sink::{Namespace, TablePath, Warehouse};
-use crate::sql::SqlString;
-use crate::table_listeners::Encounter;
-use crate::warehouse_source::RowChangeLog;
-use crate::window::Window;
+use lithify_schema::model::TableId;
+use lithify_schema::table_listeners::Encounter;
+use lithify_schema::window::Window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Base {
@@ -287,7 +287,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::listener::Appearance;
+    use lithify_schema::listener::Appearance;
 
     fn built() -> TablePath {
         TablePath::new("shelf", "people_before")

@@ -4,7 +4,7 @@ use serde::Deserialize;
 use serde::de::{self, DeserializeOwned, Deserializer};
 
 use crate::warehouse::SinkWarehouse;
-use lithify_core::artifact::ArtifactName;
+use lithify_build::artifact::ArtifactName;
 
 pub trait Placing: SinkWarehouse {
     fn change_log(&self) -> Self::Location;

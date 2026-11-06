@@ -6,8 +6,8 @@ use lithify_cli::artifacts::ArtifactConfig;
 use lithify_cli::credential::Credentials;
 use lithify_cli::pipeline::{CaptureConfig, WarehouseConfig};
 use lithify_cli::unrunnable::Unrunnable;
-use lithify_core::ts::{Replay, Ts};
 use lithify_pipeline::Pipeline;
+use lithify_schema::ts::{Replay, Ts};
 
 use crate::pipeline::{ConnectedPipeline, Watch};
 use crate::runnable::Report;

@@ -1,10 +1,10 @@
 use std::path::{Path, PathBuf};
 
-use lithify_core::model::TableId;
-use lithify_core::sink::Namespace;
+use lithify_build::sink::Namespace;
 use lithify_pipeline::infra::Miswiring;
 use lithify_pipeline::table::{Mask, Mislisting};
 use lithify_pipeline::{Cause, Misdeclaring, Pipeline, Unreadable};
+use lithify_schema::model::TableId;
 use lithify_testing::pipeline::{ArtifactConfig, CaptureConfig, Kept, scratch};
 
 const ARTIFACTS: &str = include_str!("../testdata/pipeline/artifacts.toml");

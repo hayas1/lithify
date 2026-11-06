@@ -1,11 +1,11 @@
 use std::fmt;
 
-use crate::model::{ColumnModel, ColumnName, ColumnType};
-use crate::position::Coordinate;
-use crate::source::ColumnPath;
+use crate::source::SchemaChangeLog;
 use crate::sql::SqlString;
-use crate::warehouse_source::SchemaChangeLog;
-use crate::window::Window;
+use lithify_schema::model::{ColumnModel, ColumnName, ColumnType};
+use lithify_schema::position::Coordinate;
+use lithify_schema::source::ColumnPath;
+use lithify_schema::window::Window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnsupportedColumn {

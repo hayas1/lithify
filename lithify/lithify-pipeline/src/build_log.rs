@@ -2,13 +2,13 @@ use std::fmt::{self, Display, Formatter};
 
 use ulid::Ulid;
 
-use lithify_core::artifact::ArtifactName;
-use lithify_core::build::TableBuild;
-use lithify_core::model::{ColumnType, TableId};
-use lithify_core::sink::{Namespace, TablePath, UnsupportedColumn, WarehouseSql};
-use lithify_core::sql::SqlString;
-use lithify_core::ts::{Event, Replay, Ts};
-use lithify_core::window::Window;
+use lithify_build::artifact::ArtifactName;
+use lithify_build::build::TableBuild;
+use lithify_build::sink::{Namespace, TablePath, UnsupportedColumn, WarehouseSql};
+use lithify_build::sql::SqlString;
+use lithify_schema::model::{ColumnType, TableId};
+use lithify_schema::ts::{Event, Replay, Ts};
+use lithify_schema::window::Window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Run {

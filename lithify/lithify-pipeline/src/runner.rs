@@ -6,15 +6,15 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::Serialize;
 use ulid::Ulid;
 
-use lithify_core::artifact::UnbuildableArtifact;
-use lithify_core::build::BuildContext;
-use lithify_core::listener::OutOfOrder;
-use lithify_core::model::TableId;
-use lithify_core::runner::Replayer;
-use lithify_core::sink::{Namespace, WarehouseClient};
-use lithify_core::ts::{Event, Replay, Ts};
-use lithify_core::warehouse_source::{ChangeLogs, SchemaChangeStream};
-use lithify_core::window::Window;
+use lithify_build::artifact::UnbuildableArtifact;
+use lithify_build::build::BuildContext;
+use lithify_build::runner::Replayer;
+use lithify_build::sink::{Namespace, WarehouseClient};
+use lithify_build::source::{ChangeLogs, SchemaChangeStream};
+use lithify_schema::listener::OutOfOrder;
+use lithify_schema::model::TableId;
+use lithify_schema::ts::{Event, Replay, Ts};
+use lithify_schema::window::Window;
 
 use crate::artifact::ArtifactControl;
 use crate::build_log::{BuildLog, Run, TableBuilt};

@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use lithify_core::sink::{Namespace, TablePath};
-use lithify_core::sql::SqlString;
+use lithify_build::sink::{Namespace, TablePath};
+use lithify_build::sql::SqlString;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(try_from = "WrittenConfig", into = "WrittenConfig")]

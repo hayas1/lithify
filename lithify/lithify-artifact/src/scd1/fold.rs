@@ -1,4 +1,4 @@
-use lithify_core::sql::SqlString;
+use lithify_build::sql::SqlString;
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct Fold {

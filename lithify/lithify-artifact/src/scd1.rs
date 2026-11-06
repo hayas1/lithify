@@ -2,19 +2,19 @@ use std::marker::PhantomData;
 
 use serde::Deserialize;
 
-use lithify_core::artifact::{Artifact, ArtifactBuilder, ArtifactName, UnbuildableArtifact};
-use lithify_core::build::Base;
-use lithify_core::era::{Bound, Era, EraTracker};
-use lithify_core::listener::{
+use lithify_build::artifact::{Artifact, ArtifactBuilder, ArtifactName, UnbuildableArtifact};
+use lithify_build::build::Base;
+use lithify_build::sink::{TablePath, Warehouse};
+use lithify_build::source::RowChangeLog;
+use lithify_build::sql::SqlString;
+use lithify_pipeline::schedule::Timeline;
+use lithify_schema::era::{Bound, Era, EraTracker};
+use lithify_schema::listener::{
     Alteration, ReplayEnd, SchemaChangeListener, TableAltered, TableCreated, TableRenamed,
 };
-use lithify_core::model::{ColumnModel, TableId, TableModel};
-use lithify_core::sink::{TablePath, Warehouse};
-use lithify_core::sql::SqlString;
-use lithify_core::ts::{Event, Ts};
-use lithify_core::warehouse_source::RowChangeLog;
-use lithify_core::window::Window;
-use lithify_pipeline::schedule::Timeline;
+use lithify_schema::model::{ColumnModel, TableId, TableModel};
+use lithify_schema::ts::{Event, Ts};
+use lithify_schema::window::Window;
 
 use lithify_pipeline::artifact::ArtifactControl;
 use lithify_pipeline::build_log::{BuildLog, Series};
@@ -425,20 +425,20 @@ mod tests {
         assert_eq!(scd1().window(&today, &until(2 * DAY)), None);
     }
 
-    use lithify_core::artifact::{Artifact, UnbuildableArtifact};
-    use lithify_core::era::Bound;
-    use lithify_core::event::{Hint, SchemaChange, TableChange};
-    use lithify_core::listener::Finish;
-    use lithify_core::listener::{CatalogModel, OutOfOrder};
-    use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
-    use lithify_core::position::Coordinate;
-    use lithify_core::sink::{TablePath, UnsupportedColumn};
-    use lithify_core::source::ColumnPath;
-    use lithify_core::table_listeners::{Encounter, TableListeners};
+    use lithify_build::artifact::{Artifact, UnbuildableArtifact};
+    use lithify_build::sink::{TablePath, UnsupportedColumn};
+    use lithify_schema::era::Bound;
+    use lithify_schema::event::{Hint, SchemaChange, TableChange};
+    use lithify_schema::listener::Finish;
+    use lithify_schema::listener::{CatalogModel, OutOfOrder};
+    use lithify_schema::model::{ColumnModel, ColumnType, TableId, TableModel};
+    use lithify_schema::position::Coordinate;
+    use lithify_schema::source::ColumnPath;
+    use lithify_schema::table_listeners::{Encounter, TableListeners};
     use lithify_testing::Engine;
 
-    use lithify_core::ts::Ts;
-    use lithify_core::window::Window;
+    use lithify_schema::ts::Ts;
+    use lithify_schema::window::Window;
 
     use lithify_testing::{Log, Offset, Untold};
 

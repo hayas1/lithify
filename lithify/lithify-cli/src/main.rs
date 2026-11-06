@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use chrono::NaiveDate;
 use clap::{Parser, Subcommand};
 
+use lithify_build::artifact::ArtifactName;
 #[cfg(feature = "serve")]
 use lithify_cli::artifacts::ArtifactConfig;
 use lithify_cli::command::{RunCommand, Target};
@@ -15,9 +16,8 @@ use lithify_cli::journal::Journal;
 use lithify_cli::pipeline::{CaptureConfig, WarehouseConfig};
 use lithify_cli::run::Run;
 use lithify_cli::unrunnable::Unrunnable;
-use lithify_core::artifact::ArtifactName;
-use lithify_core::ts::Ts;
 use lithify_protocol::sink::duckdb::store::{S3Credential, Secret};
+use lithify_schema::ts::Ts;
 #[cfg(feature = "serve")]
 use lithify_ui::pipelines::Survey;
 #[cfg(feature = "serve")]

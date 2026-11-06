@@ -1,7 +1,7 @@
 use std::fmt::Display;
 
-use lithify_core::window::Window;
 use lithify_pipeline::build_log::BuildLog;
+use lithify_schema::window::Window;
 
 use lithify_pipeline::check::Discrepancy;
 
@@ -53,10 +53,10 @@ impl Journal {
 mod tests {
     use chrono::DateTime;
 
-    use lithify_core::model::TableId;
-    use lithify_core::sink::TablePath;
-    use lithify_core::ts::Ts;
+    use lithify_build::sink::TablePath;
     use lithify_pipeline::build_log::{Run, Series, Status, TableBuilt};
+    use lithify_schema::model::TableId;
+    use lithify_schema::ts::Ts;
 
     use super::*;
 

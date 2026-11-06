@@ -1,13 +1,13 @@
 use chrono::DateTime;
 
-use lithify_core::sink::Namespace;
-use lithify_core::ts::{Replay, Ts};
+use lithify_build::sink::Namespace;
 use lithify_pipeline::Pipeline;
 use lithify_pipeline::build_log::Series;
 use lithify_pipeline::check::{Expectation, Inspecting, Uninspectable};
 use lithify_pipeline::materialization::Materialization;
 use lithify_pipeline::schedule::Timeline;
 use lithify_pipeline::warehouse::SinkWarehouse;
+use lithify_schema::ts::{Replay, Ts};
 use lithify_testing::pipeline::{
     ArtifactConfig, CaptureConfig, INFRA, Kept, configure, logged, scratch,
 };

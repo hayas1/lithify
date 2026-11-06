@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use lithify_core::ts::{Replay, Ts};
 use lithify_pipeline::build_log::{BuildLog, BuildLogQuery, Latest};
 use lithify_pipeline::check::{Inspecting, Inspection};
 use lithify_pipeline::infra::{Sink, Source};
@@ -11,6 +10,7 @@ use lithify_pipeline::pipelines::{PipelineLocation, Pipelines};
 use lithify_pipeline::schedule::Schedule;
 use lithify_pipeline::warehouse::{SinkWarehouse, WarehouseControl, WarehouseFn};
 use lithify_pipeline::{Declaration, Pipeline, Placing};
+use lithify_schema::ts::{Replay, Ts};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PipelineOverview {

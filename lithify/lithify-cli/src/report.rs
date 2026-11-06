@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use lithify_core::artifact::UnbuildableArtifact;
-use lithify_core::window::Window;
+use lithify_build::artifact::UnbuildableArtifact;
 use lithify_pipeline::build_log::{BuildLog, Series, TableBuilt};
 use lithify_pipeline::materialization::Materialization;
 use lithify_pipeline::runner::{BuildLogWrite, BuildLogWriter};
@@ -9,6 +8,7 @@ use lithify_pipeline::warehouse::WarehouseControl;
 use lithify_protocol::sink::bigquery::client::BigQueryExecution;
 use lithify_protocol::sink::duckdb::client::DuckDbExecution;
 use lithify_protocol::sink::execution::{Apply, DryRun};
+use lithify_schema::window::Window;
 
 use crate::journal::Journal;
 use crate::unrunnable::Unrunnable;
@@ -135,11 +135,11 @@ mod tests {
     use chrono::DateTime;
     use ulid::Ulid;
 
-    use lithify_core::model::TableId;
-    use lithify_core::sink::TablePath;
-    use lithify_core::sql::SqlString;
-    use lithify_core::ts::Ts;
+    use lithify_build::sink::TablePath;
+    use lithify_build::sql::SqlString;
     use lithify_pipeline::build_log::{Run, Status, TableBuilt};
+    use lithify_schema::model::TableId;
+    use lithify_schema::ts::Ts;
 
     use super::*;
 
