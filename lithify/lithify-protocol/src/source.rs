@@ -1,9 +1,9 @@
 pub mod debezium;
 
-use lithify_core::event::{MalformedEvent, SchemaChange};
-use lithify_core::model::TableId;
-use lithify_core::position::{Coordinate, Position};
-use lithify_core::source::ColumnPath;
+use lithify_schema::event::{MalformedEvent, SchemaChange};
+use lithify_schema::model::TableId;
+use lithify_schema::position::{Coordinate, Position};
+use lithify_schema::source::ColumnPath;
 
 pub trait CdcFormat {
     type Position: Position;

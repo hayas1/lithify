@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use lithify_core::sql::SqlString;
+use lithify_build::sql::SqlString;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Apply;

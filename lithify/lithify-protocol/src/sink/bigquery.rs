@@ -4,10 +4,10 @@ pub mod config;
 #[cfg(feature = "bigquery")]
 pub mod from_sql;
 
-use lithify_core::model::ColumnType;
-use lithify_core::sink::{ChangeLogSql, Namespace, TablePath, UnsupportedColumn, WarehouseSql};
-use lithify_core::source::ColumnPath;
-use lithify_core::sql::SqlString;
+use lithify_build::sink::{ChangeLogSql, Namespace, TablePath, UnsupportedColumn, WarehouseSql};
+use lithify_build::sql::SqlString;
+use lithify_schema::model::ColumnType;
+use lithify_schema::source::ColumnPath;
 
 use crate::landing::Landing;
 use crate::source::CdcFormat;
@@ -171,13 +171,13 @@ mod tests {
     use crate::source::debezium::mysql::MySql;
 
     use chrono::DateTime;
-    use lithify_core::model::{ColumnType, TableId};
-    use lithify_core::sink::{ChangeLogSql, TablePath, UnsupportedColumn};
-    use lithify_core::ts::Ts;
-    use lithify_core::window::Window;
+    use lithify_build::sink::{ChangeLogSql, TablePath, UnsupportedColumn};
     use lithify_pipeline::build_log::{
         BuildLog, BuildLogQuery, Latest, Run, Series, Status, TableBuilt,
     };
+    use lithify_schema::model::{ColumnType, TableId};
+    use lithify_schema::ts::Ts;
+    use lithify_schema::window::Window;
     use ulid::Ulid;
 
     fn bigquery() -> BigQueryWarehouse {

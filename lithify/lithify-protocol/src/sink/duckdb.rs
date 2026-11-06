@@ -6,10 +6,10 @@ pub mod from_sql;
 #[cfg(feature = "duckdb")]
 pub mod store;
 
-use lithify_core::model::ColumnType;
-use lithify_core::sink::{ChangeLogSql, Namespace, TablePath, UnsupportedColumn, WarehouseSql};
-use lithify_core::source::ColumnPath;
-use lithify_core::sql::SqlString;
+use lithify_build::sink::{ChangeLogSql, Namespace, TablePath, UnsupportedColumn, WarehouseSql};
+use lithify_build::sql::SqlString;
+use lithify_schema::model::ColumnType;
+use lithify_schema::source::ColumnPath;
 
 use crate::landing::Landing;
 use crate::source::CdcFormat;
@@ -243,10 +243,10 @@ mod tests {
     use crate::sink::duckdb::config::tests::s3;
     use crate::source::debezium::Debezium;
     use crate::source::debezium::mysql::MySql;
-    use lithify_core::model::ColumnModel;
-    use lithify_core::position::Coordinate;
-    use lithify_core::ts::Ts;
-    use lithify_core::window::Window;
+    use lithify_schema::model::ColumnModel;
+    use lithify_schema::position::Coordinate;
+    use lithify_schema::ts::Ts;
+    use lithify_schema::window::Window;
 
     fn read(column_type: ColumnType) -> SqlString {
         DuckDbWarehouse::new("mysql_shop_cdc")
@@ -273,10 +273,10 @@ mod tests {
         let warehouse = DuckDbWarehouse::new("mysql_shop_cdc");
 
         assert_eq!(
-            Coordinate::Text("binlog.000002".to_owned()).sql(&warehouse),
+            warehouse.coordinate(&Coordinate::Text("binlog.000002".to_owned())),
             "'binlog.000002'"
         );
-        assert_eq!(Coordinate::Number(448).sql(&warehouse), "448");
+        assert_eq!(warehouse.coordinate(&Coordinate::Number(448)), "448");
     }
 
     #[test]

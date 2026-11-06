@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::build_log::BuildLog;
-use lithify_core::model::TableId;
-use lithify_core::ts::{Event, Ts};
-use lithify_core::window::Window;
+use lithify_schema::model::TableId;
+use lithify_schema::ts::{Event, Ts};
+use lithify_schema::window::Window;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Progress {
@@ -105,7 +105,7 @@ mod tests {
     use ulid::Ulid;
 
     use crate::build_log::{Run, Series, Status, TableBuilt};
-    use lithify_core::sink::TablePath;
+    use lithify_build::sink::TablePath;
 
     use super::*;
 

@@ -2,15 +2,15 @@ use std::collections::BTreeSet;
 
 use proptest::prelude::*;
 
-use lithify_core::artifact::UnbuildableArtifact;
-use lithify_core::build::{Base, BuildContext, TableBuild};
-use lithify_core::event::{SchemaChange, TableChange};
-use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
-use lithify_core::runner::Replayer;
-use lithify_core::sink::{Namespace, TablePath};
-use lithify_core::source::SchemaHistory;
-use lithify_core::ts::{Event, Ts};
-use lithify_core::window::Window;
+use lithify_build::artifact::UnbuildableArtifact;
+use lithify_build::build::{Base, BuildContext, TableBuild};
+use lithify_build::runner::Replayer;
+use lithify_build::sink::{Namespace, TablePath};
+use lithify_schema::event::{SchemaChange, TableChange};
+use lithify_schema::model::{ColumnModel, ColumnType, TableId, TableModel};
+use lithify_schema::source::SchemaHistory;
+use lithify_schema::ts::{Event, Ts};
+use lithify_schema::window::Window;
 use lithify_testing::artifact::Mirror;
 use lithify_testing::{ColumnDdl, Engine, Log, Offset, Replica, Untold};
 

@@ -4,8 +4,8 @@ use std::ops::Range;
 use chrono::{DateTime, NaiveDate, NaiveTime, TimeDelta, TimeZone, Utc};
 use chrono_tz::Tz;
 
-use lithify_core::ts::{Event, Ts};
-use lithify_core::window::Window;
+use lithify_schema::ts::{Event, Ts};
+use lithify_schema::window::Window;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Schedule {

@@ -2,11 +2,11 @@ use std::collections::BTreeSet;
 
 use lithify_artifact::shard::Shard;
 use lithify_artifact::snapshot::Snapshot;
-use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
-use lithify_core::sink::Namespace;
-use lithify_core::ts::{Event, Ts};
-use lithify_core::window::Window;
+use lithify_build::sink::Namespace;
 use lithify_pipeline::build_log::{BuildLog, Status};
+use lithify_schema::model::{ColumnModel, ColumnType, TableId, TableModel};
+use lithify_schema::ts::{Event, Ts};
+use lithify_schema::window::Window;
 use lithify_testing::{Replica, Shards};
 
 const DAY: i64 = 86_400_000;

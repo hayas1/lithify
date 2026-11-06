@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use lithify_core::sink::Namespace;
+use lithify_build::sink::Namespace;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

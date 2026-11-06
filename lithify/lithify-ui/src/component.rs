@@ -2,9 +2,9 @@ use chrono::DateTime;
 use chrono_tz::Tz;
 use leptos::prelude::*;
 
-use lithify_core::model::TableId;
 use lithify_pipeline::build_log::{BuildLog, Status};
 use lithify_pipeline::schedule::Schedule;
+use lithify_schema::model::TableId;
 
 use lithify_pipeline::pipelines::PipelineLocation;
 
@@ -460,10 +460,10 @@ mod tests {
     use chrono::DateTime;
     use ulid::Ulid;
 
-    use lithify_core::sink::TablePath;
-    use lithify_core::ts::Ts;
-    use lithify_core::window::Window;
+    use lithify_build::sink::TablePath;
     use lithify_pipeline::build_log::{Run, Series, TableBuilt};
+    use lithify_schema::ts::Ts;
+    use lithify_schema::window::Window;
 
     use super::*;
     use lithify_testing::pipeline::Kept;

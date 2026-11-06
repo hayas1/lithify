@@ -1,5 +1,5 @@
-use lithify_core::sink::WarehouseClient;
-use lithify_core::source::{ChangeLogs, SchemaChangeStream};
+use lithify_build::sink::WarehouseClient;
+use lithify_build::source::{ChangeLogs, SchemaChangeStream};
 
 // The client stays a parameter of the traits rather than of their methods: a capture can hand only
 // a client of a warehouse it knows logs that warehouse decodes, a bound only the impl for that

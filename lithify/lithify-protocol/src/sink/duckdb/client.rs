@@ -2,11 +2,11 @@ use duckdb::types::{FromSql, Type};
 use duckdb::{Connection, Error, Statement};
 use lithify_pipeline::warehouse::WarehouseControl;
 
-use lithify_core::sink::{ChangeLogSql, Namespace, TablePath, WarehouseClient, WarehouseSql};
-use lithify_core::source::{SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed};
-use lithify_core::sql::SqlString;
-use lithify_core::window::Window;
+use lithify_build::sink::{ChangeLogSql, Namespace, TablePath, WarehouseClient, WarehouseSql};
+use lithify_build::source::{SchemaChangeLog, SchemaChangeStream, SchemaChanges, Streamed};
+use lithify_build::sql::SqlString;
 use lithify_pipeline::build_log::{BuildLogQuery, BuildLogRow};
+use lithify_schema::window::Window;
 
 use crate::sink::duckdb::DuckDbWarehouse;
 use crate::sink::execution::{Apply, DryRun};
@@ -182,18 +182,18 @@ mod tests {
     use crate::source::debezium::mysql::MySql;
     use crate::source::debezium::tests::described;
     use chrono::DateTime;
-    use lithify_core::artifact::UnbuildableArtifact;
-    use lithify_core::event::{MalformedEvent, SchemaChange};
-    use lithify_core::listener::OutOfOrder;
-    use lithify_core::model::TableId;
-    use lithify_core::position::{Coordinate, Position};
-    use lithify_core::sink::TablePath;
-    use lithify_core::source::{ChangeLog, ColumnPath};
-    use lithify_core::ts::Ts;
+    use lithify_build::artifact::UnbuildableArtifact;
+    use lithify_build::sink::TablePath;
     use lithify_pipeline::build_log::Latest;
     use lithify_pipeline::build_log::{
         BuildLog, Run, Series, Status, TableBuilt, UnreadableBuildLog,
     };
+    use lithify_schema::event::{MalformedEvent, SchemaChange};
+    use lithify_schema::listener::OutOfOrder;
+    use lithify_schema::model::TableId;
+    use lithify_schema::position::{Coordinate, Position};
+    use lithify_schema::source::{ChangeLog, ColumnPath};
+    use lithify_schema::ts::Ts;
     use ulid::Ulid;
 
     const CHANGE_LOG: &str = include_str!("../../../testdata/sink/duckdb/client/change_log.sql");

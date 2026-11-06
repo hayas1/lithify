@@ -3,18 +3,18 @@ use std::marker::PhantomData;
 use chrono_tz::Tz;
 use serde::Deserialize;
 
-use lithify_core::artifact::{Artifact, ArtifactBuilder, ArtifactName, UnbuildableArtifact};
-use lithify_core::build::Base;
-use lithify_core::era::{Bound, Era, EraTracker};
-use lithify_core::listener::{
+use lithify_build::artifact::{Artifact, ArtifactBuilder, ArtifactName, UnbuildableArtifact};
+use lithify_build::build::Base;
+use lithify_build::sink::{Namespace, TablePath, Warehouse};
+use lithify_build::source::RowChangeLog;
+use lithify_build::sql::SqlString;
+use lithify_pipeline::schedule::{Schedule, Timeline};
+use lithify_schema::era::{Bound, Era, EraTracker};
+use lithify_schema::listener::{
     Alteration, ReplayEnd, SchemaChangeListener, TableAltered, TableCreated, TableRenamed,
 };
-use lithify_core::model::TableId;
-use lithify_core::sink::{Namespace, TablePath, Warehouse};
-use lithify_core::source::RowChangeLog;
-use lithify_core::sql::SqlString;
-use lithify_core::window::Window;
-use lithify_pipeline::schedule::{Schedule, Timeline};
+use lithify_schema::model::TableId;
+use lithify_schema::window::Window;
 
 use lithify_pipeline::artifact::ArtifactControl;
 use lithify_pipeline::build_log::{BuildLog, Series};
@@ -355,11 +355,11 @@ impl<L: RowChangeLog, W: Warehouse> ArtifactBuilder<L::Position> for Scd2Builder
 
 #[cfg(test)]
 mod tests {
-    use lithify_core::event::{SchemaChange, TableChange};
-    use lithify_core::listener::{CatalogModel, OutOfOrder};
-    use lithify_core::model::{ColumnModel, ColumnType, TableModel};
-    use lithify_core::ts::Ts;
     use lithify_pipeline::schedule::Timeline;
+    use lithify_schema::event::{SchemaChange, TableChange};
+    use lithify_schema::listener::{CatalogModel, OutOfOrder};
+    use lithify_schema::model::{ColumnModel, ColumnType, TableModel};
+    use lithify_schema::ts::Ts;
     use lithify_testing::Engine;
 
     use super::*;

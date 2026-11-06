@@ -1,12 +1,12 @@
-use lithify_core::artifact::UnbuildableArtifact;
-use lithify_core::build::{Base, TableBuild};
-use lithify_core::model::TableId;
-use lithify_core::sink::TablePath;
-use lithify_core::sql::SqlString;
-use lithify_core::ts::Ts;
-use lithify_core::window::Window;
+use lithify_build::artifact::UnbuildableArtifact;
+use lithify_build::build::{Base, TableBuild};
+use lithify_build::sink::TablePath;
+use lithify_build::sql::SqlString;
 use lithify_pipeline::build_log::Status;
 use lithify_pipeline::warehouse::WarehouseControl;
+use lithify_schema::model::TableId;
+use lithify_schema::ts::Ts;
+use lithify_schema::window::Window;
 use lithify_testing::{Engine, Recorder};
 
 fn people(base: Base, making: Result<Vec<SqlString>, UnbuildableArtifact>) -> TableBuild {

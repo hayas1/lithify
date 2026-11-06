@@ -1,5 +1,5 @@
 [package]
-name = "lithify-core"
+name = "lithify-schema"
 version.workspace = true
 description.workspace = true
 authors.workspace = true
@@ -10,11 +10,7 @@ readme.workspace = true
 
 [dependencies]
 chrono = { workspace = true, features = ["clock"] }
-serde = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-lithify-testing = { workspace = true }
-proptest = { workspace = true }
-tokio = { workspace = true, features = ["macros"] }
 tracing-subscriber = { workspace = true }

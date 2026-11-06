@@ -1,8 +1,8 @@
 use sqlparser::ast::{AlterTable, AlterTableOperation, ObjectName, RenameTableNameKind, Statement};
 use sqlparser::parser::Parser;
 
-use lithify_core::event::Hint;
-use lithify_core::model::TableId;
+use lithify_schema::event::Hint;
+use lithify_schema::model::TableId;
 
 pub struct RenameReader<S> {
     dialect: S,

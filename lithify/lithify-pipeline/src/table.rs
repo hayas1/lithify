@@ -3,8 +3,8 @@ use std::fmt::{self, Display, Formatter};
 
 use serde::{Deserialize, Serialize};
 
-use lithify_core::artifact::ArtifactName;
-use lithify_core::model::TableId;
+use lithify_build::artifact::ArtifactName;
+use lithify_schema::model::TableId;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

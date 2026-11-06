@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use lithify_core::event::{Hint, SchemaChange, TableChange};
-use lithify_core::model::{
+use lithify_schema::event::{Hint, SchemaChange, TableChange};
+use lithify_schema::model::{
     ColumnModel, ColumnName, ColumnType, PrimaryKeyColumn, TableId, TableModel,
 };
-use lithify_core::source::SchemaHistory;
-use lithify_core::ts::{Event, Ts};
-use lithify_core::window::Window;
+use lithify_schema::source::SchemaHistory;
+use lithify_schema::ts::{Event, Ts};
+use lithify_schema::window::Window;
 
 use crate::change_log::Offset;
 
@@ -662,7 +662,7 @@ impl Placed {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lithify_core::event::{Hint, SchemaChange, TableChange};
+    use lithify_schema::event::{Hint, SchemaChange, TableChange};
 
     fn at(millis: i64) -> Ts<Event> {
         Ts::try_from(millis).unwrap()

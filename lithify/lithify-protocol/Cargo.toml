@@ -10,7 +10,8 @@ readme.workspace = true
 
 [dependencies]
 duckdb = { workspace = true, optional = true }
-lithify-core = { workspace = true }
+lithify-build = { workspace = true }
+lithify-schema = { workspace = true }
 lithify-pipeline = { workspace = true }
 google-cloud-auth = { workspace = true, optional = true }
 google-cloud-bigquery = { workspace = true, optional = true }

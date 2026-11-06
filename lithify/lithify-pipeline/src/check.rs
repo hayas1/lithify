@@ -3,10 +3,10 @@ use std::fmt::{self, Display, Formatter};
 
 use serde::Serialize;
 
-use lithify_core::model::TableId;
-use lithify_core::sink::TablePath;
-use lithify_core::ts::{Event, Replay, Ts};
-use lithify_core::window::Window;
+use lithify_build::sink::TablePath;
+use lithify_schema::model::TableId;
+use lithify_schema::ts::{Event, Replay, Ts};
+use lithify_schema::window::Window;
 
 use crate::build_log::{BuildLog, Latest, UnreadableBuildLog};
 use crate::infra::{Sink, Source};

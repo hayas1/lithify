@@ -1,9 +1,11 @@
 use std::fmt;
 
-use crate::model::{ColumnModel, ColumnName, ColumnType};
-use crate::source::{ColumnPath, SchemaChangeLog};
+use crate::source::SchemaChangeLog;
 use crate::sql::SqlString;
-use crate::window::Window;
+use lithify_schema::model::{ColumnModel, ColumnName, ColumnType};
+use lithify_schema::position::Coordinate;
+use lithify_schema::source::ColumnPath;
+use lithify_schema::window::Window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnsupportedColumn {
@@ -135,6 +137,13 @@ pub trait WarehouseSql {
 
     fn literal(&self, text: &str) -> SqlString {
         SqlString::from(format!("'{}'", text.replace('\'', "''")))
+    }
+
+    fn coordinate(&self, coordinate: &Coordinate) -> SqlString {
+        match coordinate {
+            Coordinate::Text(text) => self.literal(text),
+            Coordinate::Number(number) => SqlString::from(number.to_string()),
+        }
     }
 
     fn timestamp_millis(&self, milliseconds: i64) -> SqlString;

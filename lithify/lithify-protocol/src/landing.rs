@@ -1,8 +1,9 @@
-use lithify_core::event::{MalformedEvent, SchemaChange};
-use lithify_core::model::TableId;
-use lithify_core::position::Coordinate;
-use lithify_core::sink::{ChangeLogSql, Namespace, TablePath};
-use lithify_core::source::{ChangeLog, ChangeLogs, ColumnPath, RowChangeLog, SchemaChangeLog};
+use lithify_build::sink::{ChangeLogSql, Namespace, TablePath};
+use lithify_build::source::{ChangeLogs, RowChangeLog, SchemaChangeLog};
+use lithify_schema::event::{MalformedEvent, SchemaChange};
+use lithify_schema::model::TableId;
+use lithify_schema::position::Coordinate;
+use lithify_schema::source::{ChangeLog, ColumnPath};
 
 use crate::source::CdcFormat;
 

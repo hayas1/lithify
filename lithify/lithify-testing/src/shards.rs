@@ -3,15 +3,15 @@ use duckdb::Connection;
 use duckdb::types::Value;
 use ulid::Ulid;
 
-use lithify_core::model::ColumnName;
-use lithify_core::sink::{Namespace, WarehouseClient};
-use lithify_core::ts::Ts;
-use lithify_core::window::Window;
+use lithify_build::sink::{Namespace, WarehouseClient};
 use lithify_pipeline::artifact::ArtifactControl;
 use lithify_pipeline::build_log::{BuildLog, Run, Status};
 use lithify_pipeline::runner::Runner;
 use lithify_protocol::DuckDbWarehouse;
 use lithify_protocol::sink::duckdb::client::DuckDbClient;
+use lithify_schema::model::ColumnName;
+use lithify_schema::ts::Ts;
+use lithify_schema::window::Window;
 
 use crate::landing::ReplicaLanding;
 use crate::replica::{CellValue, Replica, Row};

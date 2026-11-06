@@ -2,15 +2,15 @@ use std::collections::BTreeMap;
 
 use chrono::NaiveDate;
 
-use lithify_core::artifact::ArtifactName;
-use lithify_core::sink::WarehouseClient;
-use lithify_core::window::Window;
+use lithify_build::artifact::ArtifactName;
+use lithify_build::sink::WarehouseClient;
 use lithify_pipeline::build_log::Series;
 use lithify_pipeline::capture::Capture;
 use lithify_pipeline::infra::Sink;
 use lithify_pipeline::materialization::Materialization;
 use lithify_pipeline::stepping::Stepping;
 use lithify_pipeline::warehouse::WarehouseControl;
+use lithify_schema::window::Window;
 
 use crate::artifacts::ArtifactConfig;
 use crate::journal::Journal;
@@ -162,17 +162,17 @@ impl Target {
 #[cfg(test)]
 pub(crate) mod tests {
     use crate::pipeline::CaptureConfig;
-    use lithify_core::sql::SqlString;
+    use lithify_build::sql::SqlString;
     use lithify_pipeline::Pipeline;
     use lithify_pipeline::check::Expectation;
     use lithify_pipeline::runner::BuildLogWrite;
     use lithify_protocol::sink::duckdb::client::DuckDbClient;
 
     use super::*;
-    use lithify_core::ts::Ts;
+    use lithify_schema::ts::Ts;
 
     use crate::step::tests::{CAPTURE, PEOPLE, at, built_before, logged, pipeline, rows};
-    use lithify_core::sink::WarehouseClient;
+    use lithify_build::sink::WarehouseClient;
     use lithify_pipeline::schedule::Schedule;
     use lithify_pipeline::schedule::Timeline;
 
@@ -1740,9 +1740,9 @@ mod derived {
         )
         .await
         .unwrap();
-        let untouched = !lithify_core::sink::WarehouseClient::exists(
+        let untouched = !lithify_build::sink::WarehouseClient::exists(
             &client,
-            &lithify_core::sink::TablePath::new("mysql_shop_instant", "_lithify_log"),
+            &lithify_build::sink::TablePath::new("mysql_shop_instant", "_lithify_log"),
         )
         .await
         .unwrap();
@@ -1782,11 +1782,11 @@ mod derived {
         .unwrap();
 
         assert!(
-            !lithify_core::sink::WarehouseClient::exists(
+            !lithify_build::sink::WarehouseClient::exists(
                 &client,
-                &lithify_pipeline::build_log::BuildLog::path(&lithify_core::sink::Namespace::from(
-                    "mysql_shop_instant"
-                )),
+                &lithify_pipeline::build_log::BuildLog::path(
+                    &lithify_build::sink::Namespace::from("mysql_shop_instant")
+                ),
             )
             .await
             .unwrap()

@@ -11,7 +11,8 @@ readme.workspace = true
 [dependencies]
 chrono = { workspace = true, features = ["clock", "serde"] }
 chrono-tz = { workspace = true }
-lithify-core = { workspace = true }
+lithify-build = { workspace = true }
+lithify-schema = { workspace = true }
 semigroup = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

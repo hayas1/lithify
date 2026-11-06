@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use lithify_core::sink::OpenWarehouse;
-use lithify_core::ts::{Replay, Ts};
+use lithify_build::sink::OpenWarehouse;
 use lithify_pipeline::Pipeline;
 use lithify_pipeline::infra::{Sink, Source};
 use lithify_pipeline::runner::BuildLogWrite;
@@ -11,6 +10,7 @@ use lithify_protocol::sink::duckdb::client::DuckDbClient;
 use lithify_protocol::sink::duckdb::config::Config;
 use lithify_protocol::sink::{bigquery, duckdb};
 use lithify_protocol::{BigQueryWarehouse, DuckDbWarehouse};
+use lithify_schema::ts::{Replay, Ts};
 
 use crate::artifacts::ArtifactConfig;
 use crate::command::RunCommand;

@@ -12,7 +12,8 @@ members = [
     "lithify-cli",
     "lithify-e2e",
     "lithify-pipeline",
-    "lithify-core",
+    "lithify-schema",
+    "lithify-build",
     "lithify-protocol",
     "lithify-artifact",
     "lithify-testing",
@@ -23,7 +24,8 @@ resolver = "3"
 [workspace.dependencies]
 lithify-cli = { version = "0.1.0", path = "lithify-cli" }
 lithify-pipeline = { version = "0.1.0", path = "lithify-pipeline" }
-lithify-core = { version = "0.1.0", path = "lithify-core" }
+lithify-schema = { version = "0.1.0", path = "lithify-schema" }
+lithify-build = { version = "0.1.0", path = "lithify-build" }
 lithify-protocol = { version = "0.1.0", path = "lithify-protocol" }
 lithify-artifact = { version = "0.1.0", path = "lithify-artifact" }
 lithify-testing = { path = "lithify-testing" }

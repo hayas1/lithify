@@ -4,13 +4,13 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use ulid::Ulid;
 
-use lithify_core::model::TableId;
-use lithify_core::sink::{Namespace, TablePath};
-use lithify_core::ts::Ts;
-use lithify_core::window::Window;
+use lithify_build::sink::{Namespace, TablePath};
 use lithify_pipeline::build_log::{BuildLog, Run, Series, Status, TableBuilt};
 use lithify_pipeline::warehouse::{SinkWarehouse, WarehouseFn};
 use lithify_pipeline::{Placed, Places, Placing};
+use lithify_schema::model::TableId;
+use lithify_schema::ts::Ts;
+use lithify_schema::window::Window;
 
 use crate::{Engine, Recorder};
 

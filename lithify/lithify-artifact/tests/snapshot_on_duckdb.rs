@@ -4,19 +4,19 @@ use duckdb::Connection;
 
 use lithify_artifact::shard::Shard;
 use lithify_artifact::snapshot::Snapshot;
-use lithify_core::artifact::{Artifact, UnbuildableArtifact};
-use lithify_core::build::{Base, BuildContext};
-use lithify_core::listener::OutOfOrder;
-use lithify_core::listener::ReplayEnd;
-use lithify_core::model::{ColumnModel, ColumnType, TableId, TableModel};
-use lithify_core::runner::Replayer;
-use lithify_core::sink::{Namespace, TablePath, WarehouseClient, WarehouseSql};
-use lithify_core::source::SchemaChangeStream;
-use lithify_core::sql::SqlString;
-use lithify_core::ts::Ts;
-use lithify_core::window::Window;
+use lithify_build::artifact::{Artifact, UnbuildableArtifact};
+use lithify_build::build::{Base, BuildContext};
+use lithify_build::runner::Replayer;
+use lithify_build::sink::{Namespace, TablePath, WarehouseClient, WarehouseSql};
+use lithify_build::source::SchemaChangeStream;
+use lithify_build::sql::SqlString;
 use lithify_protocol::sink::duckdb::client::DuckDbClient;
 use lithify_protocol::{Debezium, DuckDbWarehouse, Landed, MySql, S3Sink};
+use lithify_schema::listener::OutOfOrder;
+use lithify_schema::listener::ReplayEnd;
+use lithify_schema::model::{ColumnModel, ColumnType, TableId, TableModel};
+use lithify_schema::ts::Ts;
+use lithify_schema::window::Window;
 
 const CHANGE_LOG: &str = include_str!("../testdata/snapshot_on_duckdb/change_log.sql");
 

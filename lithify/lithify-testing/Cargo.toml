@@ -14,7 +14,8 @@ chrono = { workspace = true }
 duckdb = { workspace = true }
 lithify-cli = { workspace = true }
 lithify-pipeline = { workspace = true }
-lithify-core = { workspace = true }
+lithify-build = { workspace = true }
+lithify-schema = { workspace = true }
 lithify-protocol = { workspace = true, features = ["duckdb"] }
 serde = { workspace = true }
 ulid = { workspace = true }

@@ -6,9 +6,8 @@ use lithify_artifact::scd1::Scd1;
 use lithify_artifact::scd2::Scd2;
 use lithify_artifact::snapshot::Snapshot;
 use lithify_artifact::snapshot_provide::SnapshotProvide;
-use lithify_core::artifact::{Artifact, ArtifactName};
-use lithify_core::sink::WarehouseClient;
-use lithify_core::window::Window;
+use lithify_build::artifact::{Artifact, ArtifactName};
+use lithify_build::sink::WarehouseClient;
 use lithify_pipeline::Declaration;
 use lithify_pipeline::artifact::ArtifactControl;
 use lithify_pipeline::build_log::Series;
@@ -18,6 +17,7 @@ use lithify_pipeline::materialization::Materialization;
 use lithify_pipeline::progress::Step;
 use lithify_pipeline::runner::BuildLogWriter;
 use lithify_pipeline::warehouse::WarehouseControl;
+use lithify_schema::window::Window;
 
 use crate::pipeline::CaptureConfig;
 use lithify_pipeline::schedule::Schedule;
@@ -177,17 +177,17 @@ impl Declared {
 mod tests {
     use std::path::Path;
 
-    use lithify_core::model::TableId;
-    use lithify_core::sink::TablePath;
-    use lithify_core::window::Window;
+    use lithify_build::sink::TablePath;
     use lithify_pipeline::Pipeline;
+    use lithify_schema::model::TableId;
+    use lithify_schema::window::Window;
 
     use super::*;
     use crate::pipeline::CaptureConfig;
 
-    use lithify_core::ts::Ts;
     use lithify_pipeline::infra::Miswiring;
     use lithify_pipeline::{Cause, Misdeclaring};
+    use lithify_schema::ts::Ts;
 
     use crate::step::tests::{ARTIFACTS, INFRA, opened, opening};
 

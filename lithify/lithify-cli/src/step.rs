@@ -2,9 +2,7 @@
 pub(crate) mod tests {
     use duckdb::Connection;
 
-    use lithify_core::sink::{Namespace, TablePath, WarehouseClient};
-    use lithify_core::ts::Ts;
-    use lithify_core::window::Window;
+    use lithify_build::sink::{Namespace, TablePath, WarehouseClient};
     use lithify_pipeline::Pipeline;
     use lithify_pipeline::artifact::ArtifactControl;
     use lithify_pipeline::capture::Capture;
@@ -12,23 +10,25 @@ pub(crate) mod tests {
     use lithify_pipeline::warehouse::WarehouseControl;
     use lithify_protocol::DuckDbWarehouse;
     use lithify_protocol::sink::duckdb::client::DuckDbClient;
+    use lithify_schema::ts::Ts;
+    use lithify_schema::window::Window;
 
     use chrono::{DateTime, Utc};
     use ulid::Ulid;
 
-    use lithify_core::sql::SqlString;
+    use lithify_build::sql::SqlString;
 
     use crate::artifacts::ArtifactConfig;
     use crate::pipeline::{CaptureConfig, WarehouseConfig};
     use crate::unrunnable::Unrunnable;
     use lithify_artifact::snapshot::Snapshot;
-    use lithify_core::artifact::UnbuildableArtifact;
-    use lithify_core::model::TableId;
+    use lithify_build::artifact::UnbuildableArtifact;
     use lithify_pipeline::build_log::{BuildLog, Latest, Run, Series, Status, TableBuilt};
     use lithify_pipeline::infra::Sink;
     use lithify_pipeline::runner::BuildLogWrite;
     use lithify_pipeline::table;
     use lithify_protocol::sink::execution::DryRun;
+    use lithify_schema::model::TableId;
 
     const CHANGE_LOGS: &str = include_str!("../testdata/step/change_logs.sql");
 

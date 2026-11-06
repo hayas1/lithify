@@ -4,12 +4,12 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::build::Base;
-use crate::listener::{ReplayEnd, SchemaChangeListener};
-use crate::model::TableId;
 use crate::sink::{TablePath, UnsupportedColumn, Warehouse};
 use crate::source::RowChangeLog;
 use crate::sql::SqlString;
-use crate::window::Window;
+use lithify_schema::listener::{ReplayEnd, SchemaChangeListener};
+use lithify_schema::model::TableId;
+use lithify_schema::window::Window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnbuildableArtifact {

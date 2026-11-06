@@ -5,7 +5,7 @@ use std::str::FromStr;
 
 use serde::Deserialize;
 
-use lithify_core::model::TableId;
+use lithify_schema::model::TableId;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
