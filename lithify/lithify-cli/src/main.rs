@@ -9,13 +9,14 @@ use clap::{Parser, Subcommand};
 use lithify_build::artifact::ArtifactName;
 #[cfg(feature = "serve")]
 use lithify_cli::artifacts::ArtifactConfig;
-use lithify_cli::command::{RunCommand, Target};
+use lithify_cli::command::RunCommand;
 use lithify_cli::credential::Credentials;
 use lithify_cli::journal::Journal;
 #[cfg(feature = "serve")]
 use lithify_cli::pipeline::{CaptureConfig, WarehouseConfig};
 use lithify_cli::run::Run;
 use lithify_cli::unrunnable::Unrunnable;
+use lithify_pipeline::stepping::Target;
 use lithify_protocol::sink::duckdb::store::{S3Credential, Secret};
 use lithify_schema::ts::Ts;
 #[cfg(feature = "serve")]

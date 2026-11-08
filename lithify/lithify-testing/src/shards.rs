@@ -22,7 +22,10 @@ pub struct Shards {
 
 impl Shards {
     pub async fn over(replica: &Replica) -> Self {
-        let warehouse = DuckDbWarehouse::new("cdc");
+        Self::landed(replica, DuckDbWarehouse::new("cdc")).await
+    }
+
+    pub async fn landed(replica: &Replica, warehouse: DuckDbWarehouse) -> Self {
         let landing = ReplicaLanding::of(replica).create(&warehouse);
         let client = DuckDbClient::new(Connection::open_in_memory().unwrap(), warehouse);
         client.execute(&landing).await.unwrap();
@@ -68,6 +71,10 @@ impl Shards {
             .into_iter()
             .map(|built| built.logged(&run, &artifact.series()))
             .collect()
+    }
+
+    pub fn client(&self) -> &DuckDbClient {
+        &self.client
     }
 
     pub fn columns(&self, built: &BuildLog) -> Vec<String> {

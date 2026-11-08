@@ -3,6 +3,7 @@
 
 pub mod artifact;
 pub mod change_log;
+pub mod deployment;
 pub mod engine;
 pub mod landing;
 pub mod pipeline;
@@ -11,6 +12,7 @@ pub mod replica;
 pub mod shards;
 
 pub use change_log::{Log, Offset, Untold};
+pub use deployment::Deployment;
 pub use engine::Engine;
 pub use landing::ReplicaLanding;
 pub use recorder::Recorder;
