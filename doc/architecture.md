@@ -10,10 +10,10 @@ How the code is laid out and the rules it keeps, as opposed to the [design](desi
 | `lithify-build` | The data plane, built on `lithify-schema`: the SQL a warehouse speaks, where a change log landed in it and how schema changes are read from it, the `Artifact` trait, and planning what one window builds of each table, without waiting on a warehouse |
 | `lithify-artifact` | One module for each kind of artifact, each naming its tables and building them from what the replay tells it, and saying which window it builds and what it folds onto |
 | `lithify-protocol` | The change log formats, how a sink connector lands them, and the warehouses lithify reads and writes, the build log among what they hold |
-| `lithify-pipeline` | The control plane, generic over the kinds of capture, warehouse and artifact it is given: reading and listing pipelines, the schedule and the days it cuts, the build log, stepping a series window by window, running what the data plane plans, and checking a sink |
-| `lithify-cli` | The one place that lists every kind, as enums of the configuration it accepts, and the commands |
+| `lithify-pipeline` | The control plane, generic over the kinds of capture, warehouse and artifact it is given: reading and listing pipelines, the schedule and the days it cuts, the build log, stepping a series window by window and catching a sink up, running what the data plane plans, and checking a sink |
+| `lithify-cli` | The one place that lists every kind, as enums of the configuration it accepts, and the commands, which read what they are given and report what came of it |
 | `lithify-ui` | Pages showing what the build log holds, shaped from what `lithify-pipeline` reads |
-| `lithify-testing` | What `cargo test` of the other crates builds on, as a dev-dependency alone: a replica of a source database and its history as the oracle, its change log landed in an in-memory DuckDB as Debezium would land it, the shards an artifact builds over it, and stand-ins for a change log, a warehouse and a pipeline |
+| `lithify-testing` | What `cargo test` of the other crates builds on, as a dev-dependency alone: a replica of a source database and its history as the oracle, its change log landed in an in-memory DuckDB as Debezium would land it, the shards an artifact builds over it, a pipeline deployed over it and caught up there as the command line would, and stand-ins for a change log, a warehouse and a pipeline |
 | `lithify-e2e` | Scenarios run against a pipeline on real services, for what `cargo test` cannot hold: what Debezium and the sinks actually write, the store, BigQuery, and the command line from end to end |
 
 ### How the crates depend on one another
@@ -99,7 +99,8 @@ The data plane names no build log, no schedule and no status, and each trait of 
 ### Only the command line lists the kinds
 
 The command line is the one crate that enumerates the kinds of capture, dialect, warehouse, landing and artifact, as the enums of the configuration it accepts.
-The pipeline crate states what each kind must do as a trait, such as `Capture`, `SinkWarehouse`, `Placing` and `Declaration`, and the protocol and artifact crates implement them for each kind without listing them.
+The pipeline crate states what each kind must do as a trait, such as `Capture`, `SinkWarehouse`, `Placing`, `Declaration` and `Declare`, and the protocol and artifact crates implement them for each kind without listing them.
+Where the pipeline needs the kind itself, it hands a function over it rather than naming it: `Declare` calls an `ArtifactFn` with the artifact a declaration makes, so `Stepping` steps and catches a sink up without the command line listing the kinds again.
 A test takes the kinds as they are, such as the configuration of the command line that `lithify-testing` hands on, or keeps a list of its own, and runs on an in-memory database where a warehouse is needed.
 A stand-in is written only where the kind itself cannot be had, as a warehouse out of reach is, or where a dependency cannot be resolved: a unit test links a build of its crate of its own, which the kinds of the command line do not implement the traits of, so a test taking them is written in `tests/`.
 

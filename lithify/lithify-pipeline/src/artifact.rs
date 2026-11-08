@@ -31,6 +31,16 @@ pub trait ArtifactControl: Artifact {
     ) -> Option<&'b BuildLog>;
 }
 
+pub trait ArtifactFn {
+    type Output;
+
+    async fn call<A: ArtifactControl>(self, artifact: &A) -> Self::Output;
+}
+
+pub trait Declare {
+    async fn declare<F: ArtifactFn>(&self, name: &ArtifactName, zone: Tz, f: F) -> F::Output;
+}
+
 pub trait Declaration {
     fn kind(&self) -> &'static str;
 

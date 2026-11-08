@@ -7,24 +7,13 @@ use lithify_artifact::scd2::Scd2;
 use lithify_artifact::snapshot::Snapshot;
 use lithify_artifact::snapshot_provide::SnapshotProvide;
 use lithify_build::artifact::{Artifact, ArtifactName};
-use lithify_build::sink::WarehouseClient;
-use lithify_pipeline::Declaration;
 use lithify_pipeline::artifact::ArtifactControl;
 use lithify_pipeline::build_log::Series;
-use lithify_pipeline::capture::Capture;
 use lithify_pipeline::infra::Sink;
-use lithify_pipeline::materialization::Materialization;
-use lithify_pipeline::progress::Step;
-use lithify_pipeline::runner::BuildLogWriter;
-use lithify_pipeline::warehouse::WarehouseControl;
-use lithify_schema::window::Window;
-
-use crate::pipeline::CaptureConfig;
 use lithify_pipeline::schedule::Schedule;
-use lithify_pipeline::stepping::Stepping;
+use lithify_pipeline::{ArtifactFn, Declaration, Declare};
 
 use crate::pipeline::WarehouseConfig;
-use crate::unrunnable::Unrunnable;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -41,18 +30,6 @@ impl ArtifactConfig {
         match self {
             Self::Snapshot(config) => Some(config),
             Self::Instant(_) | Self::Scd1(_) | Self::Scd2(_) | Self::SnapshotProvide(_) => None,
-        }
-    }
-
-    pub fn declared(&self, name: &ArtifactName, zone: Tz) -> Declared {
-        match self {
-            Self::Snapshot(config) => Declared::Snapshot(Snapshot::declared(name, config, zone)),
-            Self::Instant(config) => Declared::Instant(Instant::declared(name, config, zone)),
-            Self::Scd1(config) => Declared::Scd1(Scd1::declared(name, config, zone)),
-            Self::Scd2(config) => Declared::Scd2(Scd2::declared(name, config, zone)),
-            Self::SnapshotProvide(config) => {
-                Declared::SnapshotProvide(SnapshotProvide::declared(name, config, zone))
-            }
         }
     }
 
@@ -116,58 +93,15 @@ impl Declaration for ArtifactConfig {
     }
 }
 
-pub enum Declared {
-    Snapshot(Snapshot),
-    Instant(Instant),
-    Scd2(Scd2),
-    Scd1(Scd1),
-    SnapshotProvide(SnapshotProvide),
-}
-
-impl Declared {
-    pub async fn next<K>(
-        &self,
-        stepping: &Stepping<'_, K, CaptureConfig, Unrunnable>,
-        materialization: &Materialization,
-        taken: &[Window],
-    ) -> Result<Option<Step>, Unrunnable>
-    where
-        K: WarehouseControl,
-        CaptureConfig: Capture<K>,
-        Unrunnable: From<<K as WarehouseClient>::Error>,
-    {
+impl Declare for ArtifactConfig {
+    async fn declare<F: ArtifactFn>(&self, name: &ArtifactName, zone: Tz, f: F) -> F::Output {
         match self {
-            Self::Snapshot(artifact) => stepping.next(artifact, materialization, taken).await,
-            Self::Instant(artifact) => stepping.next(artifact, materialization, taken).await,
-            Self::Scd2(artifact) => stepping.next(artifact, materialization, taken).await,
-            Self::Scd1(artifact) => stepping.next(artifact, materialization, taken).await,
-            Self::SnapshotProvide(artifact) => {
-                stepping.next(artifact, materialization, taken).await
-            }
-        }
-    }
-
-    pub async fn take<K, B: BuildLogWriter>(
-        &self,
-        stepping: &Stepping<'_, K, CaptureConfig, Unrunnable>,
-        materialization: &Materialization,
-        step: &Step,
-        writer: &B,
-    ) -> Result<B::Output, Unrunnable>
-    where
-        K: WarehouseControl,
-        CaptureConfig: Capture<K>,
-        Unrunnable: From<<K as WarehouseClient>::Error>,
-    {
-        match self {
-            Self::Snapshot(artifact) => {
-                stepping.take(artifact, materialization, step, writer).await
-            }
-            Self::Instant(artifact) => stepping.take(artifact, materialization, step, writer).await,
-            Self::Scd2(artifact) => stepping.take(artifact, materialization, step, writer).await,
-            Self::Scd1(artifact) => stepping.take(artifact, materialization, step, writer).await,
-            Self::SnapshotProvide(artifact) => {
-                stepping.take(artifact, materialization, step, writer).await
+            Self::Snapshot(config) => f.call(&Snapshot::declared(name, config, zone)).await,
+            Self::Instant(config) => f.call(&Instant::declared(name, config, zone)).await,
+            Self::Scd1(config) => f.call(&Scd1::declared(name, config, zone)).await,
+            Self::Scd2(config) => f.call(&Scd2::declared(name, config, zone)).await,
+            Self::SnapshotProvide(config) => {
+                f.call(&SnapshotProvide::declared(name, config, zone)).await
             }
         }
     }

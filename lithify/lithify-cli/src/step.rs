@@ -315,8 +315,7 @@ pub(crate) mod tests {
 
     pub(crate) const PEOPLE: &str = include_str!("../testdata/step/people.sql");
 
-    pub(crate) const BUILT_CHANGE_LOGS: &str =
-        include_str!("../testdata/step/built_change_logs.sql");
+    const BUILT_CHANGE_LOGS: &str = include_str!("../testdata/step/built_change_logs.sql");
 
     pub(crate) fn rows(client: &DuckDbClient, query: &str) -> Vec<(String, String)> {
         client

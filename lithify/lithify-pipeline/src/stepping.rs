@@ -1,25 +1,44 @@
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::marker::PhantomData;
 
 use chrono::NaiveDate;
 
-use crate::artifact::ArtifactControl;
-use crate::build_log::{BuildLog, Latest, UnreadableBuildLog};
+use crate::artifact::{ArtifactControl, ArtifactFn, Declare};
+use crate::build_log::{BuildLog, Latest, Series, UnreadableBuildLog};
 use crate::capture::Capture;
 use crate::check::Expectation;
-use crate::infra::Source;
+use crate::infra::{Sink, Source};
 use crate::materialization::Materialization;
 use crate::progress::{Progress, Step};
 use crate::runner::{BuildLogWriter, Replaying, Unsteppable};
 use crate::table;
 
-use crate::warehouse::WarehouseControl;
-use lithify_build::artifact::UnbuildableArtifact;
+use crate::warehouse::{SinkWarehouse, WarehouseControl};
+use lithify_build::artifact::{ArtifactName, UnbuildableArtifact};
 use lithify_build::sink::WarehouseClient;
 use lithify_schema::listener::OutOfOrder;
 use lithify_schema::model::TableId;
 use lithify_schema::ts::{Event, Ts};
 use lithify_schema::window::Window;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Target {
+    artifact: Option<ArtifactName>,
+}
+
+impl Target {
+    pub fn new(artifact: Option<ArtifactName>) -> Self {
+        Self { artifact }
+    }
+
+    fn names(&self, materialization: &Materialization) -> bool {
+        match &self.artifact {
+            Some(artifact) => materialization.artifact() == artifact,
+            None => true,
+        }
+    }
+}
 
 pub struct Stepping<'a, K, C, E> {
     client: &'a K,
@@ -70,6 +89,84 @@ where
                 ..self
             }),
         }
+    }
+
+    pub async fn step<W, A, B>(
+        &self,
+        sink: &Sink<W, A>,
+        target: &Target,
+        writer: &B,
+        mut report: impl FnMut(&Series, &Window, Result<B::Output, E>) -> Result<(), E>,
+    ) -> Result<Option<(Series, Window)>, E>
+    where
+        W: SinkWarehouse,
+        A: Declare,
+        B: BuildLogWriter,
+    {
+        self.advance(sink, target, &BTreeMap::new(), writer, &mut report)
+            .await
+    }
+
+    pub async fn catch_up<W, A, B>(
+        &self,
+        sink: &Sink<W, A>,
+        target: &Target,
+        writer: &B,
+        mut report: impl FnMut(&Series, &Window, Result<B::Output, E>) -> Result<(), E>,
+    ) -> Result<(), E>
+    where
+        W: SinkWarehouse,
+        A: Declare,
+        B: BuildLogWriter,
+    {
+        let mut taken: BTreeMap<Series, Vec<Window>> = BTreeMap::new();
+
+        while let Some((series, window)) = self
+            .advance(sink, target, &taken, writer, &mut report)
+            .await?
+        {
+            taken.entry(series).or_default().push(window);
+        }
+
+        Ok(())
+    }
+
+    async fn advance<W, A, B>(
+        &self,
+        sink: &Sink<W, A>,
+        target: &Target,
+        taken: &BTreeMap<Series, Vec<Window>>,
+        writer: &B,
+        report: &mut impl FnMut(&Series, &Window, Result<B::Output, E>) -> Result<(), E>,
+    ) -> Result<Option<(Series, Window)>, E>
+    where
+        W: SinkWarehouse,
+        A: Declare,
+        B: BuildLogWriter,
+    {
+        for (declared, materialization) in sink
+            .materializations()
+            .filter(|(_, materialization)| target.names(materialization))
+        {
+            let series = materialization.series();
+            let advance = Advance {
+                stepping: self,
+                materialization,
+                taken: taken.get(series).map(Vec::as_slice).unwrap_or_default(),
+                writer,
+            };
+
+            if let Some((window, output)) = declared
+                .declare(materialization.artifact(), sink.time_zone(), advance)
+                .await?
+            {
+                report(series, &window, output)?;
+
+                return Ok(Some((series.clone(), window)));
+            }
+        }
+
+        Ok(None)
     }
 
     pub async fn next<A: ArtifactControl>(
@@ -192,5 +289,43 @@ where
             &latest,
             &self.latest(materialization, Latest::Succeeded).await?,
         ))
+    }
+}
+
+struct Advance<'s, 'a, K, C, E, B> {
+    stepping: &'s Stepping<'a, K, C, E>,
+    materialization: &'s Materialization,
+    taken: &'s [Window],
+    writer: &'s B,
+}
+
+impl<K, C, E, B> ArtifactFn for Advance<'_, '_, K, C, E, B>
+where
+    K: WarehouseControl,
+    C: Capture<K>,
+    E: From<<K as WarehouseClient>::Error>
+        + From<UnbuildableArtifact>
+        + From<UnreadableBuildLog>
+        + From<Unsteppable>
+        + From<OutOfOrder>
+        + From<Infallible>,
+    B: BuildLogWriter,
+{
+    type Output = Result<Option<(Window, Result<B::Output, E>)>, E>;
+
+    async fn call<A: ArtifactControl>(self, artifact: &A) -> Self::Output {
+        let Some(step) = self
+            .stepping
+            .next(artifact, self.materialization, self.taken)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let output = self
+            .stepping
+            .take(artifact, self.materialization, &step, self.writer)
+            .await;
+
+        Ok(Some((step.window().clone(), output)))
     }
 }
